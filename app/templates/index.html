@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>New Shows &ndash; {{ month_label }}</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+</head>
+<body data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}" class="pack-{{ settings.day_packing }} card-{{ settings.card_style }}{% if settings.hide_not_watching %} hide-not-watching{% endif %}">
+
+<header class="hero">
+    <div class="brand-row">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <div class="month-nav">
+            <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
+                <img src="/static/images/arrow-left.png" alt="Previous month">
+            </a>
+            <a class="month-title-link" href="/pick?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
+                <h1>{{ month_label }} {{ year }}</h1>
+            </a>
+            <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
+                <img src="/static/images/arrow-right.png" alt="Next month">
+            </a>
+        </div>
+    </div>
+
+    <div class="controls-row">
+        <div class="control">
+            <label for="endpointSelect">📡 Endpoint</label>
+            <select id="endpointSelect" onchange="switchEndpoint(this.value)">
+                {% for ep in endpoints %}
+                <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="control">
+            <label for="cardStyleSelect">🎬 Cards</label>
+            <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
+                <option value="vertical"{% if settings.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
+                <option value="horizontal"{% if settings.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
+                <option value="poster"{% if settings.card_style == 'poster' %} selected{% endif %}>Poster only</option>
+            </select>
+        </div>
+        <div class="control">
+            <label for="dayPackSelect">🗓️ Days</label>
+            <select id="dayPackSelect" onchange="setLayout('day_packing', this.value)">
+                <option value="stacked"{% if settings.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
+                <option value="packed"{% if settings.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
+            </select>
+        </div>
+        <button type="button" id="hideToggle" class="pill-btn{% if settings.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()">
+            <span id="hideToggleLabel">{% if settings.hide_not_watching %}🚫 Hiding not-watching{% else %}👁️ Showing all{% endif %}</span>
+        </button>
+        {% if (endpoint.media == 'movie' and settings.radarr_configured) or (endpoint.media != 'movie' and settings.sonarr_configured) %}
+        <button type="button" id="addAllBtn" class="pill-btn" onclick="addAllToArr()" title="Add every watching item this month to {{ 'Radarr' if endpoint.media == 'movie' else 'Sonarr' }}">
+            <img class="pill-icon" src="/static/icons/{{ 'radarr' if endpoint.media == 'movie' else 'sonarr' }}.png" alt=""> Add all
+        </button>
+        {% endif %}
+        <button type="button" class="pill-btn" onclick="openSettings()">⚙️ Settings</button>
+    </div>
+
+    <div class="sub">
+        <span class="chip-info">📊 {{ total }} item{{ '' if total == 1 else 's' }}</span>
+        <span class="endpoint-desc">{{ endpoint.description }}</span>
+        <span class="chip-info">🕒 {{ generated }}</span>
+    </div>
+</header>
+
+<div id="syncPanel" class="sync-panel">
+    <span id="syncStatus" class="sync-status">🟢 Storage Connected</span>
+    <button type="button" class="sync-btn" onclick="clearData()">🗑️ Reset</button>
+</div>
+
+<div id="statsBar" class="stats-bar">
+    <div style="width: 100%;">
+        <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ total }}</strong></div>
+        <span id="deltaMsg" class="delta-msg"></span>
+    </div>
+    <hr class="stats-divider">
+    <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">0</strong></div>
+    <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">0</strong></div>
+    <div id="historyLog" class="history-log"></div>
+</div>
+
+{% if error %}
+<div class="error-banner">⚠️ {{ error }}</div>
+{% endif %}
+
+<main>
+    {% if not grouped %}
+        {% if not error %}
+        <div class="empty-state">
+            <div class="emoji">🕵️</div>
+            <div>No items matched your filters for this range.</div>
+        </div>
+        {% endif %}
+    {% else %}
+        {% for group in grouped %}
+        <section class="day-block">
+            <div class="day-header">
+                <div class="day-title">📅 {{ group.label }}</div>
+                <div class="day-count">{{ group['items']|length }} item{{ '' if group['items']|length == 1 else 's' }}</div>
+            </div>
+            <div class="grid">
+                {% for item in group['items'] %}
+                <div class="card" data-id="{{ item.id }}" data-trakt-id="{{ item.trakt_id }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.tvdb if item.tvdb is not none else '' }}" data-tmdb="{{ item.tmdb if item.tmdb is not none else '' }}" onclick="openDetails(this, event)">
+                    <div class="poster-wrap">
+                        <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
+                        <div class="new-badge">✨ NEW</div>
+                        {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
+                        {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
+                        {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
+                        {% if item.network %}<div class="network-badge">📡 {{ item.network }}</div>{% endif %}
+                        <button type="button" class="watch-toggle" onclick="toggleWatch(this, event)" title="Toggle watching">
+                            <svg class="icon-open" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                            <svg class="icon-closed" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle><line x1="2" y1="2" x2="22" y2="22"></line></svg>
+                        </button>
+                        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
+                    </div>
+                    <div class="card-body">
+                        <div class="title-row">
+                            <div class="show-title">{{ item.title }}</div>
+                            {% if item.year %}<div class="show-year">{{ item.year }}</div>{% endif %}
+                        </div>
+                        <div class="meta-row">
+                            {% if item.country %}<span class="chip country">🌍 {{ item.country }}</span>{% endif %}
+                            {% if item.language %}<span class="chip lang">🗣️ {{ item.language }}</span>{% endif %}
+                            <span class="chip day">📆 {{ item.day_of_week }}</span>
+                            {% for g in item.genres %}<span class="chip">{{ g }}</span>{% endfor %}
+                        </div>
+                        {% if item.overview %}<div class="overview">{{ item.overview }}</div>{% endif %}
+                        <div class="premiere-info">
+                            <span class="date">{{ item.air_display }}</span>
+                            <span class="time">{{ item.air_time }}</span>
+                        </div>
+                        {% if item.media != 'movie' and item.season is not none %}
+                        <div class="season-info" data-role="season-info" hidden></div>
+                        {% endif %}
+                        <div class="links-row">
+                            <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
+                                <img src="/static/images/traktlogo.png" alt="Trakt">
+                            </a>
+                            {% if item.media == 'movie' and settings.radarr_configured %}
+                            <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>
+                            {% elif item.media != 'movie' and settings.sonarr_configured %}
+                            <button type="button" class="arr-btn sonarr" data-arr="sonarr" onclick="addToArr(this, event)" title="Add to Sonarr"><img src="/static/icons/sonarr.png" alt=""><span>Sonarr</span></button>
+                            {% endif %}
+                            {% if settings.seer_configured %}
+                            <button type="button" class="arr-btn seer" data-arr="seer" onclick="addToArr(this, event)" title="Request on Seerr"><img src="/static/icons/seer.png" alt=""><span>Seerr</span></button>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endfor %}
+    {% endif %}
+</main>
+
+<hr class="footer-divider">
+<footer class="site-footer">
+    <p>Idea &amp; design by great_vc — Python rebuild &nbsp;&nbsp;<span class="version-tag">🏷️ v{{ version }} · {{ build }}</span></p>
+</footer>
+
+<!-- Settings modal (requirement C) -->
+<div id="settingsModal" class="modal-overlay" onclick="if(event.target===this) closeSettings()">
+    <div class="modal">
+        <div class="modal-head">
+            <h2>⚙️ Settings</h2>
+            <button type="button" class="modal-close" onclick="closeSettings()">&times;</button>
+        </div>
+        <form id="settingsForm" onsubmit="return saveSettings(event)">
+            <div class="modal-body">
+                <div class="field">
+                    <label for="s_client_id">Trakt Client ID</label>
+                    <input type="text" id="s_client_id" name="trakt_client_id" autocomplete="off" spellcheck="false">
+                    <span class="hint">From trakt.tv/oauth/applications</span>
+                </div>
+                <div class="field">
+                    <label for="s_access_token">Trakt Access Token</label>
+                    <input type="password" id="s_access_token" name="trakt_access_token" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="s_timezone">Timezone</label>
+                        <select id="s_timezone" name="timezone">
+                            {% for tzgroup in timezone_groups %}
+                            <optgroup label="{{ tzgroup.group }}">
+                                {% for tz in tzgroup['options'] %}
+                                <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                                {% endfor %}
+                            </optgroup>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="s_endpoint">Default endpoint</label>
+                        <select id="s_endpoint" name="endpoint">
+                            {% for ep in endpoints %}<option value="{{ ep.key }}">{{ ep.label }}</option>{% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="s_genres">Genres filter</label>
+                    <input type="text" id="s_genres" name="genres" spellcheck="false">
+                    <span class="hint">Comma-separated genre slugs; prefix with - to exclude. Blank = no filter.</span>
+                </div>
+                <div class="field">
+                    <label for="s_countries">Countries filter</label>
+                    <input type="text" id="s_countries" name="countries" spellcheck="false">
+                    <span class="hint">Comma-separated 2-letter ISO codes. Blank = no filter.</span>
+                </div>
+                <div class="field">
+                    <label for="s_networks">Networks filter</label>
+                    <textarea id="s_networks" name="network_filter" spellcheck="false"></textarea>
+                    <span class="hint">Comma-separated exact network names. Blank = all networks.</span>
+                </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="s_limit">Pagination limit</label>
+                        <input type="number" id="s_limit" name="pagination_limit" min="1" max="1000">
+                    </div>
+                    <div class="field">
+                        <label for="s_cache">Detail cache (minutes)</label>
+                        <input type="number" id="s_cache" name="cache_ttl_minutes" min="0" max="10080">
+                    </div>
+                </div>
+                <div class="field checkbox">
+                    <input type="checkbox" id="s_hide" name="hide_not_watching">
+                    <label for="s_hide">Hide not-watching by default</label>
+                </div>
+
+                <div class="settings-section">📺 Sonarr <span class="hint">(add-to-library button on shows)</span></div>
+                <div class="two-col">
+                    <div class="field"><label for="s_sonarr_url">Sonarr URL</label><input type="text" id="s_sonarr_url" name="sonarr_url" placeholder="http://localhost:8989" spellcheck="false"></div>
+                    <div class="field"><label for="s_sonarr_key">Sonarr API key</label><input type="password" id="s_sonarr_key" name="sonarr_api_key" autocomplete="off" spellcheck="false"></div>
+                </div>
+                <div class="two-col">
+                    <div class="field"><label for="s_sonarr_qp">Quality profile</label><select id="s_sonarr_qp" name="sonarr_quality_profile_id"></select></div>
+                    <div class="field"><label for="s_sonarr_rf">Root folder</label><select id="s_sonarr_rf" name="sonarr_root_folder"></select></div>
+                </div>
+                <button type="button" class="btn-ghost small" onclick="loadArrOptions('sonarr')">↻ Load Sonarr profiles &amp; folders</button>
+
+                <div class="settings-section">🎬 Radarr <span class="hint">(add-to-library button on movies)</span></div>
+                <div class="two-col">
+                    <div class="field"><label for="s_radarr_url">Radarr URL</label><input type="text" id="s_radarr_url" name="radarr_url" placeholder="http://localhost:7878" spellcheck="false"></div>
+                    <div class="field"><label for="s_radarr_key">Radarr API key</label><input type="password" id="s_radarr_key" name="radarr_api_key" autocomplete="off" spellcheck="false"></div>
+                </div>
+                <div class="two-col">
+                    <div class="field"><label for="s_radarr_qp">Quality profile</label><select id="s_radarr_qp" name="radarr_quality_profile_id"></select></div>
+                    <div class="field"><label for="s_radarr_rf">Root folder</label><select id="s_radarr_rf" name="radarr_root_folder"></select></div>
+                </div>
+                <button type="button" class="btn-ghost small" onclick="loadArrOptions('radarr')">↻ Load Radarr profiles &amp; folders</button>
+
+                <div class="settings-section">🎟️ Seerr <span class="hint">(request button — Overseerr / Jellyseerr lineage)</span></div>
+                <div class="two-col">
+                    <div class="field"><label for="s_seer_url">Seerr URL</label><input type="text" id="s_seer_url" name="seer_url" placeholder="http://localhost:5055" spellcheck="false"></div>
+                    <div class="field"><label for="s_seer_key">Seerr API key</label><input type="password" id="s_seer_key" name="seer_api_key" autocomplete="off" spellcheck="false"></div>
+                </div>
+            </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" onclick="closeSettings()">Cancel</button>
+                <button type="submit" class="btn-primary">Save &amp; reload</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Details modal (requirement G) -->
+<div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeDetails()">
+    <div class="modal wide">
+        <div class="modal-head">
+            <h2 id="detailsTitle">Details</h2>
+            <div class="modal-head-right">
+                <div id="detailsActions"></div>
+                <button type="button" class="modal-close" onclick="closeDetails()">&times;</button>
+            </div>
+        </div>
+        <div class="modal-body" id="detailsBody"></div>
+    </div>
+</div>
+
+<script src="/static/js/app.js?v={{ asset_v }}"></script>
+</body>
+</html>

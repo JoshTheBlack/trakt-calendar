@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 110" width="820" height="110">
+  <defs>
+    <linearGradient id="traktGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f4d385"/>
+      <stop offset="40%" stop-color="#e8b545"/>
+      <stop offset="100%" stop-color="#e0384d"/>
+    </linearGradient>
+  </defs>
+  <text x="410" y="78"
+        text-anchor="middle"
+        font-family="Arial Black, Arial, sans-serif"
+        font-weight="900"
+        font-size="54"
+        letter-spacing="1"
+        fill="url(#traktGradient)">TRAKT NEW SHOWS</text>
+</svg>

@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pick a Month</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+    <style>
+        .pick-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 40px 6vw; }
+        .pick-panel { width: 100%; max-width: 720px; text-align: center; }
+        .pick-panel .brand { height: 56px; margin-bottom: 22px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.55)); }
+        .pick-panel h1 { font-family: 'Bebas Neue', sans-serif; font-size: clamp(2rem, 6vw, 3.2rem); letter-spacing: 2px;
+            background: linear-gradient(90deg, var(--gold-soft), var(--gold) 40%, var(--crimson)); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: 6px; }
+        .pick-panel .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 26px; }
+        .year-nav { display: flex; align-items: center; justify-content: center; gap: 20px; margin-bottom: 26px; }
+        .year-nav .year { font-family: 'Bebas Neue', sans-serif; font-size: 2.2rem; letter-spacing: 2px; color: var(--gold-soft); min-width: 110px; }
+        .month-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; }
+        .month-btn { display: block; padding: 18px 10px; background: var(--card); border: 1px solid var(--card-border); border-radius: 12px;
+            color: var(--text); font-weight: 700; font-size: 1rem; transition: all .18s ease; }
+        .month-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.1); transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,0.4); }
+        .month-btn.current { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
+        .month-btn .num { display: block; color: var(--text-faint); font-size: 0.72rem; font-weight: 400; margin-top: 5px; }
+        .pick-foot { margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <div class="pick-wrap">
+        <div class="pick-panel">
+            <img class="brand" src="/static/images/trakttop.png" alt="Trakt">
+            <h1>Pick a Month</h1>
+            <div class="sub">Choose a month and year to see its new show premieres.</div>
+
+            <div class="year-nav">
+                <a class="month-nav-btn prev" href="/pick?year={{ year - 1 }}&amp;endpoint={{ endpoint.key }}" title="Previous year" aria-label="Previous year">
+                    <img src="/static/images/arrow-left.png" alt="Previous year">
+                </a>
+                <span class="year">{{ year }}</span>
+                <a class="month-nav-btn next" href="/pick?year={{ year + 1 }}&amp;endpoint={{ endpoint.key }}" title="Next year" aria-label="Next year">
+                    <img src="/static/images/arrow-right.png" alt="Next year">
+                </a>
+            </div>
+
+            <div class="month-grid">
+                {% for m in months %}
+                <a class="month-btn{% if current_month == m.num %} current{% endif %}" href="/?month={{ m.num }}&amp;year={{ year }}&amp;endpoint={{ endpoint.key }}">
+                    {{ m.name }}
+                    <span class="num">{{ year }}</span>
+                </a>
+                {% endfor %}
+            </div>
+
+            <div class="pick-foot">
+                <a class="pill-btn" href="/?month={{ today_month }}&amp;year={{ today_year }}&amp;endpoint={{ endpoint.key }}">Go to current month →</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

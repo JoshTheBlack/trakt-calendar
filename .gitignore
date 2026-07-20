@@ -1,0 +1,27 @@
+# Secrets / credentials
+config.php
+.env
+*.php
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# App runtime data (settings.json with API keys, per-month watch state, detail cache)
+data/
+
+# Claude Code local (personal) settings
+.claude/settings.local.json
+
+# OS / editor junk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

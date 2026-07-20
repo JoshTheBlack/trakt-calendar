@@ -1,0 +1,28 @@
+# VCS / CI
+.git/
+.github/
+.gitignore
+.dockerignore
+
+# Python env / caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local settings & runtime data (never bake secrets/state into the image)
+.claude/
+data/
+config.php
+.env
+
+# Non-runtime / legacy assets
+*.php
+images/
+LICENSE
+CHANGELOG.md
+README.md
+PLANNING.md
