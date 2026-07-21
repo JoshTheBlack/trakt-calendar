@@ -12,53 +12,58 @@ body {
 }
 a { color: inherit; text-decoration: none; }
 
-/* ---- Header / hero ---- */
-header.hero { padding: 44px 6vw 28px 6vw; border-bottom: 1px solid var(--card-border); background: linear-gradient(180deg, rgba(232,181,69,0.06), transparent); }
-.brand-row { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
-.brand-row img.brand-logo { height: 60px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.55)); }
-.month-nav { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+/* ---- Header / hero: one compact, sticky bar (wraps to 2 lines when narrow) ---- */
+header.hero {
+    position: sticky; top: 0; z-index: 30;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
+    padding: 8px 3vw; border-bottom: 1px solid var(--card-border);
+    background: rgba(10,12,16,0.92); backdrop-filter: blur(8px);
+}
+.hero-lead { display: flex; align-items: center; gap: 12px; }
+.hero-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hero-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.hero-meta { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
+
+/* Revealed only after the easter egg has been used (see app.js). */
+.distrakt-nav-link {
+    text-decoration: none; white-space: nowrap;
+    padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 0.8rem; color: #fff;
+    background: linear-gradient(45deg, #ED1C24, #7C3AED); border: 1px solid rgba(255,255,255,0.16);
+}
+.distrakt-nav-link:hover { filter: brightness(1.12); }
+
+.hero-lead img.brand-logo { height: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55)); }
+.month-nav { display: flex; align-items: center; gap: 8px; }
 .month-nav-btn {
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-    width: 46px; height: 46px; border-radius: 50%;
+    width: 30px; height: 30px; border-radius: 50%;
     background: var(--bg-panel); border: 1px solid var(--card-border);
     transition: transform .2s ease, box-shadow .2s ease, border-color .2s ease, background .2s ease;
 }
-.month-nav-btn img { width: 20px; height: 20px; transition: transform .2s ease; }
-.month-nav-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.14); box-shadow: 0 0 20px rgba(232,181,69,0.4); }
-.month-nav-btn.prev:hover { transform: scale(1.12) translateX(-4px); }
-.month-nav-btn.next:hover { transform: scale(1.12) translateX(4px); }
+.month-nav-btn img { width: 14px; height: 14px; transition: transform .2s ease; }
+.month-nav-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.14); box-shadow: 0 0 14px rgba(232,181,69,0.35); }
+.month-nav-btn.prev:hover { transform: scale(1.12) translateX(-3px); }
+.month-nav-btn.next:hover { transform: scale(1.12) translateX(3px); }
 .month-nav-btn:active { transform: scale(0.95); }
-.brand-row h1 {
-    font-family: 'Bebas Neue', sans-serif; font-size: clamp(2rem, 5vw, 3.6rem); letter-spacing: 2px;
+.hero h1 {
+    font-family: 'Bebas Neue', sans-serif; font-size: clamp(1.3rem, 2.4vw, 1.9rem); letter-spacing: 1.5px; white-space: nowrap;
     background: linear-gradient(90deg, var(--gold-soft), var(--gold) 40%, var(--crimson)); -webkit-background-clip: text; background-clip: text; color: transparent;
 }
 .month-title-link { display: inline-block; position: relative; transition: transform .18s ease; }
 .month-title-link:hover { transform: translateY(-1px); }
-.month-title-link::after { content: '📅'; -webkit-text-fill-color: initial; font-size: 0.5em; opacity: 0; margin-left: 8px; transition: opacity .18s ease; }
-.month-title-link:hover::after { opacity: 0.8; }
 
-/* ---- Controls row (endpoint switch + filter toggle) ---- */
-.controls-row { margin-top: 20px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.control { display: flex; align-items: center; gap: 8px; background: var(--bg-panel); border: 1px solid var(--card-border); padding: 6px 12px; border-radius: 999px; font-size: 0.82rem; }
-.control label { color: var(--text-dim); font-size: 0.78rem; }
+.control { display: flex; align-items: center; gap: 6px; background: var(--bg-panel); border: 1px solid var(--card-border); padding: 4px 10px; border-radius: 999px; font-size: 0.78rem; }
+.control label { color: var(--text-dim); font-size: 0.82rem; }
 .control select {
-    background: transparent; border: none; color: var(--text); font-size: 0.85rem; font-weight: 600;
-    font-family: inherit; cursor: pointer; outline: none;
+    background: transparent; border: none; color: var(--text); font-size: 0.8rem; font-weight: 600;
+    font-family: inherit; cursor: pointer; outline: none; max-width: 30vw;
 }
 .control select option { background: var(--bg-panel); color: var(--text); }
-.pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 8px 14px; border-radius: 999px; font-size: 0.82rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; }
+.pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }
 
-.sub { margin-top: 18px; color: var(--text-dim); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.sub .chip-info { background: var(--bg-panel); border: 1px solid var(--card-border); padding: 6px 14px; border-radius: 999px; font-size: 0.82rem; color: var(--text); }
-.endpoint-desc { color: var(--text-faint); font-size: 0.8rem; }
-
 /* ---- Sync + stats panels ---- */
-.sync-panel { display: flex; position: fixed; top: 16px; right: 16px; z-index: 9990; align-items: center; gap: 8px; background: rgba(18,21,28,0.92); border: 1px solid var(--card-border); border-radius: 12px; padding: 8px 10px; box-shadow: 0 14px 32px rgba(0,0,0,0.5); backdrop-filter: blur(6px); }
-.sync-btn { cursor: pointer; background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text); padding: 6px 10px; border-radius: 8px; font-size: 0.72rem; font-weight: 600; font-family: inherit; transition: all .18s ease; }
-.sync-btn:hover { background: var(--crimson); color: #fff; border-color: var(--crimson); }
-.sync-status { color: var(--text-dim); font-size: 0.72rem; margin-left: 4px; }
 
 .stats-bar { position: fixed; bottom: 20px; right: 20px; z-index: 9990; padding: 12px 16px; background: rgba(18,21,28,0.92); border: 1px solid var(--card-border); border-radius: 12px; min-width: 200px; font-size: 0.78rem; backdrop-filter: blur(6px); }
 .stats-row { display: flex; justify-content: space-between; width: 100%; margin-bottom: 4px; }
@@ -179,6 +184,8 @@ body.card-horizontal .trakt-btn img { height: 13px; }
 .card.not-watching:hover { transform: none; box-shadow: none; border-color: rgba(224,56,77,0.7); }
 .card.not-watching .card-body { opacity: 0.55; }
 body.hide-not-watching .card.not-watching { display: none; }
+/* In hide mode, collapse a whole day whose items are all not-watching (JS-driven). */
+.day-block.is-empty-hidden { display: none; }
 
 .poster-wrap { position: relative; width: 100%; aspect-ratio: 2/3; background: linear-gradient(135deg, #1c2130, #10131b); overflow: hidden; }
 .poster-wrap img { width: 100%; height: 100%; object-fit: cover; transition: filter .22s ease; }
@@ -197,6 +204,13 @@ body.hide-not-watching .card.not-watching { display: none; }
 .runtime-badge { top: 9px; left: 9px; color: var(--text-dim); }
 .ep-badge { bottom: 9px; left: 9px; border-color: rgba(79,163,224,0.5); color: var(--accent-blue); }
 .network-badge { bottom: 9px; right: 9px; max-width: 42%; overflow: hidden; text-overflow: ellipsis; border-color: rgba(79,163,224,0.5); color: var(--accent-blue); }
+/* When a TMDB logo loads, drop the badge chrome and show just the tile; on load
+   error (.no-logo) the img is hidden and the 📡 text fallback shows instead. */
+.network-badge:not(.no-logo) { padding: 0; background: none; border: none; backdrop-filter: none; }
+.network-badge .network-logo { display: block; height: 26px; width: 26px; border-radius: 6px; object-fit: contain; }
+.network-badge .network-fallback { display: none; }
+.network-badge.no-logo .network-logo { display: none; }
+.network-badge.no-logo .network-fallback { display: inline; }
 .rating-badge { position: absolute; top: 10px; right: 10px; z-index: 5; background: rgba(10,12,16,0.78); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft); font-size: 0.78rem; font-weight: 700; padding: 4px 8px; border-radius: 8px; backdrop-filter: blur(4px); }
 
 .watch-toggle { position: absolute; top: 48px; right: 10px; z-index: 6; width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.18); background: rgba(10,12,16,0.78); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .18s ease; padding: 0; }
@@ -287,6 +301,9 @@ body.hide-not-watching .card.not-watching { display: none; }
 .btn-ghost.small { padding: 7px 12px; font-size: 0.78rem; align-self: flex-start; }
 .settings-section { font-weight: 700; color: var(--gold-soft); font-size: 0.92rem; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--card-border); }
 .settings-section .hint { font-weight: 400; color: var(--text-faint); font-size: 0.72rem; }
+
+.auth-box { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: -4px; }
+.auth-box .hint { flex-basis: 100%; }
 
 /* Toasts (Sonarr/Radarr add feedback) */
 #toastHost { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10001; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }

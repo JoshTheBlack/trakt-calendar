@@ -12,6 +12,12 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# Native runtime libs: libcairo2 for cairosvg (SVG-only network logos) and
+# libjpeg/zlib for Pillow. Cleaned up in the same layer to keep the image small.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libcairo2 libjpeg62-turbo zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

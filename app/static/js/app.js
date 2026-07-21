@@ -27,8 +27,12 @@ function updateCols() {
     const b = document.body;
     // Column cap per style: poster-only wall is compact; beside cards are wide.
     const cap = b.classList.contains('card-poster') ? 6 : (b.classList.contains('card-horizontal') ? 2 : 5);
+    // In hide mode, size each day's grid to its VISIBLE (watching) cards so packed
+    // layout doesn't reserve columns for hidden not-watching items.
+    const hiding = b.classList.contains('hide-not-watching');
+    const sel = hiding ? '.card:not(.not-watching)' : '.card';
     document.querySelectorAll('.day-block').forEach(block => {
-        const n = block.querySelectorAll('.card').length;
+        const n = block.querySelectorAll(sel).length;
         block.style.setProperty('--cols', Math.max(1, Math.min(n, cap)));
     });
 }
@@ -200,8 +204,9 @@ async function toggleHideNotWatching() {
     BODY.classList.toggle('hide-not-watching', hide);
     const label = document.getElementById('hideToggleLabel');
     const btn = document.getElementById('hideToggle');
-    label.textContent = hide ? '🚫 Hiding not-watching' : '👁️ Showing all';
+    label.textContent = hide ? '🚫 Hiding' : '👁️ Showing all';
     btn.classList.toggle('active', hide);
+    updateEmptyDays();
     // Persist the preference so it sticks across reloads.
     try {
         await fetch('/api/settings', {
@@ -235,10 +240,10 @@ async function saveState() {
     return res.json();
 }
 
+// Storage persistence is silent on success; only a FAILURE is surfaced (a toast),
+// so a broken save/load doesn't lose your not-watching marks without warning.
 function setSyncStatus(ok, message) {
-    const el = document.getElementById('syncStatus');
-    if (!el) return;
-    el.textContent = ok ? '🟢 Storage Connected' : ('🔴 ' + (message || 'Storage Error'));
+    if (!ok) toast('⚠️ ' + (message || 'Storage error') + ' — changes may not be saved.', false);
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
@@ -329,11 +334,9 @@ async function toggleWatch(btn, event) {
     updateStats();
     try {
         await saveState();
-        setSyncStatus(true);
     } catch (e) {
         console.error(e);
         setSyncStatus(false, 'Save failed');
-        alert('⚠️ Your change could not be saved to the server.');
     }
 }
 
@@ -357,25 +360,20 @@ function updateStats() {
     watchingEl.textContent = actualWatching;
     notWatchingEl.textContent = actualNotWatching;
     lastKnownStats = { total, watching: actualWatching, notWatching: actualNotWatching };
+    updateEmptyDays();
 }
 
-async function clearData() {
-    if (!confirm('Reset watching status and count tracking for this month/endpoint?')) return;
-    notWatching.clear();
-    historyLog = [];
-    document.querySelectorAll('.card').forEach(card => setCardState(card, false));
-    document.getElementById('deltaMsg').textContent = `(Reset successfully)`;
-    document.getElementById('historyLog').innerHTML = '';
-    updateStats();
-    try {
-        await saveState();
-        setSyncStatus(true);
-    } catch (e) {
-        console.error(e);
-        setSyncStatus(false, 'Save failed');
-        alert('⚠️ Reset could not be saved to the server.');
-    }
+// In "Hiding" mode, collapse any day whose items are all not-watching (so nothing
+// would render under its header). In "Showing all" mode every day is shown.
+function updateEmptyDays() {
+    const hiding = BODY.classList.contains('hide-not-watching');
+    document.querySelectorAll('.day-block').forEach(block => {
+        const hide = hiding && !block.querySelector('.card:not(.not-watching)');
+        block.classList.toggle('is-empty-hidden', hide);
+    });
+    updateCols();  // re-pack columns for the now-visible card counts
 }
+
 
 // ---- Settings modal (requirement C) ----
 async function openSettings() {
@@ -383,7 +381,9 @@ async function openSettings() {
         const res = await fetch('/api/settings', { cache: 'no-store' });
         const s = await res.json();
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
+        document.getElementById('s_client_secret').value = s.trakt_client_secret || '';
         document.getElementById('s_access_token').value = s.trakt_access_token || '';
+        updateTokenStatus(s.trakt_token_expires_at);
         document.getElementById('s_timezone').value = s.timezone || '';
         document.getElementById('s_endpoint').value = s.endpoint || 'shows/new';
         document.getElementById('s_genres').value = s.genres || '';
@@ -403,6 +403,7 @@ async function openSettings() {
         ensureOption(document.getElementById('s_radarr_rf'), s.radarr_root_folder, s.radarr_root_folder);
         document.getElementById('s_seer_url').value = s.seer_url || '';
         document.getElementById('s_seer_key').value = s.seer_api_key || '';
+        document.getElementById('s_tmdb_key').value = s.tmdb_api_key || '';
     } catch (e) { console.error(e); }
     document.getElementById('settingsModal').classList.add('open');
 }
@@ -440,12 +441,16 @@ async function loadArrOptions(kind) {
     } catch (e) { toast('Could not load ' + kind + ' options', false); }
 }
 
-function closeSettings() { document.getElementById('settingsModal').classList.remove('open'); }
+function closeSettings() {
+    stopDeviceAuthPolling();
+    document.getElementById('settingsModal').classList.remove('open');
+}
 
 async function saveSettings(event) {
     event.preventDefault();
     const payload = {
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
+        trakt_client_secret: document.getElementById('s_client_secret').value.trim(),
         trakt_access_token: document.getElementById('s_access_token').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
@@ -464,7 +469,8 @@ async function saveSettings(event) {
         radarr_quality_profile_id: parseInt(document.getElementById('s_radarr_qp').value, 10) || 0,
         radarr_root_folder: document.getElementById('s_radarr_rf').value,
         seer_url: document.getElementById('s_seer_url').value.trim(),
-        seer_api_key: document.getElementById('s_seer_key').value.trim()
+        seer_api_key: document.getElementById('s_seer_key').value.trim(),
+        tmdb_api_key: document.getElementById('s_tmdb_key').value.trim()
     };
     try {
         const res = await fetch('/api/settings', {
@@ -479,6 +485,97 @@ async function saveSettings(event) {
         alert('⚠️ Could not save settings.');
     }
     return false;
+}
+
+// ---- Trakt OAuth device-code authorization ----
+let deviceAuthTimer = null;
+
+function updateTokenStatus(expiresAt) {
+    const el = document.getElementById('s_token_status');
+    if (!el) return;
+    if (!expiresAt) { el.textContent = ''; return; }
+    const when = new Date(expiresAt * 1000);
+    const past = when.getTime() < Date.now();
+    el.textContent = past
+        ? `Token expired ${when.toLocaleDateString()} — refreshing automatically, or click "Refresh token now".`
+        : `Token valid until ${when.toLocaleDateString()} (refreshes automatically once it expires).`;
+}
+
+function stopDeviceAuthPolling() {
+    if (deviceAuthTimer) { clearInterval(deviceAuthTimer); deviceAuthTimer = null; }
+}
+
+async function startDeviceAuth() {
+    stopDeviceAuthPolling();
+    const clientId = document.getElementById('s_client_id').value.trim();
+    const clientSecret = document.getElementById('s_client_secret').value.trim();
+    const box = document.getElementById('authStatus');
+    if (!clientId) { toast('Enter your Trakt Client ID first', false); return; }
+    if (!clientSecret) { toast('Enter your Trakt Client Secret first', false); return; }
+    box.textContent = 'Requesting a device code…';
+    try {
+        const res = await fetch('/api/auth/device/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ client_id: clientId })
+        });
+        const d = await res.json();
+        if (!d.ok) { box.textContent = d.error || 'Could not start authorization.'; toast(d.error || 'Could not start authorization', false); return; }
+        box.innerHTML = `Go to <a href="${esc(d.verification_url)}" target="_blank" rel="noopener">${esc(d.verification_url)}</a> and enter code <b>${esc(d.user_code)}</b>. Waiting for approval…`;
+        const deadline = Date.now() + (d.expires_in || 600) * 1000;
+        const intervalMs = Math.max(d.interval || 5, 5) * 1000;
+        deviceAuthTimer = setInterval(
+            () => pollDeviceAuth(d.device_code, clientId, clientSecret, deadline),
+            intervalMs
+        );
+    } catch (e) {
+        console.error(e);
+        box.textContent = 'Could not start authorization.';
+    }
+}
+
+async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
+    const box = document.getElementById('authStatus');
+    if (Date.now() > deadline) {
+        stopDeviceAuthPolling();
+        box.textContent = 'The code expired before it was approved — try again.';
+        return;
+    }
+    try {
+        const res = await fetch('/api/auth/device/poll', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ device_code: deviceCode, client_id: clientId, client_secret: clientSecret })
+        });
+        const d = await res.json();
+        if (d.status === 'pending' || d.status === 'slow_down') return;  // keep waiting
+        stopDeviceAuthPolling();
+        if (d.status === 'authorized') {
+            document.getElementById('s_access_token').value = d.access_token || '';
+            updateTokenStatus(d.expires_at);
+            box.textContent = '✅ Authorized! Access token filled in above.';
+            toast('Trakt authorized', true);
+        } else {
+            box.textContent = d.error || 'Authorization failed.';
+            toast(d.error || 'Authorization failed', false);
+        }
+    } catch (e) {
+        console.error(e);  // transient network hiccup; keep polling until the deadline
+    }
+}
+
+async function refreshTraktToken() {
+    const box = document.getElementById('authStatus');
+    try {
+        const res = await fetch('/api/auth/refresh', { method: 'POST' });
+        const d = await res.json();
+        if (!d.ok) { toast(d.error || 'Refresh failed', false); if (box) box.textContent = d.error || ''; return; }
+        updateTokenStatus(d.expires_at);
+        toast('Trakt token refreshed', true);
+    } catch (e) {
+        console.error(e);
+        toast('Refresh failed', false);
+    }
 }
 
 // ---- Season info tile enrichment (requirement F) ----
@@ -653,4 +750,47 @@ function closeDetails() { document.getElementById('detailsModal').classList.remo
 
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { closeSettings(); closeDetails(); }
+});
+
+// ---- Hidden /distrakt reveal: Konami code + footer build-tap (kept independent) ----
+function revealSecret() {
+    // Remember that the easter egg has been used so the calendar can surface a
+    // permanent Distrakt nav button on future visits.
+    try { localStorage.setItem('distraktRevealed', '1'); } catch (e) {}
+    location.href = '/distrakt';
+}
+
+// Once revealed, show the Distrakt nav button on the calendar.
+document.addEventListener('DOMContentLoaded', () => {
+    let revealed = false;
+    try { revealed = localStorage.getItem('distraktRevealed') === '1'; } catch (e) {}
+    const nav = document.getElementById('distraktNav');
+    if (revealed && nav) nav.hidden = false;
+});
+
+const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+let konamiBuffer = [];
+
+document.addEventListener('keydown', (e) => {
+    konamiBuffer.push(e.key);
+    konamiBuffer = konamiBuffer.slice(-KONAMI_SEQUENCE.length);
+    if (konamiBuffer.length === KONAMI_SEQUENCE.length && konamiBuffer.every((k, i) => k === KONAMI_SEQUENCE[i])) {
+        revealSecret();
+    }
+});
+
+const BUILD_TAP_TARGET = 7;
+const BUILD_TAP_WINDOW_MS = 1500;
+let buildTapCount = 0;
+let buildTapLast = 0;
+
+document.addEventListener('DOMContentLoaded', () => {
+    const tag = document.querySelector('.version-tag');
+    if (!tag) return;
+    tag.addEventListener('click', () => {
+        const now = Date.now();
+        buildTapCount = (now - buildTapLast > BUILD_TAP_WINDOW_MS) ? 1 : buildTapCount + 1;
+        buildTapLast = now;
+        if (buildTapCount >= BUILD_TAP_TARGET) revealSecret();
+    });
 });

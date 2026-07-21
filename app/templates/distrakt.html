@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Distrakt</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/distrakt.css?v={{ asset_v }}">
+</head>
+<body class="distrakt-page">
+
+<header class="distrakt-topbar">
+    <div class="distrakt-lead">
+        <a class="distrakt-brand" href="?year={{ year }}&amp;month={{ month }}" title="Discord thread tracker">
+            <svg class="distrakt-mark" viewBox="0 0 256 199" aria-hidden="true">
+                <defs>
+                    <linearGradient id="distraktGrad" x1="0" y1="1" x2="1" y2="0">
+                        <stop offset="0" stop-color="#ED1C24"/>
+                        <stop offset="1" stop-color="#7C3AED"/>
+                    </linearGradient>
+                </defs>
+                <path fill="url(#distraktGrad)" d="M216.856 16.597A208.502 208.502 0 0 0 164.042 0c-2.275 4.113-4.933 9.645-6.766 14.046-19.692-2.961-39.203-2.961-58.533 0-1.832-4.4-4.55-9.933-6.846-14.046a207.809 207.809 0 0 0-52.855 16.638C5.618 67.147-3.443 116.4 1.087 164.956c22.169 16.555 43.653 26.612 64.775 33.193 5.216-7.177 9.848-14.826 13.836-22.883-7.596-2.885-14.87-6.446-21.746-10.583 1.823-1.335 3.606-2.732 5.325-4.169 42.122 19.702 87.89 19.702 129.51 0 1.735 1.437 3.519 2.834 5.324 4.169-6.895 4.157-14.19 7.719-21.785 10.603 3.988 8.037 8.6 15.707 13.816 22.884 21.142-6.58 42.646-16.637 64.815-33.213 5.316-56.288-9.081-105.09-38.056-148.36ZM85.474 135.095c-12.645 0-23.015-11.805-23.015-26.18s10.148-26.2 23.015-26.2c12.867 0 23.236 11.804 23.015 26.2.02 14.375-10.148 26.18-23.015 26.18Zm85.051 0c-12.645 0-23.014-11.805-23.014-26.18s10.148-26.2 23.014-26.2c12.867 0 23.236 11.804 23.015 26.2 0 14.375-10.148 26.18-23.015 26.18Z"/>
+            </svg>
+            <span>Distrakt</span>
+        </a>
+        <a class="btn-ghost small distrakt-cal-link" href="/?year={{ year }}&amp;month={{ month }}" title="Back to the calendar for this month">📅 Calendar</a>
+    </div>
+    <nav class="month-nav distrakt-nav">
+        <a class="month-nav-btn prev" href="?year={{ nav.prev_year }}&amp;month={{ nav.prev_month }}" title="Previous month" aria-label="Previous month">‹</a>
+        <span class="distrakt-nav-label">{{ year }}-{{ '%02d' % month }}</span>
+        <a class="month-nav-btn next" href="?year={{ nav.next_year }}&amp;month={{ nav.next_month }}" title="Next month" aria-label="Next month">›</a>
+    </nav>
+    <div class="distrakt-actions">
+        <button type="button" class="btn-ghost small" onclick="importFromCalendar()" title="Pull this month's premieres from the Trakt calendar">⤓ Import</button>
+        <button type="button" class="btn-primary small" onclick="openAddShow()">+ Add show</button>
+    </div>
+</header>
+
+<main class="distrakt-main">
+    <div id="distraktRoot">
+        <nav class="distrakt-tabs">
+            <button type="button" class="distrakt-tab active" data-tab="shows" onclick="switchTab('shows')">This month's shows</button>
+            <button type="button" class="distrakt-tab" data-tab="copy" onclick="switchTab('copy')">Copy blocks</button>
+            <button type="button" class="distrakt-tab" data-tab="emoji" onclick="switchTab('emoji')">Emoji map</button>
+        </nav>
+
+        <section class="distrakt-panel" data-panel="shows">
+            <div id="distraktShowList" class="distrakt-show-list">
+                <div class="distrakt-empty">Loading…</div>
+            </div>
+        </section>
+
+        <section class="distrakt-panel distrakt-section" data-panel="copy" hidden>
+            <div class="distrakt-section-head">
+                <h2>Copy blocks</h2>
+                <button type="button" class="btn-ghost small" onclick="refreshMonth()">↻ Refresh</button>
+            </div>
+            <div class="distrakt-copy-block">
+                <div class="distrakt-copy-head">
+                    <span>POST 1 — announcement</span>
+                    <button type="button" class="btn-ghost small" onclick="copyBlock('post1')">Copy</button>
+                </div>
+                <textarea id="post1Text" class="distrakt-copy-textarea" readonly spellcheck="false"></textarea>
+            </div>
+            <div class="distrakt-copy-block">
+                <div class="distrakt-copy-head">
+                    <span>POST 2 — living tracker</span>
+                    <button type="button" class="btn-ghost small" onclick="copyBlock('post2')">Copy</button>
+                </div>
+                <textarea id="post2Text" class="distrakt-copy-textarea" readonly spellcheck="false"></textarea>
+            </div>
+        </section>
+
+        <section class="distrakt-panel distrakt-section" data-panel="emoji" hidden>
+            <h2>Network → emoji map</h2>
+            <div id="emojiRows" class="emoji-rows"></div>
+            <div class="emoji-map-actions">
+                <button type="button" class="btn-ghost small" onclick="addEmojiRow()">+ Add network</button>
+                <button type="button" class="btn-ghost small" onclick="backfillNetworks()" title="Add every network used by this month's shows">⤓ Backfill from shows</button>
+            </div>
+            <div class="field distrakt-default-emoji">
+                <label for="e_default">Default emoji (fallback)</label>
+                <input type="text" id="e_default" spellcheck="false">
+            </div>
+            <button type="button" class="btn-primary" onclick="saveEmojiMap()">Save emoji map</button>
+        </section>
+    </div>
+</main>
+
+<!-- Add-show modal -->
+<div id="addShowModal" class="modal-overlay" onclick="if(event.target===this) closeAddShow()">
+    <div class="modal">
+        <div class="modal-head">
+            <h2>➕ Add show</h2>
+            <button type="button" class="modal-close" onclick="closeAddShow()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="field">
+                <label for="addSearchInput">Search Trakt</label>
+                <input type="text" id="addSearchInput" placeholder="Type a show title…" autocomplete="off" spellcheck="false" oninput="onAddSearchInput()">
+            </div>
+            <div id="addSearchResults" class="distrakt-search-results"></div>
+            <div id="addSeasonPick" class="distrakt-season-pick" hidden>
+                <div class="field">
+                    <label>Pick a season for <span id="addSeasonShowTitle"></span></label>
+                    <div id="addSeasonList" class="distrakt-season-list"></div>
+                </div>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="closeAddShow()">Cancel</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    window.DISTRAKT_YEAR = {{ year }};
+    window.DISTRAKT_MONTH = {{ month }};
+</script>
+<script src="/static/js/distrakt.js?v={{ asset_v }}"></script>
+</body>
+</html>

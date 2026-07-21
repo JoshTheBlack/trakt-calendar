@@ -22,7 +22,10 @@ DEFAULT_COUNTRIES = "ar,au,at,be,br,ca,cl,cn,co,cz,dk,fi,fr,de,gr,hk,is,in,ie,it
 @dataclass
 class Settings:
     trakt_client_id: str = ""
+    trakt_client_secret: str = ""
     trakt_access_token: str = ""
+    trakt_refresh_token: str = ""
+    trakt_token_expires_at: int = 0  # unix timestamp; 0 = unknown/never obtained via OAuth
     timezone: str = "Europe/Athens"
     endpoint: str = "shows/new"
     genres: str = DEFAULT_GENRES
@@ -47,6 +50,11 @@ class Settings:
     # Seerr (Overseerr/Jellyseerr lineage) request integration
     seer_url: str = ""
     seer_api_key: str = ""
+    # Distrakt (hidden tracker) — network -> Discord emoji map + fallback (§6).
+    network_emojis: dict[str, str] = field(default_factory=dict)
+    default_network_emoji: str = ":tv:"
+    # TMDB API key — used to fetch network logos (distrakt) for Discord emoji art.
+    tmdb_api_key: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
@@ -57,7 +65,8 @@ class Settings:
         if isinstance(nf, str):
             clean["network_filter"] = [s.strip() for s in nf.split(",") if s.strip()]
         for int_field in ("pagination_limit", "cache_ttl_minutes", "sonarr_quality_profile_id",
-                          "sonarr_language_profile_id", "radarr_quality_profile_id"):
+                          "sonarr_language_profile_id", "radarr_quality_profile_id",
+                          "trakt_token_expires_at"):
             if int_field in clean:
                 try:
                     clean[int_field] = int(clean[int_field])
@@ -65,6 +74,15 @@ class Settings:
                     clean.pop(int_field)
         if "hide_not_watching" in clean:
             clean["hide_not_watching"] = _as_bool(clean["hide_not_watching"])
+        # network_emojis may arrive as a JSON string from the emoji-map editor form.
+        ne = clean.get("network_emojis")
+        if isinstance(ne, str):
+            try:
+                clean["network_emojis"] = json.loads(ne) if ne.strip() else {}
+            except (json.JSONDecodeError, ValueError):
+                clean.pop("network_emojis")
+        if "network_emojis" in clean and not isinstance(clean["network_emojis"], dict):
+            clean.pop("network_emojis")
         return cls(**clean)
 
     def to_dict(self) -> dict:
@@ -86,6 +104,10 @@ class Settings:
     @property
     def seer_configured(self) -> bool:
         return bool(self.seer_url.strip() and self.seer_api_key.strip())
+
+    @property
+    def tmdb_configured(self) -> bool:
+        return bool(self.tmdb_api_key.strip())
 
 
 def _as_bool(v) -> bool:

@@ -5,10 +5,20 @@ Usage:
 Environment:
     HOST (default 0.0.0.0), PORT (default 8000), RELOAD (default 1)
 """
+import logging
 import os
 
 import hypercorn.asyncio
 from hypercorn.config import Config
+
+# Quiet third-party libs (WARNING) but surface our own app.* INFO diagnostics
+# (e.g. the distrakt X/Y watch-count summary). Runs on import, so it applies to
+# both `python run.py` and `hypercorn run:app`.
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("app").setLevel(logging.INFO)
+# Quiet hypercorn's per-request access log (the "GET /api/... 200" lines) — set to
+# DEBUG to bring them back. App INFO diagnostics stay visible.
+logging.getLogger("hypercorn.access").setLevel(logging.WARNING)
 
 from app.main import app
 
@@ -19,7 +29,9 @@ def main() -> None:
     port = os.environ.get("PORT", "8000")
     config.bind = [f"{host}:{port}"]
     config.use_reloader = os.environ.get("RELOAD", "1") == "1"
-    config.accesslog = "-"
+    # Per-request access log ("GET /... 200" lines, incl. static 304s) is OFF by
+    # default — set ACCESS_LOG=1 to enable. App INFO diagnostics are unaffected.
+    config.accesslog = "-" if os.environ.get("ACCESS_LOG") else None
     print(f">> Trakt New Shows running at http://localhost:{port}  (Ctrl+C to stop)")
     import asyncio
     asyncio.run(hypercorn.asyncio.serve(app, config))

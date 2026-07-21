@@ -13,7 +13,7 @@
 <body data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}" class="pack-{{ settings.day_packing }} card-{{ settings.card_style }}{% if settings.hide_not_watching %} hide-not-watching{% endif %}">
 
 <header class="hero">
-    <div class="brand-row">
+    <div class="hero-lead">
         <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
         <div class="month-nav">
             <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
@@ -28,9 +28,9 @@
         </div>
     </div>
 
-    <div class="controls-row">
-        <div class="control">
-            <label for="endpointSelect">📡 Endpoint</label>
+    <div class="hero-controls">
+        <div class="control" title="{{ endpoint.description }}">
+            <label for="endpointSelect">📡</label>
             <select id="endpointSelect" onchange="switchEndpoint(this.value)">
                 {% for ep in endpoints %}
                 <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
@@ -38,7 +38,7 @@
             </select>
         </div>
         <div class="control">
-            <label for="cardStyleSelect">🎬 Cards</label>
+            <label for="cardStyleSelect">🎬</label>
             <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
                 <option value="vertical"{% if settings.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
                 <option value="horizontal"{% if settings.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
@@ -46,14 +46,18 @@
             </select>
         </div>
         <div class="control">
-            <label for="dayPackSelect">🗓️ Days</label>
+            <label for="dayPackSelect">🗓️</label>
             <select id="dayPackSelect" onchange="setLayout('day_packing', this.value)">
                 <option value="stacked"{% if settings.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
                 <option value="packed"{% if settings.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
             </select>
         </div>
-        <button type="button" id="hideToggle" class="pill-btn{% if settings.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()">
-            <span id="hideToggleLabel">{% if settings.hide_not_watching %}🚫 Hiding not-watching{% else %}👁️ Showing all{% endif %}</span>
+    </div>
+
+    <div class="hero-actions">
+        <span class="hero-meta" title="{{ endpoint.description }}">📊 {{ total }} · 🕒 {{ generated }}</span>
+        <button type="button" id="hideToggle" class="pill-btn{% if settings.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()" title="Toggle hiding not-watching items">
+            <span id="hideToggleLabel">{% if settings.hide_not_watching %}🚫 Hiding{% else %}👁️ Showing all{% endif %}</span>
         </button>
         {% if (endpoint.media == 'movie' and settings.radarr_configured) or (endpoint.media != 'movie' and settings.sonarr_configured) %}
         <button type="button" id="addAllBtn" class="pill-btn" onclick="addAllToArr()" title="Add every watching item this month to {{ 'Radarr' if endpoint.media == 'movie' else 'Sonarr' }}">
@@ -61,19 +65,9 @@
         </button>
         {% endif %}
         <button type="button" class="pill-btn" onclick="openSettings()">⚙️ Settings</button>
-    </div>
-
-    <div class="sub">
-        <span class="chip-info">📊 {{ total }} item{{ '' if total == 1 else 's' }}</span>
-        <span class="endpoint-desc">{{ endpoint.description }}</span>
-        <span class="chip-info">🕒 {{ generated }}</span>
+        <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)" hidden>🧵 Distrakt</a>
     </div>
 </header>
-
-<div id="syncPanel" class="sync-panel">
-    <span id="syncStatus" class="sync-status">🟢 Storage Connected</span>
-    <button type="button" class="sync-btn" onclick="clearData()">🗑️ Reset</button>
-</div>
 
 <div id="statsBar" class="stats-bar">
     <div style="width: 100%;">
@@ -114,7 +108,7 @@
                         {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
                         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
                         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
-                        {% if item.network %}<div class="network-badge">📡 {{ item.network }}</div>{% endif %}
+                        {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.tmdb if item.tmdb is not none else '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
                         <button type="button" class="watch-toggle" onclick="toggleWatch(this, event)" title="Toggle watching">
                             <svg class="icon-open" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
                             <svg class="icon-closed" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle><line x1="2" y1="2" x2="22" y2="22"></line></svg>
@@ -182,8 +176,19 @@
                     <span class="hint">From trakt.tv/oauth/applications</span>
                 </div>
                 <div class="field">
+                    <label for="s_client_secret">Trakt Client Secret</label>
+                    <input type="password" id="s_client_secret" name="trakt_client_secret" autocomplete="off" spellcheck="false">
+                    <span class="hint">Same page as the Client ID — needed to obtain/refresh the access token below.</span>
+                </div>
+                <div class="field">
                     <label for="s_access_token">Trakt Access Token</label>
                     <input type="password" id="s_access_token" name="trakt_access_token" autocomplete="off" spellcheck="false">
+                    <span class="hint" id="s_token_status"></span>
+                </div>
+                <div class="auth-box">
+                    <button type="button" class="btn-ghost small" onclick="startDeviceAuth()">🔑 Authorize with Trakt</button>
+                    <button type="button" class="btn-ghost small" onclick="refreshTraktToken()">↻ Refresh token now</button>
+                    <div id="authStatus" class="hint"></div>
                 </div>
                 <div class="two-col">
                     <div class="field">
@@ -261,6 +266,11 @@
                 <div class="two-col">
                     <div class="field"><label for="s_seer_url">Seerr URL</label><input type="text" id="s_seer_url" name="seer_url" placeholder="http://localhost:5055" spellcheck="false"></div>
                     <div class="field"><label for="s_seer_key">Seerr API key</label><input type="password" id="s_seer_key" name="seer_api_key" autocomplete="off" spellcheck="false"></div>
+                </div>
+
+                <div class="settings-section">🖼️ TMDB <span class="hint">(network logos for Discord emoji art)</span></div>
+                <div class="two-col">
+                    <div class="field"><label for="s_tmdb_key">TMDB API key</label><input type="password" id="s_tmdb_key" name="tmdb_api_key" autocomplete="off" spellcheck="false"></div>
                 </div>
             </div>
             <div class="modal-foot">

@@ -16,8 +16,14 @@ __pycache__/
 # App runtime data (settings.json with API keys, per-month watch state, detail cache)
 data/
 
+# Local scratch/test data dir (mirror of data/, never part of the repo)
+scratch_data/
+
 # Claude Code local (personal) settings
 .claude/settings.local.json
+
+# Build/design notes (personal, not part of the release)
+BUILD_PLAN.txt
 
 # OS / editor junk
 .DS_Store

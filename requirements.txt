@@ -4,3 +4,8 @@ jinja2==3.1.6
 httpx==0.28.1
 python-multipart==0.0.32
 tzdata==2026.3
+Pillow==12.3.0
+# SVG-only network logos (distrakt/calendar). Needs the native Cairo library at
+# runtime (Linux/Docker: apt install libcairo2; Windows dev: often absent -> those
+# few SVG-only networks fall back to the emoji, PNG networks are unaffected).
+cairosvg==2.9.0

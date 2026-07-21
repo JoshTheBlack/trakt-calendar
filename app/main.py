@@ -7,25 +7,44 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from itertools import groupby
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import arr
+from . import discord_fmt
+from . import distrakt as distrakt_store
+from . import logos
 from . import seer
 from . import state as state_store
+from . import trakt_auth
+from . import watch_history
+from .perftrace import span
 from .config import Settings, load_settings, save_settings
 from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
-from .trakt import TraktError, fetch_calendar, fetch_details, fetch_tile_info
+from .trakt import (
+    TraktError,
+    fetch_calendar,
+    fetch_details,
+    fetch_season_detail,
+    fetch_show_seasons,
+    fetch_tile_info,
+    fetch_watched_map,
+    search_shows,
+)
+
+logger = logging.getLogger(__name__)
 
 VERSION = "1.0.0"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
@@ -39,7 +58,12 @@ HEARTBEAT_SECONDS = 60
 
 def _asset_version() -> str:
     """Cache-busting token: newest mtime of the CSS/JS, recomputed each server start."""
-    files = [BASE_DIR / "static/css/style.css", BASE_DIR / "static/js/app.js"]
+    files = [
+        BASE_DIR / "static/css/style.css",
+        BASE_DIR / "static/css/distrakt.css",
+        BASE_DIR / "static/js/app.js",
+        BASE_DIR / "static/js/distrakt.js",
+    ]
     try:
         return str(int(max(f.stat().st_mtime for f in files)))
     except OSError:
@@ -78,11 +102,49 @@ async def refresh_library(force: bool = False) -> None:
     LIBRARY_CACHE["_ts"] = time.time()
 
 
+async def _apply_new_trakt_token(settings: Settings, token: dict) -> Settings:
+    """Write a fresh access/refresh token pair (from device-auth or a refresh
+    call) into `settings` and persist it. Trakt issues a NEW refresh_token on
+    every refresh — the old one stops working, so it must always be saved."""
+    settings.trakt_access_token = token["access_token"]
+    settings.trakt_refresh_token = token.get("refresh_token", "")
+    settings.trakt_token_expires_at = int(token.get("created_at", time.time())) + int(token.get("expires_in", 0))
+    save_settings(settings)
+    return settings
+
+
+async def _maybe_refresh_trakt_token() -> None:
+    """Refresh the Trakt access token once it has actually expired.
+
+    Runs on every heartbeat tick (cheap — just a timestamp comparison until the
+    token is actually due), so the token renews itself in the background
+    without the user having to notice or intervene.
+    """
+    settings = load_settings()
+    if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
+        return
+    if not settings.trakt_token_expires_at or time.time() < settings.trakt_token_expires_at:
+        return
+    try:
+        token = await trakt_auth.refresh_access_token(
+            settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
+        )
+    except httpx.HTTPError as exc:
+        logger.warning("Trakt token auto-refresh failed: %s", exc)
+        return
+    await _apply_new_trakt_token(settings, token)
+    logger.info("Trakt token auto-refreshed (next expiry %s)", settings.trakt_token_expires_at)
+
+
 async def _heartbeat_loop() -> None:
     while True:
         try:
             await refresh_integration_health()
         except Exception:  # never let the heartbeat kill the loop
+            pass
+        try:
+            await _maybe_refresh_trakt_token()
+        except Exception:
             pass
         await asyncio.sleep(HEARTBEAT_SECONDS)
 
@@ -95,6 +157,8 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         task.cancel()
+        import app.trakt as _trakt
+        await _trakt.aclose_shared_client()
 
 
 app = FastAPI(title="Trakt New Shows", lifespan=lifespan)
@@ -202,6 +266,28 @@ async def index(request: Request):
     return templates.TemplateResponse(request, "index.html", context)
 
 
+@app.get("/distrakt")
+async def distrakt(request: Request):
+    """Hidden Discord-tracker page (easter egg only — see BUILD_PLAN.txt).
+
+    Renders the shell for the requested {year, month}; the page's JS fetches the
+    computed month via /api/distrakt/month (which lazily rolls the month over).
+    Month-nav prev/next mirror the main calendar's nav (see index.html)."""
+    today = date.today()
+    year = _valid_year(request.query_params.get("year"), today.year)
+    month = _valid_month(request.query_params.get("month"), today.month)
+    context = {
+        "request": request,
+        "year": year,
+        "month": month,
+        "nav": _nav(year, month),
+        "version": VERSION,
+        "build": BUILD_LABEL,
+        "asset_v": ASSET_VERSION,
+    }
+    return templates.TemplateResponse(request, "distrakt.html", context)
+
+
 @app.get("/pick")
 async def pick(request: Request):
     """Month/year selector landing page (carried over from the original front page)."""
@@ -274,6 +360,45 @@ async def post_state(request: Request):
     return JSONResponse({"ok": True})
 
 
+_LOGO_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
+
+
+@app.get("/api/network-logo")
+async def api_network_logo(request: Request):
+    """A processed network-logo PNG tile for a network name (calendar + distrakt).
+    Generates it from TMDB on first request when `tmdb` is supplied and a TMDB key
+    is set; serves the disk cache thereafter. 404 -> the caller falls back to the
+    emoji/text tag."""
+    name = (request.query_params.get("name") or "").strip()
+    tmdb = request.query_params.get("tmdb")
+    if not name:
+        return Response(status_code=404)
+    path = logos.cached_tile(name)
+    if path is None and not logos.is_negative(name):
+        path = await logos.ensure_logo(load_settings(), name, tmdb)
+    if path is None or not path.exists():
+        return Response(status_code=404, headers=_LOGO_CACHE_HEADERS)
+    # ?download=1 -> attachment (for the emoji-map "download logo" button).
+    filename = f"{logos._slug(name)}.png" if request.query_params.get("download") else None
+    return FileResponse(path, media_type="image/png", filename=filename, headers=_LOGO_CACHE_HEADERS)
+
+
+@app.post("/api/network-logo/regenerate")
+async def api_network_logo_regenerate(request: Request):
+    """Drop a single network's cached logo and re-resolve it from TMDB."""
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    name = (data.get("name") or "").strip()
+    tmdb = data.get("tmdb")
+    if not name:
+        return JSONResponse({"ok": False, "error": "Missing network name"}, status_code=400)
+    logos.delete(name)
+    path = await logos.ensure_logo(load_settings(), name, tmdb)
+    return JSONResponse({"ok": True, "network": name, "generated": bool(path and path.exists())})
+
+
 @app.get("/api/settings")
 async def get_settings():
     return JSONResponse(load_settings().to_dict())
@@ -292,9 +417,90 @@ async def post_settings(request: Request):
     current.update(data)
     settings = Settings.from_dict(current)
     save_settings(settings)
-    # Re-check Sonarr/Radarr immediately so buttons reflect the new config right away.
+    # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config right away,
+    # and invalidate the library cache so the next fetch re-pulls with the new credentials
+    # (rather than serving the stale/empty cache until the TTL expires or a restart).
     await refresh_integration_health()
+    LIBRARY_CACHE["_ts"] = 0.0
     return JSONResponse({"ok": True, "settings": settings.to_dict()})
+
+
+@app.post("/api/auth/device/start")
+async def auth_device_start(request: Request):
+    """Begin Trakt's OAuth device-code flow. Accepts an in-progress (unsaved)
+    client_id from the Settings form, falling back to the saved one — same
+    pattern as /api/integrations/options for Sonarr/Radarr."""
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    settings = load_settings()
+    client_id = (data.get("client_id") or "").strip() or settings.trakt_client_id
+    if not client_id:
+        return JSONResponse({"ok": False, "error": "Enter a Trakt Client ID first."}, status_code=400)
+    try:
+        code = await trakt_auth.request_device_code(client_id)
+    except httpx.HTTPError as exc:
+        return JSONResponse({"ok": False, "error": f"Could not start device authorization: {exc}"}, status_code=502)
+    return JSONResponse({"ok": True, **code})
+
+
+@app.post("/api/auth/device/poll")
+async def auth_device_poll(request: Request):
+    """Check whether the user has approved the device code yet. On success,
+    persists client_id/client_secret + the new token pair to settings.json so
+    the background auto-refresh (heartbeat) can pick it up without the user
+    separately clicking "Save & reload" on the main Settings form."""
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    settings = load_settings()
+    client_id = (data.get("client_id") or "").strip() or settings.trakt_client_id
+    client_secret = (data.get("client_secret") or "").strip() or settings.trakt_client_secret
+    device_code = data.get("device_code")
+    if not (client_id and client_secret and device_code):
+        return JSONResponse({"ok": False, "error": "Missing client_id, client_secret, or device_code."}, status_code=400)
+    try:
+        token = await trakt_auth.poll_device_token(client_id, client_secret, device_code)
+    except trakt_auth.DevicePending:
+        return JSONResponse({"ok": True, "status": "pending"})
+    except trakt_auth.DeviceSlowDown:
+        return JSONResponse({"ok": True, "status": "slow_down"})
+    except trakt_auth.DeviceExpired as exc:
+        return JSONResponse({"ok": False, "status": "expired", "error": str(exc)}, status_code=410)
+    except trakt_auth.DeviceDenied as exc:
+        return JSONResponse({"ok": False, "status": "denied", "error": str(exc)}, status_code=409)
+    except httpx.HTTPError as exc:
+        return JSONResponse({"ok": False, "status": "error", "error": f"Trakt error: {exc}"}, status_code=502)
+
+    settings.trakt_client_id = client_id
+    settings.trakt_client_secret = client_secret
+    settings = await _apply_new_trakt_token(settings, token)
+    await refresh_integration_health()
+    return JSONResponse({
+        "ok": True,
+        "status": "authorized",
+        "access_token": settings.trakt_access_token,
+        "expires_at": settings.trakt_token_expires_at,
+    })
+
+
+@app.post("/api/auth/refresh")
+async def auth_refresh():
+    """Manual "refresh now" button — uses whatever is already saved (the
+    device-auth flow is what actually seeds client_secret/refresh_token)."""
+    settings = load_settings()
+    if not (settings.trakt_client_id and settings.trakt_client_secret and settings.trakt_refresh_token):
+        return JSONResponse({"ok": False, "error": "Not authorized yet — use 'Authorize with Trakt' first."}, status_code=400)
+    try:
+        token = await trakt_auth.refresh_access_token(
+            settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
+        )
+    except httpx.HTTPError as exc:
+        return JSONResponse({"ok": False, "error": f"Refresh failed: {exc}"}, status_code=502)
+    settings = await _apply_new_trakt_token(settings, token)
+    return JSONResponse({"ok": True, "expires_at": settings.trakt_token_expires_at})
 
 
 @app.get("/api/integrations/status")
@@ -373,3 +579,433 @@ async def integrations_add(request: Request):
                 pass
 
     return JSONResponse(result, status_code=200 if result.get("ok") else 502)
+
+
+# ---------------------------------------------------------------------------
+# Distrakt (hidden tracker) API — add-show flow + abandon toggle (CHAT 3) plus
+# the bucketing/rendering endpoint (CHAT 4).
+# ---------------------------------------------------------------------------
+
+def _month_key(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _merge_live_show(rec: dict, watched_lookup: dict, detail: dict) -> dict:
+    """Combine a stored record (identity + abandoned/abandoned_form) with its
+    live Trakt-derived fields into the flat "LIVE SHOW SHAPE" discord_fmt
+    expects (see app/discord_fmt.py's module docstring), plus the computed
+    `bucket` for the UI to group by."""
+    show = {
+        **rec,
+        "watched": watched_lookup.get((rec["trakt_id"], rec["season"]), 0),
+        "total": detail["total"],
+        "cadence": detail["cadence"],
+        "premiere": detail["premiere"],
+        "finale": detail["finale"],
+        "started_airing": detail["started_airing"],
+        "finished_airing": detail["finished_airing"],
+    }
+    show["bucket"] = discord_fmt.bucket_of(show, show)
+    return show
+
+
+@app.get("/api/distrakt/list")
+async def api_distrakt_list(request: Request):
+    """Raw (unbucketed) shows stored for a month — the plain management list."""
+    today = date.today()
+    year = _valid_year(request.query_params.get("year"), today.year)
+    month = _valid_month(request.query_params.get("month"), today.month)
+    doc = distrakt_store.load_month(_month_key(year, month))
+    return JSONResponse({"ok": True, "month": _month_key(year, month), "shows": (doc or {}).get("shows", [])})
+
+
+def _apply_not_watching(month_key: str, year: int, month: int, shows: list[dict], committed: bool) -> list[dict]:
+    """§5 main-calendar not-watching, date-gated on the month's 1st (committed):
+
+      - PREVIEW (before the 1st): not-watching HIDES the show from the tracker —
+        excluded from the list + both posts, but KEPT in the doc so un-toggling
+        brings it straight back ("not-watching removes from distrakt prior to the
+        1st").
+      - COMMITTED (on/after the 1st): not-watching promotes the roster show to
+        Abandoned (persisted, form frozen). One-directional — never un-abandons;
+        the dedicated /distrakt toggle + Delete stay the source of truth. The
+        `abandoned` guard means a steady-state read does no extra writes."""
+    nw_ids = distrakt_store.not_watching_ids(year, month)
+    if not nw_ids:
+        return shows
+
+    def matched(s: dict) -> bool:
+        return str(s.get("slug") or "") in nw_ids or str(s.get("trakt_id")) in nw_ids
+
+    if not committed:
+        return [s for s in shows if not matched(s)]
+
+    for show in shows:
+        if show.get("abandoned") or not matched(show):
+            continue
+        form = discord_fmt.freeze_form(show)
+        distrakt_store.set_abandoned(month_key, show["trakt_id"], show["season"], True, abandoned_form=form)
+        show["abandoned"] = True
+        show["abandoned_form"] = form
+        show["bucket"] = "abandoned"
+    return shows
+
+
+def _empty_month_payload(month_key: str, settings, readonly: bool = False) -> dict:
+    """Headers-only render for a month with no roster + no Trakt call: an
+    unconfigured/uninitialized month (readonly=False) or a never-tracked past
+    month reached by navigating backward (readonly=True, §6 no-backfill)."""
+    return {
+        "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
+        "post1": discord_fmt.render_post1([], settings.network_emojis, settings.default_network_emoji),
+        "post2": discord_fmt.render_post2([], settings.network_emojis, settings.default_network_emoji),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: bool = False) -> tuple[dict, int]:
+    """Shared body for GET /api/distrakt/month + POST /api/distrakt/refresh.
+
+    Lazily rolls the month over (ensure_month), then either renders a CLOSED
+    month from its frozen snapshot (no Trakt) or computes the OPEN month live
+    (auto-refreshing totals when stale >24h, §3; or always when force_fresh).
+    A never-tracked PAST/gap month (backward nav) is rendered empty + read-only
+    and never created (§6 no-backfill). Returns (json_payload, http_status)."""
+    today = date.today()
+    month_key = _month_key(year, month)
+    existing = distrakt_store.load_month(month_key)
+    if existing is None:
+        blocked = distrakt_store.is_backfill_blocked(month_key)
+        if blocked or not settings.configured:
+            # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
+            # persisted, no Trakt call. `readonly` hides the add/edit affordances.
+            return _empty_month_payload(month_key, settings, readonly=blocked), 200
+
+    with span("payload.ensure_month", month=month_key, force=force_fresh):
+        doc = await distrakt_store.ensure_month(year, month, settings, today=today)
+    month_key = doc["month"]
+
+    if doc.get("closed"):
+        # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
+        shows = distrakt_store.frozen_shows(doc)
+        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji)
+        post2 = discord_fmt.render_post2(shows, settings.network_emojis, settings.default_network_emoji,
+                                         movies=doc.get("movies"))
+        return {
+            "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
+            "post1": post1, "post2": post2, "generated_at": datetime.now(timezone.utc).isoformat(),
+        }, 200
+
+    committed = distrakt_store.month_committed(month_key, today)
+    # A PREVIEW month (before the 1st) keeps auto-populating from premieres so the
+    # roster tracks the calendar (and un-not-watching re-adds a previously excluded
+    # premiere). A COMMITTED month is stable — premieres only re-import on demand.
+    if not committed and settings.configured:
+        await distrakt_store.import_premieres(month_key, settings)
+        doc = distrakt_store.load_month(month_key) or doc
+
+    records = doc.get("shows", [])
+    if records and not settings.configured:
+        return {"ok": False, "error": "Not configured"}, 400
+    # Backfill tmdb on records added before we stored it (one-time; self-limiting)
+    # so the network-logo <img> gets a tmdb to generate from on this same load.
+    if records and settings.configured:
+        with span("payload.backfill_tmdb"):
+            doc = await distrakt_store.backfill_tmdb(month_key, settings) or doc
+        records = doc.get("shows", [])
+    # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
+    # stale load re-baseline the whole watch history):
+    #   season_fresh -> bypass the 24h season cache for `y`. Only on explicit
+    #                   Refresh; routine loads let the 24h TTL refresh `y` daily.
+    #   force        -> full watch-history re-baseline. ONLY on explicit Refresh;
+    #                   normal loads rely on the last_activities gate + deltas.
+    season_fresh = force_fresh
+
+    # Sync the incremental watch-history cache ONCE (gated by /sync/last_activities).
+    # Reuse it for both watched counts and the month's watched-movies list.
+    watched_lookup: dict = {}
+    movies: list[dict] = []
+    if settings.configured:
+        with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
+            state = await watch_history.sync_and_baseline(
+                settings, [r["trakt_id"] for r in records], force=force_fresh, today=today,
+            )
+            watched_lookup = watch_history.watched_map(state)
+            mstart, mend = watch_history.month_bounds(month_key)
+            movies = watch_history.movies_in_range(state, mstart, mend)
+            sp.set(watched_keys=len(watched_lookup), movies=len(movies))
+
+    with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
+        shows = await distrakt_store.compute_live_shows(records, settings, fresh=season_fresh, watched_lookup=watched_lookup) if records else []
+    shows = _apply_not_watching(month_key, year, month, shows, committed)
+    if records and season_fresh:
+        distrakt_store.stamp_refreshed(month_key)
+
+    with span("payload.render"):
+        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji)
+        post2 = discord_fmt.render_post2(shows, settings.network_emojis, settings.default_network_emoji, movies=movies)
+    return {
+        "ok": True,
+        "month": month_key,
+        "closed": False,
+        "readonly": False,
+        "shows": shows,
+        "post1": post1,
+        "post2": post2,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }, 200
+
+
+@app.get("/api/distrakt/month")
+async def api_distrakt_month(request: Request):
+    """Computed buckets + the two copy-paste POST 1/POST 2 markdown blocks.
+
+    OPEN month: live x/y + cadence/dates recomputed (1x /sync/watched/shows + 1x
+    season call per show), auto-refreshed if totals are stale >24h (§3). CLOSED /
+    past month: rendered from the frozen snapshot with NO Trakt calls. Opening an
+    uninitialized month lazily rolls it over first (§6, see ensure_month)."""
+    today = date.today()
+    year = _valid_year(request.query_params.get("year"), today.year)
+    month = _valid_month(request.query_params.get("month"), today.month)
+    with span("GET /api/distrakt/month", ym=f"{year}-{month:02d}"):
+        payload, status = await _distrakt_month_payload(year, month, load_settings())
+    return JSONResponse(payload, status_code=status)
+
+
+@app.post("/api/distrakt/refresh")
+async def api_distrakt_refresh(request: Request):
+    """Force a fresh totals refresh (§3): bypass the 24h season cache + re-stamp
+    totals_refreshed_at for the OPEN month, then return the same shape as GET
+    /api/distrakt/month. CLOSED months are frozen (nothing to refresh)."""
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    payload, status = await _distrakt_month_payload(year, month, load_settings(), force_fresh=True)
+    return JSONResponse(payload, status_code=status)
+
+
+@app.get("/api/distrakt/months")
+async def api_distrakt_months():
+    """Available YYYY-MM docs for the history nav, plus the real current month
+    (always navigable even before it has been initialized)."""
+    today = date.today()
+    current = _month_key(today.year, today.month)
+    months = sorted(set(distrakt_store.list_months()) | {current})
+    return JSONResponse({"ok": True, "months": months, "current": current})
+
+
+@app.post("/api/distrakt/import")
+async def api_distrakt_import(request: Request):
+    """Pull this month's calendar premieres into the OPEN month (shows/new -> New,
+    shows/premieres minus new -> Returning; skips existing + not-watching). The
+    manual "Import from calendar" action — e.g. to seed the current month when its
+    doc already exists (so lazy-init's one-shot premiere seeding was skipped).
+    Returns the same shape as GET /api/distrakt/month."""
+    settings = load_settings()
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    month_key = _month_key(year, month)
+    if distrakt_store.is_backfill_blocked(month_key):
+        return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
+    doc = await distrakt_store.ensure_month(year, month, settings, today=today)
+    if doc.get("closed"):
+        return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
+    doc = await distrakt_store.import_premieres(month_key, settings)
+    _register_networks([s.get("network") for s in (doc or {}).get("shows", [])])
+    payload, status = await _distrakt_month_payload(year, month, settings)
+    return JSONResponse(payload, status_code=status)
+
+
+@app.post("/api/distrakt/backfill-networks")
+async def api_distrakt_backfill_networks(request: Request):
+    """Register every network used by this month's roster into the emoji map
+    (with the default emoji) so they all show up in the editor. Returns the map."""
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    doc = distrakt_store.load_month(_month_key(year, month))
+    _register_networks([s.get("network") for s in (doc or {}).get("shows", [])])
+    settings = load_settings()
+    return JSONResponse({
+        "ok": True,
+        "network_emojis": settings.network_emojis,
+        "default_network_emoji": settings.default_network_emoji,
+    })
+
+
+@app.post("/api/distrakt/remove")
+async def api_distrakt_remove(request: Request):
+    """Delete a show+season from an OPEN month (cleanup mistakes / abandons).
+    Frozen past months are read-only."""
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    try:
+        trakt_id = int(data["trakt_id"])
+        season = int(data["season"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+    month_key = _month_key(year, month)
+    doc = distrakt_store.load_month(month_key)
+    if doc is None:
+        return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
+    if doc.get("closed"):
+        return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
+    if not distrakt_store.remove_show(month_key, trakt_id, season):
+        return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
+    payload, status = await _distrakt_month_payload(year, month, load_settings())  # recomputed month (1d)
+    return JSONResponse(payload, status_code=status)
+
+
+@app.get("/api/distrakt/search")
+async def api_distrakt_search(request: Request):
+    settings = load_settings()
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    q = request.query_params.get("q", "")
+    try:
+        results = await search_shows(settings, q)
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
+    return JSONResponse({"ok": True, "results": results})
+
+
+@app.get("/api/distrakt/seasons")
+async def api_distrakt_seasons(request: Request):
+    """Aired seasons for a show (add-flow season picker) — not in BUILD_PLAN's
+    route list, but required so the browser can call fetch_show_seasons()."""
+    settings = load_settings()
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    trakt_id = request.query_params.get("id")
+    if not trakt_id:
+        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    try:
+        seasons = await fetch_show_seasons(settings, trakt_id)
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
+    return JSONResponse({"ok": True, "seasons": seasons})
+
+
+def _register_networks(networks) -> None:
+    """Auto-populate the network->emoji map (backlog item 3): any network not yet
+    mapped gets the default emoji as a placeholder so it appears in the editor,
+    ready to be customized. No-op for blank / already-mapped networks."""
+    settings = load_settings()
+    changed = False
+    for net in networks:
+        net = (net or "").strip()
+        if net and net not in settings.network_emojis:
+            settings.network_emojis[net] = settings.default_network_emoji
+            changed = True
+    if changed:
+        save_settings(settings)
+
+
+@app.post("/api/distrakt/add")
+async def api_distrakt_add(request: Request):
+    """Persist a show+season into the {year,month} doc (identity), baseline its
+    watch history, and register its network in the emoji map."""
+    settings = load_settings()
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    try:
+        show = {
+            "trakt_id": int(data["trakt_id"]),
+            "tmdb": data.get("tmdb"),
+            "season": int(data["season"]),
+            "slug": data.get("slug") or "",
+            "title": data.get("title") or "",
+            "network": data.get("network") or "",
+            "media": "show",
+        }
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+    month_key = _month_key(year, month)
+    if distrakt_store.is_backfill_blocked(month_key):
+        # §6 no-backfill: refuse to create a never-tracked past/gap month even via
+        # a manual add (keeps the store growing forward-only, consistent with the
+        # read path's read-only rendering of such months).
+        return JSONResponse(
+            {"ok": False, "error": "Can't add shows to a past month that was never tracked."},
+            status_code=400,
+        )
+    distrakt_store.add_show(month_key, show)
+    _register_networks([show["network"]])
+    try:  # baseline the show's watch history now so its counts are correct immediately
+        await watch_history.baseline_show(settings, show["trakt_id"])
+    except Exception:  # never fail the add on a baseline hiccup — it self-heals on next load
+        logger.warning("baseline_show failed for %s", show["trakt_id"], exc_info=True)
+    payload, status = await _distrakt_month_payload(year, month, settings)  # return the recomputed month (1d)
+    return JSONResponse(payload, status_code=status)
+
+
+@app.post("/api/distrakt/abandon")
+async def api_distrakt_abandon(request: Request):
+    """Toggle a show+season's abandoned flag. On abandon, freezes
+    `abandoned_form` = the current live inline form minus premiere/finale dates
+    (§4/§5), via discord_fmt.freeze_form — so the Discord line stays stable even
+    after the show would otherwise have moved buckets. Un-abandoning clears it
+    (distrakt_store.set_abandoned's job). If Trakt isn't configured (or the show
+    isn't found), abandoned_form falls back to None, same as pre-Chat-4."""
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    try:
+        trakt_id = int(data["trakt_id"])
+        season = int(data["season"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+    abandoned = bool(data.get("abandoned"))
+    month_key = _month_key(year, month)
+
+    abandoned_form = None
+    if abandoned:
+        doc = distrakt_store.load_month(month_key)
+        rec = next(
+            (r for r in (doc or {}).get("shows", []) if r.get("trakt_id") == trakt_id and r.get("season") == season),
+            None,
+        )
+        settings = load_settings()
+        if rec is not None and settings.configured:
+            watched_lookup, detail = await asyncio.gather(
+                fetch_watched_map(settings, [trakt_id]),
+                fetch_season_detail(settings, trakt_id, season),
+            )
+            abandoned_form = discord_fmt.freeze_form(_merge_live_show(rec, watched_lookup, detail))
+
+    rec = distrakt_store.set_abandoned(month_key, trakt_id, season, abandoned, abandoned_form=abandoned_form)
+    if rec is None:
+        return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
+    payload, status = await _distrakt_month_payload(year, month, load_settings())  # recomputed month (1d)
+    return JSONResponse(payload, status_code=status)
