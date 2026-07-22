@@ -70,3 +70,28 @@ body.auth-page {
 .btn-ghost.tiny:hover { color: var(--text); border-color: var(--gold-soft); }
 
 .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* Admin screen — same tokens and fonts as the auth pages above, but a wide
+   table layout instead of a centered form. */
+.admin-shell { width: 100%; max-width: 1040px; margin: 0 auto; padding: 24px 20px 60px; display: flex; flex-direction: column; gap: 26px; }
+.admin-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.admin-top h1 { font-family: 'Bebas Neue', sans-serif; font-size: 1.9rem; letter-spacing: 1px; color: var(--gold-soft); }
+.admin-top a { color: var(--accent-blue); font-size: 0.85rem; }
+.admin-top a:hover { text-decoration: underline; }
+.admin-section { background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 16px; padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; }
+.admin-section h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.25rem; letter-spacing: 1px; color: var(--gold-soft); }
+.admin-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.admin-table-wrap { overflow-x: auto; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.admin-table th, .admin-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--card-border); vertical-align: middle; white-space: nowrap; }
+.admin-table th { color: var(--text-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
+.admin-table td.actions { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; }
+.admin-table .badge-row { display: flex; gap: 5px; flex-wrap: wrap; }
+.admin-empty { color: var(--text-faint); font-size: 0.82rem; }
+.btn-danger { border-color: rgba(224,56,77,0.5); color: var(--crimson); }
+.btn-danger:hover { background: rgba(224,56,77,0.1); border-color: var(--crimson); }
+.admin-inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+.admin-inline-form .field { min-width: 140px; }
+.admin-msg { font-size: 0.8rem; min-height: 1.1em; }
+.admin-msg.error { color: var(--crimson); }
+.admin-msg.ok { color: var(--green); }

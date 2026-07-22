@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from . import admin_routes
 from . import arr
 from . import auth
 from . import auth_routes
@@ -29,6 +30,8 @@ from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
 from . import logos
+from . import plex_auth
+from . import plex_routes
 from . import seer
 from . import state as state_store
 from . import trakt_auth
@@ -177,6 +180,9 @@ async def _heartbeat_loop() -> None:
 async def lifespan(_app: FastAPI):
     # Schema first — everything after this point may touch the database.
     await db.init()
+    # Generated once and persisted: this UUID names the INSTALLATION to Plex,
+    # not any particular user, and every PIN request needs it.
+    await plex_auth.ensure_client_identifier()
     # Loud, once, at boot: a route nobody declared is being refused to every
     # caller, and the operator should hear about it here rather than from a user.
     authz.log_undeclared_routes(_app)
@@ -200,6 +206,8 @@ templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
+app.include_router(plex_routes.router)
+app.include_router(admin_routes.router)
 
 # Every route below is registered through this, which requires an access level
 # and refuses to register one without it.

@@ -23,7 +23,7 @@
       {% else %}
       <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Trakt client ID, client secret, and public base URL in Settings">Continue with Trakt <span class="soon">Off</span></button>
       {% endif %}
-      <button type="button" class="auth-provider-btn" disabled title="Coming soon">Continue with Plex <span class="soon">Soon</span></button>
+      <button type="button" class="auth-provider-btn ready" id="plexBtn">Continue with Plex</button>
     </div>
     <div class="auth-divider">or</div>
 
@@ -46,8 +46,21 @@
   </div>
 </div>
 
+<script src="/static/js/plex-auth.js"></script>
 <script>
 const err = document.getElementById('error');
+document.getElementById('plexBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('plexBtn');
+  err.textContent = '';
+  btn.disabled = true;
+  try {
+    const data = await plexAuth();
+    window.location = data.redirect || '/';
+  } catch (e) {
+    err.textContent = e.message || 'Could not sign in with Plex.';
+    btn.disabled = false;
+  }
+});
 async function submit() {
   err.textContent = '';
   const btn = document.getElementById('submit');

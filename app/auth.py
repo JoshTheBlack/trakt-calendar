@@ -425,6 +425,17 @@ async def list_invites():
     )
 
 
+async def list_invite_redemptions(invite_id: int):
+    """Who has redeemed a given invite, newest first — for the admin invites
+    screen. LEFT JOIN because the redeeming user could since have been deleted;
+    the redemption row still records that it happened."""
+    return await db.fetch_all(
+        "SELECT r.*, u.username FROM invite_redemptions r "
+        "LEFT JOIN users u ON u.id = r.user_id WHERE r.invite_id = ? ORDER BY r.redeemed_at DESC",
+        (invite_id,),
+    )
+
+
 async def username_availability_error(username: str) -> str | None:
     """None when `username` can be registered right now, otherwise why not.
 
@@ -746,6 +757,22 @@ async def create_handshake(
     return state
 
 
+def _check_handshake_row(row, *, provider: str, session_id: str | None, ts: int) -> None:
+    """The binding checks shared by consume_handshake and peek_handshake: right
+    provider, not expired, not already consumed, and — for a link handshake —
+    bound to the session making this request."""
+    if row is None:
+        raise HandshakeError(HANDSHAKE_REJECTED)
+    if row["provider"] != provider or row["consumed_at"] is not None:
+        raise HandshakeError(HANDSHAKE_REJECTED)
+    if ts >= int(row["expires_at"]):
+        raise HandshakeError(HANDSHAKE_REJECTED)
+    if row["purpose"] == "link":
+        bound = row["session_id"] or ""
+        if not (session_id and secrets.compare_digest(str(bound), str(session_id))):
+            raise HandshakeError(HANDSHAKE_REJECTED)
+
+
 async def consume_handshake(
     state: str | None,
     *,
@@ -772,16 +799,7 @@ async def consume_handshake(
 
     def _work(conn: db.Connection):
         row = conn.execute("SELECT * FROM auth_handshakes WHERE state = ?", (state,)).fetchone()
-        if row is None:
-            raise HandshakeError(HANDSHAKE_REJECTED)
-        if row["provider"] != provider or row["consumed_at"] is not None:
-            raise HandshakeError(HANDSHAKE_REJECTED)
-        if ts >= int(row["expires_at"]):
-            raise HandshakeError(HANDSHAKE_REJECTED)
-        if row["purpose"] == "link":
-            bound = row["session_id"] or ""
-            if not (session_id and secrets.compare_digest(str(bound), str(session_id))):
-                raise HandshakeError(HANDSHAKE_REJECTED)
+        _check_handshake_row(row, provider=provider, session_id=session_id, ts=ts)
         claimed = conn.execute(
             "UPDATE auth_handshakes SET consumed_at = ? WHERE id = ? AND consumed_at IS NULL",
             (ts, row["id"]),
@@ -791,6 +809,32 @@ async def consume_handshake(
         return row
 
     return await db.transaction(_work)
+
+
+async def peek_handshake(
+    state: str | None,
+    *,
+    provider: str,
+    session_id: str | None = None,
+    now: int | None = None,
+):
+    """Read a handshake row without consuming it, applying every binding check
+    consume_handshake does.
+
+    For flows where the provider confirms completion asynchronously rather
+    than through a one-shot callback — Plex's PIN is polled repeatedly before
+    it carries a token — repeatedly consuming the row isn't an option, since
+    consumption is single-use by design. Every poll instead re-validates the
+    binding with this, and the caller still calls consume_handshake exactly
+    once, at the moment it is ready to finish the flow, so single use remains
+    enforced by the database rather than assumed by the caller.
+    """
+    if not state:
+        raise HandshakeError(HANDSHAKE_REJECTED)
+    ts = db.now() if now is None else now
+    row = await db.fetch_one("SELECT * FROM auth_handshakes WHERE state = ?", (state,))
+    _check_handshake_row(row, provider=provider, session_id=session_id, ts=ts)
+    return row
 
 
 # The handshake is also pinned to the browser it started in, with a cookie
@@ -1050,14 +1094,16 @@ async def login_with_provider_identity(
         raise IdentityInUse() from exc
 
 
-async def unlink_identity(user_id: int, provider: str) -> bool:
+async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -> bool:
     """Remove a linked provider account. False when there was none to remove.
 
     Raises LastLoginMethod when this is the account's only remaining way in — an
     account with no password and no identities cannot be signed in to by anyone,
-    including its owner, and there is no self-service recovery from that. An
-    administrator can still unlink anything, and is warned when it orphans an
-    account.
+    including its owner, and there is no self-service recovery from that. Every
+    caller except the admin screen leaves `force` at its default, so the
+    self-service unlink endpoint keeps refusing exactly as before; the admin
+    screen sets it only after showing the operator the same warning and asking
+    them to confirm the orphan deliberately.
     """
     def _work(conn: db.Connection) -> bool:
         row = conn.execute(
@@ -1071,7 +1117,7 @@ async def unlink_identity(user_id: int, provider: str) -> bool:
             "SELECT COUNT(*) FROM linked_identities WHERE user_id = ? AND id != ?",
             (user_id, row["id"]),
         ).fetchone()[0])
-        if remaining == 0 and not (user and user["password_hash"]):
+        if remaining == 0 and not (user and user["password_hash"]) and not force:
             raise LastLoginMethod()
         conn.execute("DELETE FROM linked_identities WHERE id = ?", (row["id"],))
         return True
@@ -1325,6 +1371,256 @@ def _maybe_warn_default_proxy(request: Request, settings: Settings) -> None:
         "trusted_proxy_ips in Settings to the proxy's address/CIDR.",
         TRUSTED_PROXY_IPS_DEFAULT, peer, peer,
     )
+
+
+# ---------------------------------------------------------------------------
+# admin operations
+# ---------------------------------------------------------------------------
+# Everything the admin screen does to another account. Kept here rather than in
+# the route module so the business rules — the last-admin guard chief among
+# them — have exactly one implementation regardless of how many HTTP routes end
+# up calling them.
+
+
+class UserNotFound(Exception):
+    """The target account does not exist."""
+
+
+class LastAdmin(Exception):
+    """The instance's last remaining administrator cannot be demoted, disabled,
+    or deleted — there would be no account left able to run the admin screen at
+    all, including to reverse the mistake."""
+
+
+class CannotDeleteSelf(Exception):
+    """An administrator cannot delete their own account.
+
+    Demoting it and deleting it from another admin's account works; this just
+    rules out the one-click way to lock yourself out of your own instance.
+    """
+
+
+def _admin_count(conn: db.Connection) -> int:
+    return int(conn.execute("SELECT COUNT(*) FROM users WHERE is_admin = 1").fetchone()[0])
+
+
+async def list_users_overview() -> list[dict]:
+    """One row per account, shaped for the admin list: a display name (the
+    username, or a linked identity's display name when there is no username),
+    every linked provider, the three approval/disabled flags, and both
+    activity timestamps.
+
+    Two queries rather than one GROUP_CONCAT join, because an account can hold
+    up to two linked identities and the "no username" fallback needs a
+    specific one's display name, not a flattened string of both.
+    """
+    users = await db.fetch_all("SELECT * FROM users ORDER BY created_at ASC")
+    identities = await db.fetch_all(
+        "SELECT user_id, provider, display_name FROM linked_identities ORDER BY provider"
+    )
+    by_user: dict[int, list[dict]] = {}
+    for row in identities:
+        by_user.setdefault(int(row["user_id"]), []).append(
+            {"provider": row["provider"], "display_name": row["display_name"]}
+        )
+    sessions = await db.fetch_all(
+        "SELECT user_id, MAX(last_seen_at) AS last_seen_at FROM sessions GROUP BY user_id"
+    )
+    last_seen = {int(row["user_id"]): row["last_seen_at"] for row in sessions}
+
+    overview = []
+    for u in users:
+        uid = int(u["id"])
+        idents = by_user.get(uid, [])
+        display = u["username"] or next((i["display_name"] for i in idents if i["display_name"]), None) or f"user #{uid}"
+        overview.append({
+            "id": uid,
+            "username": u["username"],
+            "display_name": display,
+            "providers": [i["provider"] for i in idents],
+            "is_admin": bool(u["is_admin"]),
+            "is_bootstrap": bool(u["is_bootstrap"]),
+            "calendar_approved": bool(u["calendar_approved"]),
+            "distrakt_approved": bool(u["distrakt_approved"]),
+            "is_disabled": bool(u["is_disabled"]),
+            "created_at": u["created_at"],
+            "last_login_at": u["last_login_at"],
+            "last_session_at": last_seen.get(uid),
+        })
+    return overview
+
+
+async def display_name_for(user_id: int) -> str | None:
+    """The same display name list_users_overview() computes, for one account —
+    what an admin must type back to confirm deleting it. None when the account
+    doesn't exist."""
+    user = await get_user(user_id)
+    if user is None:
+        return None
+    if user["username"]:
+        return user["username"]
+    for row in await list_identities(user_id):
+        if row["display_name"]:
+            return row["display_name"]
+    return f"user #{user_id}"
+
+
+async def set_calendar_approved(user_id: int, approved: bool) -> None:
+    await db.execute(
+        "UPDATE users SET calendar_approved = ?, updated_at = ? WHERE id = ?",
+        (int(approved), db.now(), user_id),
+    )
+
+
+async def set_distrakt_approved(user_id: int, approved: bool) -> None:
+    await db.execute(
+        "UPDATE users SET distrakt_approved = ?, updated_at = ? WHERE id = ?",
+        (int(approved), db.now(), user_id),
+    )
+
+
+async def set_admin(user_id: int, is_admin: bool) -> None:
+    """Promote or demote. Raises LastAdmin rather than demoting the instance's
+    only administrator."""
+    def _work(conn: db.Connection) -> None:
+        row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise UserNotFound()
+        if not is_admin and row["is_admin"] and _admin_count(conn) <= 1:
+            raise LastAdmin()
+        conn.execute(
+            "UPDATE users SET is_admin = ?, updated_at = ? WHERE id = ?",
+            (int(is_admin), db.now(), user_id),
+        )
+
+    await db.transaction(_work)
+
+
+async def set_disabled(user_id: int, disabled: bool) -> None:
+    """Disable or re-enable an account.
+
+    Disabling deletes every session that account holds, on top of the flag
+    itself — a disabled account that stayed signed in everywhere it already was
+    would not actually be disabled. Raises LastAdmin rather than disabling the
+    instance's only administrator.
+    """
+    def _work(conn: db.Connection) -> None:
+        row = conn.execute("SELECT is_admin FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise UserNotFound()
+        if disabled and row["is_admin"] and _admin_count(conn) <= 1:
+            raise LastAdmin()
+        conn.execute(
+            "UPDATE users SET is_disabled = ?, updated_at = ? WHERE id = ?",
+            (int(disabled), db.now(), user_id),
+        )
+        if disabled:
+            conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+    await db.transaction(_work)
+
+
+async def admin_set_username(user_id: int, username: str) -> None:
+    """Give an OAuth-only account a username, so it can also be given a
+    password. An account created purely by a provider sign-in has neither —
+    there is nothing for set_password() to attach a username-based login to
+    until this has run once."""
+    await db.execute(
+        "UPDATE users SET username = ?, updated_at = ? WHERE id = ?",
+        (username.strip().lower(), db.now(), user_id),
+    )
+
+
+async def list_sessions(user_id: int):
+    return await db.fetch_all(
+        "SELECT * FROM sessions WHERE user_id = ? ORDER BY last_seen_at DESC", (user_id,),
+    )
+
+
+# Per-user tables cleared by wipe_user_data(), beyond the account row itself.
+# Empty today: calendar_not_watching, calendar_view_state, and the four
+# distrakt_* tables don't exist yet (they are later work). Each entry is
+# (table_name, user_id_column) — a chat that adds one of those tables appends
+# its own entry here rather than teaching wipe_user_data a new special case.
+WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = ()
+
+
+async def wipe_user_data(user_id: int) -> None:
+    """Clear a user's calendar and distrakt data, disable the account, and log
+    it out everywhere — while keeping the account itself, its linked
+    identities, its username/slug, and its share links untouched.
+
+    This is the reversible "start this person over" action: re-enabling the
+    account afterwards is all it takes to undo it, and nothing is retired.
+    delete_user() is the separate, permanent action for when that is not what
+    is wanted.
+    """
+    def _work(conn: db.Connection) -> None:
+        row = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        if row is None:
+            raise UserNotFound()
+        for table, column in WIPE_DATA_TABLES:
+            conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (user_id,))
+        conn.execute(
+            "UPDATE users SET is_disabled = 1, updated_at = ? WHERE id = ?", (db.now(), user_id),
+        )
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+
+    await db.transaction(_work)
+
+
+async def delete_user(user_id: int, *, actor_user_id: int) -> None:
+    """Permanently delete an account and everything under it, in one
+    transaction.
+
+    Every foreign key that references users(id) is ON DELETE CASCADE except
+    invites.created_by, which is SET NULL so that deleting the admin who
+    issued an invite doesn't revoke it out from under someone mid-redemption —
+    so this single DELETE fans out to sessions, linked_identities,
+    auth_handshakes, and invite_redemptions with no row left behind in any of
+    them. The account's username is recorded in retired_identifiers so a new
+    registration can't silently inherit a `/u/<username>` link that was already
+    shared. Raises CannotDeleteSelf or LastAdmin rather than performing either.
+    """
+    if user_id == actor_user_id:
+        raise CannotDeleteSelf()
+
+    def _work(conn: db.Connection) -> None:
+        row = conn.execute(
+            "SELECT username, is_admin FROM users WHERE id = ?", (user_id,),
+        ).fetchone()
+        if row is None:
+            raise UserNotFound()
+        if row["is_admin"] and _admin_count(conn) <= 1:
+            raise LastAdmin()
+        ts = db.now()
+        if row["username"]:
+            conn.execute(
+                "INSERT OR IGNORE INTO retired_identifiers (kind, value, retired_at) "
+                "VALUES ('username', ?, ?)",
+                (row["username"], ts),
+            )
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+
+    await db.transaction(_work)
+
+
+async def list_retired_identifiers():
+    return await db.fetch_all("SELECT * FROM retired_identifiers ORDER BY retired_at DESC")
+
+
+async def release_retired_identifier(kind: str, value: str) -> bool:
+    """Delete a retired-identifier block, making the name claimable again.
+
+    Tokens are never releasable: they are random with no legitimate reason to
+    reissue a specific one, unlike a username or slug someone might want back.
+    """
+    if kind == "token":
+        raise ValueError("Share tokens cannot be released.")
+    result = await db.execute(
+        "DELETE FROM retired_identifiers WHERE kind = ? AND value = ?", (kind, value),
+    )
+    return result.rowcount > 0
 
 
 # ---------------------------------------------------------------------------

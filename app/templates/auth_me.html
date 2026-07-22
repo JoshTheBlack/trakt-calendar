@@ -63,9 +63,14 @@
       </div>
       <div class="row">
         <span class="label">Plex</span>
-        <span class="auth-badge {{ 'ok' if 'plex' in linked else 'off' }}">
-          {{ linked.get('plex') if 'plex' in linked else "Not linked" }}
-        </span>
+        {% if 'plex' in linked %}
+        <span class="auth-badge ok">{{ linked.get('plex') or "Linked" }}</span>
+        {% if can_unlink %}
+        <button class="btn-ghost tiny" type="button" data-unlink="plex">Unlink</button>
+        {% endif %}
+        {% else %}
+        <button class="btn-ghost tiny" type="button" id="plexConnect">Connect</button>
+        {% endif %}
       </div>
     </div>
     <p class="auth-error" id="linkError" role="alert"></p>
@@ -79,7 +84,24 @@
   </div>
 </div>
 
+<script src="/static/js/plex-auth.js"></script>
 <script>
+const plexConnect = document.getElementById('plexConnect');
+if (plexConnect) {
+  plexConnect.addEventListener('click', async () => {
+    const err = document.getElementById('linkError');
+    err.textContent = '';
+    plexConnect.disabled = true;
+    try {
+      await plexAuth({link: true});
+      window.location.reload();
+    } catch (e) {
+      err.textContent = e.message || 'Could not connect your Plex account.';
+      plexConnect.disabled = false;
+    }
+  });
+}
+
 document.querySelectorAll('[data-unlink]').forEach(btn => {
   btn.addEventListener('click', async () => {
     const provider = btn.dataset.unlink;

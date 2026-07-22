@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Admin &ndash; Trakt New Shows</title>
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/auth.css">
+</head>
+<body>
+<div class="admin-shell">
+  <div class="admin-top">
+    <h1>Admin</h1>
+    <a href="/">&larr; Back to the calendar</a>
+  </div>
+
+  <section class="admin-section">
+    <div class="admin-section-head"><h2>Accounts</h2></div>
+    <p class="admin-msg" id="usersMsg"></p>
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead>
+          <tr>
+            <th>Account</th><th>Linked</th><th>Calendar</th><th>Distrakt</th><th>Admin</th>
+            <th>Status</th><th>Created</th><th>Last login</th><th>Last active</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td>{{ u.display_name }}{% if u.is_bootstrap %} <span class="auth-badge off">bootstrap</span>{% endif %}</td>
+            <td class="badge-row">
+              {% for p in u.providers %}<span class="auth-badge off">{{ p }}</span>{% endfor %}
+              {% if not u.providers %}&mdash;{% endif %}
+            </td>
+            <td><span class="auth-badge {{ 'ok' if u.calendar_approved else 'pending' }}">{{ 'Yes' if u.calendar_approved else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'ok' if u.distrakt_approved else 'off' }}">{{ 'Yes' if u.distrakt_approved else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'ok' if u.is_admin else 'off' }}">{{ 'Yes' if u.is_admin else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'off' if u.is_disabled else 'ok' }}">{{ 'Disabled' if u.is_disabled else 'Active' }}</span></td>
+            <td data-ts="{{ u.created_at or 0 }}"></td>
+            <td data-ts="{{ u.last_login_at or 0 }}"></td>
+            <td data-ts="{{ u.last_session_at or 0 }}"></td>
+            <td class="actions">
+              <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="calendar" data-value="{{ 'false' if u.calendar_approved else 'true' }}">{{ 'Revoke calendar' if u.calendar_approved else 'Approve calendar' }}</button>
+              <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="distrakt" data-value="{{ 'false' if u.distrakt_approved else 'true' }}">{{ 'Revoke distrakt' if u.distrakt_approved else 'Approve distrakt' }}</button>
+              <button type="button" class="btn-ghost tiny" data-action="admin" data-user="{{ u.id }}" data-value="{{ 'false' if u.is_admin else 'true' }}">{{ 'Demote' if u.is_admin else 'Promote' }}</button>
+              <button type="button" class="btn-ghost tiny" data-action="disabled" data-user="{{ u.id }}" data-value="{{ 'false' if u.is_disabled else 'true' }}">{{ 'Re-enable' if u.is_disabled else 'Disable' }}</button>
+              <button type="button" class="btn-ghost tiny" data-action="password" data-user="{{ u.id }}" data-has-username="{{ 'true' if u.username else 'false' }}">Reset password</button>
+              <button type="button" class="btn-ghost tiny" data-action="revoke-sessions" data-user="{{ u.id }}">Log out everywhere</button>
+              {% if 'trakt' in u.providers %}<button type="button" class="btn-ghost tiny" data-action="unlink" data-user="{{ u.id }}" data-provider="trakt">Unlink Trakt</button>{% endif %}
+              {% if 'plex' in u.providers %}<button type="button" class="btn-ghost tiny" data-action="unlink" data-user="{{ u.id }}" data-provider="plex">Unlink Plex</button>{% endif %}
+              <button type="button" class="btn-ghost tiny" data-action="wipe" data-user="{{ u.id }}">Wipe data</button>
+              {% if u.id != me.user_id %}
+              <button type="button" class="btn-ghost tiny btn-danger" data-action="delete" data-user="{{ u.id }}" data-name="{{ u.display_name }}">Delete</button>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not users %}
+          <tr><td colspan="10" class="admin-empty">No accounts.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="admin-section">
+    <div class="admin-section-head"><h2>Invites</h2></div>
+    <form class="admin-inline-form" id="inviteForm">
+      <div class="field"><label>Label</label><input type="text" name="label" placeholder="optional"></div>
+      <div class="field"><label>Max uses</label><input type="number" name="max_uses" min="1" placeholder="unlimited"></div>
+      <div class="field"><label>Expires (hours)</label><input type="number" name="expires_in_hours" min="1" placeholder="never"></div>
+      <div class="field checkbox"><input type="checkbox" name="grants_calendar_on_accept" id="grantsCalendar" checked><label for="grantsCalendar">Grants calendar on accept</label></div>
+      <button type="submit" class="btn-ghost small">Issue invite</button>
+    </form>
+    <p class="admin-msg" id="inviteMsg"></p>
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead><tr><th>Label</th><th>Status</th><th>Uses</th><th>Grants calendar</th><th>Created</th><th>Expires</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for inv in invites %}
+          <tr>
+            <td>{{ inv.label or '—' }}</td>
+            <td><span class="auth-badge {{ 'off' if inv.revoked else 'ok' }}">{{ 'Revoked' if inv.revoked else 'Active' }}</span></td>
+            <td>{{ inv.used_count }}{% if inv.max_uses %} / {{ inv.max_uses }}{% endif %}</td>
+            <td>{{ 'Yes' if inv.grants_calendar_on_accept else 'No' }}</td>
+            <td data-ts="{{ inv.created_at or 0 }}"></td>
+            <td data-ts="{{ inv.expires_at or 0 }}" data-ts-empty="Never"></td>
+            <td class="actions">
+              <button type="button" class="btn-ghost tiny" data-action="copy-invite" data-token="{{ inv.token }}">Copy link</button>
+              <button type="button" class="btn-ghost tiny" data-action="view-redemptions" data-invite="{{ inv.id }}">Redemptions ({{ inv.redemption_count }})</button>
+              {% if not inv.revoked %}
+              <button type="button" class="btn-ghost tiny btn-danger" data-action="revoke-invite" data-invite="{{ inv.id }}">Revoke</button>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not invites %}
+          <tr><td colspan="7" class="admin-empty">No invites yet.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="admin-section">
+    <h2>Retired identifiers</h2>
+    <p class="auth-sub">Blocked from reuse by default so a re-registration can't silently inherit a link that was already shared. Releasing one makes it claimable again, by anyone.</p>
+    <p class="admin-msg" id="retiredMsg"></p>
+    <div class="admin-table-wrap">
+      <table class="admin-table">
+        <thead><tr><th>Kind</th><th>Value</th><th>Retired</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for r in retired %}
+          <tr>
+            <td>{{ r.kind }}</td>
+            <td>{{ r.value }}</td>
+            <td data-ts="{{ r.retired_at or 0 }}"></td>
+            <td class="actions">
+              {% if r.kind != 'token' %}
+              <button type="button" class="btn-ghost tiny" data-action="release" data-kind="{{ r.kind }}" data-value="{{ r.value }}">Release</button>
+              {% else %}&mdash;{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+          {% if not retired %}
+          <tr><td colspan="4" class="admin-empty">Nothing retired.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<script>
+document.querySelectorAll('[data-ts]').forEach(td => {
+  const v = parseInt(td.dataset.ts, 10);
+  td.textContent = v ? new Date(v * 1000).toLocaleString() : (td.dataset.tsEmpty || '—');
+});
+
+async function postJSON(url, body) {
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body || {}),
+  });
+  const data = await resp.json().catch(() => ({}));
+  return {resp, data};
+}
+
+function setMsg(id, text, ok) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = text || '';
+  el.className = 'admin-msg' + (text ? (ok ? ' ok' : ' error') : '');
+}
+
+document.getElementById('inviteForm').addEventListener('submit', async (ev) => {
+  ev.preventDefault();
+  const form = ev.target;
+  const body = {
+    label: form.label.value.trim() || undefined,
+    grants_calendar_on_accept: form.grants_calendar_on_accept.checked,
+  };
+  if (form.max_uses.value) body.max_uses = parseInt(form.max_uses.value, 10);
+  if (form.expires_in_hours.value) body.expires_in_hours = parseFloat(form.expires_in_hours.value);
+  const {resp, data} = await postJSON('/api/admin/invites', body);
+  if (resp.ok && data.ok) {
+    window.location.reload();
+    return;
+  }
+  setMsg('inviteMsg', data.error || 'Could not issue that invite.', false);
+});
+
+document.querySelectorAll('[data-action="copy-invite"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const url = window.location.origin + '/register?invite=' + btn.dataset.token;
+    try {
+      await navigator.clipboard.writeText(url);
+      setMsg('inviteMsg', 'Copied: ' + url, true);
+    } catch (e) {
+      prompt('Copy this invite link:', url);
+    }
+  });
+});
+
+document.querySelectorAll('[data-action="revoke-invite"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Revoke this invite? Anyone holding the link will no longer be able to use it.')) return;
+    const {resp, data} = await postJSON('/api/admin/invites/' + btn.dataset.invite + '/revoke', {});
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('inviteMsg', data.error || 'Could not revoke that invite.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="view-redemptions"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const resp = await fetch('/api/admin/invites/' + btn.dataset.invite + '/redemptions');
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) { setMsg('inviteMsg', 'Could not load redemptions.', false); return; }
+    if (!data.redemptions.length) { alert('No redemptions yet.'); return; }
+    const lines = data.redemptions.map(r =>
+      (r.username || ('user #' + r.user_id)) + ' — ' + new Date(r.redeemed_at * 1000).toLocaleString() +
+      (r.ip_address ? ' — ' + r.ip_address : ''));
+    alert(lines.join('\n'));
+  });
+});
+
+document.querySelectorAll('[data-action="release"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Release "' + btn.dataset.value + '"? It becomes claimable again by anyone, including on any link already shared under it.')) return;
+    const {resp, data} = await postJSON('/api/admin/retired/release', {kind: btn.dataset.kind, value: btn.dataset.value});
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('retiredMsg', data.error || 'Could not release that identifier.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="approval"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const body = {};
+    body[btn.dataset.field] = btn.dataset.value === 'true';
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/approval', body);
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('usersMsg', data.error || 'Could not update approval.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="admin"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const promoting = btn.dataset.value === 'true';
+    if (!promoting && !confirm('Remove administrator access from this account?')) return;
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/admin', {is_admin: promoting});
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('usersMsg', data.error || 'Could not change admin status.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="disabled"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const disabling = btn.dataset.value === 'true';
+    if (disabling && !confirm('Disable this account? It will be signed out everywhere and unable to sign back in until re-enabled.')) return;
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/disabled', {disabled: disabling});
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('usersMsg', data.error || 'Could not change that account\'s status.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="password"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const body = {};
+    if (btn.dataset.hasUsername === 'false') {
+      const username = prompt('This account has no username yet. Set one now (leave blank to skip):');
+      if (username) body.username = username.trim();
+    }
+    const custom = prompt('Enter a temporary password, or leave blank to generate one:');
+    if (custom === null) return;
+    if (custom) body.password = custom;
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/password', body);
+    if (resp.ok && data.ok) {
+      alert('Temporary password: ' + data.password + '\n\nEvery session on that account has been signed out.');
+      window.location.reload();
+      return;
+    }
+    setMsg('usersMsg', data.error || 'Could not reset that password.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="revoke-sessions"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Log this account out everywhere?')) return;
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/sessions/revoke-all', {});
+    if (resp.ok && data.ok) { setMsg('usersMsg', 'Signed out ' + data.revoked + ' session(s).', true); return; }
+    setMsg('usersMsg', data.error || 'Could not revoke sessions.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="unlink"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Unlink ' + btn.dataset.provider + ' from this account?')) return;
+    let {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider});
+    if (!resp.ok && data.orphan_warning) {
+      if (!confirm(data.error + '\n\nUnlink anyway?')) return;
+      ({resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider, force: true}));
+    }
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('usersMsg', data.error || 'Could not unlink that account.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="wipe"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    if (!confirm('Wipe this account\'s calendar and distrakt data and disable it? The account, its identities, and its username stay intact — this can be undone by re-enabling it.')) return;
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/wipe', {});
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('usersMsg', data.error || 'Could not wipe that account.', false);
+  });
+});
+
+document.querySelectorAll('[data-action="delete"]').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const name = btn.dataset.name;
+    const typed = prompt('This permanently deletes the account. Type "' + name + '" to confirm:');
+    if (typed === null) return;
+    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/delete', {confirm_username: typed});
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    setMsg('usersMsg', data.error || 'Could not delete that account.', false);
+  });
+});
+</script>
+</body>
+</html>

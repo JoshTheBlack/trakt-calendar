@@ -21,12 +21,13 @@
       can use it, unless your invite already grants it.
     </p>
 
-    {% if trakt_login_configured %}
     <div class="auth-providers">
+      {% if trakt_login_configured %}
       <a class="auth-provider-btn ready" href="/auth/trakt/start{% if invite_token %}?invite={{ invite_token | urlencode }}{% endif %}">Sign up with Trakt</a>
+      {% endif %}
+      <button type="button" class="auth-provider-btn ready" id="plexBtn">Sign up with Plex</button>
     </div>
     <div class="auth-divider">or</div>
-    {% endif %}
 
     <div class="auth-form">
       <div class="field">
@@ -51,9 +52,22 @@
   </div>
 </div>
 
+<script src="/static/js/plex-auth.js"></script>
 <script>
 const invite = {{ invite_token | tojson }};
 const err = document.getElementById('error');
+document.getElementById('plexBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('plexBtn');
+  err.textContent = '';
+  btn.disabled = true;
+  try {
+    const data = await plexAuth({invite: invite});
+    window.location = data.redirect || '/';
+  } catch (e) {
+    err.textContent = e.message || 'Could not sign up with Plex.';
+    btn.disabled = false;
+  }
+});
 async function submit() {
   err.textContent = '';
   const btn = document.getElementById('submit');
