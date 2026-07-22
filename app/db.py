@@ -724,6 +724,35 @@ def MIGRATION_9(conn: sqlite3.Connection) -> None:
         "administrator; it is per-user from now on.", len(emojis),
     )
 
+# Migration 10 — "not watching" becomes a property of the SHOW, not of one cell
+# in the (endpoint, year, month) grid.
+#
+# calendar_not_watching keyed a mark by the view it was made in, so marking a
+# series premiere hid it on Series Premieres and nowhere else: the same show's
+# episodes still filled All Episodes, and next month's rows started clean. That
+# is not what the toggle says. It says "I'm not watching this", which is a fact
+# about the show and has no month in it.
+#
+# The item_id was ALREADY the show's slug on every endpoint (the normalizer
+# reads the show object, not the episode), so folding the grid away is a pure
+# widening — every existing mark survives, keeping its earliest created_at, and
+# now applies everywhere that show appears.
+MIGRATION_10 = """
+CREATE TABLE not_watching_shows (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- The calendar card's data-id: the show/movie slug when Trakt gave one, else
+    -- str(trakt_id) — exactly what the normalizer emits as an item's "id".
+    item_id    TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, item_id)
+);
+INSERT INTO not_watching_shows (user_id, item_id, created_at)
+    SELECT user_id, item_id, MIN(created_at)
+      FROM calendar_not_watching
+     GROUP BY user_id, item_id;
+DROP TABLE calendar_not_watching;
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -737,6 +766,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (7, MIGRATION_7),
     (8, MIGRATION_8),
     (9, MIGRATION_9),
+    (10, MIGRATION_10),
 ]
 
 

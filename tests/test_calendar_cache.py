@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache, calendar_cache, calendar_filter, db, trakt  # noqa: E402
 from app.config import Settings  # noqa: E402
-from app.endpoints import get_endpoint  # noqa: E402
+from app.endpoints import ENDPOINTS, get_endpoint  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -158,8 +158,10 @@ class PruneTests(unittest.TestCase):
 class FetchShapeTests(CacheTestCase):
     async def test_window_fetch_sends_no_filters_and_no_pagination_headers(self):
         client = _CaptureClient([PruneTests.RICH])
+        # The window RICH's 2026-07-15 air date actually belongs to — a fetch now
+        # trims what falls outside the window it asked for.
         with patch("app.trakt.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 13))
         self.assertNotIn("genres", client.url)
         self.assertNotIn("countries", client.url)
         self.assertNotIn("X-Pagination-Page", client.sent_headers)
@@ -174,6 +176,98 @@ class FetchShapeTests(CacheTestCase):
             with self.assertLogs("app.calendar_cache", level="WARNING") as logged:
                 await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
+
+
+class WindowOverrunTests(CacheTestCase):
+    """Trakt does not honour the `days` bound it is given.
+
+    Measured live against the real API: `/calendars/all/shows/2026-06-29/7` came
+    back carrying entries through 2026-07-11, and the 2026-07-13 window carried
+    entries through 2026-09-05. Consecutive windows therefore overlap, and a
+    month read that concatenated them rendered 207 duplicate cards for July 2026
+    — two "House of the Dragon S03E03"s on the 5th, and so on.
+    """
+
+    async def test_a_window_keeps_only_its_own_seven_days(self):
+        body = [
+            _entry("day-before", "2026-07-05T12:00:00Z"),    # the previous window's
+            _entry("first-day", "2026-07-06T12:00:00Z"),
+            _entry("last-day", "2026-07-12T23:00:00Z"),
+            _entry("day-after", "2026-07-13T00:30:00Z"),     # the next window's
+            _entry("months-later", "2026-09-05T12:00:00Z"),  # the real overrun
+        ]
+        client = _CaptureClient(body)
+        with patch("app.trakt.shared_client", return_value=client):
+            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+        self.assertEqual([e["show"]["ids"]["slug"] for e in entries],
+                         ["first-day", "last-day"])
+
+    async def test_adjacent_windows_no_longer_both_claim_the_same_airing(self):
+        """The boundary case the trim exists for: whichever window Trakt hands an
+        airing to, exactly one window keeps it."""
+        shared = _entry("house-of-the-dragon", "2026-07-06T01:00:00Z", season=3, number=3)
+        client = _CaptureClient([shared])
+        with patch("app.trakt.shared_client", return_value=client):
+            earlier = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 6, 29))
+            owning = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+        self.assertEqual(earlier, [])
+        self.assertEqual(len(owning), 1)
+
+    async def test_a_read_over_already_overlapping_cached_windows_still_dedupes(self):
+        """Windows cached BEFORE the trim existed overlap, and would keep drawing
+        doubled cards until their TTL ran out. The read path deduplicates too, so
+        the fix lands without anyone having to clear the cache."""
+        airing = _entry("house-of-the-dragon", "2026-07-06T01:00:00Z", season=3, number=3)
+        now = 1_800_000_000
+        for start in (date(2026, 6, 29), date(2026, 7, 6)):
+            await calendar_cache.store_window(SHOWS.key, start, [airing], 600, now)
+
+        items, _ = await calendar_cache.read_month(
+            SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7,
+            allow_fetch=False, now=now,
+        )
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["episode_label"], "S03E03")
+
+    async def test_the_request_is_the_documented_shape_for_every_endpoint(self):
+        """/calendars/{target}/{path}/{start_date}/{days}. The overrun is Trakt's
+        behaviour, not a malformed request, so this pins the URL we send."""
+        for key, endpoint in ENDPOINTS.items():
+            with self.subTest(endpoint=key):
+                client = _CaptureClient([])
+                with patch("app.trakt.shared_client", return_value=client):
+                    await calendar_cache.fetch_window_raw(endpoint, self.settings, date(2026, 7, 6))
+                path, _, query = client.url.partition("?")
+                self.assertTrue(
+                    path.endswith(f"/calendars/all/{endpoint.path}/2026-07-06/7"), path)
+                self.assertIn("extended=full", query)
+
+    async def test_movies_are_trimmed_on_released_not_first_aired(self):
+        """A movie entry carries `released`, not `first_aired`. Movies came back
+        inside their window when measured, but that is one small dataset rather
+        than a promise, so the trim has to be able to read their date at all."""
+        movies = get_endpoint("movies")
+        body = [
+            {"released": "2026-07-08", "movie": {"title": "In Range", "ids": {"slug": "in-range", "trakt": 1}}},
+            {"released": "2026-07-30", "movie": {"title": "Overrun", "ids": {"slug": "overrun", "trakt": 2}}},
+        ]
+        client = _CaptureClient(body)
+        with patch("app.trakt.shared_client", return_value=client):
+            entries = await calendar_cache.fetch_window_raw(movies, self.settings, date(2026, 7, 6))
+        self.assertEqual([e["movie"]["title"] for e in entries], ["In Range"])
+
+    async def test_two_different_episodes_of_one_show_are_not_confused(self):
+        """Dedup keys on the airing, not the show — a show legitimately appears
+        many times in a month."""
+        entries = [
+            _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=9, number=7),
+            _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=9, number=7),  # repeat
+            _entry("rick-and-morty", "2026-07-07T01:00:00Z", season=9, number=8),
+            _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=0, number=76),  # a special
+        ]
+        kept = calendar_cache.dedupe_entries(entries, "show")
+        self.assertEqual([(e["episode"]["season"], e["episode"]["number"]) for e in kept],
+                         [(9, 7), (9, 8), (0, 76)])
 
 
 # ---------------------------------------------------------------------------

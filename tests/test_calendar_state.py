@@ -69,31 +69,32 @@ class StateTestCase(unittest.IsolatedAsyncioTestCase):
 
 class NotWatchingDeltaTests(StateTestCase):
     async def test_toggle_on_and_off_is_a_delta(self):
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "slug-a", True)
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "slug-b", True)
+        await calendar_state.set_not_watching(self.user_id, "slug-a", True)
+        await calendar_state.set_not_watching(self.user_id, "slug-b", True)
         self.assertEqual(
-            set(await calendar_state.not_watching_list(self.user_id, "shows/new", 2026, 7)),
+            set(await calendar_state.not_watching_list(self.user_id)),
             {"slug-a", "slug-b"},
         )
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "slug-a", False)
-        self.assertEqual(
-            await calendar_state.not_watching_list(self.user_id, "shows/new", 2026, 7),
-            ["slug-b"],
-        )
+        await calendar_state.set_not_watching(self.user_id, "slug-a", False)
+        self.assertEqual(await calendar_state.not_watching_list(self.user_id), ["slug-b"])
 
     async def test_marking_twice_is_idempotent(self):
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "slug-a", True)
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "slug-a", True)
-        self.assertEqual(
-            await calendar_state.not_watching_list(self.user_id, "shows/new", 2026, 7), ["slug-a"])
+        await calendar_state.set_not_watching(self.user_id, "slug-a", True)
+        await calendar_state.set_not_watching(self.user_id, "slug-a", True)
+        self.assertEqual(await calendar_state.not_watching_list(self.user_id), ["slug-a"])
 
-    async def test_isolated_per_endpoint_month_and_user(self):
+    async def test_a_mark_applies_to_every_endpoint_and_month(self):
+        """The point of the global store: one toggle, seen everywhere the show is."""
+        await calendar_state.set_not_watching(self.user_id, "mine", True)
+        for endpoint, year, month in (("shows/new", 2026, 7), ("shows", 2026, 7),
+                                      ("movies", 2027, 1)):
+            state = await calendar_state.load_state(self.user_id, endpoint, year, month)
+            self.assertEqual(state["notWatching"], ["mine"])
+
+    async def test_isolated_per_user(self):
         other = await _make_user("other")
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "mine", True)
-        # Different endpoint, month, and user each see nothing.
-        self.assertEqual(await calendar_state.not_watching_list(self.user_id, "shows", 2026, 7), [])
-        self.assertEqual(await calendar_state.not_watching_list(self.user_id, "shows/new", 2026, 8), [])
-        self.assertEqual(await calendar_state.not_watching_list(other, "shows/new", 2026, 7), [])
+        await calendar_state.set_not_watching(self.user_id, "mine", True)
+        self.assertEqual(await calendar_state.not_watching_list(other), [])
 
 
 class WholeDocumentTests(StateTestCase):
@@ -116,12 +117,15 @@ class WholeDocumentTests(StateTestCase):
         self.assertEqual(
             loaded, {"notWatching": [], "history": [], "lastCount": None, "lastShowIds": None})
 
-    async def test_save_replaces_the_not_watching_set(self):
+    async def test_save_adds_to_the_not_watching_set_rather_than_replacing_it(self):
+        """A document describes ONE view, so an id missing from it is not evidence
+        the user unmarked that show — it may have been marked from another month
+        entirely. Unmarking is set_not_watching's job."""
         await calendar_state.save_state(self.user_id, "shows/new", 2026, 7, {"notWatching": ["a", "b"]})
-        await calendar_state.save_state(self.user_id, "shows/new", 2026, 7, {"notWatching": ["b", "c"]})
+        await calendar_state.save_state(self.user_id, "shows", 2026, 8, {"notWatching": ["b", "c"]})
         self.assertEqual(
             set((await calendar_state.load_state(self.user_id, "shows/new", 2026, 7))["notWatching"]),
-            {"b", "c"},
+            {"a", "b", "c"},
         )
 
 
@@ -139,14 +143,15 @@ class ViewStateTests(StateTestCase):
 
 
 class RosterUnionTests(StateTestCase):
-    async def test_not_watching_ids_unions_the_roster_endpoints(self):
-        await calendar_state.set_not_watching(self.user_id, "shows/new", 2026, 7, "new-1", True)
-        await calendar_state.set_not_watching(self.user_id, "shows/premieres", 2026, 7, "prem-1", True)
-        # A non-roster endpoint is not part of the distrakt roster read.
-        await calendar_state.set_not_watching(self.user_id, "shows", 2026, 7, "all-1", True)
+    async def test_not_watching_ids_is_every_mark_the_user_has_made(self):
+        """The distrakt roster read used to union two endpoints for one month.
+        There is one set now, and the tracker asks the same question the calendar
+        does: is this a show they said they aren't watching?"""
+        for item_id in ("new-1", "prem-1", "all-1"):
+            await calendar_state.set_not_watching(self.user_id, item_id, True)
         self.assertEqual(
-            await calendar_state.not_watching_ids(self.user_id, 2026, 7),
-            {"new-1", "prem-1"},
+            await calendar_state.not_watching_ids(self.user_id),
+            {"new-1", "prem-1", "all-1"},
         )
 
 
@@ -173,21 +178,22 @@ class LegacyImportTests(StateTestCase):
         # The originals are NOT deleted.
         self.assertTrue((DATA_DIR / "state_shows_new_2026_7.json").exists())
 
-        # Rows landed on this user, mapped back to the right endpoint/year/month.
+        # Change detection landed on this user, mapped back to the right
+        # endpoint/year/month; every file's marks merged into the one global set.
         july = await calendar_state.load_state(self.user_id, "shows/new", 2026, 7)
-        self.assertEqual(set(july["notWatching"]), {"slug-a", "slug-b"})
         self.assertEqual(july["lastCount"], 3)
         self.assertEqual(july["lastShowIds"], ["slug-a"])
         self.assertEqual(july["history"], [{"h": 1}])
+        self.assertEqual(set(july["notWatching"]), {"slug-a", "slug-b", "slug-c"})
         aug = await calendar_state.load_state(self.user_id, "shows/premieres", 2026, 8)
-        self.assertEqual(aug["notWatching"], ["slug-c"])
+        self.assertEqual(set(aug["notWatching"]), {"slug-a", "slug-b", "slug-c"})
 
     async def test_import_is_idempotent_on_a_rerun(self):
         self._write_legacy("state_shows_2026_7.json", {"notWatching": ["slug-a"]})
         await calendar_state.import_legacy_state(self.user_id)
         await calendar_state.import_legacy_state(self.user_id)  # re-run
         rows = await db.fetch_all(
-            "SELECT * FROM calendar_not_watching WHERE user_id = ?", (self.user_id,))
+            "SELECT * FROM not_watching_shows WHERE user_id = ?", (self.user_id,))
         self.assertEqual(len(rows), 1)
 
     async def test_unrecognized_filenames_are_skipped(self):

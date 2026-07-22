@@ -118,25 +118,53 @@ class PasswordTests(AuthTestCase):
 
 
 class UserTests(AuthTestCase):
-    async def test_create_user_seeds_prefs_from_settings(self):
+    def _seeding_settings(self) -> Settings:
+        return Settings(endpoint="shows/premieres", card_style="poster",
+                        day_packing="packed", hide_not_watching=True,
+                        network_filter=["HBO", "Netflix"], genres="-anime",
+                        countries="us,gb", timezone="America/New_York")
+
+    async def test_create_user_seeds_layout_prefs_from_settings(self):
         """settings.json's per-user fields are the seed for a new account's
         preferences; after creation the two diverge."""
-        settings = Settings(endpoint="shows/premieres", card_style="poster",
-                            day_packing="packed", hide_not_watching=True,
-                            network_filter=["HBO", "Netflix"], genres="-anime",
-                            countries="us,gb", timezone="America/New_York")
         user_id = await auth.create_user(username="seeded", password="hunter2hunter2",
-                                         settings=settings)
+                                         settings=self._seeding_settings())
         prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
         self.assertEqual(prefs["endpoint"], "shows/premieres")
         self.assertEqual(prefs["card_style"], "poster")
         self.assertEqual(prefs["day_packing"], "packed")
         self.assertEqual(prefs["hide_not_watching"], 1)
-        self.assertEqual(prefs["network_filter_json"], '["HBO", "Netflix"]')
-        self.assertEqual(prefs["genres"], "-anime")
-        self.assertEqual(prefs["countries"], "us,gb")
         user = await auth.get_user(user_id)
         self.assertEqual(user["timezone"], "America/New_York")
+
+    async def test_the_filters_are_deliberately_not_seeded(self):
+        """Layout is cosmetic and inheriting it is a kindness; a filter REMOVES
+        shows, and doing that to an account that never asked reads as the
+        calendar not carrying them at all."""
+        user_id = await auth.create_user(username="unfiltered", password="hunter2hunter2",
+                                         settings=self._seeding_settings())
+        prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
+        self.assertEqual(prefs["genres"], "")
+        self.assertEqual(prefs["countries"], "")
+        self.assertEqual(prefs["network_filter_json"], "[]")
+
+    async def test_onboarding_alone_may_inherit_the_operators_filters(self):
+        """The upgrade path: those settings ARE the bootstrap admin's own, from
+        before the instance had accounts, so their calendar keeps rendering as
+        it did."""
+        settings = self._seeding_settings()
+
+        def _work(conn):
+            user_id = auth.insert_user(conn, username="operator", password_hash=None,
+                                       is_admin=True, is_bootstrap=True)
+            auth.insert_user_prefs(conn, user_id, settings, seed_filters=True)
+            return user_id
+
+        user_id = await db.transaction(_work)
+        prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
+        self.assertEqual(prefs["genres"], "-anime")
+        self.assertEqual(prefs["countries"], "us,gb")
+        self.assertEqual(prefs["network_filter_json"], '["HBO", "Netflix"]')
 
     async def test_lookup_is_case_insensitive(self):
         await self.make_user(username="alice", password="hunter2hunter2")

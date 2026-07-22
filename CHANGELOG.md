@@ -14,6 +14,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🧯 Hardened against cross-site requests: changes must be JSON and same-origin, sessions are server-side and revocable, sign-in is rate-limited per username and per address, and the interactive API docs are switched off.
 
 ### Admin interface
+- ⚙️ **Settings is organised into tabs** — Server, Trakt, Calendar, Integrations — on a wider panel, instead of one long scroll. It's still one form and one Save, and the "reconnect your Trakt account" prompt sits above the tabs so it can't hide behind the one you're not on.
 - 🧑‍✈️ A new **/admin** screen: list accounts with their linked providers and last activity, approve or revoke each kind of access, promote/demote admins, reset passwords, disable or delete accounts, revoke individual sessions or sign someone out everywhere, and manage invites and their redemptions.
 - 🧹 Two separate destructive actions — **wipe data** (reversible; keeps the account and its links) and **delete account** (full, typed confirmation, retires the username and share links so nobody inherits them).
 
@@ -21,11 +22,16 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🗓️ Card style, day packing, hide-not-watching, **timezone**, and your watching/not-watching marks are now **per account** — two people looking at the same month see the same shows with their own marks and their own layout.
 - 🌍 All times are stored in UTC and rendered in **your** timezone, with a picker in the header and a one-click "use my device timezone". No silent auto-detection: month and day boundaries shift with the zone, so the change is yours to make.
 - ⚡ Calendar data is fetched once per week-long window and **shared across everyone**, refreshed on a short TTL, with genre/country/network/language filtering applied per viewer instead of per request to Trakt. Fewer API calls, faster loads, and the per-show detail cache moved into the same store.
+- 🔎 **A Filters button in the header, for everyone.** Genre, country, and network filters moved out of the admin Settings screen into a panel any signed-in account can open, and the button lights up as **🔎 Filtered** whenever something is being held back — so a month that looks short says why. They were previously admin-only *and* wrote the app-wide seed, so they changed nothing about the admin's own calendar and nobody else had any way to filter at all. One cached month, filtered per person.
+- 🌍 **New accounts now start with no filters.** The old default quietly excluded nine genres and allowed only 35 countries, which looked like the calendar simply not carrying those shows. Nothing is filtered until you say so. Existing accounts keep whatever they already had, and can clear it in the new panel.
+- 👯 **Fixed duplicate cards.** Trakt returns more than the week it's asked for — sometimes two months more — so neighbouring weeks overlapped and the same episode was drawn twice (July 2026 had 207 doubled cards on All Episodes). Each week now keeps only its own days, and the page drops repeats on the way out, so existing installs are fixed without clearing any cache.
 - 🔁 Marking something not-watching now sends just that one change, so two open tabs can no longer overwrite each other.
+- 🙈 **"Not watching" now means the whole show, everywhere.** Turning off a series or season premiere also takes its episodes off All Episodes, keeps it off next month, and hides it on your shared page — one decision instead of one per calendar per month. Turning it back on brings it back everywhere too, and every mark you already had is carried over. On All Episodes, hiding one episode folds away the show's other episodes **as you click**, with no reload.
 
 ### Interface
 - 🧭 **The same header on every page** — calendar, month picker, account, and admin. Account, Settings, Admin and Sign out collapse into one menu, so an administrator's bar fits on a single line again.
 - 📅 The month picker is a tidy **4×3 grid** and carries the header too, instead of being a dead end.
+- 🚧 A **mistyped address now gets a real page** instead of a line of raw JSON, and it says the same thing whether the address never existed or simply isn't yours to open. Scripts still get JSON.
 
 ### Public sharing
 - 🔗 Publish your calendar as a **read-only public page** — as an unguessable link, as `/u/your-name`, or as your own custom `/c/slug`. Enable any combination, pick which one gets generated, and rotate the private link at any time.
@@ -37,6 +43,11 @@ All notable changes to this project are documented here. Format loosely follows 
 ### Your account
 - 🪪 Set your own **username and password** from the account page. An account created through Plex or Trakt starts with neither, and a password means you can still get in if you ever lose access to the linked service. Changing a password signs out every other session but keeps you signed in where you are.
 - 🔌 **Unlinking Plex or Trakt now revokes the authorization** at the provider instead of leaving it sitting in your connected-apps list. If that can't be reached, the unlink still happens and you're told to finish it there.
+
+### Connecting to Trakt
+- 🔑 **Authorizing with Trakt shows the pairing code properly** — its own field with a Copy button and a button that opens trakt.tv, instead of a code bolded inside a sentence. The Authorize button is held down while a code is live, because pressing it again quietly issued a *new* code and invalidated the one you had just copied.
+- 🔗 When a Trakt authorization succeeds but can't be attached to your login, Settings now **says why** and offers a one-click retry, instead of leaving the same prompt up with no explanation.
+- 🙈 Fixed the "reconnect your Trakt account" notice never going away: Settings panels marked hidden were being drawn anyway, so the notice ignored the app's answer entirely and showed for every administrator whether or not it applied. The same fault was quietly showing the redirect-URI and cookie-policy panels to everyone.
 
 ### Ops
 - 🍪 **First-run setup works out the session-cookie policy for you** from the browser that sets the instance up, so a plain-HTTP LAN install and an HTTPS deployment both work with no configuration. If it's ever wrong, the sign-in page and Settings say so instead of leaving you looping back to the login form.

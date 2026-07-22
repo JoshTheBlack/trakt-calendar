@@ -197,12 +197,20 @@ operator out of the UI that would fix it. Edit `data/settings.json` and restart:
 (default `false`; when `true`, anyone can register without an invite).
 
 The endpoint, layout, and hide-not-watching controls also live in the header for quick
-switching, and every choice persists.
+switching, and every choice persists. Marking something "not watching" is a decision about
+the **show**, not about the card you clicked: it applies on every calendar view, in every
+month, and on your public share page, until you turn it back on.
 
-> **Advanced filtering (Trakt VIP):** Trakt gates calendar filtering by genre, country,
-> and network behind a [VIP subscription](https://trakt.tv/vip/filtering). If your account
-> isn't VIP these filters may be ignored by the API; the unfiltered calendar works on any
-> account.
+**🔎 Filters** in the header narrows your calendar by genre, country, and network. The
+button reads **🔎 Filtered** and stays lit while anything is being held back. Filters
+belong to your account, not to the instance — two people read the same cached month and
+each see it filtered their own way. Genres and countries are comma-separated, and a
+leading `-` excludes instead of including (`drama, -reality`); networks are matched exactly
+as Trakt spells them. **New accounts start with nothing filtered.**
+
+> Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering),
+> but this app filters the cached response itself rather than asking Trakt to, so the
+> Filters panel works on any account.
 
 ## Requirements
 
@@ -225,7 +233,7 @@ app/
   share_routes.py   Public read-only calendars (/s/, /u/, /c/)
   share_links.py    Share-link settings + URL building
   calendar_cache.py Global UTC window cache + the read path over it
-  calendar_state.py Per-user not-watching marks + change detection
+  calendar_state.py Per-user not-watching marks (show-level, all views) + change detection
   trakt.py          Async Trakt client + response normalizer
   endpoints.py      Calendar endpoint registry
   timezones.py      Curated IANA timezone list

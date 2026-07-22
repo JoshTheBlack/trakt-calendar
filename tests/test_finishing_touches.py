@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -427,6 +428,104 @@ class CacheSettingsWidgetTests(FinishingTestCase):
         payload = self.client.get("/api/settings").json()
         self.assertIn("calendar_cache_ttl_minutes", payload)
         self.assertIn("api_cache_max_bytes", payload)
+
+
+class SettingsTabsTests(FinishingTestCase):
+    """Settings is four tabbed groups in one form."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self.admin_id)
+
+    def _body(self) -> str:
+        return self.client.get("/?month=1&year=2026").text
+
+    def test_every_tab_has_a_panel_and_only_the_first_is_showing(self):
+        body = self._body()
+        tabs = re.findall(r'data-tab="([\w-]+)"', body)
+        panels = re.findall(r'data-tab-panel="([\w-]+)"', body)
+        self.assertEqual(tabs, ["server", "trakt", "calendar", "integrations"])
+        self.assertEqual(panels, tabs)
+        # Three of the four start hidden; the CSS cannot be relied on to hide
+        # them, so the attribute has to be in the markup.
+        self.assertEqual(len(re.findall(r'data-tab-panel="\w+" role="tabpanel" hidden', body)), 3)
+
+    def test_no_field_was_dropped_on_the_way_into_the_tabs(self):
+        """The regrouping moved markup around every input the save path reads by
+        id, and a field left behind would save as a blank or a zero."""
+        body = self._body()
+        for field_id in ("s_base_url", "s_trusted_proxies", "s_client_id", "s_client_secret",
+                         "s_access_token", "s_timezone", "s_endpoint", "s_limit", "s_cache",
+                         "s_calcache", "s_cachecap", "s_hide", "s_sonarr_url", "s_sonarr_key",
+                         "s_radarr_url", "s_radarr_key", "s_seer_url", "s_seer_key",
+                         "s_tmdb_key"):
+            with self.subTest(field=field_id):
+                self.assertIn(f'id="{field_id}"', body)
+
+    def test_the_reconnect_notice_sits_outside_the_tabs(self):
+        """It is an alert about the instance, and an alert that only appears on
+        the tab you happen to be standing on is one you can miss."""
+        body = self._body()
+        notice = body.index('id="s_reconnect_box"')
+        first_panel = body.index('data-tab-panel="server"')
+        self.assertLess(notice, first_panel)
+
+    def test_one_save_still_writes_fields_from_several_tabs(self):
+        """Tabs are presentation only — the panels share a single form, so a
+        value from the Server tab and one from Integrations go together."""
+        resp = self.client.post("/api/settings", json={
+            "public_base_url": ORIGIN, "sonarr_url": "http://localhost:8989",
+            "calendar_cache_ttl_minutes": 30,
+        })
+        self.assertEqual(resp.status_code, 200, resp.text)
+        settings = load_settings()
+        self.assertEqual(settings.sonarr_url, "http://localhost:8989")
+        self.assertEqual(settings.calendar_cache_ttl_minutes, 30)
+
+
+class ErrorPageTests(FinishingTestCase):
+    """A mistyped address gets a page, not Starlette's raw JSON."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self.admin_id)
+
+    def test_a_browser_gets_the_themed_page(self):
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("text/html", resp.headers["content-type"])
+        self.assertIn("error-card", resp.text)
+        self.assertIn("Back to the calendar", resp.text)
+
+    def test_a_script_still_gets_json(self):
+        """fetch() sends Accept: */*, and a caller that parses the body has to
+        keep getting something parseable."""
+        resp = self.client.get("/no-such-page")
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("application/json", resp.headers["content-type"])
+        self.assertFalse(resp.json()["ok"])
+
+    def test_a_wrong_method_reads_as_not_found(self):
+        """Answering "that exists but not like that" tells a stranger which
+        addresses are real."""
+        resp = self.client.post("/no-such-page", json={}, headers={"Accept": "text/html"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertNotIn("405", resp.text)
+
+    def test_the_page_names_no_route_and_offers_no_inventory(self):
+        """It says the same thing for a never-existed path and for one that is
+        simply not this account's to open."""
+        secret = self.client.get("/api/admin/hidden-thing", headers={"Accept": "text/html"}).text
+        typo = self.client.get("/calender", headers={"Accept": "text/html"}).text
+        self.assertNotIn("hidden-thing", secret)
+        self.assertNotIn("calender", typo)
+
+    def test_the_share_pages_keep_their_own_wording(self):
+        """A dead share link says so specifically — it is a different question
+        from a mistyped address, and the answer is more useful."""
+        resp = self.client.get("/s/not-a-real-token", headers={"Accept": "text/html"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertIn("shared calendar", resp.text)
 
 
 class TokenRevocationOnUnlinkTests(FinishingTestCase):

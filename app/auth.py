@@ -153,12 +153,22 @@ def insert_user(
     return int(cur.lastrowid)
 
 
-def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings) -> None:
+def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings,
+                      *, seed_filters: bool = False) -> None:
     """SYNCHRONOUS. Seeds a user's view preferences from settings.json's app-wide
     values.
 
     Those settings.json fields are a SEED, not a live source: once this row
     exists, editing settings.json affects new users only, never this one.
+
+    The genre/country/network FILTERS are excluded from that seed unless
+    `seed_filters` is set, and only the first-run onboarding sets it. A filter
+    removes shows from someone's calendar without ever telling them a filter
+    exists, so it is not something to inherit from an instance's configuration —
+    a new account starts seeing everything and narrows it down itself. Onboarding
+    is the one exception, because there the settings are the operator's own from
+    before this instance had accounts, and their calendar has to keep rendering
+    as it did.
     """
     conn.execute(
         "INSERT INTO user_prefs (user_id, endpoint, card_style, day_packing, "
@@ -167,8 +177,9 @@ def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings) -> 
         (
             user_id, settings.endpoint, settings.card_style, settings.day_packing,
             int(bool(settings.hide_not_watching)),
-            json.dumps(list(settings.network_filter or [])),
-            settings.genres or "", settings.countries or "",
+            json.dumps(list(settings.network_filter or [])) if seed_filters else "[]",
+            (settings.genres or "") if seed_filters else "",
+            (settings.countries or "") if seed_filters else "",
         ),
     )
 
@@ -1764,7 +1775,7 @@ async def list_sessions(user_id: int):
 # data appends its own entry here rather than teaching wipe_user_data a new
 # special case.
 WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = (
-    ("calendar_not_watching", "user_id"),
+    ("not_watching_shows", "user_id"),
     ("calendar_view_state", "user_id"),
     ("distrakt_shows", "user_id"),
     ("distrakt_months", "user_id"),

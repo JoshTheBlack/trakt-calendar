@@ -196,7 +196,7 @@ async def _render(request: Request, share_row) -> Response:
             network_filter=network_filter, allow_fetch=False,
         )
 
-    nw_ids = set(await calendar_state.not_watching_list(owner_id, endpoint.key, year, month))
+    nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible: list[dict] = []
     for item in items:
         item = dict(item)

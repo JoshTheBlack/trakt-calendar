@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ status }} {{ title }} &ndash; Trakt New Shows</title>
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
+</head>
+<body class="auth-page">
+<div class="auth-shell">
+  <a href="/"><img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows"></a>
+  <div class="auth-card error-card">
+    <div class="error-code" aria-hidden="true">{{ status }}</div>
+    <h1>{{ title }}</h1>
+    <p class="auth-notice">{{ message }}</p>
+    {# Home only. A "go back" would send them to whatever produced the dead link,
+       and this page deliberately says nothing about whether the address exists
+       for somebody else — a 404 that reads differently for a real-but-forbidden
+       URL is an inventory of what is there. #}
+    <div class="auth-actions">
+      <a class="btn-primary" href="/">Back to the calendar</a>
+    </div>
+  </div>
+</div>
+</body>
+</html>

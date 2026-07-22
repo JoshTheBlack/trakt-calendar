@@ -154,8 +154,17 @@ class DeltaStateEndpointTests(CalendarRouteTestCase):
         self._toggle("show-a", True)
         self._toggle("show-a", True)
         rows = asyncio.run(db.fetch_all(
-            "SELECT item_id FROM calendar_not_watching WHERE user_id = ?", (self.user_id,)))
+            "SELECT item_id FROM not_watching_shows WHERE user_id = ?", (self.user_id,)))
         self.assertEqual([r["item_id"] for r in rows], ["show-a"])
+
+    def test_a_mark_made_in_one_view_shows_up_in_every_other(self):
+        """Not-watching is a fact about the show, so marking a series premiere
+        also hides it under All Episodes and in every other month."""
+        self._toggle("show-a", True)
+        for query in ("year=2026&month=7&endpoint=shows",
+                      "year=2027&month=1&endpoint=shows/premieres"):
+            state = self.client.get(f"/api/state?{query}").json()
+            self.assertEqual(state["notWatching"], ["show-a"], query)
 
     def test_two_tabs_toggling_different_items_do_not_lose_either_mark(self):
         """The old whole-array save was a read-modify-write of one shared
@@ -236,6 +245,104 @@ class ViewPrefsPersistenceTests(CalendarRouteTestCase):
     def test_unrecognized_or_empty_update_is_rejected(self):
         resp = self.client.post("/api/me/prefs", json={"card_style": "not-a-real-style"})
         self.assertEqual(resp.status_code, 400)
+
+
+# ---------------------------------------------------------------------------
+# the genre/country/network filters: per viewer, over one shared cache
+# ---------------------------------------------------------------------------
+
+class ViewerFilterTests(CalendarRouteTestCase):
+    """These used to be editable only on the admin Settings screen, which wrote
+    the app-wide SEED — so they changed nothing for the admin's own calendar and
+    left every other account with no way to filter at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.user1 = self._make_user("filter_one")
+        self.user2 = self._make_user("filter_two")
+        drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
+        drama["show"]["genres"] = ["drama"]
+        drama["show"]["network"] = "HBO"
+        comedy = _entry("the-comedy", "The Comedy", "2026-07-16T20:00:00Z")
+        comedy["show"]["genres"] = ["comedy"]
+        comedy["show"]["network"] = "Netflix"
+        patcher = patch("app.calendar_cache.fetch_window_raw",
+                        AsyncMock(return_value=[drama, comedy]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_a_new_account_starts_with_no_filters_at_all(self):
+        """A filter removes shows without ever saying one exists, so it is not
+        something an account inherits from the instance's configuration."""
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
+        self.assertEqual(prefs["genres"], "")
+        self.assertEqual(prefs["countries"], "")
+        self.assertEqual(prefs["network_filter"], [])
+
+    def test_each_viewer_filters_the_same_cached_month_their_own_way(self):
+        self.sign_in_as(self.user1)
+        resp = self.client.post("/api/me/prefs", json={"genres": "-comedy"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page)
+        self.assertNotIn("The Comedy", page)
+
+        # The second viewer set nothing and still sees everything — one cache,
+        # two answers.
+        self.sign_in_as(self.user2)
+        page2 = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page2)
+        self.assertIn("The Comedy", page2)
+
+    def test_a_non_admin_can_read_and_write_their_own_filters(self):
+        """The whole point: no admin rights involved."""
+        self.sign_in_as(self.user1)
+        resp = self.client.post("/api/me/prefs", json={
+            "genres": " drama , ", "countries": "us", "network_filter": "HBO, hbo , Netflix"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+        prefs = self.client.get("/api/me/prefs").json()["prefs"]
+        self.assertEqual(prefs["genres"], "drama")       # empty token dropped
+        self.assertEqual(prefs["countries"], "us")
+        # De-duplicated case-insensitively, keeping the spelling first given.
+        self.assertEqual(prefs["network_filter"], ["HBO", "Netflix"])
+
+    def test_the_network_filter_narrows_to_the_named_networks(self):
+        self.sign_in_as(self.user1)
+        self.client.post("/api/me/prefs", json={"network_filter": "HBO"})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page)
+        self.assertNotIn("The Comedy", page)
+
+    def test_a_filter_can_be_cleared_again(self):
+        """Present-but-empty has to mean "no filter" rather than "unchanged", or
+        a filter could be set and never taken off."""
+        self.sign_in_as(self.user1)
+        self.client.post("/api/me/prefs", json={"genres": "-comedy"})
+        self.client.post("/api/me/prefs", json={"genres": "", "network_filter": []})
+        prefs = self.client.get("/api/me/prefs").json()["prefs"]
+        self.assertEqual(prefs["genres"], "")
+        self.assertEqual(prefs["network_filter"], [])
+        self.assertIn("The Comedy", self.client.get("/?year=2026&month=7").text)
+
+    def test_the_header_button_says_when_a_filter_is_narrowing_the_month(self):
+        """A filter's only other evidence is the shows that aren't there, which
+        looks exactly like Trakt not listing them."""
+        self.sign_in_as(self.user1)
+        unfiltered = self.client.get("/?year=2026&month=7").text
+        self.assertIn('id="filtersBtn"', unfiltered)
+        self.assertNotIn('id="filtersBtn" class="pill-btn active"', unfiltered)
+
+        self.client.post("/api/me/prefs", json={"genres": "-comedy", "network_filter": "HBO"})
+        filtered = self.client.get("/?year=2026&month=7").text
+        self.assertIn('id="filtersBtn" class="pill-btn active"', filtered)
+        self.assertIn("genre, network", filtered)
+
+    def test_the_filter_endpoints_still_need_a_session(self):
+        self.client.cookies.clear()
+        self.assertEqual(self.client.get("/api/me/prefs").status_code, 401)
+        self.assertEqual(
+            self.client.post("/api/me/prefs", json={"genres": "drama"}).status_code, 401)
 
 
 # ---------------------------------------------------------------------------

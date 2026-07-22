@@ -374,12 +374,20 @@ function setCardState(card, isNotWatching) {
     btn.querySelector('.icon-closed').style.display = isNotWatching ? 'block' : 'none';
 }
 
+// Every card on the page for one show. On All Episodes that is a dozen rows
+// across a dozen days, all of them the same decision — the server stores the
+// mark once, per show, so the page has to move them together or it spends the
+// rest of the session disagreeing with what was saved until a reload.
+function cardsForShow(id) {
+    return document.querySelectorAll(`.card[data-id="${CSS.escape(id)}"]`);
+}
+
 async function toggleWatch(btn, event) {
     if (event) event.stopPropagation();
     const card = btn.closest('.card');
     const id = card.getAttribute('data-id');
     const isNotWatching = !card.classList.contains('not-watching');
-    setCardState(card, isNotWatching);
+    cardsForShow(id).forEach(c => setCardState(c, isNotWatching));
     if (isNotWatching) notWatching.add(id); else notWatching.delete(id);
     updateStats();
     try {
@@ -495,7 +503,27 @@ function collectSecrets() {
     return payload;
 }
 
+// The tabs are presentation only — every panel stays in the one <form>, and
+// hidden inputs are read by id at save time, so switching tabs never drops a
+// pending edit and one Save still writes all four groups.
+function showSettingsTab(name) {
+    document.querySelectorAll('#settingsModal [data-tab]').forEach(btn => {
+        const on = btn.dataset.tab === name;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+    document.querySelectorAll('#settingsModal [data-tab-panel]').forEach(panel => {
+        panel.hidden = panel.dataset.tabPanel !== name;
+    });
+    // The OVERLAY is the scroll container (the modal sits at flex-start inside
+    // it), so a tall panel scrolled halfway down would leave the next tab
+    // opening mid-content.
+    const overlay = document.getElementById('settingsModal');
+    if (overlay) overlay.scrollTop = 0;
+}
+
 async function openSettings() {
+    showSettingsTab('server');
     buildSecretControls();
     try {
         const res = await fetch('/api/settings', { cache: 'no-store' });
@@ -510,9 +538,6 @@ async function openSettings() {
         updateTraktLoginHints(s);
         document.getElementById('s_timezone').value = s.timezone || '';
         document.getElementById('s_endpoint').value = s.endpoint || 'shows/new';
-        document.getElementById('s_genres').value = s.genres || '';
-        document.getElementById('s_countries').value = s.countries || '';
-        document.getElementById('s_networks').value = (s.network_filter || []).join(', ');
         document.getElementById('s_limit').value = s.pagination_limit || 300;
         document.getElementById('s_cache').value = (s.cache_ttl_minutes ?? 720);
         document.getElementById('s_calcache').value = (s.calendar_cache_ttl_minutes ?? 10);
@@ -575,6 +600,66 @@ function closeSettings() {
     document.getElementById('settingsModal').classList.remove('open');
 }
 
+// ---- Filters (per viewer, not per instance) ----
+// Reads and writes /api/me/prefs, not /api/settings: these belong to whoever is
+// signed in, and /api/settings is admin-only. The filters are applied at read
+// time against one shared calendar cache, so each account can filter the same
+// cached month its own way.
+async function openFilters() {
+    try {
+        const res = await fetch('/api/me/prefs', { cache: 'no-store' });
+        const d = await res.json();
+        const p = d.prefs || {};
+        document.getElementById('f_genres').value = p.genres || '';
+        document.getElementById('f_countries').value = p.countries || '';
+        document.getElementById('f_networks').value = (p.network_filter || []).join(', ');
+    } catch (e) {
+        console.error(e);
+        toast('Could not load your filters', false);
+    }
+    document.getElementById('filtersModal').classList.add('open');
+}
+
+function closeFilters() {
+    document.getElementById('filtersModal').classList.remove('open');
+}
+
+// Empties the three inputs WITHOUT saving, so "Clear all" then Cancel leaves the
+// stored filters alone — the same bargain every other field in these modals makes.
+function clearFilters() {
+    ['f_genres', 'f_countries', 'f_networks'].forEach(id => {
+        document.getElementById(id).value = '';
+    });
+}
+
+async function saveFilters(event) {
+    event.preventDefault();
+    const payload = {
+        genres: document.getElementById('f_genres').value,
+        countries: document.getElementById('f_countries').value,
+        network_filter: document.getElementById('f_networks').value
+    };
+    try {
+        const res = await fetch('/api/me/prefs', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.ok) {
+            toast(d.error || 'Could not save filters', false);
+            return false;
+        }
+        // Filtering happens server-side while the month is assembled, so the
+        // page has to be rebuilt to reflect it.
+        window.location.reload();
+    } catch (e) {
+        console.error(e);
+        toast('Could not save filters', false);
+    }
+    return false;
+}
+
 async function saveSettings(event) {
     event.preventDefault();
     const payload = {
@@ -584,9 +669,6 @@ async function saveSettings(event) {
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
-        genres: document.getElementById('s_genres').value.trim(),
-        countries: document.getElementById('s_countries').value.trim(),
-        network_filter: document.getElementById('s_networks').value,
         pagination_limit: parseInt(document.getElementById('s_limit').value, 10) || 300,
         cache_ttl_minutes: parseInt(document.getElementById('s_cache').value, 10) || 0,
         calendar_cache_ttl_minutes: parseInt(document.getElementById('s_calcache').value, 10) || 10,
@@ -814,6 +896,40 @@ function updateTraktLoginHints(s) {
     }
     const box = document.getElementById('s_reconnect_box');
     if (box) box.hidden = !s.trakt_reconnect_notice;
+    showReconnectError('');
+}
+
+function showReconnectError(message) {
+    const el = document.getElementById('s_reconnect_error');
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('warn', !!message);
+}
+
+// Retry linking the token this instance already has, and report what stopped it.
+// The notice's only previous escape was the OAuth flow, which cannot help when
+// the blocker is that another login here already holds the Trakt account.
+async function adoptTraktToken(btn) {
+    btn.disabled = true;
+    showReconnectError('');
+    try {
+        const res = await fetch('/api/auth/trakt/adopt', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        });
+        const d = await res.json();
+        if (d.ok) {
+            document.getElementById('s_reconnect_box').hidden = true;
+            toast('Trakt account linked', true);
+            return;
+        }
+        showReconnectError(d.error || 'Could not link the saved token.');
+        toast('Could not link the saved token', false);
+    } catch (e) {
+        console.error(e);
+        showReconnectError('Could not reach the server.');
+    } finally {
+        btn.disabled = false;
+    }
 }
 
 function copyRedirectUri() {
@@ -875,6 +991,36 @@ function stopDeviceAuthPolling() {
     if (deviceAuthTimer) { clearInterval(deviceAuthTimer); deviceAuthTimer = null; }
 }
 
+// Show or hide the pairing panel, and lock the start button while a code is
+// live. Re-clicking "Authorize with Trakt" used to request a FRESH code, so the
+// one you had just copied stopped working — a trap, because the button looks
+// exactly like the thing you press to open the page you paste the code into.
+function setDeviceAuthActive(active) {
+    const panel = document.getElementById('s_device_panel');
+    const start = document.getElementById('s_device_start');
+    if (panel) panel.hidden = !active;
+    if (start) {
+        start.disabled = active;
+        start.textContent = active ? '⏳ Waiting for approval…' : '🔑 Authorize with Trakt';
+    }
+}
+
+function copyDeviceCode() {
+    const input = document.getElementById('s_device_code');
+    if (!input || !input.value) return;
+    navigator.clipboard.writeText(input.value).then(
+        () => toast('Pairing code copied', true),
+        () => toast('Could not copy — select it and copy by hand', false)
+    );
+}
+
+function cancelDeviceAuth() {
+    stopDeviceAuthPolling();
+    setDeviceAuthActive(false);
+    const box = document.getElementById('authStatus');
+    if (box) box.textContent = 'Authorization cancelled.';
+}
+
 async function startDeviceAuth() {
     stopDeviceAuthPolling();
     const clientId = document.getElementById('s_client_id').value.trim();
@@ -896,7 +1042,11 @@ async function startDeviceAuth() {
         });
         const d = await res.json();
         if (!d.ok) { box.textContent = d.error || 'Could not start authorization.'; toast(d.error || 'Could not start authorization', false); return; }
-        box.innerHTML = `Go to <a href="${esc(d.verification_url)}" target="_blank" rel="noopener">${esc(d.verification_url)}</a> and enter code <b>${esc(d.user_code)}</b>. Waiting for approval…`;
+        document.getElementById('s_device_code').value = d.user_code || '';
+        const link = document.getElementById('s_device_link');
+        link.href = d.verification_url || 'https://trakt.tv/activate';
+        setDeviceAuthActive(true);
+        box.textContent = 'Copy the code, open trakt.tv, and enter it there. Waiting for approval…';
         const deadline = Date.now() + (d.expires_in || 600) * 1000;
         const intervalMs = Math.max(d.interval || 5, 5) * 1000;
         deviceAuthTimer = setInterval(
@@ -913,6 +1063,7 @@ async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
     const box = document.getElementById('authStatus');
     if (Date.now() > deadline) {
         stopDeviceAuthPolling();
+        setDeviceAuthActive(false);
         box.textContent = 'The code expired before it was approved — try again.';
         return;
     }
@@ -925,6 +1076,7 @@ async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
         const d = await res.json();
         if (d.status === 'pending' || d.status === 'slow_down') return;  // keep waiting
         stopDeviceAuthPolling();
+        setDeviceAuthActive(false);
         if (d.status === 'authorized') {
             // The token isn't sent back — it is already saved server-side, and
             // putting a bearer token in page memory would serve no purpose.
@@ -935,10 +1087,16 @@ async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
             updateTokenStatus(d.expires_at);
             // The server also tries to adopt the fresh token as this admin's own
             // linked identity, which is what takes the reconnect notice down.
+            // When that part fails it says why: an authorization that "worked"
+            // yet left the notice up is the state that reads as the app ignoring
+            // what you just did.
             if (d.trakt_linked) {
                 const notice = document.getElementById('s_reconnect_box');
                 if (notice) notice.hidden = true;
                 box.textContent = '✅ Authorized, and linked to your account.';
+            } else if (d.trakt_link_error) {
+                box.textContent = '✅ Authorized, but not linked to your login: ' + d.trakt_link_error;
+                showReconnectError(d.trakt_link_error);
             } else {
                 box.textContent = '✅ Authorized! The access token has been saved.';
             }
@@ -1141,8 +1299,14 @@ function renderDetails(d, poster, media, season) {
 
 function closeDetails() { document.getElementById('detailsModal').classList.remove('open'); }
 
+// Escape closes whichever overlay is open. Driven off the class rather than a
+// list of close functions: the Settings modal is only rendered for admins, so
+// calling closeSettings() unconditionally threw for everybody else — which took
+// the rest of the handler down with it and left Escape doing nothing at all.
 document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closeSettings(); closeDetails(); }
+    if (e.key !== 'Escape') return;
+    stopDeviceAuthPolling();
+    document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
 });
 
 // ---- Hidden /distrakt reveal: Konami code + footer build-tap (kept independent) ----

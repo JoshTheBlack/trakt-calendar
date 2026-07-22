@@ -23,6 +23,13 @@ locked by live measurement against the real Trakt API:
     whole window in one response (verified live); a warning is logged if a
     pagination header ever appears, in case that changes.
 
+  - TRIM EACH WINDOW TO ITS OWN 7 DAYS. The request is the documented shape
+    (/calendars/{target}/{path}/{start_date}/{days}), but Trakt treats `days` as
+    a floor, not a ceiling — measured live, a 7-day window came back carrying
+    entries two months past its end — so neighbouring windows overlap heavily.
+    Without the trim a month read concatenates those overlaps and renders the
+    same episode two or three times (see in_window / dedupe_entries).
+
 The cache blob and the detail-lookup cache share one table (api_cache); this
 module owns the calendar keys and the per-window TTL. THE READ PATH — read_month
 plus the window helpers below — is what the authenticated calendar route and the
@@ -68,6 +75,85 @@ def aligned_windows(range_start: date, range_end: date) -> list[date]:
     while current <= range_end:
         out.append(current)
         current += timedelta(days=WINDOW_DAYS)
+    return out
+
+
+def _entry_utc_date(entry: dict) -> str:
+    """The YYYY-MM-DD an entry airs on, in UTC, straight off the stored string.
+
+    Sliced rather than parsed: the cache stores Trakt's raw ISO-UTC timestamp
+    verbatim, so the first ten characters already are the UTC date, and the
+    windows this feeds are UTC-aligned.
+    """
+    return str(entry.get("first_aired") or entry.get("released") or "")[:10]
+
+
+def in_window(entry: dict, start: date) -> bool:
+    """Whether an entry belongs to the 7-day window beginning `start`.
+
+    NEEDED BECAUSE TRAKT OVERRUNS THE `days` IT IS GIVEN. The request shape is
+    exactly the documented one — /calendars/{target}/{path}/{start_date}/{days} —
+    and `days` is honoured as a floor but not as a ceiling. Measured live against
+    /calendars/all/shows/ from 2026-07-06:
+
+        days=1  ->   89 entries spanning 4 days
+        days=3  ->  206 entries spanning 6 days
+        days=7  ->  404 entries spanning 17 days, out to 2026-07-27
+        days=14 ->  793 entries spanning out to 2026-09-05
+
+    Every show endpoint does it (new, premieres, finales, shows); movies happened
+    to come back clean, which is a small dataset rather than a promise. The
+    `end_date` query filter does NOT constrain it — same 404 entries, same span —
+    so there is no server-side way to ask for less.
+
+    What IS reliable: the response never starts before `start_date`, and always
+    covers the range asked for. So the window owning a date always returns that
+    date, and trimming the rest is lossless — verified by count on a real month
+    (1691 cards with 207 duplicates -> 1484, exactly the duplicates removed).
+
+    Windows tile contiguously, so every UTC date falls in exactly one, and an
+    entry Trakt handed to the wrong window is one an adjacent window also
+    returns. Without this trim a month read concatenates those overlaps and
+    renders the same episode two or three times.
+
+    Trimmed on the entry's top-level `first_aired` (or `released` for movies),
+    which is also what the normalizer renders the card from. Checked live across
+    every endpoint: it never disagrees with `episode.first_aired`.
+    """
+    day = _entry_utc_date(entry)
+    if not day:
+        return False
+    return start.isoformat() <= day < (start + timedelta(days=WINDOW_DAYS)).isoformat()
+
+
+def entry_identity(entry: dict, media_key: str) -> tuple:
+    """What makes two calendar entries the same airing.
+
+    The immutable Trakt id rather than the slug (a slug is user-changeable), plus
+    the episode coordinates and the air time — a show legitimately appears many
+    times in a month, and only the same episode at the same moment is a repeat.
+    """
+    media = entry.get(media_key) or {}
+    ids = media.get("ids") or {}
+    episode = entry.get("episode") or {}
+    return (
+        ids.get("trakt") or ids.get("slug"),
+        episode.get("season"),
+        episode.get("number"),
+        entry.get("first_aired") or entry.get("released"),
+    )
+
+
+def dedupe_entries(entries: list[dict], media_key: str) -> list[dict]:
+    """First occurrence of each airing, order preserved."""
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for entry in entries:
+        identity = entry_identity(entry, media_key)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        out.append(entry)
     return out
 
 
@@ -139,11 +225,17 @@ def _decompress(blob) -> list[dict]:
 
 
 async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[dict]:
-    """Fetch one 7-day window from Trakt, UNFILTERED and PRUNED.
+    """Fetch one 7-day window from Trakt, UNFILTERED, PRUNED, and TRIMMED to the
+    window's own 7 days.
 
     No `genres`/`countries` query params (all filtering is read-time now) and no
     pagination headers (calendar endpoints ignore them and return the whole
     window in one response). Logs a warning if Trakt ever starts paginating.
+
+    The trim is not tidiness. Trakt does not honour the `days` bound it is given
+    (see in_window), so consecutive windows overlap by days or weeks; storing
+    what arrived would mean caching the same airings several times over and
+    handing the page duplicate cards for every one of them.
     """
     url = (
         f"{trakt.API_BASE}/calendars/all/{endpoint.path}/{start.isoformat()}/{WINDOW_DAYS}"
@@ -171,12 +263,23 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
     if not isinstance(raw, list):
         return []
     pruned: list[dict] = []
+    overrun = 0
     for entry in raw:
-        if isinstance(entry, dict):
-            item = prune_entry(entry, endpoint.media)
-            if item is not None:
-                pruned.append(item)
-    return pruned
+        if not isinstance(entry, dict):
+            continue
+        item = prune_entry(entry, endpoint.media)
+        if item is None:
+            continue
+        if not in_window(item, start):
+            overrun += 1
+            continue
+        pruned.append(item)
+    if overrun:
+        logger.debug(
+            "Trakt returned %d entr(ies) outside the %s window starting %s; trimmed.",
+            overrun, endpoint.key, start,
+        )
+    return dedupe_entries(pruned, endpoint.media)
 
 
 async def read_cached_window(endpoint_key: str, start: date) -> tuple[list[dict], int] | None:
@@ -291,6 +394,12 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
         entries.extend(window_entries)
         if cached_at is not None:
             as_of = cached_at if as_of is None else min(as_of, cached_at)
+
+    # Belt and braces over the trim in fetch_window_raw. That one keeps NEW
+    # windows disjoint; this one also covers windows cached BEFORE the trim
+    # existed, which overlap and would otherwise keep rendering doubled cards
+    # until their TTL expired. It is a no-op once every window has been refetched.
+    entries = dedupe_entries(entries, endpoint.media)
 
     kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries)
 

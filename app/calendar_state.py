@@ -1,18 +1,22 @@
 """Per-user calendar state: the "not watching" marks and the change-detection
-fields, replacing app/state.py's shared per-(endpoint,year,month) JSON files with
-rows keyed additionally by user.
+fields, replacing app/state.py's shared per-(endpoint,year,month) JSON files.
 
-app/state.py wrote one JSON document per (endpoint, year, month) shared by
-everyone. Here each such document becomes rows in calendar_not_watching (one per
-marked item) plus one row in calendar_view_state (the last_count / last_show_ids
-/ history a viewer's change detection needs). Rows rather than a document is what
-turns a single toggle into a delta — an INSERT or DELETE of one item_id — instead
-of the whole-array read-modify-write that loses updates when a user has two tabs
-open.
+The two halves are keyed differently ON PURPOSE.
 
-This module provides the storage functions only. The calendar route keeps using
-app/state.py until it is switched over to load_state / save_state / the delta
-helpers here.
+"Not watching" is a fact about a SHOW and lives in not_watching_shows, keyed by
+(user, item_id) alone. Marking a series premiere means you are not watching that
+show — so its episodes stop appearing on All Episodes, its next season premiere
+arrives already marked, and none of it comes back next month. Keying the mark by
+the view it happened to be made in made the toggle mean "hide this cell", which
+is not what it says.
+
+Change detection ("N new since you last looked") is genuinely per view, because
+it is about one month of one endpoint's list, so calendar_view_state keeps its
+(user, endpoint, year, month) key.
+
+Both are rows rather than documents, which is what turns a single toggle into a
+delta — an INSERT or DELETE of one item_id — instead of the whole-array
+read-modify-write that loses updates when a user has two tabs open.
 """
 from __future__ import annotations
 
@@ -26,11 +30,6 @@ from .config import DATA_DIR
 from .endpoints import ENDPOINTS
 
 logger = logging.getLogger(__name__)
-
-# Endpoints whose main-calendar not-watching decisions the distrakt roster is
-# built from. Kept here so the roster reader below and its future per-user caller
-# agree on the source set.
-ROSTER_ENDPOINTS = ("shows/new", "shows/premieres")
 
 # The same slug-safe transform app/state.py used to build its filenames, so a
 # state_*.json name can be mapped back to its endpoint key on import.
@@ -49,23 +48,35 @@ _SAFE_TO_ENDPOINT = {_safe_endpoint(key): key for key in ENDPOINTS}
 # reads
 # ---------------------------------------------------------------------------
 
-async def not_watching_list(user_id: int, endpoint: str, year: int, month: int) -> list[str]:
-    """This user's not-watching item ids for one (endpoint, year, month), oldest
-    mark first."""
+async def not_watching_list(user_id: int) -> list[str]:
+    """Every show this user has marked not-watching, oldest mark first.
+
+    Not scoped to an endpoint or a month: a mark applies wherever that show turns
+    up. The item ids are the calendar card's data-id, which the normalizer builds
+    from the SHOW's ids on every show endpoint, so one list filters all of them.
+    """
     rows = await db.fetch_all(
-        "SELECT item_id FROM calendar_not_watching "
-        "WHERE user_id = ? AND endpoint = ? AND year = ? AND month = ? "
+        "SELECT item_id FROM not_watching_shows WHERE user_id = ? "
         "ORDER BY created_at, item_id",
-        (user_id, endpoint, int(year), int(month)),
+        (user_id,),
     )
     return [r["item_id"] for r in rows]
 
 
+async def not_watching_ids(user_id: int) -> set[str]:
+    """not_watching_list as a set, for the callers that only ever ask "is this
+    one of them?"."""
+    return set(await not_watching_list(user_id))
+
+
 async def load_state(user_id: int, endpoint: str, year: int, month: int) -> dict:
-    """The whole state for one (endpoint, year, month), in the exact shape
-    app/state.load_state returned, so the route can swap to this with no change
-    to what it hands the front end."""
-    not_watching = await not_watching_list(user_id, endpoint, year, month)
+    """What the calendar page needs on load, in the shape app/state.load_state
+    returned so the front end is unchanged.
+
+    `notWatching` is the user's whole global set; the change-detection fields are
+    read for this one (endpoint, year, month).
+    """
+    not_watching = await not_watching_list(user_id)
     row = await db.fetch_one(
         "SELECT last_count, last_show_ids_json, history_json FROM calendar_view_state "
         "WHERE user_id = ? AND endpoint = ? AND year = ? AND month = ?",
@@ -79,37 +90,23 @@ async def load_state(user_id: int, endpoint: str, year: int, month: int) -> dict
     }
 
 
-async def not_watching_ids(user_id: int, year: int, month: int) -> set[str]:
-    """Union of this user's main-calendar not-watching ids across the roster's
-    source endpoints (shows/new + shows/premieres) for one year/month — the
-    per-user replacement for the shared distrakt roster read."""
-    ids: set[str] = set()
-    for endpoint in ROSTER_ENDPOINTS:
-        ids.update(await not_watching_list(user_id, endpoint, year, month))
-    return ids
-
-
 # ---------------------------------------------------------------------------
 # writes — deltas (a single toggle) and whole-document (the drop-in for POST)
 # ---------------------------------------------------------------------------
 
-async def set_not_watching(user_id: int, endpoint: str, year: int, month: int,
-                           item_id: str, not_watching: bool) -> None:
-    """Toggle one item. A delta, so two open tabs cannot lose each other's marks
-    the way a whole-array save did."""
+async def set_not_watching(user_id: int, item_id: str, not_watching: bool) -> None:
+    """Mark or unmark one show for this user, everywhere. A delta, so two open
+    tabs cannot lose each other's marks the way a whole-array save did."""
     if not_watching:
         await db.execute(
-            "INSERT INTO calendar_not_watching "
-            "(user_id, endpoint, year, month, item_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(user_id, endpoint, year, month, item_id) DO NOTHING",
-            (user_id, endpoint, int(year), int(month), str(item_id), db.now()),
+            "INSERT INTO not_watching_shows (user_id, item_id, created_at) "
+            "VALUES (?, ?, ?) ON CONFLICT(user_id, item_id) DO NOTHING",
+            (user_id, str(item_id), db.now()),
         )
     else:
         await db.execute(
-            "DELETE FROM calendar_not_watching "
-            "WHERE user_id = ? AND endpoint = ? AND year = ? AND month = ? AND item_id = ?",
-            (user_id, endpoint, int(year), int(month), str(item_id)),
+            "DELETE FROM not_watching_shows WHERE user_id = ? AND item_id = ?",
+            (user_id, str(item_id)),
         )
 
 
@@ -148,11 +145,13 @@ async def set_view_state(user_id: int, endpoint: str, year: int, month: int, *,
 
 
 async def save_state(user_id: int, endpoint: str, year: int, month: int, payload: dict) -> None:
-    """Replace the whole state for one (endpoint, year, month), mirroring
-    app/state.save_state's whole-document semantics — a drop-in for the current
-    POST handler. The delta helpers above are the better shape for a single
-    toggle; this exists so the route can be switched over without also being
-    reshaped in the same step.
+    """Write a whole state document for one (endpoint, year, month).
+
+    The not-watching marks in it are ADDED to the user's global set rather than
+    replacing it, because the payload only ever describes one view: a document
+    listing July's Series Premieres says nothing about a show marked in August,
+    and treating its absence as an unmark would delete marks the sender never
+    saw. Unmarking is set_not_watching's job, which names the one show it means.
     """
     not_watching = [str(x) for x in (payload.get("notWatching") or [])]
     history = list(payload.get("history") or [])
@@ -161,18 +160,11 @@ async def save_state(user_id: int, endpoint: str, year: int, month: int, payload
 
     def _work(conn: db.Connection) -> None:
         now = db.now()
-        conn.execute(
-            "DELETE FROM calendar_not_watching "
-            "WHERE user_id = ? AND endpoint = ? AND year = ? AND month = ?",
-            (user_id, endpoint, int(year), int(month)),
-        )
         for item_id in not_watching:
             conn.execute(
-                "INSERT INTO calendar_not_watching "
-                "(user_id, endpoint, year, month, item_id, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(user_id, endpoint, year, month, item_id) DO NOTHING",
-                (user_id, endpoint, int(year), int(month), item_id, now),
+                "INSERT INTO not_watching_shows (user_id, item_id, created_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(user_id, item_id) DO NOTHING",
+                (user_id, item_id, now),
             )
         conn.execute(
             "INSERT INTO calendar_view_state "
@@ -262,13 +254,15 @@ async def import_legacy_state(user_id: int) -> int:
     def _work(conn: db.Connection) -> None:
         now = db.now()
         for endpoint, year, month, doc in parsed:
+            # Every file's marks land in the one global set — which is the
+            # widening this import is now carrying out for free: a show the
+            # operator turned off in one month's Series Premieres is a show they
+            # are not watching, full stop.
             for item_id in (doc.get("notWatching") or []):
                 conn.execute(
-                    "INSERT INTO calendar_not_watching "
-                    "(user_id, endpoint, year, month, item_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?) "
-                    "ON CONFLICT(user_id, endpoint, year, month, item_id) DO NOTHING",
-                    (user_id, endpoint, year, month, str(item_id), now),
+                    "INSERT INTO not_watching_shows (user_id, item_id, created_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(user_id, item_id) DO NOTHING",
+                    (user_id, str(item_id), now),
                 )
             last_count = doc.get("lastCount")
             last_show_ids = doc.get("lastShowIds")

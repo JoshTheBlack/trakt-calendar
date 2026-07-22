@@ -141,8 +141,10 @@ async def onboarding_create(request: Request):
             distrakt_approved=True, timezone=settings.timezone or None,
         )
         # Seeded from settings.json so an upgraded instance's calendar renders
-        # exactly as it did before there were accounts.
-        auth.insert_user_prefs(conn, user_id, settings)
+        # exactly as it did before there were accounts — filters included, which
+        # is why this is the one call site that asks for them. Every account made
+        # after this one starts unfiltered (see insert_user_prefs).
+        auth.insert_user_prefs(conn, user_id, settings, seed_filters=True)
         if trakt_identity:
             auth.insert_linked_identity(
                 conn, user_id=user_id, provider="trakt",

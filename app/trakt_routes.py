@@ -322,9 +322,9 @@ async def _clear_reconnect_notice(is_admin: bool) -> None:
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
 
 
-async def adopt_app_token(user_id: int, settings: Settings) -> bool:
+async def adopt_app_token(user_id: int, settings: Settings) -> tuple[bool, str | None]:
     """Link settings.json's app-wide Trakt token to `user_id` as a personal
-    identity. Returns whether it worked.
+    identity. Returns (linked, why_it_did_not).
 
     First-run setup does this too, but it can only try once, and it fails
     whenever Trakt is unreachable or the stored token has already expired —
@@ -335,18 +335,27 @@ async def adopt_app_token(user_id: int, settings: Settings) -> bool:
     known-good at that exact moment, so the account lookup behind it is as
     likely to succeed as it will ever be.
 
+    The reason is RETURNED, not only logged. Every failure here leaves the same
+    unexplained notice on the Settings screen, and its causes want different
+    actions — authorize again, or free the Trakt account from the other login on
+    this instance. Sending the operator to a log file to find out which is what
+    made a clearable notice look permanent.
+
     Best effort by design — the caller has already saved a working token and must
     not fail on this.
     """
     token = (settings.trakt_access_token or "").strip()
     client_id = (settings.trakt_client_id or "").strip()
     if not (token and client_id):
-        return False
+        return False, "No Trakt Client ID and access token are saved yet."
     try:
         account = await trakt_auth.fetch_account(client_id, token)
     except trakt_auth.AccountLookupError as exc:
         logger.warning("Could not adopt the app-wide Trakt token: %s", exc)
-        return False
+        return False, (
+            f"Trakt would not say which account this token belongs to ({exc}) — "
+            "authorize again to get a fresh one."
+        )
     try:
         await auth.link_provider_identity(
             identity=auth.ProviderIdentity(
@@ -359,13 +368,33 @@ async def adopt_app_token(user_id: int, settings: Settings) -> bool:
             ),
             user_id=user_id,
         )
-    except (auth.IdentityInUse, auth.AccountUnavailable):
+    except auth.IdentityInUse:
         # Somebody else already holds this Trakt account here. Never moved —
         # and the notice stays up, because this login is still unlinked.
         logger.warning("The app-wide Trakt account is already linked to another user.")
-        return False
+        return False, (
+            "The Trakt account this token belongs to is already linked to "
+            f"{await _identity_owner_label(str(account['id']))} on this instance. "
+            "Unlink it there first, then try again."
+        )
+    except auth.AccountUnavailable:
+        return False, "This login can't be linked to right now."
     await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
-    return True
+    return True, None
+
+
+async def _identity_owner_label(provider_user_id: str) -> str:
+    """Which local login already holds this Trakt account, named well enough to
+    act on. Falls back to a bare description when the row has no username, which
+    an account created through Plex or Trakt legitimately may not."""
+    row = await db.fetch_one(
+        "SELECT u.username AS username FROM linked_identities li "
+        "JOIN users u ON u.id = li.user_id "
+        "WHERE li.provider = ? AND li.provider_user_id = ?",
+        (PROVIDER, provider_user_id),
+    )
+    username = (row["username"] if row else None) or ""
+    return f'the "{username}" account' if username else "another account here"
 
 
 REVOKE_FAILED_NOTICE = (

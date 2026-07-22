@@ -101,6 +101,18 @@ body.auth-page.has-nav .auth-logo { display: none; }
 
 .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* Error pages (404 / 403). The same card as the auth screens, with the status
+   set as a watermark so the page is identifiable at a glance without the number
+   competing with the sentence that actually explains it. */
+.error-card { text-align: center; align-items: center; position: relative; overflow: hidden; }
+.error-code {
+    font-family: 'Bebas Neue', sans-serif; font-size: 5.5rem; line-height: 0.9;
+    letter-spacing: 4px; color: var(--gold); opacity: 0.16; user-select: none;
+}
+.error-card h1 { margin-top: -14px; }
+.error-card .auth-notice { text-align: left; }
+.error-card .auth-actions { justify-content: center; }
+
 /* Admin screen — same tokens and fonts as the auth pages above, but a wide
    table layout instead of a centered form. */
 /* Wide: the accounts table carries ten columns and a cluster of row actions, and

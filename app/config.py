@@ -25,9 +25,13 @@ TRUSTED_PROXY_IPS_DEFAULT = "127.0.0.1/32"
 def _seed_trusted_proxy_ips() -> str:
     return os.environ.get("TRUSTED_PROXY_IPS", TRUSTED_PROXY_IPS_DEFAULT).strip() or TRUSTED_PROXY_IPS_DEFAULT
 
-# Default genre/country filters carried over from the original PHP script.
-DEFAULT_GENRES = "-animation,-anime,-children,-game-show,-home-and-garden,-music,-reality,-special-interest,-talk-show"
-DEFAULT_COUNTRIES = "ar,au,at,be,br,ca,cl,cn,co,cz,dk,fi,fr,de,gr,hk,is,in,ie,it,jp,kr,mx,nl,nz,no,pl,pt,za,es,se,ch,tr,gb,us"
+# NO default genre/country filter. The original PHP script shipped one operator's
+# taste as the default — nine excluded genres and a 35-country allowlist — which
+# silently removed shows a new install had never been asked about, and read as
+# the calendar simply not carrying them. An empty spec filters nothing; the
+# Filters panel is where anyone who wants a filter says so.
+DEFAULT_GENRES = ""
+DEFAULT_COUNTRIES = ""
 
 # Credentials. These are WRITE-ONLY over the API: they are never sent back to a
 # client, only a flag saying whether each one has a value. Everything here is

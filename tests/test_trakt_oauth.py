@@ -829,6 +829,12 @@ class PublicBaseUrlTests(TraktOAuthTestCase):
 
 
 class ReconnectNoticeTests(TraktOAuthTestCase):
+    def setUp(self):
+        super().setUp()
+        # The notice is about a token this instance HAS but could not resolve,
+        # so every test here needs one saved.
+        save_settings(_settings(trakt_access_token="app-wide-token"))
+
     def test_the_notice_is_surfaced_and_cleared_by_an_admin_linking(self):
         asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
         self.sign_in_as(self.admin_id)
@@ -843,6 +849,44 @@ class ReconnectNoticeTests(TraktOAuthTestCase):
         self.sign_in_as(user)
         self.callback(self.start("/auth/trakt/link"))
         self.assertEqual(asyncio.run(db.get_meta(auth_routes.TRAKT_RECONNECT_NOTICE)), "1")
+
+    def test_the_notice_can_be_cleared_by_adopting_the_saved_token(self):
+        """The button the notice offers: link the token this instance already
+        has, with no second trip through Trakt."""
+        asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
+        self.sign_in_as(self.admin_id)
+        with patch.object(trakt_auth, "fetch_account",
+                          return_value={"id": TRAKT_ID, "name": "Josh"}):
+            resp = self.client.post("/api/auth/trakt/adopt", json={})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertFalse(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+
+    def test_adoption_blocked_by_another_login_says_which_one(self):
+        """The failure that re-authorizing can never fix. Reporting it is the
+        whole point: the notice used to stay up saying nothing, so the only
+        remedy on offer was the one that could not work."""
+        asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
+        squatter = self.make_user("squatter", calendar_approved=True)
+        self.sign_in_as(squatter)
+        self.callback(self.start("/auth/trakt/link"))
+
+        self.sign_in_as(self.admin_id)
+        with patch.object(trakt_auth, "fetch_account",
+                          return_value={"id": TRAKT_ID, "name": "Josh"}):
+            resp = self.client.post("/api/auth/trakt/adopt", json={})
+        self.assertEqual(resp.status_code, 409, resp.text)
+        self.assertIn("squatter", resp.json()["error"])
+        # And it is still up, because this login is still unlinked.
+        self.assertTrue(self.client.get("/api/settings").json()["trakt_reconnect_notice"])
+
+    def test_a_token_trakt_will_not_resolve_reports_that_instead(self):
+        asyncio.run(db.set_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "1"))
+        self.sign_in_as(self.admin_id)
+        with patch.object(trakt_auth, "fetch_account",
+                          side_effect=trakt_auth.AccountLookupError("HTTP 401")):
+            resp = self.client.post("/api/auth/trakt/adopt", json={})
+        self.assertEqual(resp.status_code, 409, resp.text)
+        self.assertIn("HTTP 401", resp.json()["error"])
 
 
 class ProviderButtonTests(TraktOAuthTestCase):

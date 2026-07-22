@@ -69,6 +69,15 @@
 
     <div class="hero-actions">
         <span class="hero-meta" title="{{ endpoint.description }}">📊 {{ total }} · 🕒 {{ generated }}</span>
+        {# In the bar rather than behind the ☰ menu, and lit up while a filter is
+           set. A filter REMOVES shows, so a calendar quietly missing something
+           has to carry the reason on its face — buried one click away, the only
+           evidence was the absence itself. #}
+        <button type="button" id="filtersBtn" class="pill-btn{% if view.filters_active %} active{% endif %}"
+                onclick="openFilters()"
+                title="{% if view.filters_active %}Filtering this calendar by {{ view.filters_summary }}{% else %}Filter this calendar by genre, country, or network{% endif %}">
+            🔎 {% if view.filters_active %}Filtered{% else %}Filters{% endif %}
+        </button>
         <button type="button" id="hideToggle" class="pill-btn{% if view.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()" title="Toggle hiding not-watching items">
             <span id="hideToggleLabel">{% if view.hide_not_watching %}🚫 Hiding{% else %}👁️ Showing all{% endif %}</span>
         </button>
@@ -198,37 +207,67 @@
 {% if is_admin %}
 <!-- Settings modal (requirement C) -->
 <div id="settingsModal" class="modal-overlay" onclick="if(event.target===this) closeSettings()">
-    <div class="modal">
+    <div class="modal settings-modal">
         <div class="modal-head">
             <h2>⚙️ Settings</h2>
             <button type="button" class="modal-close" onclick="closeSettings()">&times;</button>
         </div>
         <form id="settingsForm" onsubmit="return saveSettings(event)">
+            {# One long scroll became four groups. The tabs are presentation only:
+               every field stays inside this one <form> and one Save writes the
+               lot, because these settings are interdependent (a base URL without
+               the Trakt credentials it builds a redirect for is half a change)
+               and a per-tab save would invite leaving one behind. #}
+            <div class="tabs" role="tablist" aria-label="Settings sections">
+                <button type="button" class="tab-btn active" role="tab" aria-selected="true"
+                        data-tab="server" onclick="showSettingsTab('server')">🖥️ Server</button>
+                <button type="button" class="tab-btn" role="tab" aria-selected="false"
+                        data-tab="trakt" onclick="showSettingsTab('trakt')">🎟️ Trakt</button>
+                <button type="button" class="tab-btn" role="tab" aria-selected="false"
+                        data-tab="calendar" onclick="showSettingsTab('calendar')">📅 Calendar</button>
+                <button type="button" class="tab-btn" role="tab" aria-selected="false"
+                        data-tab="integrations" onclick="showSettingsTab('integrations')">🔌 Integrations</button>
+            </div>
             <div class="modal-body">
+                {# ABOVE the tabs' content, not inside the Trakt one: this is an
+                   alert about the instance's state, and an alert that only shows
+                   on the tab you happen to be standing on is an alert you can
+                   miss. Two ways out, because they fail differently — "Link it"
+                   retries the saved token and SAYS why if it can't, while the
+                   OAuth link is the way through when the token is the problem. #}
                 <div class="field" id="s_reconnect_box" hidden>
                     <p class="auth-notice">
-                        This instance's saved Trakt token could not be matched to a Trakt
-                        account, so it isn't linked to your login.
-                        <a href="/auth/trakt/link">Reconnect your Trakt account</a>.
+                        This instance's saved Trakt token isn't linked to your login yet, so
+                        anything that reads your own Trakt history can't run.
                     </p>
+                    <div class="auth-notice-actions">
+                        <button type="button" class="btn-ghost small" onclick="adoptTraktToken(this)">🔗 Link it to my account</button>
+                        <a class="btn-ghost small" href="/auth/trakt/link">Reconnect with Trakt</a>
+                    </div>
+                    <span class="hint" id="s_reconnect_error"></span>
                 </div>
-                <div class="field">
-                    <label for="s_base_url">Public base URL</label>
-                    <input type="text" id="s_base_url" name="public_base_url" placeholder="https://shows.example.com" autocomplete="off" spellcheck="false">
-                    <span class="hint" id="s_redirect_hint">The origin people reach this app on — no path, no trailing slash. Required for "Log in with Trakt", and used for every link the app generates.</span>
+
+                <div class="tab-panel" data-tab-panel="server" role="tabpanel">
+                    <div class="field">
+                        <label for="s_base_url">Public base URL</label>
+                        <input type="text" id="s_base_url" name="public_base_url" placeholder="https://shows.example.com" autocomplete="off" spellcheck="false">
+                        <span class="hint" id="s_redirect_hint">The origin people reach this app on — no path, no trailing slash. Required for "Log in with Trakt", and used for every link the app generates.</span>
+                    </div>
+                    <div class="field">
+                        <label for="s_trusted_proxies">Trusted proxy addresses</label>
+                        <input type="text" id="s_trusted_proxies" name="trusted_proxy_ips" placeholder="127.0.0.1/32" autocomplete="off" spellcheck="false">
+                        <span class="hint" id="s_proxy_hint"></span>
+                    </div>
+                    {# Read-only on purpose: a wrong value here logs everyone out of the
+                       screen that would fix it, so cookie_secure stays hand-edited in
+                       settings.json. Shown because a mismatch is otherwise invisible. #}
+                    <div class="field" id="s_cookie_box" hidden>
+                        <label>Session cookies</label>
+                        <span class="hint" id="s_cookie_hint"></span>
+                    </div>
                 </div>
-                <div class="field">
-                    <label for="s_trusted_proxies">Trusted proxy addresses</label>
-                    <input type="text" id="s_trusted_proxies" name="trusted_proxy_ips" placeholder="127.0.0.1/32" autocomplete="off" spellcheck="false">
-                    <span class="hint" id="s_proxy_hint"></span>
-                </div>
-                {# Read-only on purpose: a wrong value here logs everyone out of the
-                   screen that would fix it, so cookie_secure stays hand-edited in
-                   settings.json. Shown because a mismatch is otherwise invisible. #}
-                <div class="field" id="s_cookie_box" hidden>
-                    <label>Session cookies</label>
-                    <span class="hint" id="s_cookie_hint"></span>
-                </div>
+
+                <div class="tab-panel" data-tab-panel="trakt" role="tabpanel" hidden>
                 <div class="field">
                     <label for="s_client_id">Trakt Client ID</label>
                     <input type="text" id="s_client_id" name="trakt_client_id" autocomplete="off" spellcheck="false">
@@ -258,13 +297,34 @@
                         Redirect URI field — the whole path, not just the site address.</span>
                 </div>
                 <div class="auth-box">
-                    <button type="button" class="btn-ghost small" onclick="startDeviceAuth()">🔑 Authorize with Trakt</button>
+                    <button type="button" id="s_device_start" class="btn-ghost small" onclick="startDeviceAuth()">🔑 Authorize with Trakt</button>
                     <button type="button" class="btn-ghost small" onclick="refreshTraktToken()">↻ Refresh token now</button>
+                    {# The pairing code and the page to enter it on are the whole
+                       flow, so they get real controls rather than a sentence with
+                       a link buried in it. The start button is disabled while a
+                       code is live: clicking it again silently issued a NEW code,
+                       which invalidated the one already copied. #}
+                    <div id="s_device_panel" class="device-auth" hidden>
+                        <div class="device-auth-code">
+                            <input type="text" id="s_device_code" readonly aria-label="Trakt pairing code">
+                            <button type="button" class="btn-ghost small" onclick="copyDeviceCode()">Copy</button>
+                        </div>
+                        <div class="device-auth-actions">
+                            <a id="s_device_link" class="btn-ghost small" href="#" target="_blank" rel="noopener">Open trakt.tv to enter it ↗</a>
+                            <button type="button" class="btn-ghost small" onclick="cancelDeviceAuth()">Cancel</button>
+                        </div>
+                    </div>
                     <div id="authStatus" class="hint"></div>
                     <div class="hint">Device pairing — needs no redirect URI, so it still works if
                         the registered one is wrong. This authorizes the app-wide connection used
                         for calendar data, not any one person's login.</div>
                 </div>
+                </div>
+
+                <div class="tab-panel" data-tab-panel="calendar" role="tabpanel" hidden>
+                <p class="hint">Defaults for accounts created from here on, and the caching every
+                    account's calendar is served from. Each person's own view controls and
+                    🔎 Filters override the defaults for them.</p>
                 <div class="two-col">
                     <div class="field">
                         <label for="s_timezone">Timezone</label>
@@ -285,21 +345,11 @@
                         </select>
                     </div>
                 </div>
-                <div class="field">
-                    <label for="s_genres">Genres filter</label>
-                    <input type="text" id="s_genres" name="genres" spellcheck="false">
-                    <span class="hint">Comma-separated genre slugs; prefix with - to exclude. Blank = no filter.</span>
-                </div>
-                <div class="field">
-                    <label for="s_countries">Countries filter</label>
-                    <input type="text" id="s_countries" name="countries" spellcheck="false">
-                    <span class="hint">Comma-separated 2-letter ISO codes. Blank = no filter.</span>
-                </div>
-                <div class="field">
-                    <label for="s_networks">Networks filter</label>
-                    <textarea id="s_networks" name="network_filter" spellcheck="false"></textarea>
-                    <span class="hint">Comma-separated exact network names. Blank = all networks.</span>
-                </div>
+                {# The genre / country / network filters used to live here. They
+                   are per-viewer, so they moved to the Filters panel that every
+                   signed-in account can reach — these fields wrote the app-wide
+                   seed, which meant they changed nothing about the admin's own
+                   calendar and gave everyone else no way to filter at all. #}
                 <div class="two-col">
                     <div class="field">
                         <label for="s_limit">Pagination limit</label>
@@ -328,7 +378,9 @@
                     <input type="checkbox" id="s_hide" name="hide_not_watching">
                     <label for="s_hide">Hide not-watching by default</label>
                 </div>
+                </div>
 
+                <div class="tab-panel" data-tab-panel="integrations" role="tabpanel" hidden>
                 <div class="settings-section">📺 Sonarr <span class="hint">(add-to-library button on shows)</span></div>
                 <div class="two-col">
                     <div class="field"><label for="s_sonarr_url">Sonarr URL</label><input type="text" id="s_sonarr_url" name="sonarr_url" placeholder="http://localhost:8989" spellcheck="false"></div>
@@ -361,6 +413,7 @@
                 <div class="two-col">
                     <div class="field"><label for="s_tmdb_key">TMDB API key</label><input type="password" id="s_tmdb_key" data-secret="1" name="tmdb_api_key" autocomplete="off" spellcheck="false"></div>
                 </div>
+                </div>
             </div>
             <div class="modal-foot">
                 <button type="button" class="btn-ghost" onclick="closeSettings()">Cancel</button>
@@ -370,6 +423,55 @@
     </div>
 </div>
 {% endif %}
+
+{# Filters: what this VIEWER's calendar contains, so it sits outside the admin
+   block. The filters are applied per viewer at read time against one shared
+   cache (app/calendar_filter.py), which is what lets two people filter the same
+   cached month differently — the UI was the only piece missing. #}
+<div id="filtersModal" class="modal-overlay" onclick="if(event.target===this) closeFilters()">
+    <div class="modal">
+        <div class="modal-head">
+            <h2>🔎 Filters</h2>
+            <button type="button" class="modal-close" onclick="closeFilters()">&times;</button>
+        </div>
+        <form id="filtersForm" onsubmit="return saveFilters(event)">
+            <div class="modal-body">
+                <p class="hint">These apply to your calendar only — everyone else keeps their own.</p>
+                <div class="field">
+                    <label for="f_genres">Genres</label>
+                    <input type="text" id="f_genres" name="genres" spellcheck="false" autocomplete="off"
+                           placeholder="drama, -reality">
+                    <span class="hint">Comma-separated genre slugs; prefix one with <code>-</code> to exclude it.
+                        Blank means every genre.</span>
+                </div>
+                <div class="field">
+                    <label for="f_countries">Countries</label>
+                    <input type="text" id="f_countries" name="countries" spellcheck="false" autocomplete="off"
+                           placeholder="us, gb, -jp">
+                    <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code> to exclude.
+                        Blank means everywhere.</span>
+                </div>
+                <div class="field">
+                    <label for="f_networks">Networks</label>
+                    <textarea id="f_networks" name="network_filter" spellcheck="false"
+                              placeholder="HBO, Netflix, BBC One"></textarea>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them.
+                        Blank means every network.</span>
+                </div>
+                {# Genre and country filtering is a Trakt VIP feature only when
+                   Trakt does it. This app filters the cached result itself, so
+                   it works on any account — worth saying, because the Settings
+                   screen still carries the VIP caveat for the fields Trakt is
+                   asked about directly. #}
+                <p class="hint">Filtering happens here, not at Trakt, so these work on any Trakt account.</p>
+            </div>
+            <div class="modal-foot">
+                <button type="button" class="btn-ghost" onclick="clearFilters()">Clear all</button>
+                <button type="submit" class="btn-primary">Save &amp; reload</button>
+            </div>
+        </form>
+    </div>
+</div>
 
 <!-- Share modal: publish a read-only, no-login copy of this calendar. -->
 <div id="shareModal" class="modal-overlay" onclick="if(event.target===this) closeShare()">

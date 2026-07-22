@@ -311,12 +311,33 @@ body.hide-not-watching .card.not-watching { display: none; }
 .modal-overlay.open { display: flex; }
 .modal { width: 100%; max-width: 560px; background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 16px; box-shadow: 0 30px 80px rgba(0,0,0,0.6); }
 .modal.wide { max-width: 720px; }
+/* Settings carries four groups of fields, so it gets more room than the modals
+   that ask one question. */
+.modal.settings-modal { max-width: 860px; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 20px 24px; border-bottom: 1px solid var(--card-border); }
+
+/* Modal tabs. The strip scrolls sideways rather than wrapping onto a second row,
+   which would move the panel below it every time a label changed length. */
+.tabs { display: flex; gap: 4px; padding: 0 24px; border-bottom: 1px solid var(--card-border); overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
+.tab-btn { flex: none; cursor: pointer; background: none; border: none; border-bottom: 2px solid transparent; color: var(--text-faint); font-family: inherit; font-size: 0.84rem; font-weight: 600; padding: 12px 14px; margin-bottom: -1px; white-space: nowrap; transition: color .15s ease, border-color .15s ease; }
+.tab-btn:hover { color: var(--text-dim); }
+.tab-btn.active { color: var(--gold-soft); border-bottom-color: var(--gold); }
+.tab-panel { display: flex; flex-direction: column; gap: 16px; }
 .modal-head h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.6rem; letter-spacing: 1px; color: var(--gold-soft); }
 .modal-head-right { display: flex; align-items: center; gap: 14px; }
 .modal-close { cursor: pointer; background: none; border: none; color: var(--text-dim); font-size: 1.4rem; line-height: 1; }
 .modal-close:hover { color: var(--crimson); }
 .modal-body { padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; }
+/* The `hidden` attribute hides an element only via the UA stylesheet's
+   `[hidden] { display: none }`, which ANY author rule setting `display` beats
+   silently — `.field` below is one, so every `<div class="field" hidden>` in the
+   Settings modal rendered whatever the server said. That is why the "reconnect
+   your Trakt account" notice looked permanent: it was, and the code taking it
+   down had always worked. Stated once, globally, rather than as a per-component
+   `.thing[hidden]` patch each new panel has to remember to add. */
+[hidden] { display: none !important; }
+
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font-size: 0.8rem; color: var(--text-dim); font-weight: 600; }
 .field .hint { font-size: 0.72rem; color: var(--text-faint); }
@@ -340,6 +361,19 @@ body.hide-not-watching .card.not-watching { display: none; }
 .auth-box { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: -4px; }
 .auth-box .hint { flex-basis: 100%; }
 
+/* Trakt device pairing. The code is the thing being acted on, so it is set large
+   and monospaced with its own Copy button rather than bolded inside a sentence,
+   and the page to enter it on is a button beside it. */
+.device-auth { flex-basis: 100%; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--card-border); border-radius: 10px; background: var(--bg-input, #12151c); }
+.device-auth-code { display: flex; gap: 8px; align-items: stretch; }
+.device-auth-code input { flex: 1; background: transparent; border: 1px solid var(--card-border); border-radius: 8px; color: var(--gold-soft); padding: 8px 12px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 1.15rem; font-weight: 700; letter-spacing: 0.18em; text-align: center; }
+.device-auth-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.device-auth-actions .btn-ghost { align-self: auto; text-decoration: none; }
+
+/* The reconnect notice's two escape routes, side by side. */
+.auth-notice-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.auth-notice-actions .btn-ghost { align-self: auto; text-decoration: none; }
+
 /* Share modal */
 .share-row { border-top: 1px solid var(--card-border); padding-top: 14px; }
 .share-row:first-of-type { border-top: none; padding-top: 0; }
@@ -349,6 +383,8 @@ body.hide-not-watching .card.not-watching { display: none; }
 .share-link-box input { flex: 1; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; font-size: 0.8rem; }
 .share-slug-edit { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
 .share-slug-edit input { background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; }
+/* A literal the user has to type exactly, called out inside hint text. */
+.hint code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 4px; padding: 0 4px; }
 .hint.ok { color: #4caf50; }
 .hint.err { color: var(--crimson); }
 /* A setting that is not wrong but is very likely misconfigured — the trusted-proxy

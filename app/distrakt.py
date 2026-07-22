@@ -602,7 +602,7 @@ async def import_premieres(user_id: int, month_key: str, settings) -> dict | Non
         return doc
     year, month = int(month_key[:4]), int(month_key[5:7])
     present = {(int(s["trakt_id"]), int(s["season"])) for s in doc.get("shows") or []}
-    nw_ids = await calendar_state.not_watching_ids(user_id, year, month)
+    nw_ids = await calendar_state.not_watching_ids(user_id)
     if await _add_premieres(doc, present, settings, year, month, nw_ids):
         await save_month(user_id, doc)
     return doc
@@ -728,7 +728,7 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
             present.add(key)
 
     # (c) This month's premieres, minus not-watching (excluded before commit).
-    nw_ids = await calendar_state.not_watching_ids(user_id, int(year), int(month))
+    nw_ids = await calendar_state.not_watching_ids(user_id)
     await _add_premieres(doc, present, settings, int(year), int(month), nw_ids)
 
     # (d) In-progress-but-unfinished shows from recent history.

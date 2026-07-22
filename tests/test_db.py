@@ -30,13 +30,16 @@ EXPECTED_TABLES = {
     "users", "user_prefs", "linked_identities", "sessions", "login_attempts",
     "auth_handshakes", "invites", "invite_redemptions", "retired_identifiers",
     "app_meta", "schema_version",
-    # Migration 2 — the calendar data model.
-    "api_cache", "calendar_not_watching", "calendar_view_state",
+    # Migration 2 — the calendar data model. (calendar_not_watching was folded
+    # into not_watching_shows by migration 10 and dropped.)
+    "api_cache", "calendar_view_state",
     # Migration 3 — public share links.
     "share_links",
     # Migration 4 — the per-user distrakt tracker data model.
     "distrakt_months", "distrakt_shows", "distrakt_watch_state",
     "distrakt_show_progress", "distrakt_movie_watches",
+    # Migration 9 / 10 — per-user emoji map, and show-level not-watching.
+    "distrakt_prefs", "not_watching_shows",
 }
 
 
@@ -85,6 +88,48 @@ class MigrationTests(DbTestCase):
         await db.execute(
             "INSERT INTO users (username, is_bootstrap, created_at, updated_at) "
             "VALUES ('four', 0, ?, ?)", (now, now))
+
+    async def test_migration_10_folds_per_view_marks_into_one_per_show(self):
+        """An upgrading instance keeps every not-watching mark it had, and the
+        same show marked in three different views becomes one row carrying the
+        EARLIEST of the three timestamps — the moment the user first said it."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "fold-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None  # the runner issues its own BEGIN IMMEDIATE
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 9]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'operator', ?, ?)", (now, now))
+            for endpoint, month, item, ts in (
+                ("shows/new", 7, "the-show", now + 50),
+                ("shows", 7, "the-show", now + 10),
+                ("shows/premieres", 8, "the-show", now + 30),
+                ("shows/new", 7, "other-show", now),
+            ):
+                conn.execute(
+                    "INSERT INTO calendar_not_watching "
+                    "(user_id, endpoint, year, month, item_id, created_at) "
+                    "VALUES (1, ?, 2026, ?, ?, ?)", (endpoint, month, item, ts))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            rows = {r["item_id"]: r["created_at"] for r in
+                    conn.execute("SELECT item_id, created_at FROM not_watching_shows")}
+            self.assertEqual(rows, {"the-show": now + 10, "other-show": now})
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+                             "AND name = 'calendar_not_watching'").fetchone()[0], 0)
+        finally:
+            conn.close()
 
     async def test_username_is_case_insensitive(self):
         """Without NOCASE, `Admin` and `admin` would be two separate accounts."""

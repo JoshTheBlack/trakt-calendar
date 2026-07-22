@@ -3,7 +3,7 @@
 Covers ensure_month's orchestration (freeze prior -> carry forward minus
 completed/abandoned -> premieres minus not-watching -> in-progress history) and
 the staleness helpers, with every Trakt call mocked out. The main-calendar
-not-watching overlay is NOT mocked: real rows go into calendar_not_watching
+not-watching overlay is NOT mocked: real rows go into not_watching_shows
 through app/calendar_state, since "the roster is built from this user's own
 calendar decisions" is exactly the wiring worth proving.
 
@@ -107,8 +107,9 @@ class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
     async def _mark_not_watching(self, user_id, year, month, item_id,
                                  endpoint="shows/new"):
         """A real main-calendar "not watching" mark, the same write the calendar
-        page makes."""
-        await calendar_state.set_not_watching(user_id, endpoint, year, month, item_id, True)
+        page makes. The year/month/endpoint are accepted and ignored: a mark is a
+        statement about the show, not about the view it was made in."""
+        await calendar_state.set_not_watching(user_id, item_id, True)
 
 
 class RolloverTests(RolloverTestCase):

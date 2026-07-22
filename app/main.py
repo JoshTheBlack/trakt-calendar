@@ -23,6 +23,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import admin_routes
 from . import arr
@@ -220,6 +221,40 @@ authz.declare_mount(app, "/static", AuthLevel.PUBLIC)
 authz.install(app)
 
 
+# The status codes that get a rendered page rather than Starlette's bare
+# {"detail": "Not Found"} JSON. Deliberately short: a wrong URL and a refused one
+# are what a person typing in the address bar actually hits. Everything else
+# keeps the default, because an unexpected status is worth seeing raw.
+_ERROR_PAGES: dict[int, tuple[str, str]] = {
+    404: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped."),
+    403: ("Not allowed", "Your account can't open this. If that seems wrong, ask an administrator to check your access."),
+    405: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped."),
+}
+
+
+@app.exception_handler(StarletteHTTPException)
+async def handle_http_exception(request: Request, exc: StarletteHTTPException) -> Response:
+    """A themed page for a browser, the unchanged JSON for everything else.
+
+    Split on Accept rather than on the path: /api/... is not the only thing a
+    script calls, and a page is only ever useful to something that renders one.
+    A 405 is folded into "not found" on purpose — telling a stranger that an
+    address exists but takes a different method is an inventory of the app.
+    """
+    page = _ERROR_PAGES.get(exc.status_code)
+    if page is None or "text/html" not in (request.headers.get("accept") or "").lower():
+        detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
+        return JSONResponse({"ok": False, **detail}, status_code=exc.status_code,
+                            headers=getattr(exc, "headers", None))
+    title, message = page
+    return templates.TemplateResponse(
+        request, "error.html",
+        {"status": exc.status_code, "title": title, "message": message,
+         "asset_v": ASSET_VERSION},
+        status_code=exc.status_code,
+    )
+
+
 def _valid_month(value, fallback: int) -> int:
     try:
         m = int(value)
@@ -290,6 +325,24 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
+def _filters_active(prefs: dict) -> bool:
+    return bool(prefs["genres"] or prefs["countries"] or prefs["network_filter"])
+
+
+def _filters_summary(prefs: dict) -> str:
+    """"genre, country" — which dimensions are narrowing this calendar, for the
+    header button's tooltip. Names the dimensions rather than the values, which
+    can run to dozens of networks and would not fit."""
+    named = [
+        label for label, value in (
+            ("genre", prefs["genres"]),
+            ("country", prefs["countries"]),
+            ("network", prefs["network_filter"]),
+        ) if value
+    ]
+    return ", ".join(named)
+
+
 @guard.get("/", AuthLevel.CALENDAR_APPROVED)
 async def index(request: Request):
     settings = load_settings()
@@ -338,6 +391,11 @@ async def index(request: Request):
         "card_style": prefs["card_style"] or settings.card_style,
         "day_packing": prefs["day_packing"] or settings.day_packing,
         "hide_not_watching": prefs["hide_not_watching"],
+        # Whether this viewer's month has been narrowed, and by what. The header
+        # button reads both: a filter's only other evidence is the shows that
+        # aren't there, which is indistinguishable from Trakt not listing them.
+        "filters_active": _filters_active(prefs),
+        "filters_summary": _filters_summary(prefs),
     }
 
     context = {
@@ -475,12 +533,16 @@ async def post_state(request: Request):
     """A DELTA endpoint, not a whole-document replace.
 
     Two independent payload shapes, dispatched on which keys are present:
-    `{item_id, not_watching}` toggles a single item, and `{last_count,
-    last_show_ids, history?}` records this load's change-detection baseline.
-    Sending only the piece that actually changed — instead of the whole
-    notWatching array — is what stops one open tab's save from clobbering a mark
-    a second tab just made; each write is its own INSERT/DELETE or UPDATE, not a
-    read-modify-write of a shared document.
+    `{item_id, not_watching}` toggles a single SHOW for this user everywhere, and
+    `{last_count, last_show_ids, history?}` records this load's change-detection
+    baseline for the endpoint/year/month in the query string. Sending only the
+    piece that actually changed — instead of the whole notWatching array — is
+    what stops one open tab's save from clobbering a mark a second tab just made;
+    each write is its own INSERT/DELETE or UPDATE, not a read-modify-write of a
+    shared document.
+
+    The endpoint/year/month params are read for the baseline only. A not-watching
+    mark has no month in it: it is a statement about the show.
     """
     user = await auth.current_user(request)
     today = date.today()
@@ -499,7 +561,7 @@ async def post_state(request: Request):
         if not item_id:
             return JSONResponse({"ok": False, "error": "Missing item_id"}, status_code=400)
         await calendar_state.set_not_watching(
-            user.user_id, endpoint.key, year, month, item_id, bool(payload.get("not_watching")),
+            user.user_id, item_id, bool(payload.get("not_watching")),
         )
         return JSONResponse({"ok": True})
 
@@ -531,6 +593,43 @@ _CARD_STYLES = ("vertical", "horizontal", "poster")
 _DAY_PACKINGS = ("stacked", "packed")
 
 
+def _filter_spec(value) -> str:
+    """Normalize a `-anime, drama` genre/country spec to comma-separated tokens.
+
+    Only tidying — app/calendar_filter.py lowercases and splits on ',' itself, so
+    this exists to keep what the user typed from being echoed back with the empty
+    tokens and ragged spacing a half-edited list leaves behind.
+    """
+    return ", ".join(t for t in (s.strip() for s in str(value or "").split(",")) if t)
+
+
+def _network_list(value) -> list[str]:
+    """Networks as a de-duplicated list, from either a JSON array or the comma
+    string the textarea produces. Names are matched exactly on the read path, so
+    they keep their case; the duplicate check does not."""
+    raw = [str(v) for v in value] if isinstance(value, list) else str(value or "").split(",")
+    seen: set[str] = set()
+    names: list[str] = []
+    for name in (item.strip() for item in raw):
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            names.append(name)
+    return names
+
+
+@guard.get("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
+async def get_me_prefs(request: Request):
+    """The viewer's own view preferences, for the Filters panel to populate from.
+
+    Separate from /api/settings, which is ADMIN-only and describes the instance.
+    These are the values that actually filter this person's calendar, so every
+    signed-in account has to be able to read them back.
+    """
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    return JSONResponse({"ok": True, "prefs": prefs})
+
+
 @guard.post("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
 async def post_me_prefs(request: Request):
     """Persist a partial update to the viewer's own calendar view preferences.
@@ -538,7 +637,10 @@ async def post_me_prefs(request: Request):
     Card style, day packing, and hide-not-watching used to write settings.json —
     an admin-only file — so anyone else's choice applied for one page load and
     was gone on the next. This writes user_prefs instead, so it sticks for every
-    account.
+    account. The genre/country/network filters are here for the same reason: they
+    were only editable on the admin Settings screen, which wrote the app-wide
+    seed and so changed nothing for the admin's own calendar and offered nobody
+    else any way to filter at all.
 
     Also mirrors into share_links when the user has ever opened the Share panel:
     that table's owner-default columns are seeded from user_prefs at creation and
@@ -561,6 +663,14 @@ async def post_me_prefs(request: Request):
         updates["day_packing"] = data["day_packing"]
     if "hide_not_watching" in data:
         updates["hide_not_watching"] = bool(data["hide_not_watching"])
+    # Present-but-empty is a real value here — it is how a filter is CLEARED —
+    # so these key off presence rather than truthiness.
+    if "genres" in data:
+        updates["genres"] = _filter_spec(data["genres"])
+    if "countries" in data:
+        updates["countries"] = _filter_spec(data["countries"])
+    if "network_filter" in data:
+        updates["network_filter"] = _network_list(data["network_filter"])
     if not updates:
         return JSONResponse({"ok": False, "error": "Nothing to update"}, status_code=400)
     await auth.update_user_prefs(user.user_id, **updates)
@@ -783,7 +893,7 @@ async def auth_device_poll(request: Request):
     # account" notice up with nothing in the UI able to clear it, and leaves the
     # tracker refusing this account for want of a linked identity.
     admin = await auth.current_user(request)
-    linked = await trakt_routes.adopt_app_token(admin.user_id, settings) if admin else False
+    linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, settings)
     # The token itself is not echoed back. It is already saved, so sending it to
     # the browser would put a Trakt bearer token in page memory for no purpose.
     return JSONResponse({
@@ -792,7 +902,29 @@ async def auth_device_poll(request: Request):
         "expires_at": settings.trakt_token_expires_at,
         # Lets the Settings screen take the reconnect notice down without a reload.
         "trakt_linked": linked,
+        # And, when it can't, say so on the spot. A successful authorization that
+        # silently failed to link is the exact state that leaves the reconnect
+        # notice up looking like it ignored what was just done.
+        "trakt_link_error": link_error,
     })
+
+
+@guard.post("/api/auth/trakt/adopt", AuthLevel.ADMIN)
+async def auth_trakt_adopt(request: Request):
+    """Retry linking the saved app-wide Trakt token to the calling administrator.
+
+    The reconnect notice asks for exactly this, and until now the only thing that
+    performed it was a fresh device authorization — so an adoption that failed
+    for a reason re-authorizing does not fix (the Trakt account already belonging
+    to another login here) left the notice up no matter how many times the
+    operator re-ran the flow. This is the same operation on its own, with the
+    reason reported.
+    """
+    admin = await auth.current_user(request)
+    linked, link_error = await trakt_routes.adopt_app_token(admin.user_id, load_settings())
+    if not linked:
+        return JSONResponse({"ok": False, "error": link_error}, status_code=409)
+    return JSONResponse({"ok": True})
 
 
 @guard.post("/api/auth/refresh", AuthLevel.ADMIN)
@@ -976,7 +1108,7 @@ async def api_distrakt_list(request: Request):
     return JSONResponse({"ok": True, "month": _month_key(year, month), "shows": (doc or {}).get("shows", [])})
 
 
-async def _apply_not_watching(user_id: int, month_key: str, year: int, month: int,
+async def _apply_not_watching(user_id: int, month_key: str,
                               shows: list[dict], committed: bool) -> list[dict]:
     """This user's own main-calendar not-watching marks, date-gated on the month's
     1st (committed):
@@ -987,8 +1119,12 @@ async def _apply_not_watching(user_id: int, month_key: str, year: int, month: in
       - COMMITTED (on/after the 1st): not-watching promotes the roster show to
         Abandoned (persisted, form frozen). One-directional — never un-abandons;
         the dedicated /distrakt toggle + Delete stay the source of truth. The
-        `abandoned` guard means a steady-state read does no extra writes."""
-    nw_ids = await calendar_state.not_watching_ids(user_id, year, month)
+        `abandoned` guard means a steady-state read does no extra writes.
+
+    The marks read here are the user's whole set, not one month's: "not watching"
+    is a fact about the show, so a show they turned off on the calendar is one
+    the tracker should not be counting whichever month they said it in."""
+    nw_ids = await calendar_state.not_watching_ids(user_id)
     if not nw_ids:
         return shows
 
@@ -1104,7 +1240,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
 
     with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
         shows = await distrakt_store.compute_live_shows(user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup) if records else []
-    shows = await _apply_not_watching(user_id, month_key, year, month, shows, committed)
+    shows = await _apply_not_watching(user_id, month_key, shows, committed)
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
