@@ -66,6 +66,17 @@ class Settings:
     pagination_limit: int = 300
     hide_not_watching: bool = False
     cache_ttl_minutes: int = 720  # detail/cast/episode cache lifetime (phase 2)
+    # Calendar window cache lifetime. Trakt's calendar endpoints carry no ETag or
+    # Last-Modified (verified against the live API), so a window is refreshed on a
+    # short TTL rather than a conditional request. Short because premiere dates in
+    # the current/near month shift; a far-past or far-future month rarely changes
+    # but costs nothing to leave on the same clock.
+    calendar_cache_ttl_minutes: int = 10
+    # Total budget for the shared api_cache blob table. The heartbeat evicts the
+    # least-recently-stored entries once the summed byte_size crosses this. Detail
+    # lookups were measured at ~213 KB each, so 1 GB is on the order of a few
+    # thousand of them — a handful of active users' browsing.
+    api_cache_max_bytes: int = 1024 * 1024 * 1024
     day_packing: str = "stacked"   # "stacked" | "packed"
     card_style: str = "vertical"   # "vertical" | "horizontal" | "poster" (poster-only wall, info on hover)
     # Sonarr / Radarr integration (add-to-library buttons)
@@ -121,7 +132,8 @@ class Settings:
         nf = clean.get("network_filter")
         if isinstance(nf, str):
             clean["network_filter"] = [s.strip() for s in nf.split(",") if s.strip()]
-        for int_field in ("pagination_limit", "cache_ttl_minutes", "sonarr_quality_profile_id",
+        for int_field in ("pagination_limit", "cache_ttl_minutes", "calendar_cache_ttl_minutes",
+                          "api_cache_max_bytes", "sonarr_quality_profile_id",
                           "sonarr_language_profile_id", "radarr_quality_profile_id",
                           "trakt_token_expires_at"):
             if int_field in clean:

@@ -305,6 +305,18 @@ body.hide-not-watching .card.not-watching { display: none; }
 .auth-box { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: -4px; }
 .auth-box .hint { flex-basis: 100%; }
 
+/* Share modal */
+.share-row { border-top: 1px solid var(--card-border); padding-top: 14px; }
+.share-row:first-of-type { border-top: none; padding-top: 0; }
+.checkbox-label { display: flex; align-items: center; gap: 10px; font-size: 0.85rem; font-weight: 600; cursor: pointer; }
+.checkbox-label input { width: 18px; height: 18px; accent-color: var(--gold); }
+.share-link-box { display: flex; gap: 8px; margin-top: 8px; }
+.share-link-box input { flex: 1; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; font-size: 0.8rem; }
+.share-slug-edit { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.share-slug-edit input { background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; }
+.hint.ok { color: #4caf50; }
+.hint.err { color: var(--crimson); }
+
 /* Toasts (Sonarr/Radarr add feedback) */
 #toastHost { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10001; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
 .toast { padding: 11px 18px; border-radius: 10px; font-size: 0.85rem; font-weight: 600; color: #fff; box-shadow: 0 12px 32px rgba(0,0,0,0.55); opacity: 0; transform: translateY(12px); transition: opacity .25s ease, transform .25s ease; max-width: 92vw; text-align: center; }

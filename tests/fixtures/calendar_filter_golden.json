@@ -1,0 +1,37 @@
+{
+  "_comment": "Golden regression fixture for the read-time genre/country filter (app/calendar_filter.py). A representative unfiltered calendar window (raw genre slugs + country, the only fields the filter reads) plus the item set Trakt's OWN server-side filter returned for the SAME window under each of the two spec styles the app produces. The expected sets are hand-derived from Trakt's documented filter semantics — which were verified item-for-item against the live API — NOT computed by the predicate under test, so this stays a genuine regression guard against the predicate silently drifting. Entries deliberately cover hyphenated genre slugs, the anime-vs-animation distinction, empty genres, missing country, multi-genre exclude hits, and allowlist misses.",
+  "media_key": "show",
+  "exclude_spec": {"genres": "-anime,-home-and-garden,-music,-talk-show", "countries": "-kr"},
+  "include_spec": {
+    "genres": "-animation,-anime,-children,-game-show,-home-and-garden,-music,-reality,-special-interest,-talk-show",
+    "countries": "ar,au,at,be,br,ca,cl,cn,co,cz,dk,fi,fr,de,gr,hk,is,in,ie,it,jp,kr,mx,nl,nz,no,pl,pt,za,es,se,ch,tr,gb,us"
+  },
+  "entries": [
+    {"show": {"ids": {"slug": "e01-drama-us"}, "genres": ["drama"], "country": "us"}},
+    {"show": {"ids": {"slug": "e02-anime-jp"}, "genres": ["anime"], "country": "jp"}},
+    {"show": {"ids": {"slug": "e03-hg-us"}, "genres": ["home-and-garden"], "country": "us"}},
+    {"show": {"ids": {"slug": "e04-music-gb"}, "genres": ["music"], "country": "gb"}},
+    {"show": {"ids": {"slug": "e05-talk-us"}, "genres": ["talk-show"], "country": "us"}},
+    {"show": {"ids": {"slug": "e06-drama-kr"}, "genres": ["drama"], "country": "kr"}},
+    {"show": {"ids": {"slug": "e07-gameshow-us"}, "genres": ["game-show"], "country": "us"}},
+    {"show": {"ids": {"slug": "e08-reality-us"}, "genres": ["reality"], "country": "us"}},
+    {"show": {"ids": {"slug": "e09-animation-us"}, "genres": ["animation"], "country": "us"}},
+    {"show": {"ids": {"slug": "e10-children-us"}, "genres": ["children"], "country": "us"}},
+    {"show": {"ids": {"slug": "e11-specialint-us"}, "genres": ["special-interest"], "country": "us"}},
+    {"show": {"ids": {"slug": "e12-comedy-jp"}, "genres": ["comedy"], "country": "jp"}},
+    {"show": {"ids": {"slug": "e13-drama-ru"}, "genres": ["drama"], "country": "ru"}},
+    {"show": {"ids": {"slug": "e14-nogenre-us"}, "genres": [], "country": "us"}},
+    {"show": {"ids": {"slug": "e15-drama-nocountry"}, "genres": ["drama"], "country": ""}},
+    {"show": {"ids": {"slug": "e16-anime-us"}, "genres": ["anime"], "country": "us"}},
+    {"show": {"ids": {"slug": "e17-drama-anime-us"}, "genres": ["drama", "anime"], "country": "us"}},
+    {"show": {"ids": {"slug": "e18-drama-comedy-gb"}, "genres": ["drama", "comedy"], "country": "gb"}}
+  ],
+  "expected_exclude": [
+    "e01-drama-us", "e07-gameshow-us", "e08-reality-us", "e09-animation-us",
+    "e10-children-us", "e11-specialint-us", "e12-comedy-jp", "e13-drama-ru",
+    "e14-nogenre-us", "e15-drama-nocountry", "e18-drama-comedy-gb"
+  ],
+  "expected_include": [
+    "e01-drama-us", "e06-drama-kr", "e12-comedy-jp", "e14-nogenre-us", "e18-drama-comedy-gb"
+  ]
+}

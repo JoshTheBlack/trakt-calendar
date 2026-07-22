@@ -35,7 +35,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, authz, db, trakt_auth
+from . import auth, authz, calendar_state, db, trakt_auth
 from .auth import AuthLevel
 from .config import load_settings
 
@@ -224,14 +224,16 @@ async def _import_legacy_calendar_state(user_id: int) -> None:
     """Import the legacy `data/state_*.json` files onto the account just created.
 
     Those files hold the pre-accounts "not watching" decisions and per-month
-    change-detection state, keyed by endpoint/year/month with no user. The
-    per-user tables that replace them don't exist yet, so this is a no-op for now.
-
-    TODO: implement once the per-user calendar tables land, keeping this call
-    site. The files must not be deleted until the import has succeeded at least
-    once.
+    change-detection state, keyed by endpoint/year/month with no user; the
+    importer backs them up, then copies them into the per-user calendar tables
+    under this account. A failure is logged rather than raised — onboarding must
+    not be blocked by a local file hiccup, and the originals are left in place so
+    a retry can still succeed.
     """
-    return None
+    try:
+        await calendar_state.import_legacy_state(user_id)
+    except Exception:
+        logger.warning("Legacy calendar state import failed for user %s", user_id, exc_info=True)
 
 
 # ---------------------------------------------------------------------------

@@ -172,6 +172,72 @@ def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings) -> 
     )
 
 
+async def get_user_prefs(user_id: int) -> dict:
+    """A user's view preferences, in the shape the calendar read path and the
+    per-user pref-write endpoint both use. Falls back to empty/default values if
+    the row is somehow missing (it is created alongside every user, but a
+    fallback here is cheap and keeps this a total function)."""
+    row = await db.fetch_one(
+        "SELECT endpoint, card_style, day_packing, hide_not_watching, "
+        "network_filter_json, genres, countries FROM user_prefs WHERE user_id = ?",
+        (user_id,),
+    )
+    if row is None:
+        return {
+            "endpoint": None, "card_style": None, "day_packing": None,
+            "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
+        }
+    return {
+        "endpoint": row["endpoint"],
+        "card_style": row["card_style"],
+        "day_packing": row["day_packing"],
+        "hide_not_watching": bool(row["hide_not_watching"]),
+        "network_filter": json.loads(row["network_filter_json"] or "[]"),
+        "genres": row["genres"] or "",
+        "countries": row["countries"] or "",
+    }
+
+
+# Columns a caller may update through update_user_prefs, keyed by the dict key
+# it's passed under (network_filter/hide_not_watching need a transform on the
+# way into their column; the rest write straight through).
+_USER_PREF_FIELDS = frozenset({
+    "endpoint", "card_style", "day_packing", "hide_not_watching",
+    "network_filter", "genres", "countries",
+})
+
+
+async def update_user_prefs(user_id: int, **fields) -> None:
+    """Persist a partial update to one user's view preferences. Unknown keys and
+    None values are ignored, so a caller can pass through a request body's dict
+    as-is without first stripping out whatever it didn't set."""
+    updates = {k: v for k, v in fields.items() if k in _USER_PREF_FIELDS and v is not None}
+    if not updates:
+        return
+    columns: list[str] = []
+    params: list = []
+    for key, value in updates.items():
+        if key == "hide_not_watching":
+            columns.append("hide_not_watching = ?")
+            params.append(int(bool(value)))
+        elif key == "network_filter":
+            columns.append("network_filter_json = ?")
+            params.append(json.dumps(list(value)))
+        else:
+            columns.append(f"{key} = ?")
+            params.append(value)
+    params.append(user_id)
+    await db.execute(f"UPDATE user_prefs SET {', '.join(columns)} WHERE user_id = ?", tuple(params))
+
+
+async def set_user_timezone(user_id: int, tz: str) -> None:
+    """Persist the viewer's saved timezone. Validating that `tz` is a real IANA
+    zone is the caller's job (it needs zoneinfo either way, to build the picker)."""
+    await db.execute(
+        "UPDATE users SET timezone = ?, updated_at = ? WHERE id = ?", (tz, db.now(), user_id),
+    )
+
+
 def insert_linked_identity(
     conn: db.Connection,
     *,
@@ -450,6 +516,12 @@ async def username_availability_error(username: str) -> str | None:
     if await find_user_by_username(candidate):
         return "That username is taken."
     if await identifier_is_retired("username", candidate):
+        return "That username is taken."
+    # A username may not shadow another user's custom share slug (§1.10's
+    # cross-namespace rule, checked in the other direction by
+    # share_links.slug_error) — queried directly rather than importing
+    # app.share_links, which itself imports this module.
+    if await db.fetch_one("SELECT 1 FROM share_links WHERE custom_slug = ?", (candidate,)):
         return "That username is taken."
     return None
 
@@ -1538,11 +1610,14 @@ async def list_sessions(user_id: int):
 
 
 # Per-user tables cleared by wipe_user_data(), beyond the account row itself.
-# Empty today: calendar_not_watching, calendar_view_state, and the four
-# distrakt_* tables don't exist yet (they are later work). Each entry is
-# (table_name, user_id_column) — a chat that adds one of those tables appends
-# its own entry here rather than teaching wipe_user_data a new special case.
-WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = ()
+# Each entry is (table_name, user_id_column); a later table that holds per-user
+# data appends its own entry here rather than teaching wipe_user_data a new
+# special case. The per-user distrakt tables are added here when that data layer
+# lands.
+WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = (
+    ("calendar_not_watching", "user_id"),
+    ("calendar_view_state", "user_id"),
+)
 
 
 async def wipe_user_data(user_id: int) -> None:
@@ -1577,10 +1652,12 @@ async def delete_user(user_id: int, *, actor_user_id: int) -> None:
     invites.created_by, which is SET NULL so that deleting the admin who
     issued an invite doesn't revoke it out from under someone mid-redemption —
     so this single DELETE fans out to sessions, linked_identities,
-    auth_handshakes, and invite_redemptions with no row left behind in any of
-    them. The account's username is recorded in retired_identifiers so a new
-    registration can't silently inherit a `/u/<username>` link that was already
-    shared. Raises CannotDeleteSelf or LastAdmin rather than performing either.
+    auth_handshakes, invite_redemptions, and share_links with no row left
+    behind in any of them. The account's username, custom share slug, and
+    share token are all recorded in retired_identifiers so a new registration
+    can't silently inherit a `/u/<username>`, `/c/<slug>`, or `/s/<token>` link
+    that was already shared. Raises CannotDeleteSelf or LastAdmin rather than
+    performing either.
     """
     if user_id == actor_user_id:
         raise CannotDeleteSelf()
@@ -1599,6 +1676,21 @@ async def delete_user(user_id: int, *, actor_user_id: int) -> None:
                 "INSERT OR IGNORE INTO retired_identifiers (kind, value, retired_at) "
                 "VALUES ('username', ?, ?)",
                 (row["username"], ts),
+            )
+        share = conn.execute(
+            "SELECT custom_slug, token FROM share_links WHERE user_id = ?", (user_id,),
+        ).fetchone()
+        if share is not None:
+            if share["custom_slug"]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO retired_identifiers (kind, value, retired_at) "
+                    "VALUES ('slug', ?, ?)",
+                    (share["custom_slug"], ts),
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO retired_identifiers (kind, value, retired_at) "
+                "VALUES ('token', ?, ?)",
+                (share["token"], ts),
             )
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 

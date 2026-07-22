@@ -409,11 +409,106 @@ CREATE TABLE app_meta (
 );
 """
 
+# Migration 2 — the calendar data model. A generic TTL blob cache that both the
+# per-show detail lookups (which used to write one file each under data/cache/)
+# and the new calendar window cache share, so there is one TTL-blob-cache
+# mechanism in the app rather than two; plus the per-user "not watching" marks
+# and change-detection fields that replace the shared per-(endpoint,year,month)
+# state_*.json files, keyed additionally by user_id.
+MIGRATION_2 = """
+CREATE TABLE api_cache (
+    cache_key   TEXT PRIMARY KEY,
+    -- zlib-compressed JSON. Trakt's calendar/detail payloads are highly
+    -- repetitive and compress well, so the bytes are stored compressed from the
+    -- start rather than retrofitted.
+    payload     BLOB    NOT NULL,
+    cached_at   INTEGER NOT NULL,
+    -- Per-entry lifetime, because one global constant will not do: a calendar
+    -- window wants ~10 minutes while a season lookup is good for a day. NULL for
+    -- entries whose reader decides freshness itself (the detail lookups, which
+    -- pass a TTL to get() at read time) — those are aged out by the size cap only.
+    ttl_seconds INTEGER,
+    -- Stored per row so the size cap is a single SUM(byte_size) rather than
+    -- stat-ing the database file or decompressing every payload to weigh it.
+    byte_size   INTEGER NOT NULL
+);
+-- The size-cap eviction walks oldest-stored first; the TTL sweep filters on the
+-- same column, so both are index-served.
+CREATE INDEX ix_api_cache_cached_at ON api_cache(cached_at);
+
+-- One row per calendar item a user has marked "not watching", replacing the
+-- shared notWatching array in each state_*.json. Rows rather than a document is
+-- what makes a single toggle a delta (INSERT/DELETE of one item_id) instead of
+-- a whole-array read-modify-write that loses updates across two open tabs.
+CREATE TABLE calendar_not_watching (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint   TEXT    NOT NULL,
+    year       INTEGER NOT NULL,
+    month      INTEGER NOT NULL,
+    -- The calendar card's data-id: the show/movie slug when Trakt gave one, else
+    -- str(trakt_id) — exactly what the normalizer emits as an item's "id".
+    item_id    TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (user_id, endpoint, year, month, item_id)
+);
+
+-- The per-viewer change-detection fields ("N new since YOU last looked"). These
+-- are inherently per-user, so they live here and not in the shared window cache.
+CREATE TABLE calendar_view_state (
+    user_id            INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint           TEXT    NOT NULL,
+    year               INTEGER NOT NULL,
+    month              INTEGER NOT NULL,
+    last_count         INTEGER,
+    last_show_ids_json TEXT,
+    history_json       TEXT,
+    updated_at         INTEGER NOT NULL,
+    PRIMARY KEY (user_id, endpoint, year, month)
+);
+"""
+
+# Migration 3 — public share links. One row per user who has ever opened the
+# share panel (created lazily, not for every account up front). The three
+# public URL shapes (/s/<token>, /u/<username>, /c/<slug>) each resolve to one
+# user's calendar; `enabled_*` controls which shapes actually answer, and
+# `preferred_kind` is only which one the UI's copy button reaches for — all
+# enabled shapes keep working regardless of which is preferred. The trailing
+# columns are the owner's OWN view-option defaults, used when a share request
+# doesn't override them with a query param.
+MIGRATION_3 = """
+CREATE TABLE share_links (
+    user_id             INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    token               TEXT    NOT NULL UNIQUE,
+    -- NULL until the owner opts into a custom slug. NOCASE so it collides
+    -- correctly with both other slugs and usernames, which are also NOCASE.
+    custom_slug         TEXT    UNIQUE COLLATE NOCASE,
+    preferred_kind      TEXT    NOT NULL DEFAULT 'token'
+                            CHECK (preferred_kind IN ('token', 'username', 'slug')),
+    -- The token form defaults on so a brand-new share panel already has a
+    -- working link; the human-readable forms are opt-in (§1.10).
+    enabled_token       INTEGER NOT NULL DEFAULT 1,
+    enabled_username    INTEGER NOT NULL DEFAULT 0,
+    enabled_slug        INTEGER NOT NULL DEFAULT 0,
+    created_at          INTEGER NOT NULL,
+    token_rotated_at    INTEGER NOT NULL,
+    -- Owner defaults for the public view. A query param on the share request
+    -- always wins; these are the fallback before the app-wide default.
+    endpoint            TEXT,
+    card_style          TEXT,
+    day_packing         TEXT,
+    hide_not_watching   INTEGER NOT NULL DEFAULT 0,
+    network_filter_json TEXT    NOT NULL DEFAULT '[]',
+    timezone            TEXT
+);
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
+    (2, MIGRATION_2),
+    (3, MIGRATION_3),
 ]
 
 

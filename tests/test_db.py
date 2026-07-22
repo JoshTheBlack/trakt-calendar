@@ -30,6 +30,10 @@ EXPECTED_TABLES = {
     "users", "user_prefs", "linked_identities", "sessions", "login_attempts",
     "auth_handshakes", "invites", "invite_redemptions", "retired_identifiers",
     "app_meta", "schema_version",
+    # Migration 2 — the calendar data model.
+    "api_cache", "calendar_not_watching", "calendar_view_state",
+    # Migration 3 — public share links.
+    "share_links",
 }
 
 

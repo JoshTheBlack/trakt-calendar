@@ -46,13 +46,11 @@ async function setLayout(key, value) {
         document.body.classList.add('pack-' + value);
     }
     updateCols();
-    // The layout already changed on screen; this only persists it. It writes the
-    // app-wide settings file, which is an administrator's to change, so for
-    // anyone else the choice applies to this page load and isn't saved. Per-user
-    // view preferences are what will make it stick for everyone.
-    if (!window.IS_ADMIN) return;
+    // The layout already changed on screen; this only persists it — to this
+    // account's own view preferences, so it sticks on the next visit for
+    // whoever is signed in, not just an administrator.
     try {
-        await fetch('/api/settings', {
+        await fetch('/api/me/prefs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ [key]: value })
@@ -215,11 +213,9 @@ async function toggleHideNotWatching() {
     label.textContent = hide ? '🚫 Hiding' : '👁️ Showing all';
     btn.classList.toggle('active', hide);
     updateEmptyDays();
-    // Persists to the app-wide settings file, so same as setLayout: an
-    // administrator's to save, everyone else's for this page load only.
-    if (!window.IS_ADMIN) return;
+    // Persists to this account's own view preferences (same as setLayout).
     try {
-        await fetch('/api/settings', {
+        await fetch('/api/me/prefs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ hide_not_watching: hide })
@@ -227,24 +223,65 @@ async function toggleHideNotWatching() {
     } catch (e) { console.error(e); }
 }
 
+// ---- Timezone picker (day/time grouping) ----
+// No automatic browser detection: the saved default is a deliberate choice, and
+// "use my device timezone" is one click away rather than something silently
+// applied on load. Changing it reloads the page, since day headers and air
+// times are computed server-side for the viewer's saved zone.
+async function setViewerTimezone(tz) {
+    if (!tz) return;
+    try {
+        const res = await fetch('/api/me/timezone', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ timezone: tz })
+        });
+        if (!res.ok) throw new Error('save failed');
+        window.location.reload();
+    } catch (e) {
+        console.error(e);
+        toast('Could not save timezone', false);
+    }
+}
+
+function useDeviceTimezone() {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (!tz) return;
+    const select = document.getElementById('tzSelect');
+    if (select) select.value = tz;
+    setViewerTimezone(tz);
+}
+
 // ---- State storage ----
+// A DELTA endpoint: a toggle sends only the one item that changed, and the
+// change-detection baseline (last_count/last_show_ids/history) is written
+// separately, once per load. Neither is a read-modify-write of the whole
+// document, so two open tabs can't lose each other's marks.
 async function loadState() {
     const res = await fetch(STATE_URL, { method: 'GET', cache: 'no-store' });
     if (!res.ok) throw new Error('Failed to load state: ' + res.status);
     return res.json();
 }
 
-async function saveState() {
-    const payload = {
-        notWatching: Array.from(notWatching),
-        history: historyLog,
-        lastCount: currentTotalShows,
-        lastShowIds: currentShowIds
-    };
+async function saveNotWatchingDelta(itemId, isNotWatching) {
     const res = await fetch(STATE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify({ item_id: itemId, not_watching: isNotWatching })
+    });
+    if (!res.ok) throw new Error('Failed to save state: ' + res.status);
+    return res.json();
+}
+
+async function saveViewBaseline() {
+    const res = await fetch(STATE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            last_count: currentTotalShows,
+            last_show_ids: currentShowIds,
+            history: historyLog
+        })
     });
     if (!res.ok) throw new Error('Failed to save state: ' + res.status);
     return res.json();
@@ -307,7 +344,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
 
         updateStats();
-        await saveState();
+        await saveViewBaseline();
     } catch (e) {
         console.error(e);
         setSyncStatus(false, 'Load failed');
@@ -343,7 +380,7 @@ async function toggleWatch(btn, event) {
     if (isNotWatching) notWatching.add(id); else notWatching.delete(id);
     updateStats();
     try {
-        await saveState();
+        await saveNotWatchingDelta(id, isNotWatching);
     } catch (e) {
         console.error(e);
         setSyncStatus(false, 'Save failed');
@@ -570,6 +607,120 @@ async function saveSettings(event) {
         alert('⚠️ Could not save settings.');
     }
     return false;
+}
+
+// ---- Public share links (Share panel) ----
+let shareState = null;
+let shareSlugTimer = null;
+
+function renderShare() {
+    if (!shareState) return;
+    document.getElementById('share_no_base_url').hidden = !shareState.base_url_missing;
+    document.getElementById('share_enable_token').checked = shareState.enabled.token;
+    document.getElementById('share_enable_username').checked = shareState.enabled.username;
+    document.getElementById('share_enable_slug').checked = shareState.enabled.slug;
+    document.getElementById('share_slug_input').value = shareState.custom_slug || '';
+    document.getElementById('share_preferred').value = shareState.preferred_kind;
+
+    for (const kind of ['token', 'username', 'slug']) {
+        const box = document.getElementById('share_box_' + kind);
+        const url = shareState.urls[kind];
+        box.hidden = !url;
+        if (url) document.getElementById('share_url_' + kind).value = url;
+    }
+}
+
+async function openShare() {
+    try {
+        const res = await fetch('/api/me/share', { cache: 'no-store' });
+        shareState = await res.json();
+        renderShare();
+    } catch (e) { console.error(e); }
+    document.getElementById('shareModal').classList.add('open');
+}
+
+function closeShare() {
+    document.getElementById('shareModal').classList.remove('open');
+}
+
+async function setShareEnabled(kind, enabled) {
+    try {
+        const res = await fetch('/api/me/share/enabled', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind, enabled })
+        });
+        shareState = await res.json();
+        renderShare();
+    } catch (e) { toast('Could not update sharing', false); }
+}
+
+async function setSharePreferred(kind) {
+    try {
+        const res = await fetch('/api/me/share/preferred', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind })
+        });
+        shareState = await res.json();
+        renderShare();
+    } catch (e) { toast('Could not update sharing', false); }
+}
+
+function checkShareSlug() {
+    clearTimeout(shareSlugTimer);
+    const slug = document.getElementById('share_slug_input').value.trim();
+    const status = document.getElementById('share_slug_status');
+    if (!slug) { status.textContent = ''; status.className = 'hint'; return; }
+    status.textContent = 'Checking…';
+    status.className = 'hint';
+    shareSlugTimer = setTimeout(async () => {
+        try {
+            const res = await fetch('/api/me/share/slug-check?slug=' + encodeURIComponent(slug), { cache: 'no-store' });
+            const d = await res.json();
+            if (d.available) {
+                status.textContent = 'Available — saving…';
+                status.className = 'hint ok';
+                const saveRes = await fetch('/api/me/share/slug', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ slug })
+                });
+                const saved = await saveRes.json();
+                if (saved.ok) {
+                    shareState = saved;
+                    renderShare();
+                    status.textContent = 'Saved';
+                    status.className = 'hint ok';
+                } else {
+                    status.textContent = saved.error || 'Could not save';
+                    status.className = 'hint err';
+                }
+            } else {
+                status.textContent = d.error || 'Not available';
+                status.className = 'hint err';
+            }
+        } catch (e) {
+            status.textContent = 'Could not check availability';
+            status.className = 'hint err';
+        }
+    }, 500);
+}
+
+async function rotateShareToken() {
+    if (!confirm('Rotate the token link? The old link will stop working immediately.')) return;
+    try {
+        const res = await fetch('/api/me/share/rotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        shareState = await res.json();
+        renderShare();
+        toast('Token link rotated', true);
+    } catch (e) { toast('Could not rotate token', false); }
+}
+
+function copyShareUrl(kind) {
+    const input = document.getElementById('share_url_' + kind);
+    if (!input || !input.value) return;
+    navigator.clipboard.writeText(input.value).then(
+        () => toast('Link copied', true),
+        () => toast('Could not copy link', false)
+    );
 }
 
 // ---- Trakt OAuth device-code authorization ----

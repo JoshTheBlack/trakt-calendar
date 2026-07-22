@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from itertools import groupby
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import FastAPI, Request
@@ -26,6 +27,9 @@ from . import arr
 from . import auth
 from . import auth_routes
 from . import authz
+from . import cache
+from . import calendar_cache
+from . import calendar_state
 from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
@@ -33,7 +37,8 @@ from . import logos
 from . import plex_auth
 from . import plex_routes
 from . import seer
-from . import state as state_store
+from . import share_links
+from . import share_routes
 from . import trakt_auth
 from . import trakt_routes
 from . import watch_history
@@ -44,7 +49,6 @@ from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
 from .trakt import (
     TraktError,
-    fetch_calendar,
     fetch_details,
     fetch_season_detail,
     fetch_show_seasons,
@@ -157,6 +161,9 @@ async def _sweep_auth_rows() -> None:
     await auth.sweep_expired_sessions(now)
     await db.execute("DELETE FROM auth_handshakes WHERE expires_at <= ?", (now,))
     await auth.sweep_login_attempts(now)
+    # Age out expired cache windows and hold the shared blob table under its
+    # size cap, evicting least-recently-stored first.
+    await cache.sweep(now, load_settings().api_cache_max_bytes)
 
 
 async def _heartbeat_loop() -> None:
@@ -180,6 +187,9 @@ async def _heartbeat_loop() -> None:
 async def lifespan(_app: FastAPI):
     # Schema first — everything after this point may touch the database.
     await db.init()
+    # The detail-lookup cache moved into the api_cache table; drop the old
+    # data/cache/*.json directory now that the schema that replaces it is in place.
+    cache.discard_legacy_dir()
     # Generated once and persisted: this UUID names the INSTALLATION to Plex,
     # not any particular user, and every PIN request needs it.
     await plex_auth.ensure_client_identifier()
@@ -208,6 +218,7 @@ app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
 app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
+app.include_router(share_routes.router)
 
 # Every route below is registered through this, which requires an access level
 # and refuses to register one without it.
@@ -269,15 +280,32 @@ def _picker_context(request: Request, settings, year: int, endpoint):
     }
 
 
+def _resolve_viewer_tz(user, settings) -> ZoneInfo:
+    """The viewer's saved timezone, falling back to the app-wide default and then
+    UTC if either name turns out to be unusable (e.g. a stale settings.json value
+    predating a tzdata rename)."""
+    for name in (user.timezone, settings.timezone, "UTC"):
+        if not name:
+            continue
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            continue
+    return ZoneInfo("UTC")
+
+
 @guard.get("/", AuthLevel.CALENDAR_APPROVED)
 async def index(request: Request):
     settings = load_settings()
     # Already resolved and cached by the dependency that let this request in.
     user = await auth.current_user(request)
     is_admin = bool(user and user.is_admin)
+    prefs = await auth.get_user_prefs(user.user_id)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
-    endpoint_key = request.query_params.get("endpoint") or settings.endpoint or DEFAULT_ENDPOINT
+    endpoint_key = (
+        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
+    )
     endpoint = get_endpoint(endpoint_key)
 
     # No month specified -> show the month/year picker landing page (like the original front page).
@@ -285,6 +313,7 @@ async def index(request: Request):
         return templates.TemplateResponse(request, "pick.html", _picker_context(request, settings, year, endpoint))
 
     month = _valid_month(request.query_params.get("month"), today.month)
+    tz = _resolve_viewer_tz(user, settings)
 
     items: list[dict] = []
     error: str | None = None
@@ -292,7 +321,11 @@ async def index(request: Request):
         error = "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
     else:
         try:
-            items = await fetch_calendar(endpoint, settings, year, month)
+            items, _as_of = await calendar_cache.read_month(
+                endpoint, settings, tz=tz, year=year, month=month,
+                genres=prefs["genres"], countries=prefs["countries"],
+                network_filter=prefs["network_filter"] or None,
+            )
         except TraktError as exc:
             error = str(exc)
 
@@ -301,12 +334,23 @@ async def index(request: Request):
         for day, rows in groupby(items, key=lambda i: i["air_date"])
     ]
 
+    # Per-user view preferences (card style, day packing, hide-not-watching) —
+    # distinct from `settings`, which stays the app-wide defaults new accounts
+    # are seeded from and the admin Settings screen's own values.
+    view = {
+        "card_style": prefs["card_style"] or settings.card_style,
+        "day_packing": prefs["day_packing"] or settings.day_packing,
+        "hide_not_watching": prefs["hide_not_watching"],
+    }
+
     context = {
         "request": request,
         "settings": settings,
+        "view": view,
         "endpoint": endpoint,
         "endpoints": endpoint_choices(),
         "timezone_groups": build_timezone_options(settings.timezone),
+        "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,
         "month": month,
         "month_label": calendar.month_name[month],
@@ -408,15 +452,27 @@ async def api_details(request: Request):
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)
 async def get_state(request: Request):
+    user = await auth.current_user(request)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
     endpoint = get_endpoint(request.query_params.get("endpoint"))
-    return JSONResponse(state_store.load_state(endpoint.key, year, month))
+    return JSONResponse(await calendar_state.load_state(user.user_id, endpoint.key, year, month))
 
 
 @guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)
 async def post_state(request: Request):
+    """A DELTA endpoint, not a whole-document replace.
+
+    Two independent payload shapes, dispatched on which keys are present:
+    `{item_id, not_watching}` toggles a single item, and `{last_count,
+    last_show_ids, history?}` records this load's change-detection baseline.
+    Sending only the piece that actually changed — instead of the whole
+    notWatching array — is what stops one open tab's save from clobbering a mark
+    a second tab just made; each write is its own INSERT/DELETE or UPDATE, not a
+    read-modify-write of a shared document.
+    """
+    user = await auth.current_user(request)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
@@ -427,10 +483,107 @@ async def post_state(request: Request):
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
     if not isinstance(payload, dict):
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+
+    if "item_id" in payload:
+        item_id = str(payload.get("item_id") or "")
+        if not item_id:
+            return JSONResponse({"ok": False, "error": "Missing item_id"}, status_code=400)
+        await calendar_state.set_not_watching(
+            user.user_id, endpoint.key, year, month, item_id, bool(payload.get("not_watching")),
+        )
+        return JSONResponse({"ok": True})
+
+    if "last_count" in payload or "last_show_ids" in payload:
+        last_count = payload.get("last_count")
+        try:
+            last_count = int(last_count) if last_count is not None else None
+        except (TypeError, ValueError):
+            return JSONResponse({"ok": False, "error": "last_count must be a whole number"}, status_code=400)
+        last_show_ids = payload.get("last_show_ids")
+        if last_show_ids is not None and not isinstance(last_show_ids, list):
+            return JSONResponse({"ok": False, "error": "last_show_ids must be a list"}, status_code=400)
+        history = payload.get("history")
+        if history is not None and not isinstance(history, list):
+            return JSONResponse({"ok": False, "error": "history must be a list"}, status_code=400)
+        await calendar_state.set_view_state(
+            user.user_id, endpoint.key, year, month,
+            last_count=last_count, last_show_ids=last_show_ids, history=history,
+        )
+        return JSONResponse({"ok": True})
+
+    return JSONResponse(
+        {"ok": False, "error": "Expected item_id/not_watching or last_count/last_show_ids"},
+        status_code=400,
+    )
+
+
+_CARD_STYLES = ("vertical", "horizontal", "poster")
+_DAY_PACKINGS = ("stacked", "packed")
+
+
+@guard.post("/api/me/prefs", AuthLevel.CALENDAR_APPROVED)
+async def post_me_prefs(request: Request):
+    """Persist a partial update to the viewer's own calendar view preferences.
+
+    Card style, day packing, and hide-not-watching used to write settings.json —
+    an admin-only file — so anyone else's choice applied for one page load and
+    was gone on the next. This writes user_prefs instead, so it sticks for every
+    account.
+
+    Also mirrors into share_links when the user has ever opened the Share panel:
+    that table's owner-default columns are seeded from user_prefs at creation and
+    otherwise have no editor of their own, so keeping them in sync here is what
+    makes a public share page track the owner's own view without a second save
+    action (see app/share_links.py's module docstring).
+    """
+    user = await auth.current_user(request)
     try:
-        state_store.save_state(endpoint.key, year, month, payload)
-    except OSError as exc:
-        return JSONResponse({"ok": False, "error": f"Could not write state: {exc}"}, status_code=500)
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+
+    updates: dict = {}
+    if "card_style" in data and data["card_style"] in _CARD_STYLES:
+        updates["card_style"] = data["card_style"]
+    if "day_packing" in data and data["day_packing"] in _DAY_PACKINGS:
+        updates["day_packing"] = data["day_packing"]
+    if "hide_not_watching" in data:
+        updates["hide_not_watching"] = bool(data["hide_not_watching"])
+    if not updates:
+        return JSONResponse({"ok": False, "error": "Nothing to update"}, status_code=400)
+    await auth.update_user_prefs(user.user_id, **updates)
+    if await share_links.get(user.user_id) is not None:
+        await share_links.update_owner_defaults(user.user_id, **updates)
+    return JSONResponse({"ok": True})
+
+
+@guard.post("/api/me/timezone", AuthLevel.CALENDAR_APPROVED)
+async def post_me_timezone(request: Request):
+    """Persist the viewer's calendar timezone.
+
+    No automatic browser detection (§1.15) — this is reached either by picking a
+    zone from the header's dropdown, or by the "use my device timezone" button
+    filling in Intl's resolved zone name before the same request fires.
+    """
+    user = await auth.current_user(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    tz_name = str((data or {}).get("timezone") or "").strip()
+    if not tz_name:
+        return JSONResponse({"ok": False, "error": "Missing timezone"}, status_code=400)
+    try:
+        ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return JSONResponse({"ok": False, "error": "Unknown timezone"}, status_code=400)
+    await auth.set_user_timezone(user.user_id, tz_name)
+    # Mirrored into share_links the same way post_me_prefs does, once the user
+    # has a share row at all — see that route's docstring.
+    if await share_links.get(user.user_id) is not None:
+        await share_links.update_owner_defaults(user.user_id, timezone=tz_name)
     return JSONResponse({"ok": True})
 
 

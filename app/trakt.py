@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from . import cache
+from . import calendar_filter
 from .config import Settings
 from .endpoints import Endpoint
 
@@ -55,13 +56,13 @@ def _headers(settings: Settings, paginate: bool = True) -> dict:
 
 
 def _build_url(endpoint: Endpoint, settings: Settings, start_date: str, days: int) -> str:
+    # genres/countries are NOT sent as query params any more: the calendar cache
+    # stores the complete unfiltered result and those become read-time per-user
+    # filters, so one viewer can include JP/KR shows and another exclude them from
+    # the same cached data. The equivalent filtering is reproduced client-side in
+    # fetch_calendar (and the cached read path) via app/calendar_filter.py.
     path = f"{API_BASE}/calendars/all/{endpoint.path}/{start_date}/{days}"
-    params = {"extended": "full,images"}
-    if settings.genres:
-        params["genres"] = settings.genres
-    if settings.countries:
-        params["countries"] = settings.countries
-    return f"{path}?{urlencode(params)}"
+    return f"{path}?{urlencode({'extended': 'full,images'})}"
 
 
 async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, month: int) -> list[dict]:
@@ -71,11 +72,16 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     end_date = f"{year:04d}-{month:02d}-{days:02d}"
     url = _build_url(endpoint, settings, start_date, days)
 
-    resp = await shared_client().get(url, headers=_headers(settings))
+    # Calendar endpoints ignore pagination headers and return the whole range in
+    # one response (verified live), so they are not sent here; a warning fires if
+    # Trakt ever starts paginating.
+    resp = await shared_client().get(url, headers=_headers(settings, paginate=False))
     if resp.status_code == 401:
         raise TraktError("Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401)
     if resp.status_code != 200:
         raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+    if resp.headers.get("x-pagination-page-count"):
+        logger.warning("Trakt calendar endpoint returned pagination headers for %s; response may be truncated.", url)
 
     try:
         raw = resp.json()
@@ -83,6 +89,12 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
         raise TraktError("Trakt API returned an unreadable response.")
     if not isinstance(raw, list):
         raw = []
+
+    # Trakt used to filter by the genres/countries query params server-side;
+    # those are no longer sent, so the same filtering is reproduced here on the
+    # raw genre slugs (before normalization, which would rewrite "game-show" to
+    # "Game Show"), giving an item set identical to what Trakt returned before.
+    raw = calendar_filter.filter_entries(raw, endpoint.media, settings.genres, settings.countries)
 
     tz = ZoneInfo(settings.timezone)
     items = [normalize(entry, endpoint, tz) for entry in raw]
