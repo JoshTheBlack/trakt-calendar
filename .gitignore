@@ -24,6 +24,7 @@ scratch_data/
 
 # Build/design notes (personal, not part of the release)
 BUILD_PLAN.txt
+PLANNING.md
 
 # OS / editor junk
 .DS_Store
