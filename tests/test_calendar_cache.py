@@ -313,13 +313,14 @@ class EvictionTests(CacheTestCase):
 
 class DetailCacheTests(CacheTestCase):
     async def test_get_set_round_trip_and_ttl(self):
-        # cache.get/set are synchronous and run on this (event-loop) thread.
-        cache.set("http://x/y", {"hello": ["world", 1, 2]})
-        self.assertEqual(cache.get("http://x/y", ttl_seconds=3600), {"hello": ["world", 1, 2]})
+        # cache.get/set are async: the read, the decompress and the write all
+        # happen on a db worker thread, never on the event loop.
+        await cache.set("http://x/y", {"hello": ["world", 1, 2]})
+        self.assertEqual(await cache.get("http://x/y", ttl_seconds=3600), {"hello": ["world", 1, 2]})
         # ttl<=0 is an explicit always-miss.
-        self.assertIsNone(cache.get("http://x/y", ttl_seconds=0))
+        self.assertIsNone(await cache.get("http://x/y", ttl_seconds=0))
         # A missing key is a miss, not an error.
-        self.assertIsNone(cache.get("http://nope", ttl_seconds=3600))
+        self.assertIsNone(await cache.get("http://nope", ttl_seconds=3600))
 
 
 # ---------------------------------------------------------------------------

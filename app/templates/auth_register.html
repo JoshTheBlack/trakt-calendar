@@ -65,6 +65,7 @@ document.getElementById('plexBtn').addEventListener('click', async () => {
     window.location = data.redirect || '/';
   } catch (e) {
     err.textContent = e.message || 'Could not sign up with Plex.';
+    plexFallbackLink(err);
     btn.disabled = false;
   }
 });

@@ -65,6 +65,10 @@ UPSTREAM_FAILED = (
     "Trakt could not complete the sign-in. Please try again in a moment."
 )
 
+TOO_MANY_STARTS = (
+    "Too many sign-in attempts from this address. Try again in a few minutes."
+)
+
 
 def _notice(request: Request, title: str, message: str, *, status: int = 400,
             back: str = "/login", back_label: str = "Back to sign in"):
@@ -99,8 +103,15 @@ async def _begin(
     session_id: str | None = None,
     invite_token: str | None = None,
 ):
-    """Create a handshake and redirect the browser to Trakt's approval screen."""
+    """Create a handshake and redirect the browser to Trakt's approval screen.
+
+    Throttled per address on the same counter Plex's start route uses, so an
+    unauthenticated caller cannot mint handshake rows in a loop — or get a second
+    budget by alternating between the two providers.
+    """
     settings = load_settings()
+    if await auth.handshake_start_limited(request, settings):
+        return _notice(request, "Too many attempts", TOO_MANY_STARTS, status=429)
     if not settings.trakt_login_configured:
         return _notice(request, "Not available", NOT_CONFIGURED, status=503)
     state = await auth.create_handshake(
@@ -193,9 +204,9 @@ async def trakt_callback(request: Request):
 
     identity = auth.ProviderIdentity(
         provider=PROVIDER,
-        # The immutable numeric account id. A username or slug can be released
-        # by its owner and re-registered by somebody else, who would inherit
-        # this link along with it.
+        # The account UUID — Trakt exposes no numeric user id at all. A username
+        # or slug can be released by its owner and re-registered by somebody
+        # else, who would inherit this link along with it.
         provider_user_id=str(account["id"]),
         display_name=account.get("name"),
         access_token=token.get("access_token"),
@@ -309,6 +320,52 @@ async def _clear_reconnect_notice(is_admin: bool) -> None:
     """
     if is_admin:
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
+
+
+async def adopt_app_token(user_id: int, settings: Settings) -> bool:
+    """Link settings.json's app-wide Trakt token to `user_id` as a personal
+    identity. Returns whether it worked.
+
+    First-run setup does this too, but it can only try once, and it fails
+    whenever Trakt is unreachable or the stored token has already expired —
+    leaving the operator with the reconnect notice up and no way to clear it,
+    because the device-code flow in Settings renews the app-wide token without
+    ever touching `linked_identities`. Running the same adoption after a
+    successful device authorization is what closes that loop: the token is
+    known-good at that exact moment, so the account lookup behind it is as
+    likely to succeed as it will ever be.
+
+    Best effort by design — the caller has already saved a working token and must
+    not fail on this.
+    """
+    token = (settings.trakt_access_token or "").strip()
+    client_id = (settings.trakt_client_id or "").strip()
+    if not (token and client_id):
+        return False
+    try:
+        account = await trakt_auth.fetch_account(client_id, token)
+    except trakt_auth.AccountLookupError as exc:
+        logger.warning("Could not adopt the app-wide Trakt token: %s", exc)
+        return False
+    try:
+        await auth.link_provider_identity(
+            identity=auth.ProviderIdentity(
+                provider=PROVIDER,
+                provider_user_id=str(account["id"]),
+                display_name=account.get("name"),
+                access_token=token,
+                refresh_token=settings.trakt_refresh_token or None,
+                token_expires_at=settings.trakt_token_expires_at or None,
+            ),
+            user_id=user_id,
+        )
+    except (auth.IdentityInUse, auth.AccountUnavailable):
+        # Somebody else already holds this Trakt account here. Never moved —
+        # and the notice stays up, because this login is still unlinked.
+        logger.warning("The app-wide Trakt account is already linked to another user.")
+        return False
+    await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
+    return True
 
 
 REVOKE_FAILED_NOTICE = (

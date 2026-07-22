@@ -57,11 +57,15 @@ def _insert_row(conn: db.Connection, user_id: int, now: int) -> None:
         "FROM user_prefs WHERE user_id = ?", (user_id,),
     ).fetchone()
     account = conn.execute("SELECT timezone FROM users WHERE id = ?", (user_id,)).fetchone()
+    # All three forms answer from the start. Which one the panel shows is a
+    # separate question (preferred_kind), and the username/slug forms resolve to
+    # nothing until there is a username/slug to resolve, so enabling them up front
+    # publishes nothing that did not already exist.
     conn.execute(
         "INSERT INTO share_links (user_id, token, preferred_kind, enabled_token, "
         "enabled_username, enabled_slug, created_at, token_rotated_at, "
         "endpoint, card_style, day_packing, hide_not_watching, network_filter_json, timezone) "
-        "VALUES (?, ?, 'token', 1, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, 'token', 1, 1, 1, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id, secrets.token_urlsafe(32), now, now,
             prefs["endpoint"] if prefs else None,
@@ -109,6 +113,28 @@ async def set_enabled(user_id: int, kind: str, enabled: bool) -> None:
     await get_or_create(user_id)
     column = _ENABLED_COLUMN[kind]
     await db.execute(f"UPDATE share_links SET {column} = ? WHERE user_id = ?", (int(enabled), user_id))
+
+
+async def set_active_kind(user_id: int, kind: str) -> None:
+    """Record which link form the Share panel hands out, and make sure all three
+    still answer.
+
+    The dropdown is PRESENTATION ONLY. Every form a user has published keeps
+    working regardless of which one they last looked at — a link already given to
+    somebody must not break because its owner switched the panel to a different
+    one. That is why this enables rather than swapping: the alternative silently
+    revokes URLs that are already out in the world.
+
+    set_enabled remains the way to actually take a form out of service.
+    """
+    if kind not in PREFERRED_KINDS:
+        raise ValueError(f"Unknown share kind: {kind!r}")
+    await get_or_create(user_id)
+    await db.execute(
+        "UPDATE share_links SET preferred_kind = ?, enabled_token = 1, "
+        "enabled_username = 1, enabled_slug = 1 WHERE user_id = ?",
+        (kind, user_id),
+    )
 
 
 async def set_preferred_kind(user_id: int, kind: str) -> None:
@@ -305,7 +331,17 @@ async def slug_error(slug: str, *, exclude_user_id: int | None = None) -> str | 
         return "That name is already someone's username."
     if await auth.identifier_is_retired("username", candidate):
         return "That name is already someone's username."
-    if await auth.identifier_is_retired("slug", candidate):
+    # A slug this same account retired is theirs to take back — switching away
+    # and back must not permanently cost someone their own name. It stays blocked
+    # for everybody else, which is the point of retiring it.
+    retired = await db.fetch_one(
+        "SELECT user_id FROM retired_identifiers WHERE kind = 'slug' AND value = ?", (candidate,),
+    )
+    if retired is not None and not (
+        exclude_user_id is not None
+        and retired["user_id"] is not None
+        and int(retired["user_id"]) == exclude_user_id
+    ):
         return "That slug is taken."
     row = await db.fetch_one("SELECT user_id FROM share_links WHERE custom_slug = ?", (candidate,))
     if row is not None and (exclude_user_id is None or int(row["user_id"]) != exclude_user_id):
@@ -313,27 +349,62 @@ async def slug_error(slug: str, *, exclude_user_id: int | None = None) -> str | 
     return None
 
 
+def _retire_slug(conn: db.Connection, user_id: int, slug: str | None) -> None:
+    """SYNCHRONOUS. Block a slug this account is giving up from being claimed by
+    anybody else.
+
+    Changing a slug silently frees the old one, and `/c/<old-slug>` links are
+    already out in the world by the time anyone changes it — so without this the
+    next person to claim that name inherits an audience. Recorded WITH the
+    account that gave it up, which is what lets the same owner take it back
+    (slug_error) while it stays blocked for everyone else.
+    """
+    if not slug:
+        return
+    conn.execute(
+        "INSERT OR REPLACE INTO retired_identifiers (kind, value, retired_at, user_id) "
+        "VALUES ('slug', ?, ?, ?)",
+        (slug, db.now(), user_id),
+    )
+
+
 async def set_custom_slug(user_id: int, slug: str | None) -> str | None:
     """Set or clear the user's custom slug. Returns an error string (making no
     change) when `slug` is unusable, otherwise None.
 
-    Clearing the slug also disables the slug form: an enabled form with no
-    slug set would have nowhere to resolve.
+    The slug being replaced is retired, so a name whose links are already shared
+    cannot be picked up by somebody else. Clearing the slug also disables the slug
+    form: an enabled form with no slug set would have nowhere to resolve.
     """
     await get_or_create(user_id)
     candidate = (slug or "").strip().lower()
-    if not candidate:
-        await db.execute(
-            "UPDATE share_links SET custom_slug = NULL, enabled_slug = 0 WHERE user_id = ?",
-            (user_id,),
-        )
-        return None
-    if err := await slug_error(candidate, exclude_user_id=user_id):
-        return err
 
     def _work(conn: db.Connection) -> None:
-        conn.execute("UPDATE share_links SET custom_slug = ? WHERE user_id = ?", (candidate, user_id))
+        previous = conn.execute(
+            "SELECT custom_slug FROM share_links WHERE user_id = ?", (user_id,),
+        ).fetchone()
+        old = previous["custom_slug"] if previous else None
+        if old and old.lower() != candidate:
+            _retire_slug(conn, user_id, old)
+        if candidate:
+            # Taking a name back that this account itself retired: drop the block
+            # rather than leaving a row that contradicts the live slug.
+            conn.execute(
+                "DELETE FROM retired_identifiers WHERE kind = 'slug' AND value = ? AND user_id = ?",
+                (candidate, user_id),
+            )
+            conn.execute(
+                "UPDATE share_links SET custom_slug = ? WHERE user_id = ?", (candidate, user_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE share_links SET custom_slug = NULL, enabled_slug = 0 WHERE user_id = ?",
+                (user_id,),
+            )
 
+    if candidate:
+        if err := await slug_error(candidate, exclude_user_id=user_id):
+            return err
     try:
         await db.transaction(_work)
     except db.IntegrityError:
@@ -387,9 +458,18 @@ _RESOLVE_SELECT = (
 
 
 async def resolve_by_token(token: str):
+    """Resolve /s/<token>. The index lookup finds the row; the compare_digest
+    below repeats the equality in constant time, so the one comparison this app
+    makes against a secret is not a byte-at-a-time one (§4.1). Usernames and
+    slugs are public identifiers and need no such treatment."""
     if not token:
         return None
-    return await db.fetch_one(_RESOLVE_SELECT.format(condition="sl.token = ? AND sl.enabled_token = 1"), (token,))
+    row = await db.fetch_one(
+        _RESOLVE_SELECT.format(condition="sl.token = ? AND sl.enabled_token = 1"), (token,),
+    )
+    if row is None or not secrets.compare_digest(str(row["token"]), token):
+        return None
+    return row
 
 
 async def resolve_by_username(username: str):
@@ -402,9 +482,33 @@ async def resolve_by_username(username: str):
 
 
 async def resolve_by_slug(slug: str):
+    """Resolve /c/<slug>, including slugs this owner has since moved on from.
+
+    A retired slug KEEPS WORKING for the account that gave it up. Retiring exists
+    so nobody ELSE can claim a name whose links are already circulating — and
+    404ing those links would be the same harm the retirement was meant to prevent,
+    just inflicted by us instead of by a stranger. So an old `/c/` link follows its
+    owner rather than dying.
+
+    A retired row whose `user_id` is NULL — a deleted account, or one written
+    before the column existed — resolves to nothing and stays blocked. There is
+    no owner left to follow.
+    """
     candidate = (slug or "").strip().lower()
     if not candidate:
         return None
-    return await db.fetch_one(
+    row = await db.fetch_one(
         _RESOLVE_SELECT.format(condition="sl.custom_slug = ? AND sl.enabled_slug = 1"), (candidate,),
+    )
+    if row is not None:
+        return row
+    return await db.fetch_one(
+        _RESOLVE_SELECT.format(
+            condition=(
+                "sl.enabled_slug = 1 AND sl.user_id = ("
+                "  SELECT user_id FROM retired_identifiers"
+                "   WHERE kind = 'slug' AND value = ? AND user_id IS NOT NULL)"
+            ),
+        ),
+        (candidate,),
     )

@@ -10,6 +10,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🎟️ **Registration is invite-only** by default. Admins issue invite links with an optional label, expiry, and use limit; an invite normally grants calendar access on the spot, and every unusable invite (expired, revoked, used up, never existed) shows the same page.
 - ✅ Access is granted **per account and per area** — calendar access and the hidden area are separate, deliberate grants.
 - 🛡️ **Every route now declares who may call it**, and anything undeclared is refused. This closes the big one: `GET /api/settings` used to hand the Trakt token, Trakt client secret, TMDB key, and every *arr API key to anyone who asked. Credentials are now write-only — the Settings screen shows which are set, never what they are.
+- 🔒 A run of wrong passwords locks **that account**, not everyone. The per-address limit sits far above anything one person fumbling a password produces, so a household — or everyone behind a reverse proxy — can't be locked out by one neighbour's typos. Lockouts expire on their own and are written to the log, since the sign-in page deliberately can't say why it refused.
 - 🧯 Hardened against cross-site requests: changes must be JSON and same-origin, sessions are server-side and revocable, sign-in is rate-limited per username and per address, and the interactive API docs are switched off.
 
 ### Admin interface
@@ -22,10 +23,15 @@ All notable changes to this project are documented here. Format loosely follows 
 - ⚡ Calendar data is fetched once per week-long window and **shared across everyone**, refreshed on a short TTL, with genre/country/network/language filtering applied per viewer instead of per request to Trakt. Fewer API calls, faster loads, and the per-show detail cache moved into the same store.
 - 🔁 Marking something not-watching now sends just that one change, so two open tabs can no longer overwrite each other.
 
+### Interface
+- 🧭 **The same header on every page** — calendar, month picker, account, and admin. Account, Settings, Admin and Sign out collapse into one menu, so an administrator's bar fits on a single line again.
+- 📅 The month picker is a tidy **4×3 grid** and carries the header too, instead of being a dead end.
+
 ### Public sharing
 - 🔗 Publish your calendar as a **read-only public page** — as an unguessable link, as `/u/your-name`, or as your own custom `/c/slug`. Enable any combination, pick which one gets generated, and rotate the private link at any time.
 - 🎛️ Choose **how the link opens**: hand it out reflecting your current display, or pin the calendar, card style, day packing, timezone, and hide-not-watching into the link itself. Either way your own calendar is untouched — the options are written into the URL, not into your settings.
 - 👀 Visitors get their own view controls on a shared page (endpoint, cards, days, timezone, hide-not-watching). They're plain links, so no sign-in and no saved state — and the URL they end up on is shareable too.
+- ♻️ **Changing your custom name doesn't break links you've already shared** — the old `/c/name` keeps opening your calendar, and nobody else can claim that name afterwards. Every link form you've published stays live; the picker only chooses which one you're handed to copy.
 - 🚫 Public pages make **zero API calls**, ever. They serve what is already cached (with a "data as of" line) rather than spending your rate limit for a stranger, and a bad link always 404s the same way regardless of why.
 
 ### Your account
@@ -33,11 +39,15 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🔌 **Unlinking Plex or Trakt now revokes the authorization** at the provider instead of leaving it sitting in your connected-apps list. If that can't be reached, the unlink still happens and you're told to finish it there.
 
 ### Ops
+- 🍪 **First-run setup works out the session-cookie policy for you** from the browser that sets the instance up, so a plain-HTTP LAN install and an HTTPS deployment both work with no configuration. If it's ever wrong, the sign-in page and Settings say so instead of leaving you looping back to the login form.
+- 🚶 **Trusted proxy addresses** are editable in Settings, which shows the address your requests are actually arriving from and warns when forwarded headers are being ignored — the misconfiguration that makes every user look like one IP. The Docker image passes the same value through to the server.
 - 🎚️ Calendar cache lifetime and the total cache size cap are now editable in Settings instead of only in the config file.
 
 ### 🥚
 - The hidden thing now checks whether it has anywhere to take you. If it doesn't, it just makes the noise.
 - Whatever it is you found, you can now take a copy of it home, and put it back.
+- Its decorations are yours alone now, rather than shared with everyone else who found it. They travel in the copy you take home.
+- Clicking a row opens the full details, with the ones you've already seen ticked off — and each tick takes you to it.
 
 ## 🏷️ [1.0.1] - Unreleased
 

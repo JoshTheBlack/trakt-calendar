@@ -356,7 +356,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         self.assertTrue(recorder.urls)
         for url in recorder.urls:
             with self.subTest(url=url):
-                self.assertIsNone(cache.get(url, 3600))
+                self.assertIsNone(asyncio.run(cache.get(url, 3600)))
 
 
 class EasterEggFlagTests(DistraktTestCase):

@@ -56,9 +56,44 @@ header.hero {
 .control label { color: var(--text-dim); font-size: 0.82rem; }
 .control select {
     background: transparent; border: none; color: var(--text); font-size: 0.8rem; font-weight: 600;
-    font-family: inherit; cursor: pointer; outline: none; max-width: 30vw;
+    font-family: inherit; cursor: pointer; outline: none;
+    /* Truncate rather than size to the longest option: one long timezone name
+       used to widen the bar enough to push everything onto a second row. */
+    max-width: 15ch; text-overflow: ellipsis;
 }
+/* The timezone list has by far the longest entries and the least need to show
+   them in full — the selected zone is recognisable from its first few words. */
+.control.tz select { max-width: 11ch; }
 .control select option { background: var(--bg-panel); color: var(--text); }
+
+/* ---- Nav menu: collapses several destinations into one pill ---- */
+/* <details> rather than a scripted popover — it opens, closes on Escape, and is
+   keyboard reachable with no JS at all. app.js only adds close-on-outside-click. */
+.nav-menu { position: relative; }
+.nav-menu > summary {
+    list-style: none; cursor: pointer;
+    /* Same shape as .pill-btn so it sits in the row as another button. */
+    background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text);
+    padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+    transition: all .18s ease;
+}
+.nav-menu > summary::-webkit-details-marker { display: none; }
+.nav-menu > summary:hover,
+.nav-menu[open] > summary { border-color: var(--gold); background: rgba(232,181,69,0.12); }
+.nav-menu-items {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 40;
+    display: flex; flex-direction: column; gap: 2px; min-width: 170px; padding: 6px;
+    background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 10px;
+    box-shadow: 0 18px 40px rgba(0,0,0,0.55);
+}
+.nav-menu-items a, .nav-menu-items button {
+    display: flex; align-items: center; gap: 8px; width: 100%;
+    padding: 7px 10px; border-radius: 7px; border: none; background: none;
+    color: var(--text); font: inherit; font-size: 0.8rem; font-weight: 600;
+    text-align: left; text-decoration: none; cursor: pointer; white-space: nowrap;
+}
+.nav-menu-items a:hover, .nav-menu-items button:hover { background: rgba(255,255,255,0.07); }
 .pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }
@@ -316,6 +351,9 @@ body.hide-not-watching .card.not-watching { display: none; }
 .share-slug-edit input { background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; color: var(--text-dim); padding: 8px 10px; font-family: inherit; }
 .hint.ok { color: #4caf50; }
 .hint.err { color: var(--crimson); }
+/* A setting that is not wrong but is very likely misconfigured — the trusted-proxy
+   list when forwarded headers are arriving and being ignored. */
+.hint.warn { color: #e0a030; }
 
 /* Toasts (Sonarr/Radarr add feedback) */
 #toastHost { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10001; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }

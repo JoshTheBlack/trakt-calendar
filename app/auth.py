@@ -19,6 +19,7 @@ import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from urllib.parse import urlsplit
 
 import anyio.to_thread
 from argon2 import PasswordHasher
@@ -252,9 +253,18 @@ def insert_linked_identity(
 ) -> int:
     """SYNCHRONOUS.
 
-    `provider_user_id` MUST be the provider's immutable numeric account id, never
-    a username, slug, or email — those can be changed by their owner, released,
-    and re-registered by somebody else, who would then inherit this link.
+    `provider_user_id` MUST be the provider's immutable, non-reassignable account
+    handle — never a username, slug, or email, which can be changed by their
+    owner, released, and re-registered by somebody else, who would then inherit
+    this link. Per provider that is:
+
+      Plex:  the numeric account id from /api/v2/user.
+      Trakt: the account UUID from /users/settings. Trakt users have NO numeric
+             id — `ids` on a user is `{"slug": ...}` — so the UUID is the whole
+             of what is available (see trakt_auth.fetch_account).
+
+    Stored as TEXT for exactly that reason: the two providers do not agree on a
+    type, and the column has to hold whichever each one actually issues.
     """
     ts = db.now() if now is None else now
     cur = conn.execute(
@@ -537,10 +547,30 @@ async def username_availability_error(username: str) -> str | None:
 
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 15 * 60
+# The per-address counter is a DIFFERENT job from the per-username one and needs a
+# different threshold. Per-username at 5 is the precise defence: it protects one
+# account from being guessed at. Per-address exists only to stop one attacker
+# spraying MANY usernames from one place — and it is shared by everybody behind
+# that address, which on a home instance is every user, and behind a reverse proxy
+# is the entire internet-facing side of the app.
+#
+# At 5 it did the wrong thing spectacularly: five wrong passwords on ONE account
+# locked out EVERY account from that address, administrator included, with the
+# generic "invalid username or password" and nothing in the log. The address
+# limit has to sit far above anything one person fumbling a password produces,
+# because the cost of tripping it is borne by people who did nothing.
+LOGIN_IP_MAX_ATTEMPTS = 25
 REGISTER_MAX_ATTEMPTS = 10
 REGISTER_WINDOW_SECONDS = 60 * 60
 INVITE_MAX_ATTEMPTS = 10
 INVITE_WINDOW_SECONDS = 60 * 60
+# The provider sign-in START routes. They are unauthenticated GETs that write a
+# handshake row and — for Plex — call plex.tv before anybody has proved anything,
+# so they are the one pre-auth path that costs this instance an outbound request.
+# Generous, because a person retrying a flaky popup must never hit it: 30 in ten
+# minutes is far more than any human does and far less than a script wants.
+HANDSHAKE_MAX_ATTEMPTS = 30
+HANDSHAKE_WINDOW_SECONDS = 10 * 60
 # Old enough that no limiter above still needs the row, so one sweep interval
 # covers all three (plus the share-page limiter built on the same table).
 ATTEMPT_RETENTION_SECONDS = 24 * 60 * 60
@@ -568,7 +598,11 @@ async def is_locked_out(
 ) -> bool:
     """Whether `max_attempts` FAILURES have landed for this key within the
     trailing `window_seconds`. Failures only, so a burst of wrong passwords
-    followed by the right one doesn't count against whoever just succeeded."""
+    followed by the right one doesn't count against whoever just succeeded.
+
+    A pure read. check_lockout() is what the sign-in paths call — it also clears
+    a lockout that has served its time.
+    """
     ts = db.now() if now is None else now
     count = await db.fetch_value(
         "SELECT COUNT(*) FROM login_attempts WHERE key_type = ? AND key_value = ? "
@@ -576,6 +610,53 @@ async def is_locked_out(
         (key_type, key_value, ts - window_seconds), default=0,
     )
     return int(count) >= max_attempts
+
+
+async def check_lockout(
+    key_type: str, key_value: str, *, max_attempts: int, window_seconds: int, now: int | None = None,
+) -> bool:
+    """Whether this key is locked out right now, RESETTING the counter when a
+    lockout has expired.
+
+    Without the reset, a lockout does not really end after `window_seconds`: the
+    failures that caused it age out one at a time, so the count sits at
+    max_attempts-1 and the very next mistake re-locks the key immediately. That
+    is a lockout that quietly becomes permanent for anyone still using the
+    account. Once a key has served a full window without reaching the threshold
+    again, its history is dropped and it starts from zero.
+
+    The caller must NOT record an attempt when this returns True — see the
+    sign-in handlers. Counting attempts made while locked out lets a retry loop
+    keep refilling the window and hold the lockout open indefinitely, which is
+    denial of service against the account holder rather than protection for them.
+    """
+    ts = db.now() if now is None else now
+    cutoff = ts - window_seconds
+
+    def _work(conn: db.Connection) -> bool:
+        recent = int(conn.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE key_type = ? AND key_value = ? "
+            "AND succeeded = 0 AND attempted_at > ?",
+            (key_type, key_value, cutoff),
+        ).fetchone()[0])
+        if recent >= max_attempts:
+            return True
+        # Not locked now, but there is history. If it ever reached the threshold
+        # it was a lockout that has since lapsed, so wipe the slate rather than
+        # leaving a primed counter behind.
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM login_attempts WHERE key_type = ? AND key_value = ? "
+            "AND succeeded = 0",
+            (key_type, key_value),
+        ).fetchone()[0])
+        if total >= max_attempts:
+            conn.execute(
+                "DELETE FROM login_attempts WHERE key_type = ? AND key_value = ?",
+                (key_type, key_value),
+            )
+        return False
+
+    return await db.transaction(_work)
 
 
 async def rate_limited(
@@ -590,6 +671,24 @@ async def rate_limited(
         (key_type, key_value, ts - window_seconds), default=0,
     )
     return int(count) >= max_attempts
+
+
+async def handshake_start_limited(request: Request, settings: Settings | None = None) -> bool:
+    """Whether this address has started too many provider sign-ins, recording
+    this one either way.
+
+    Shared by both providers' start routes so one address cannot get a fresh
+    budget by alternating between them. Volume-only, like the registration and
+    share-page limiters: there is no notion of a "failed" start.
+    """
+    cfg = settings or load_settings()
+    ip = client_ip(request, cfg)
+    limited = await rate_limited(
+        "handshake_ip", ip,
+        max_attempts=HANDSHAKE_MAX_ATTEMPTS, window_seconds=HANDSHAKE_WINDOW_SECONDS,
+    )
+    await record_attempt("handshake_ip", ip, True)
+    return limited
 
 
 async def sweep_login_attempts(now: int | None = None) -> int:
@@ -743,6 +842,16 @@ async def validate_session(
 async def revoke_session(session_id: str) -> None:
     """Hard delete on logout — no tombstone, no waiting for an expiry to pass."""
     await db.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+
+
+async def revoke_user_session(user_id: int, session_id: str) -> bool:
+    """Delete one session, but only if it belongs to `user_id`. False when it
+    doesn't exist or belongs to somebody else — so an admin screen showing one
+    account cannot act on another account's session by id."""
+    result = await db.execute(
+        "DELETE FROM sessions WHERE id = ? AND user_id = ?", (session_id, user_id),
+    )
+    return result.rowcount > 0
 
 
 async def revoke_user_sessions(user_id: int) -> int:
@@ -963,7 +1072,7 @@ def handshake_cookie_matches(request: Request, settings: Settings, state: str | 
 # linked identities
 # ---------------------------------------------------------------------------
 # What a completed handshake produces. `provider_user_id` is always the
-# provider's immutable numeric account id (see insert_linked_identity), and the
+# provider's immutable account handle (see insert_linked_identity), and the
 # UNIQUE (provider, provider_user_id) index is what makes "this account is
 # already known, sign its owner in" a single lookup.
 
@@ -1272,6 +1381,44 @@ def use_secure_cookie(settings: Settings, request: Request | None = None) -> boo
     return True
 
 
+def browser_scheme(request: Request | None) -> str | None:
+    """The scheme the BROWSER used, per its own headers — or None if it didn't say.
+
+    This is deliberately not `request.url.scheme`, which behind a TLS-terminating
+    proxy reports the plain HTTP hop between the proxy and this app rather than
+    the HTTPS the browser is actually on. `Origin` carries the browser's own
+    origin and is set on every mutating fetch; `Referer` covers navigations.
+
+    Crucially it does NOT depend on `trusted_proxy_ips` being correct, which is
+    what makes it usable where `X-Forwarded-Proto` is not: an instance whose
+    proxy list is still at the default ignores forwarded headers entirely, and
+    that is exactly the instance most likely to be misconfigured.
+    """
+    if request is None:
+        return None
+    for header in ("origin", "referer"):
+        value = (request.headers.get(header) or "").strip()
+        # A sandboxed or privacy-stripped Origin arrives as the literal "null".
+        if not value or value.lower() == "null":
+            continue
+        scheme = urlsplit(value).scheme.lower()
+        if scheme in ("http", "https"):
+            return scheme
+    return None
+
+
+def detect_cookie_secure(request: Request | None) -> str:
+    """The `cookie_secure` value this browser's connection calls for.
+
+    "never" only when the browser positively reports plain HTTP. Anything else —
+    HTTPS, or a request that says nothing at all — resolves to "always", because
+    the cost of being wrong is asymmetric: a needlessly Secure cookie fails
+    loudly and immediately during setup, while a needlessly insecure one fails
+    silently and permanently for every user afterwards.
+    """
+    return "never" if browser_scheme(request) == "http" else "always"
+
+
 def request_is_https(request: Request | None, settings: Settings) -> bool:
     """Whether the browser reached this app over TLS.
 
@@ -1285,7 +1432,7 @@ def request_is_https(request: Request | None, settings: Settings) -> bool:
         return True  # nothing to inspect: fail closed and keep Secure on
     if request.url.scheme == "https":
         return True
-    if _peer_is_trusted_proxy(request, settings):
+    if peer_is_trusted_proxy(request, settings):
         proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
         if proto == "https":
             return True
@@ -1378,7 +1525,10 @@ def _is_trusted(addr: str, networks: list[ipaddress._BaseNetwork]) -> bool:
     return any(ip in net for net in networks)
 
 
-def _peer_is_trusted_proxy(request: Request, settings: Settings) -> bool:
+def peer_is_trusted_proxy(request: Request, settings: Settings) -> bool:
+    """Whether the immediate peer is inside the configured trusted-proxy set —
+    i.e. whether this request's forwarded headers are honored at all. Public
+    because the Settings screen reports it back to the operator."""
     peer = request.client.host if request.client else None
     if not peer:
         return False
@@ -1621,6 +1771,7 @@ WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = (
     ("distrakt_watch_state", "user_id"),
     ("distrakt_show_progress", "user_id"),
     ("distrakt_movie_watches", "user_id"),
+    ("distrakt_prefs", "user_id"),
 )
 
 

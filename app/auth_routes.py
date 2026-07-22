@@ -35,9 +35,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, authz, calendar_state, db, trakt_auth
+from . import assets, auth, authz, calendar_state, db, trakt_auth
 from .auth import AuthLevel
-from .config import load_settings
+from .config import load_settings, save_settings
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +169,9 @@ async def onboarding_create(request: Request):
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
 
     await _import_legacy_calendar_state(user_id)
+    # BEFORE the session below, so the very first cookie this instance issues
+    # already carries the right policy.
+    settings = _adopt_cookie_policy(settings, request)
     await auth.mark_logged_in(user_id)
     session_id = await auth.create_session(
         user_id,
@@ -196,14 +199,43 @@ class _InvalidInvite(Exception):
     """Raised inside the registration transaction to roll it back."""
 
 
-async def _fetch_trakt_identity(settings) -> dict | None:
-    """Look up the numeric Trakt account id for the token already in
-    settings.json, via `GET /users/me`.
+def _adopt_cookie_policy(settings, request: Request):
+    """Pin the session-cookie Secure policy to what this browser actually used,
+    and persist it. Returns the settings to issue the first cookie with.
 
-    settings.json holds a token but no account id, and an identity row must be
-    keyed on the immutable numeric id rather than a username or slug. Returns
+    `cookie_secure` ships as "always", which is correct for every HTTPS
+    deployment and wrong for a plain-HTTP one — there the browser silently
+    discards the cookie, so sign-in reports success and the very next request is
+    anonymous. Startup cannot tell those apart, because behind a TLS-terminating
+    proxy this app is served over plain HTTP either way.
+
+    Onboarding can. It is the one moment a real browser talks to an instance that
+    has no policy yet, and the request carries the browser's own scheme in its
+    Origin header (see auth.browser_scheme for why that beats X-Forwarded-Proto
+    here). So the answer is resolved from evidence rather than asked as a
+    question the operator may not know applies to them. It stays editable in
+    data/settings.json afterwards, and /login says so if the two ever diverge.
+    """
+    detected = auth.detect_cookie_secure(request)
+    if detected == (settings.cookie_secure or "").strip().lower():
+        return settings
+    settings.cookie_secure = detected
+    save_settings(settings)
+    logger.info(
+        "Setup: session cookies set to %r — this browser reached the instance over %s. "
+        "Change `cookie_secure` in data/settings.json if that is wrong.",
+        detected, auth.browser_scheme(request) or "an unreported scheme",
+    )
+    return settings
+
+
+async def _fetch_trakt_identity(settings) -> dict | None:
+    """Look up the Trakt account UUID for the token already in settings.json.
+
+    settings.json holds a token but no account handle, and an identity row must
+    be keyed on the immutable UUID rather than a username or slug. Returns
     None on any failure at all — an expired token, a revoked app registration, no
-    network, or a response with no numeric account id in it. Setup then creates
+    network, or a response with no account UUID in it. Setup then creates
     the account without the link and leaves a notice to reconnect, because
     blocking first-run setup on a third-party call would make an instance
     unusable for reasons entirely outside its control, and writing a row with a
@@ -374,9 +406,17 @@ async def register(request: Request):
 async def login_page(request: Request):
     if not await auth.any_users_exist():
         return RedirectResponse("/onboarding", status_code=303)
+    settings = load_settings()
     return templates.TemplateResponse(request, "auth_login.html", {
         "request": request,
-        "trakt_login_configured": load_settings().trakt_login_configured,
+        "trakt_login_configured": settings.trakt_login_configured,
+        # Whether the cookie a successful sign-in issues will carry `Secure`. The
+        # page compares it against the protocol the browser is really on: if this
+        # is true over plain http:// the cookie is dropped on arrival and sign-in
+        # silently does nothing, which otherwise looks exactly like a wrong
+        # password. Onboarding resolves this correctly on its own, so reaching
+        # here means the deployment moved or settings.json was edited by hand.
+        "cookie_is_secure": auth.use_secure_cookie(settings, request),
     })
 
 
@@ -395,6 +435,12 @@ async def login(request: Request):
     so one attacker can't lock out every account by spraying one IP, and one
     victim IP can't be used to spray many usernames without tripping its own
     limit first.
+
+    A LOCKED-OUT ATTEMPT IS NOT COUNTED. It still burns a full dummy verify, so
+    it costs the same and reveals nothing, but recording it would let a retry
+    loop keep pushing fresh failures into the trailing window and hold the
+    lockout open forever — which matters most for the per-IP counter, where
+    every user behind one reverse proxy shares a key.
     """
     data = await _json_body(request)
     username = str(data.get("username") or "").strip()
@@ -403,19 +449,35 @@ async def login(request: Request):
     ip = auth.client_ip(request, settings)
     username_key = username.lower()
 
-    locked = False
-    if username_key:
-        locked = await auth.is_locked_out(
-            "username", username_key,
-            max_attempts=auth.LOGIN_MAX_ATTEMPTS, window_seconds=auth.LOGIN_WINDOW_SECONDS,
-        )
-    if not locked:
-        locked = await auth.is_locked_out(
-            "ip", ip, max_attempts=auth.LOGIN_MAX_ATTEMPTS, window_seconds=auth.LOGIN_WINDOW_SECONDS,
-        )
+    locked = None
+    if username_key and await auth.check_lockout(
+        "username", username_key,
+        max_attempts=auth.LOGIN_MAX_ATTEMPTS, window_seconds=auth.LOGIN_WINDOW_SECONDS,
+    ):
+        locked = "username"
+    elif await auth.check_lockout(
+        "ip", ip,
+        max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS, window_seconds=auth.LOGIN_WINDOW_SECONDS,
+    ):
+        locked = "address"
 
-    user = await auth.find_user_by_username(username) if (username and not locked) else None
-    if locked or user is None:
+    if locked:
+        # Logged because the response deliberately cannot say this. Without a line
+        # here a lockout is indistinguishable from a wrong password to the
+        # operator too, which turns a working rate limiter into an unexplained
+        # "login is broken" — the reason this log line exists.
+        logger.warning(
+            "Sign-in refused: this %s is temporarily locked out after %d failed "
+            "attempts in %d minutes. It clears itself; attempts made while locked "
+            "are not counted.",
+            locked, auth.LOGIN_MAX_ATTEMPTS if locked == "username" else auth.LOGIN_IP_MAX_ATTEMPTS,
+            auth.LOGIN_WINDOW_SECONDS // 60,
+        )
+        await auth.burn_dummy_verify(password)
+        return _error(INVALID_CREDENTIALS, 401)
+
+    user = await auth.find_user_by_username(username) if username else None
+    if user is None:
         await auth.burn_dummy_verify(password)
         if username_key:
             await auth.record_attempt("username", username_key, False)
@@ -432,7 +494,12 @@ async def login(request: Request):
         # written; upgrade it now that we have the plaintext to do it with.
         await auth.update_password_hash(int(user["id"]), result.new_hash)
 
+    # Both counters, not just the username's. The per-IP key is shared by every
+    # user behind a reverse proxy, so leaving other people's failures on it after
+    # somebody has just proved they own an account means one more mistake from
+    # anyone locks out the whole instance.
     await auth.clear_attempts("username", username_key)
+    await auth.clear_attempts("ip", ip)
     await auth.mark_logged_in(int(user["id"]))
     session_id = await auth.create_session(
         int(user["id"]), user_agent=request.headers.get("user-agent"), ip_address=ip,
@@ -484,6 +551,9 @@ async def me_page(request: Request):
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
+        # Cache-busting token for the shared header's script/stylesheet, the same
+        # one every other page uses.
+        "asset_v": assets.ASSET_VERSION,
     })
 
 
@@ -568,9 +638,11 @@ async def set_own_password(request: Request):
     user = await auth.require_session(request)
     settings = load_settings()
     ip = auth.client_ip(request, settings)
-    # The current-password check is a guess-checking oracle, so it is throttled
-    # on the same counter and thresholds a sign-in attempt is.
-    if await auth.is_locked_out("ip", ip, max_attempts=auth.LOGIN_MAX_ATTEMPTS,
+    # The current-password check is a guess-checking oracle, so it is throttled on
+    # the same shared per-address counter a sign-in is — at the same tolerant
+    # threshold, since this one is reached by someone who is ALREADY signed in and
+    # locking them out over a neighbour's typos is pure harm.
+    if await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
                                 window_seconds=auth.LOGIN_WINDOW_SECONDS):
         return _error("Too many attempts. Try again later.", 429)
 

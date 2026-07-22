@@ -220,7 +220,7 @@ async def _cached_get(
     url = f"{API_BASE}/{path}?{urlencode(params)}"
     ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
     if not fresh and not private:
-        cached = cache.get(url, ttl)
+        cached = await cache.get(url, ttl)
         if cached is not None:
             _perf.debug("cacheHIT  %s", path)  # DEBUG: 1 line/season, noisy on warm loads
             return cached
@@ -249,7 +249,7 @@ async def _cached_get(
             raise TraktError("Trakt API returned an unreadable response.")
         return None
     if not private:
-        cache.set(url, data)
+        await cache.set(url, data)
     return data
 
 

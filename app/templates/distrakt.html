@@ -10,8 +10,8 @@
 </head>
 <body class="distrakt-page">
 
-<header class="distrakt-topbar">
-    <div class="distrakt-lead">
+<header class="hero distrakt-topbar">
+    <div class="hero-lead">
         <a class="distrakt-brand" href="?year={{ year }}&amp;month={{ month }}" title="Discord thread tracker">
             <svg class="distrakt-mark" viewBox="0 0 256 199" aria-hidden="true">
                 <defs>
@@ -24,16 +24,29 @@
             </svg>
             <span>Distrakt</span>
         </a>
-        <a class="btn-ghost small distrakt-cal-link" href="/?year={{ year }}&amp;month={{ month }}" title="Back to the calendar for this month">📅 Calendar</a>
+        <nav class="month-nav distrakt-nav">
+            <a class="month-nav-btn prev" href="?year={{ nav.prev_year }}&amp;month={{ nav.prev_month }}" title="Previous month" aria-label="Previous month">‹</a>
+            <span class="distrakt-nav-label">{{ year }}-{{ '%02d' % month }}</span>
+            <a class="month-nav-btn next" href="?year={{ nav.next_year }}&amp;month={{ nav.next_month }}" title="Next month" aria-label="Next month">›</a>
+        </nav>
     </div>
-    <nav class="month-nav distrakt-nav">
-        <a class="month-nav-btn prev" href="?year={{ nav.prev_year }}&amp;month={{ nav.prev_month }}" title="Previous month" aria-label="Previous month">‹</a>
-        <span class="distrakt-nav-label">{{ year }}-{{ '%02d' % month }}</span>
-        <a class="month-nav-btn next" href="?year={{ nav.next_year }}&amp;month={{ nav.next_month }}" title="Next month" aria-label="Next month">›</a>
-    </nav>
-    <div class="distrakt-actions">
-        <button type="button" class="btn-ghost small" onclick="importFromCalendar()" title="Pull this month's premieres from the Trakt calendar">⤓ Import</button>
-        <button type="button" class="btn-primary small" onclick="openAddShow()">+ Add show</button>
+    {# Same shape as the calendar's bar: the page's own controls first, then the
+       cross-page link and the menu on the right — so 📅 Calendar sits exactly
+       where 🧵 Distrakt sits over there. #}
+    <div class="hero-actions">
+        <button type="button" class="pill-btn" onclick="importFromCalendar()" title="Pull this month's premieres from the Trakt calendar">⤓ Import</button>
+        <button type="button" class="pill-btn" onclick="openAddShow()">➕ Add show</button>
+        <details class="nav-menu">
+            <summary title="Account and settings">☰ Menu</summary>
+            <div class="nav-menu-items">
+                <a href="/me">👤 Account</a>
+                {% if is_admin %}
+                <a href="/admin">🛠️ Admin</a>
+                {% endif %}
+                <button type="button" onclick="signOut()">🚪 Sign out</button>
+            </div>
+        </details>
+        <a class="distrakt-nav-link" href="/?year={{ year }}&amp;month={{ month }}" title="Back to the calendar for this month">📅 Calendar</a>
     </div>
 </header>
 
@@ -43,15 +56,19 @@
             <button type="button" class="distrakt-tab active" data-tab="shows" onclick="switchTab('shows')">This month's shows</button>
             <button type="button" class="distrakt-tab" data-tab="copy" onclick="switchTab('copy')">Copy blocks</button>
             <button type="button" class="distrakt-tab" data-tab="data" onclick="switchTab('data')">Backup</button>
-            {# The emoji map is app-wide configuration shared by every user's
-               posts, so it is edited from the administrator's settings surface
-               only. Everyone else still sees the emoji, just can't change them. #}
-            {% if is_admin %}
+            {# Everyone with the tracker gets this: the map is their own and
+               decides how their own Discord posts render. #}
             <button type="button" class="distrakt-tab" data-tab="emoji" onclick="switchTab('emoji')">Emoji map</button>
-            {% endif %}
         </nav>
 
         <section class="distrakt-panel" data-panel="shows">
+            {# Refresh lives here, beside the counts it actually updates, rather
+               than on the Copy blocks tab where its effect was invisible. #}
+            <div class="distrakt-section-head">
+                <h2>This month's shows</h2>
+                <button type="button" class="btn-ghost small" onclick="refreshMonth()"
+                        title="Re-read watch history and season data from Trakt">↻ Refresh</button>
+            </div>
             <div id="distraktShowList" class="distrakt-show-list">
                 <div class="distrakt-empty">Loading…</div>
             </div>
@@ -60,7 +77,6 @@
         <section class="distrakt-panel distrakt-section" data-panel="copy" hidden>
             <div class="distrakt-section-head">
                 <h2>Copy blocks</h2>
-                <button type="button" class="btn-ghost small" onclick="refreshMonth()">↻ Refresh</button>
             </div>
             <div class="distrakt-copy-block">
                 <div class="distrakt-copy-head">
@@ -126,9 +142,12 @@
             </div>
         </section>
 
-        {% if is_admin %}
         <section class="distrakt-panel distrakt-section" data-panel="emoji" hidden>
             <h2>Network → emoji map</h2>
+            <p class="distrakt-note">Your own map — it decides how the networks in
+                <strong>your</strong> Discord posts render, and nobody else's. New networks
+                are added here automatically as your roster picks them up. It travels with
+                the Backup export.</p>
             <div id="emojiRows" class="emoji-rows"></div>
             <div class="emoji-map-actions">
                 <button type="button" class="btn-ghost small" onclick="addEmojiRow()">+ Add network</button>
@@ -140,9 +159,19 @@
             </div>
             <button type="button" class="btn-primary" onclick="saveEmojiMap()">Save emoji map</button>
         </section>
-        {% endif %}
     </div>
 </main>
+
+<!-- Show details modal: the calendar's, plus this user's watched episodes. -->
+<div id="distraktDetailsModal" class="modal-overlay" onclick="if(event.target===this) closeDistraktDetails()">
+    <div class="modal wide">
+        <div class="modal-head">
+            <h2 id="distraktDetailsTitle">Details</h2>
+            <button type="button" class="modal-close" onclick="closeDistraktDetails()">&times;</button>
+        </div>
+        <div class="modal-body" id="distraktDetailsBody"></div>
+    </div>
+</div>
 
 <!-- Add-show modal -->
 <div id="addShowModal" class="modal-overlay" onclick="if(event.target===this) closeAddShow()">
@@ -174,12 +203,12 @@
     window.DISTRAKT_YEAR = {{ year }};
     window.DISTRAKT_MONTH = {{ month }};
     window.IS_ADMIN = {{ "true" if is_admin else "false" }};
-    // Rendered in rather than fetched: the roster falls back to these emoji for
-    // networks with no logo, and the endpoint that serves the map is for
-    // administrators only.
+    // This user's OWN map, rendered in rather than fetched: the roster falls back
+    // to these emoji for any network with no logo, on the first paint.
     window.NETWORK_EMOJIS = {{ network_emojis | tojson }};
     window.DEFAULT_NETWORK_EMOJI = {{ default_network_emoji | tojson }};
 </script>
+<script src="/static/js/nav.js?v={{ asset_v }}"></script>
 <script src="/static/js/distrakt.js?v={{ asset_v }}"></script>
 </body>
 </html>

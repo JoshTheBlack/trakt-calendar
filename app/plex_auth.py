@@ -21,7 +21,7 @@ server. Registration is gated by the invite system the same way Trakt's is.
 from __future__ import annotations
 
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -97,12 +97,20 @@ async def request_pin(client_id: str) -> dict:
 
 
 def popup_url(client_id: str, code: str) -> str:
-    """Where to send the popup window for the visitor to approve the PIN."""
+    """Where to send the popup window for the visitor to approve the PIN.
+
+    `quote_via=quote` so a space becomes %20 rather than urlencode's default `+`.
+    Everything after the `#` is a FRAGMENT, which never reaches a server — it is
+    parsed by Plex's own single-page app, and `+`-means-space is a
+    form-encoding convention rather than a URL one. Every known-working Plex
+    client builds this with encodeURIComponent, so this matches them byte for
+    byte instead of relying on their parser being lenient.
+    """
     query = urlencode({
         "clientID": client_id,
         "code": code,
         "context[device][product]": PRODUCT,
-    })
+    }, quote_via=quote)
     return f"{AUTH_APP_URL}#?{query}"
 
 

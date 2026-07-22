@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi import Request  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, authz, config, db  # noqa: E402
+from app import auth, authz, config, db, distrakt  # noqa: E402
 from app.auth import AuthLevel  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -303,19 +303,39 @@ class DistraktTemplateTests(GatingTestCase):
         return user_id
 
     def test_the_emoji_map_is_rendered_in_rather_than_fetched(self):
-        """The endpoint that serves the map is admin-only, but every viewer needs
-        the emoji as a fallback for networks with no logo."""
-        save_settings(Settings(network_emojis={"HBO": ":hbo:"}, default_network_emoji=":tv:"))
-        self.sign_in_as(self._tracker(is_admin=False))
+        """The roster falls back to these emoji for networks with no logo, so the
+        page needs them without a second round trip."""
+        user_id = self._tracker(is_admin=False)
+        asyncio.run(distrakt.set_emoji_prefs(user_id, {"HBO": ":hbo:"}, ":tv:"))
+        self.sign_in_as(user_id)
         body = self.client.get("/distrakt").text
         self.assertIn('window.NETWORK_EMOJIS = {"HBO": ":hbo:"}', body)
-        self.assertIn('window.IS_ADMIN = false', body)
 
-    def test_the_emoji_editor_is_admin_only(self):
-        self.sign_in_as(self._tracker(is_admin=False))
-        self.assertNotIn("saveEmojiMap()", self.client.get("/distrakt").text)
+    def test_the_emoji_map_is_this_users_own(self):
+        """It renders into ONE account's Discord posts, so it is that account's.
+        It used to be app-wide, which meant any user's roster import registered
+        networks into the operator's map."""
+        mine = self._tracker(is_admin=False)
+        theirs = self._tracker(is_admin=True)
+        asyncio.run(distrakt.set_emoji_prefs(mine, {"HBO": ":mine:"}, ":tv:"))
+        asyncio.run(distrakt.set_emoji_prefs(theirs, {"HBO": ":theirs:"}, ":tv:"))
+        self.sign_in_as(mine)
+        self.assertIn(":mine:", self.client.get("/distrakt").text)
         self.sign_out()
-        self.sign_in_as(self._tracker(is_admin=True))
+        self.sign_in_as(theirs)
+        body = self.client.get("/distrakt").text
+        self.assertIn(":theirs:", body)
+        self.assertNotIn(":mine:", body)
+
+    def test_a_new_account_starts_with_an_empty_map(self):
+        """Nothing seeds it — not settings.json, not another account. It fills in
+        from this user's own roster and travels with their Backup export."""
+        self.sign_in_as(self._tracker(is_admin=False))
+        self.assertIn("window.NETWORK_EMOJIS = {}", self.client.get("/distrakt").text)
+
+    def test_every_tracker_user_can_edit_their_own_map(self):
+        """No longer admin-only: the map decides how THIS account's posts render."""
+        self.sign_in_as(self._tracker(is_admin=False))
         self.assertIn("saveEmojiMap()", self.client.get("/distrakt").text)
 
 

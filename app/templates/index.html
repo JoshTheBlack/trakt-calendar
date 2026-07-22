@@ -52,7 +52,7 @@
                 <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
             </select>
         </div>
-        <div class="control" title="Your timezone — controls day grouping and air times">
+        <div class="control tz" title="Your timezone — controls day grouping and air times">
             <label for="tzSelect">🌐</label>
             <select id="tzSelect" onchange="setViewerTimezone(this.value)">
                 {% for tzgroup in viewer_timezone_groups %}
@@ -82,10 +82,21 @@
         </button>
         {% endif %}
         <button type="button" class="pill-btn" onclick="openShare()">🔗 Share</button>
-        {% if is_admin %}
-        <button type="button" class="pill-btn" onclick="openSettings()">⚙️ Settings</button>
-        <a class="pill-btn" href="/admin">🛠️ Admin</a>
-        {% endif %}
+        {# One pill instead of three. An admin's bar carried Account + Settings +
+           Admin on top of everything else, which pushed the header onto a second
+           row; these are destinations rather than controls, so they collapse
+           together well. #}
+        <details class="nav-menu">
+            <summary title="Account and settings">☰ Menu</summary>
+            <div class="nav-menu-items">
+                <a href="/me">👤 Account</a>
+                {% if is_admin %}
+                <button type="button" onclick="closeNavMenus(); openSettings()">⚙️ Settings</button>
+                <a href="/admin">🛠️ Admin</a>
+                {% endif %}
+                <button type="button" onclick="signOut()">🚪 Sign out</button>
+            </div>
+        </details>
         <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)" hidden>🧵 Distrakt</a>
     </div>
 </header>
@@ -207,6 +218,18 @@
                     <span class="hint" id="s_redirect_hint">The origin people reach this app on — no path, no trailing slash. Required for "Log in with Trakt", and used for every link the app generates.</span>
                 </div>
                 <div class="field">
+                    <label for="s_trusted_proxies">Trusted proxy addresses</label>
+                    <input type="text" id="s_trusted_proxies" name="trusted_proxy_ips" placeholder="127.0.0.1/32" autocomplete="off" spellcheck="false">
+                    <span class="hint" id="s_proxy_hint"></span>
+                </div>
+                {# Read-only on purpose: a wrong value here logs everyone out of the
+                   screen that would fix it, so cookie_secure stays hand-edited in
+                   settings.json. Shown because a mismatch is otherwise invisible. #}
+                <div class="field" id="s_cookie_box" hidden>
+                    <label>Session cookies</label>
+                    <span class="hint" id="s_cookie_hint"></span>
+                </div>
+                <div class="field">
                     <label for="s_client_id">Trakt Client ID</label>
                     <input type="text" id="s_client_id" name="trakt_client_id" autocomplete="off" spellcheck="false">
                     <span class="hint">From trakt.tv/oauth/applications</span>
@@ -220,6 +243,19 @@
                     <label for="s_access_token">Trakt Access Token</label>
                     <input type="password" id="s_access_token" data-secret="1" name="trakt_access_token" autocomplete="off" spellcheck="false">
                     <span class="hint" id="s_token_status"></span>
+                </div>
+                {# The single most common setup mistake is registering the ORIGIN
+                   on the Trakt application instead of this exact callback path,
+                   which Trakt rejects with a bare "invalid_redirect". Shown as a
+                   copyable value rather than buried in hint text. #}
+                <div class="field" id="s_redirect_field" hidden>
+                    <label for="s_redirect_uri">Trakt redirect URI</label>
+                    <div class="share-link-box">
+                        <input type="text" id="s_redirect_uri" readonly>
+                        <button type="button" class="btn-ghost small" onclick="copyRedirectUri()">Copy</button>
+                    </div>
+                    <span class="hint">Paste this <strong>exactly</strong> into your Trakt application's
+                        Redirect URI field — the whole path, not just the site address.</span>
                 </div>
                 <div class="auth-box">
                     <button type="button" class="btn-ghost small" onclick="startDeviceAuth()">🔑 Authorize with Trakt</button>
@@ -343,53 +379,37 @@
             <button type="button" class="modal-close" onclick="closeShare()">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="hint">A shared link is read-only, needs no sign-in, and never spends this
-                instance's Trakt rate limit — visitors see whatever is already cached.</p>
+            {# Only an administrator can set public_base_url, so only they are told
+               about it. For anyone else it is an unfixable complaint about a
+               setting they cannot see. #}
             <p class="hint err" id="share_no_base_url" hidden>Set a public base URL in Settings before
                 sharing a link — without it there is nothing to build one from.</p>
 
-            <div class="field share-row">
-                <label class="checkbox-label"><input type="checkbox" id="share_enable_token" onchange="setShareEnabled('token', this.checked)"> Link with a private token</label>
-                <div class="share-link-box" id="share_box_token" hidden>
-                    <input type="text" id="share_url_token" readonly>
-                    <button type="button" class="btn-ghost small" onclick="copyShareUrl('token')">Copy</button>
-                    <button type="button" class="btn-ghost small" onclick="rotateShareToken()" title="Invalidate the old link and issue a new one">↻ Rotate</button>
-                </div>
+            <div class="field">
+                <label for="share_kind">Share link</label>
+                <select id="share_kind" onchange="setShareKind(this.value)">
+                    <option value="token">A private token</option>
+                    <option value="username">My username</option>
+                    <option value="slug">A custom name</option>
+                </select>
+                <span class="hint">Only the selected link answers. Switching turns the others off.</span>
             </div>
 
-            <div class="field share-row">
-                <label class="checkbox-label"><input type="checkbox" id="share_enable_username" onchange="setShareEnabled('username', this.checked)"> Link with my username</label>
-                <div class="share-link-box" id="share_box_username" hidden>
-                    <input type="text" id="share_url_username" readonly>
-                    <button type="button" class="btn-ghost small" onclick="copyShareUrl('username')">Copy</button>
-                </div>
-            </div>
-
-            <div class="field share-row">
-                <label class="checkbox-label"><input type="checkbox" id="share_enable_slug" onchange="setShareEnabled('slug', this.checked)"> Link with a custom name</label>
-                <div class="share-slug-edit">
-                    <input type="text" id="share_slug_input" placeholder="your-custom-name" spellcheck="false" oninput="checkShareSlug()">
-                    <span class="hint" id="share_slug_status"></span>
-                </div>
-                <div class="share-link-box" id="share_box_slug" hidden>
-                    <input type="text" id="share_url_slug" readonly>
-                    <button type="button" class="btn-ghost small" onclick="copyShareUrl('slug')">Copy</button>
-                </div>
+            <div class="field" id="share_slug_field" hidden>
+                <label for="share_slug_input">Custom name</label>
+                <input type="text" id="share_slug_input" placeholder="your-custom-name" spellcheck="false" oninput="checkShareSlug()">
+                <span class="hint" id="share_slug_status"></span>
             </div>
 
             <div class="field">
-                <label for="share_preferred">Which link to generate</label>
-                <select id="share_preferred" onchange="setSharePreferred(this.value)">
-                    <option value="token">The private token link</option>
-                    <option value="username">The username link</option>
-                    <option value="slug">The custom-name link</option>
-                </select>
+                <div class="share-link-box">
+                    <input type="text" id="share_url" readonly placeholder="No link yet">
+                    <button type="button" class="btn-ghost small" onclick="copyShareUrl()">Copy</button>
+                    <button type="button" class="btn-ghost small" id="share_rotate" onclick="rotateShareToken()" title="Invalidate the old link and issue a new one">↻ Rotate</button>
+                </div>
             </div>
 
             <div class="settings-section">🎛️ How the link opens</div>
-            <p class="hint">These options are written into the link itself. They change nothing
-                about your own calendar — pick "use my current display" and whoever opens the
-                link simply sees it the way you have it set right now.</p>
             <div class="field">
                 <label class="checkbox-label">
                     <input type="radio" name="share_view_mode" value="current" onchange="setShareViewMode('current')"> Use my current display
@@ -475,6 +495,7 @@
     // hand gets you a refusal rather than a tracker.
     window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
 </script>
+<script src="/static/js/nav.js?v={{ asset_v }}"></script>
 <script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>
 </html>

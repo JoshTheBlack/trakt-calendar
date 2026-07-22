@@ -336,6 +336,23 @@ async def post_share_enabled(request: Request):
     return JSONResponse(_share_payload(row, user.username, load_settings()))
 
 
+@guard.post("/api/me/share/active", AuthLevel.CALENDAR_APPROVED)
+async def post_share_active(request: Request):
+    """Publish exactly one of the three link forms and retire the other two.
+
+    What the Share panel's single dropdown writes. The granular
+    /enabled + /preferred pair is still there for a caller that wants several
+    forms live at once; this is the one-link-at-a-time shape the UI presents.
+    """
+    user = await auth.current_user(request)
+    data = await _json_body(request)
+    if data is None or data.get("kind") not in share_links.PREFERRED_KINDS:
+        return JSONResponse({"ok": False, "error": "Expected {kind}"}, status_code=400)
+    await share_links.set_active_kind(user.user_id, data["kind"])
+    row = await share_links.get(user.user_id)
+    return JSONResponse(_share_payload(row, user.username, load_settings()))
+
+
 @guard.post("/api/me/share/preferred", AuthLevel.CALENDAR_APPROVED)
 async def post_share_preferred(request: Request):
     user = await auth.current_user(request)

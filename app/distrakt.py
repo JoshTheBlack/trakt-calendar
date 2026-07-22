@@ -753,7 +753,11 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
 # Bump only on an incompatible change to the exported shape. Restore refuses a
 # version it doesn't understand rather than guessing at an older/newer layout.
-EXPORT_SCHEMA = 1
+# 2 adds distrakt_prefs (the network->emoji map). A version-1 document restores
+# fine — see restore_user_data, which treats a table the file doesn't carry as
+# "leave it alone" rather than "delete it".
+EXPORT_SCHEMA = 2
+SUPPORTED_EXPORT_SCHEMAS = (1, 2)
 
 # (table, columns-excluding-user_id). The export lists rows verbatim so an
 # export -> restore round trip is an identity; restore always writes user_id from
@@ -764,7 +768,82 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("distrakt_watch_state", ("last_synced", "beacons_json")),
     ("distrakt_show_progress", ("trakt_id", "season", "watched_episodes_json")),
     ("distrakt_movie_watches", ("trakt_id", "watched_at", "title", "year")),
+    # The emoji map travels with the backup: it is the only copy there is now
+    # that nothing seeds it, so a restore that dropped it would lose work that
+    # cannot be recovered from anywhere else.
+    ("distrakt_prefs", ("network_emojis_json", "default_network_emoji", "updated_at")),
 )
+
+
+# ---------------------------------------------------------------------------
+# per-user network -> emoji map
+# ---------------------------------------------------------------------------
+# This was app-wide in settings.json, which meant every tracker user shared one
+# map: importing a roster on any account registered its networks into the
+# operator's, and one person's emoji choices went out in everybody's Discord
+# posts. It is per-user for the same reason the roster and the watch history are.
+#
+# THERE IS NO SEEDING. A new account starts with an empty map and the default
+# emoji, and fills it in as its own roster registers networks. Inheriting the
+# operator's map would be the same mistake in slower motion — one person's
+# choices arriving in another person's posts, just once instead of continuously.
+# The map travels with the tracker's own Backup export/restore instead, which is
+# how a user moves it between instances or accounts.
+
+DEFAULT_EMOJI = ":tv:"
+
+
+async def get_emoji_prefs(user_id: int) -> tuple[dict, str]:
+    """This user's (network_emojis, default_emoji).
+
+    An account with no row yet gets an empty map — deliberately, not as a
+    fallback to anything app-wide.
+    """
+    row = await db.fetch_one(
+        "SELECT network_emojis_json, default_network_emoji FROM distrakt_prefs "
+        "WHERE user_id = ?",
+        (user_id,),
+    )
+    if row is None:
+        return {}, DEFAULT_EMOJI
+    try:
+        emojis = json.loads(row["network_emojis_json"] or "{}")
+    except ValueError:
+        emojis = {}
+    return (
+        emojis if isinstance(emojis, dict) else {},
+        row["default_network_emoji"] or DEFAULT_EMOJI,
+    )
+
+
+async def set_emoji_prefs(user_id: int, emojis: dict, default_emoji: str) -> None:
+    """Replace this user's whole map. The editor sends every row it has, so a
+    partial merge would make deleting an entry impossible."""
+    await db.execute(
+        "INSERT INTO distrakt_prefs (user_id, network_emojis_json, default_network_emoji, updated_at) "
+        "VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(user_id) DO UPDATE SET "
+        "network_emojis_json = excluded.network_emojis_json, "
+        "default_network_emoji = excluded.default_network_emoji, "
+        "updated_at = excluded.updated_at",
+        (user_id, json.dumps({str(k): str(v) for k, v in (emojis or {}).items()}),
+         (default_emoji or DEFAULT_EMOJI).strip() or DEFAULT_EMOJI, db.now()),
+    )
+
+
+async def register_networks(user_id: int, networks) -> dict:
+    """Add any unmapped network to THIS user's map with the default emoji, so it
+    shows up in their editor ready to customize. Returns the resulting map."""
+    emojis, default_emoji = await get_emoji_prefs(user_id)
+    changed = False
+    for net in networks:
+        net = (net or "").strip()
+        if net and net not in emojis:
+            emojis[net] = default_emoji
+            changed = True
+    if changed:
+        await set_emoji_prefs(user_id, emojis, default_emoji)
+    return emojis
 
 
 class RestoreError(ValueError):
@@ -787,25 +866,35 @@ async def export_user_data(user_id: int) -> dict:
 async def restore_user_data(user_id: int, doc: dict) -> None:
     """Replace `user_id`'s distrakt data with the document's, in one transaction.
 
-    REPLACE, not merge: the user's existing rows in all five tables are deleted
+    REPLACE, not merge: the user's existing rows in the file's tables are deleted
     and the file's inserted. Any `user_id` present in the file is IGNORED — every
     row is written under the session user. Refuses an unknown schema version.
+
+    A table the document does not carry at all is LEFT ALONE rather than emptied,
+    which is what lets an older export restore onto a newer schema: a version-1
+    backup predates the emoji map and says nothing about it, and reading that
+    silence as "delete my map" would destroy data the file never claimed to
+    describe.
     """
     if not isinstance(doc, dict):
         raise RestoreError("restore document must be an object")
-    if doc.get("schema") != EXPORT_SCHEMA:
+    if doc.get("schema") not in SUPPORTED_EXPORT_SCHEMAS:
         raise RestoreError(f"unsupported distrakt export schema: {doc.get('schema')!r}")
     payload: dict[str, list] = {}
     for table, _cols in _EXPORT_TABLES:
-        rows = doc.get(table, [])
+        if table not in doc:
+            continue
+        rows = doc.get(table)
         if not isinstance(rows, list):
             raise RestoreError(f"{table} must be a list")
         payload[table] = rows
 
     def _work(conn: db.Connection) -> None:
-        for table, _cols in _EXPORT_TABLES:
+        for table in payload:
             conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
         for table, cols in _EXPORT_TABLES:
+            if table not in payload:
+                continue
             collist = ", ".join(("user_id", *cols))
             placeholders = ", ".join(["?"] * (1 + len(cols)))
             sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders})"

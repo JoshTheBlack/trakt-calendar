@@ -258,17 +258,49 @@ def _configured_origin(settings: Settings) -> str | None:
     return f"{parts.scheme}://{parts.netloc}".lower()
 
 
+def acceptable_origins(request: Request, settings: Settings) -> set[str]:
+    """Every origin this instance will accept a mutating request from.
+
+    A configured `public_base_url` is authoritative and yields exactly one, which
+    is the tightest this check gets and the reason to set it.
+
+    Without one, the HOST comes from the request and the SCHEME cannot be
+    established at all: behind a TLS-terminating proxy this app is served plain
+    HTTP whether or not the browser is on HTTPS, and `X-Forwarded-Proto` is only
+    believed when the peer is a configured trusted proxy — which on a fresh
+    install it is not. Insisting on a scheme we cannot observe rejected every
+    mutating request on a brand-new proxied deployment, INCLUDING onboarding,
+    which made the instance impossible to set up: the setting that would fix it
+    lives behind the login that could not be created.
+
+    So an unconfigured instance accepts either scheme for its OWN host. The host
+    comparison is what actually refuses a hostile origin; the scheme half adds
+    nothing against a cross-site attacker (who controls neither) and everything
+    against the operator.
+    """
+    configured = _configured_origin(settings)
+    if configured:
+        return {configured}
+    host = (request.headers.get("host") or "").strip().lower()
+    if not host:
+        return set()
+    if auth.request_is_https(request, settings):
+        return {f"https://{host}"}
+    return {f"http://{host}", f"https://{host}"}
+
+
 def expected_origin(request: Request, settings: Settings) -> str | None:
+    """The single origin this instance considers canonical, or None.
+
+    Kept for callers that want one value to show or log. The actual admission
+    decision uses acceptable_origins(), which may be broader — see there.
+    """
     configured = _configured_origin(settings)
     if configured:
         return configured
     host = (request.headers.get("host") or "").strip().lower()
     if not host:
         return None
-    # Behind a TLS-terminating proxy this app is served plain HTTP, so the
-    # request's own scheme says "http" while the browser's Origin says "https".
-    # Resolving the scheme the same way the cookie policy does keeps the two in
-    # agreement instead of rejecting every request on a real deployment.
     scheme = "https" if auth.request_is_https(request, settings) else "http"
     return f"{scheme}://{host}"
 
@@ -277,8 +309,7 @@ def cross_origin_reason(request: Request, settings: Settings) -> str | None:
     """None when the request may proceed, otherwise why it may not."""
     origin = (request.headers.get("origin") or "").strip().lower()
     if origin:
-        expected = expected_origin(request, settings)
-        if expected is None or origin != expected:
+        if origin not in acceptable_origins(request, settings):
             return "This request came from another origin."
         return None
     # No Origin header: fall back to the browser's own account of where the

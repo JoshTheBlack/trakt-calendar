@@ -93,9 +93,11 @@ class Settings:
     # Seerr (Overseerr/Jellyseerr lineage) request integration
     seer_url: str = ""
     seer_api_key: str = ""
-    # Distrakt (hidden tracker) — network -> Discord emoji map + fallback (§6).
-    network_emojis: dict[str, str] = field(default_factory=dict)
-    default_network_emoji: str = ":tv:"
+    # The distrakt network -> emoji map USED to live here, app-wide. It is per-user
+    # now (distrakt_prefs, migration 9): it renders into one person's Discord
+    # posts, and sharing it meant any user's roster import registered networks
+    # into the operator's map. Nothing seeds a new user's map — it fills in from
+    # their own roster, and travels via the tracker's Backup export.
     # TMDB API key — used to fetch network logos (distrakt) for Discord emoji art.
     tmdb_api_key: str = ""
     # Session cookie Secure flag: "always" (default) | "never" | "auto".
@@ -150,15 +152,6 @@ class Settings:
         # redirect URI instead of one with a doubled separator in it.
         if isinstance(clean.get("public_base_url"), str):
             clean["public_base_url"] = clean["public_base_url"].strip().rstrip("/")
-        # network_emojis may arrive as a JSON string from the emoji-map editor form.
-        ne = clean.get("network_emojis")
-        if isinstance(ne, str):
-            try:
-                clean["network_emojis"] = json.loads(ne) if ne.strip() else {}
-            except (json.JSONDecodeError, ValueError):
-                clean.pop("network_emojis")
-        if "network_emojis" in clean and not isinstance(clean["network_emojis"], dict):
-            clean.pop("network_emojis")
         return cls(**clean)
 
     def to_dict(self) -> dict:

@@ -501,6 +501,9 @@ async function openSettings() {
         const res = await fetch('/api/settings', { cache: 'no-store' });
         const s = await res.json();
         document.getElementById('s_base_url').value = s.public_base_url || '';
+        document.getElementById('s_trusted_proxies').value = s.trusted_proxy_ips || '';
+        updateProxyHint(s);
+        updateCookieHint(s);
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
         applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
@@ -577,6 +580,7 @@ async function saveSettings(event) {
     const payload = {
         ...collectSecrets(),
         public_base_url: document.getElementById('s_base_url').value.trim(),
+        trusted_proxy_ips: document.getElementById('s_trusted_proxies').value.trim(),
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
@@ -623,19 +627,27 @@ let shareSlugTimer = null;
 
 function renderShare() {
     if (!shareState) return;
-    document.getElementById('share_no_base_url').hidden = !shareState.base_url_missing;
-    document.getElementById('share_enable_token').checked = shareState.enabled.token;
-    document.getElementById('share_enable_username').checked = shareState.enabled.username;
-    document.getElementById('share_enable_slug').checked = shareState.enabled.slug;
-    document.getElementById('share_slug_input').value = shareState.custom_slug || '';
-    document.getElementById('share_preferred').value = shareState.preferred_kind;
+    // public_base_url is an admin-only setting, so an ordinary user can only be
+    // annoyed by this, never act on it.
+    document.getElementById('share_no_base_url').hidden =
+        !(shareState.base_url_missing && window.IS_ADMIN);
 
-    for (const kind of ['token', 'username', 'slug']) {
-        const box = document.getElementById('share_box_' + kind);
-        const url = shareState.urls[kind];
-        box.hidden = !url;
-        if (url) document.getElementById('share_url_' + kind).value = url;
-    }
+    const kind = shareState.preferred_kind;
+    document.getElementById('share_kind').value = kind;
+    // Each control belongs to exactly one form: the custom name only means
+    // anything for the slug link, and rotating only applies to the token.
+    document.getElementById('share_slug_field').hidden = kind !== 'slug';
+    document.getElementById('share_rotate').hidden = kind !== 'token';
+    document.getElementById('share_slug_input').value = shareState.custom_slug || '';
+
+    const url = shareState.urls[kind];
+    const box = document.getElementById('share_url');
+    box.value = url || '';
+    // A slug link has nothing to resolve to until a name is saved; say which of
+    // the two reasons the box is empty rather than leaving it blank.
+    box.placeholder = shareState.base_url_missing
+        ? 'No public base URL set'
+        : (kind === 'slug' ? 'Pick a custom name above' : 'No link yet');
     renderShareView();
 }
 
@@ -703,20 +715,11 @@ function closeShare() {
     document.getElementById('shareModal').classList.remove('open');
 }
 
-async function setShareEnabled(kind, enabled) {
+// One link at a time: this publishes the chosen form and retires the other two,
+// so the dropdown is the only sharing switch there is.
+async function setShareKind(kind) {
     try {
-        const res = await fetch('/api/me/share/enabled', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ kind, enabled })
-        });
-        shareState = await res.json();
-        renderShare();
-    } catch (e) { toast('Could not update sharing', false); }
-}
-
-async function setSharePreferred(kind) {
-    try {
-        const res = await fetch('/api/me/share/preferred', {
+        const res = await fetch('/api/me/share/active', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ kind })
         });
@@ -774,8 +777,8 @@ async function rotateShareToken() {
     } catch (e) { toast('Could not rotate token', false); }
 }
 
-function copyShareUrl(kind) {
-    const input = document.getElementById('share_url_' + kind);
+function copyShareUrl() {
+    const input = document.getElementById('share_url');
     if (!input || !input.value) return;
     navigator.clipboard.writeText(input.value).then(
         () => toast('Link copied', true),
@@ -802,13 +805,70 @@ function updateTokenStatus(expiresAt) {
 // reconnect prompt left behind when a saved token couldn't be matched to an
 // account during first-run setup.
 function updateTraktLoginHints(s) {
-    const hint = document.getElementById('s_redirect_hint');
-    if (hint && s.trakt_redirect_uri) {
-        hint.textContent = 'Register this exact redirect URI on your Trakt application: '
-            + s.trakt_redirect_uri;
+    const field = document.getElementById('s_redirect_field');
+    const input = document.getElementById('s_redirect_uri');
+    if (field && input) {
+        input.value = s.trakt_redirect_uri || '';
+        // Nothing to register until a public base URL exists to build it from.
+        field.hidden = !s.trakt_redirect_uri;
     }
     const box = document.getElementById('s_reconnect_box');
     if (box) box.hidden = !s.trakt_reconnect_notice;
+}
+
+function copyRedirectUri() {
+    const input = document.getElementById('s_redirect_uri');
+    if (!input || !input.value) return;
+    navigator.clipboard.writeText(input.value).then(
+        () => toast('Redirect URI copied', true),
+        () => toast('Could not copy', false)
+    );
+}
+
+// Tells the operator what to type instead of making them work out their own
+// container network, and calls out the one combination that fails silently:
+// forwarded headers arriving from a peer this app doesn't trust, which collapses
+// every user onto the proxy's address for rate limiting and the session list.
+function updateProxyHint(s) {
+    const hint = document.getElementById('s_proxy_hint');
+    if (!hint) return;
+    const peer = s.detected_peer_ip || 'unknown';
+    let text = 'Comma-separated CIDRs whose X-Forwarded-For this app will honor. '
+        + 'This request came from ' + peer + '.';
+    if (s.forwarded_headers_present && !s.peer_is_trusted_proxy) {
+        text += ' Forwarded headers ARE arriving but are being ignored, so every user '
+            + 'currently looks like ' + peer + ' — add it here.';
+        hint.classList.add('warn');
+    } else {
+        hint.classList.remove('warn');
+    }
+    hint.textContent = text;
+}
+
+// cookie_secure is resolved from the browser at onboarding and hand-edited after,
+// so it can drift: a data dir that started on localhost and later moved behind
+// HTTPS keeps "never" and quietly serves session cookies with no Secure flag.
+// Only the browser knows the real protocol, so the comparison happens here.
+function updateCookieHint(s) {
+    const box = document.getElementById('s_cookie_box');
+    const hint = document.getElementById('s_cookie_hint');
+    if (!box || !hint) return;
+    const mode = (s.cookie_secure || 'always').toLowerCase();
+    const isHttps = window.location.protocol === 'https:';
+    let text = '';
+    if (mode === 'never' && isHttps) {
+        text = 'Set to "never", but you reached this page over https://. Session cookies '
+            + 'are going out without the Secure flag — set "cookie_secure" to "always" in '
+            + 'data/settings.json.';
+    } else if (mode === 'always' && !isHttps) {
+        text = 'Set to "always", but you reached this page over http://. Anyone signing in '
+            + 'over http:// will have their cookie discarded — set "cookie_secure" to '
+            + '"never" in data/settings.json, or serve this instance over https://.';
+    }
+    hint.textContent = text;
+    hint.classList.toggle('warn', !!text);
+    // Nothing to say when the policy matches reality; the field stays out of the way.
+    box.hidden = !text;
 }
 
 function stopDeviceAuthPolling() {
@@ -873,7 +933,15 @@ async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
             tokenInput.dataset.stored = '1';
             tokenInput.placeholder = 'Saved — leave blank to keep it';
             updateTokenStatus(d.expires_at);
-            box.textContent = '✅ Authorized! The access token has been saved.';
+            // The server also tries to adopt the fresh token as this admin's own
+            // linked identity, which is what takes the reconnect notice down.
+            if (d.trakt_linked) {
+                const notice = document.getElementById('s_reconnect_box');
+                if (notice) notice.hidden = true;
+                box.textContent = '✅ Authorized, and linked to your account.';
+            } else {
+                box.textContent = '✅ Authorized! The access token has been saved.';
+            }
             toast('Trakt authorized', true);
         } else {
             box.textContent = d.error || 'Authorization failed.';

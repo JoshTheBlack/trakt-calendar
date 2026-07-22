@@ -538,13 +538,18 @@ class IdentityKeyTests(TraktOAuthTestCase):
         self.assertEqual(resp.status_code, 502)
         self.assertEqual(self.identities(), [])
 
-    def test_fetch_account_refuses_a_slug_only_response(self):
+    @staticmethod
+    def _stub_client(payload, status=200):
+        """An httpx.AsyncClient stand-in returning one canned response, and
+        recording the URL it was asked for."""
+        seen = {}
+
         class _Resp:
-            status_code = 200
+            status_code = status
 
             @staticmethod
             def json():
-                return {"username": "josh", "ids": {"slug": "josh"}}
+                return payload
 
         class _Client:
             async def __aenter__(self):
@@ -553,12 +558,50 @@ class IdentityKeyTests(TraktOAuthTestCase):
             async def __aexit__(self, *exc):
                 return False
 
-            async def get(self, *a, **kw):
+            async def get(self, url, *a, **kw):
+                seen["url"] = url
                 return _Resp()
 
-        with patch("app.trakt_auth.httpx.AsyncClient", return_value=_Client()):
-            with self.assertRaises(trakt_auth.AccountLookupError):
-                asyncio.run(trakt_auth.fetch_account("cid", "token"))
+        return _Client(), seen
+
+    # The real /users/settings body, trimmed to what fetch_account reads. Trakt
+    # users have NO numeric id: `ids` is {slug, uuid}, and the UUID is the only
+    # stable handle there is.
+    SETTINGS_BODY = {
+        "user": {
+            "username": "JoshTheBlack",
+            "name": "JoshTheBlack",
+            "ids": {"slug": "joshtheblack", "uuid": "30ee8617b5f3f670f90d88012b30adf4"},
+        },
+        "account": {"timezone": "America/New_York", "token": "unrelated-internal-value"},
+    }
+
+    def test_fetch_account_reads_the_uuid_from_users_settings(self):
+        client, seen = self._stub_client(self.SETTINGS_BODY)
+        with patch("app.trakt_auth.httpx.AsyncClient", return_value=client):
+            account = asyncio.run(trakt_auth.fetch_account("cid", "token"))
+        self.assertEqual(account, {"id": "30ee8617b5f3f670f90d88012b30adf4",
+                                   "name": "JoshTheBlack"})
+        # /users/me cannot answer this — it returns ids:{slug} and nothing else.
+        self.assertTrue(seen["url"].endswith("/users/settings"))
+
+    def test_fetch_account_ignores_the_unrelated_account_token(self):
+        """The settings response carries a Trakt-internal `account.token`. It must
+        never end up on the identity row or anywhere near a log."""
+        client, _ = self._stub_client(self.SETTINGS_BODY)
+        with patch("app.trakt_auth.httpx.AsyncClient", return_value=client):
+            account = asyncio.run(trakt_auth.fetch_account("cid", "token"))
+        self.assertNotIn("unrelated-internal-value", str(account))
+
+    def test_fetch_account_refuses_a_response_with_no_uuid(self):
+        """A slug is reassignable, so a body carrying only one is refused rather
+        than keyed on."""
+        for body in ({"user": {"ids": {"slug": "josh"}}}, {"user": {}}, {}):
+            with self.subTest(body=body):
+                client, _ = self._stub_client(body)
+                with patch("app.trakt_auth.httpx.AsyncClient", return_value=client):
+                    with self.assertRaises(trakt_auth.AccountLookupError):
+                        asyncio.run(trakt_auth.fetch_account("cid", "token"))
 
 
 class RefreshSerializationTests(TraktOAuthTestCase):

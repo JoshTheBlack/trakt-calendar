@@ -10,7 +10,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
     <style>
-        .pick-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 40px 6vw; }
+        /* No 100vh now that a header sits above it: the panel centres in what is
+           left rather than pushing the page taller than the viewport. */
+        .pick-wrap { display: flex; align-items: center; justify-content: center; padding: 40px 6vw; }
         .pick-panel { width: 100%; max-width: 720px; text-align: center; }
         .pick-panel .brand { height: 56px; margin-bottom: 22px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.55)); }
         .pick-panel h1 { font-family: 'Bebas Neue', sans-serif; font-size: clamp(2rem, 6vw, 3.2rem); letter-spacing: 2px;
@@ -18,7 +20,10 @@
         .pick-panel .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 26px; }
         .year-nav { display: flex; align-items: center; justify-content: center; gap: 20px; margin-bottom: 26px; }
         .year-nav .year { font-family: 'Bebas Neue', sans-serif; font-size: 2.2rem; letter-spacing: 2px; color: var(--gold-soft); min-width: 110px; }
-        .month-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 14px; }
+        /* A deliberate 4x3 rectangle rather than auto-fit, which packed 5-5-2 at
+           this width and read as a ragged list instead of a calendar year. */
+        .month-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+        @media (max-width: 620px) { .month-grid { grid-template-columns: repeat(2, 1fr); } }
         .month-btn { display: block; padding: 18px 10px; background: var(--card); border: 1px solid var(--card-border); border-radius: 12px;
             color: var(--text); font-weight: 700; font-size: 1rem; transition: all .18s ease; }
         .month-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.1); transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,0.4); }
@@ -28,9 +33,39 @@
     </style>
 </head>
 <body>
+    {# The calendar's own header, same markup and same stylesheet, so the bar is
+       identical across the site. The view controls (card style, day packing,
+       timezone) are deliberately absent — nothing rendered here reacts to them. #}
+    <header class="hero">
+        <div class="hero-lead">
+            <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        </div>
+        <div class="hero-controls">
+            <div class="control" title="{{ endpoint.description }}">
+                <label for="endpointSelect">📡</label>
+                <select id="endpointSelect" onchange="switchPickEndpoint(this.value)">
+                    {% for ep in endpoints %}
+                    <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        <div class="hero-actions">
+            <details class="nav-menu">
+                <summary title="Account and settings">☰ Menu</summary>
+                <div class="nav-menu-items">
+                    <a href="/me">👤 Account</a>
+                    {% if is_admin %}
+                    <a href="/admin">🛠️ Admin</a>
+                    {% endif %}
+                    <button type="button" onclick="signOut()">🚪 Sign out</button>
+                </div>
+            </details>
+        </div>
+    </header>
+
     <div class="pick-wrap">
         <div class="pick-panel">
-            <img class="brand" src="/static/images/trakttop.png" alt="Trakt">
             <h1>Pick a Month</h1>
             <div class="sub">Choose a month and year to see its new show premieres.</div>
 
@@ -58,5 +93,16 @@
             </div>
         </div>
     </div>
+<script src="/static/js/nav.js?v={{ asset_v }}"></script>
+<script>
+    // Stays on the picker rather than jumping into a month: this page is where
+    // you choose one, so switching the calendar type must not also choose it.
+    function switchPickEndpoint(key) {
+        const params = new URLSearchParams(window.location.search);
+        params.set('endpoint', key);
+        params.set('year', '{{ year }}');
+        window.location = '/pick?' + params.toString();
+    }
+</script>
 </body>
 </html>

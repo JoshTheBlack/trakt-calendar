@@ -8,15 +8,30 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <link rel="stylesheet" href="/static/css/auth.css">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
 </head>
 <body>
+
+<header class="hero">
+    <div class="hero-lead">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <h1>Admin</h1>
+    </div>
+    <div class="hero-actions">
+        <a class="pill-btn" href="/">📅 Calendar</a>
+        <details class="nav-menu">
+            <summary title="Account and settings">☰ Menu</summary>
+            <div class="nav-menu-items">
+                <a href="/me">👤 Account</a>
+                <a href="/admin">🛠️ Admin</a>
+                <button type="button" onclick="signOut()">🚪 Sign out</button>
+            </div>
+        </details>
+    </div>
+</header>
+
 <div class="admin-shell">
-  <div class="admin-top">
-    <h1>Admin</h1>
-    <a href="/">&larr; Back to the calendar</a>
-  </div>
 
   <section class="admin-section">
     <div class="admin-section-head"><h2>Accounts</h2></div>
@@ -33,10 +48,10 @@
           {% for u in users %}
           <tr>
             <td>{{ u.display_name }}{% if u.is_bootstrap %} <span class="auth-badge off">bootstrap</span>{% endif %}</td>
-            <td class="badge-row">
+            <td class="badge-row"><div class="badge-group">
               {% for p in u.providers %}<span class="auth-badge off">{{ p }}</span>{% endfor %}
               {% if not u.providers %}&mdash;{% endif %}
-            </td>
+            </div></td>
             <td><span class="auth-badge {{ 'ok' if u.calendar_approved else 'pending' }}">{{ 'Yes' if u.calendar_approved else 'No' }}</span></td>
             <td><span class="auth-badge {{ 'ok' if u.distrakt_approved else 'off' }}">{{ 'Yes' if u.distrakt_approved else 'No' }}</span></td>
             <td><span class="auth-badge {{ 'ok' if u.is_admin else 'off' }}">{{ 'Yes' if u.is_admin else 'No' }}</span></td>
@@ -44,7 +59,7 @@
             <td data-ts="{{ u.created_at or 0 }}"></td>
             <td data-ts="{{ u.last_login_at or 0 }}"></td>
             <td data-ts="{{ u.last_session_at or 0 }}"></td>
-            <td class="actions">
+            <td class="actions"><div class="action-group">
               <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="calendar" data-value="{{ 'false' if u.calendar_approved else 'true' }}">{{ 'Revoke calendar' if u.calendar_approved else 'Approve calendar' }}</button>
               <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="distrakt" data-value="{{ 'false' if u.distrakt_approved else 'true' }}">{{ 'Revoke distrakt' if u.distrakt_approved else 'Approve distrakt' }}</button>
               <button type="button" class="btn-ghost tiny" data-action="admin" data-user="{{ u.id }}" data-value="{{ 'false' if u.is_admin else 'true' }}">{{ 'Demote' if u.is_admin else 'Promote' }}</button>
@@ -57,7 +72,7 @@
               {% if u.id != me.user_id %}
               <button type="button" class="btn-ghost tiny btn-danger" data-action="delete" data-user="{{ u.id }}" data-name="{{ u.display_name }}">Delete</button>
               {% endif %}
-            </td>
+            </div></td>
           </tr>
           {% endfor %}
           {% if not users %}
@@ -90,13 +105,13 @@
             <td>{{ 'Yes' if inv.grants_calendar_on_accept else 'No' }}</td>
             <td data-ts="{{ inv.created_at or 0 }}"></td>
             <td data-ts="{{ inv.expires_at or 0 }}" data-ts-empty="Never"></td>
-            <td class="actions">
+            <td class="actions"><div class="action-group">
               <button type="button" class="btn-ghost tiny" data-action="copy-invite" data-token="{{ inv.token }}">Copy link</button>
               <button type="button" class="btn-ghost tiny" data-action="view-redemptions" data-invite="{{ inv.id }}">Redemptions ({{ inv.redemption_count }})</button>
               {% if not inv.revoked %}
               <button type="button" class="btn-ghost tiny btn-danger" data-action="revoke-invite" data-invite="{{ inv.id }}">Revoke</button>
               {% endif %}
-            </td>
+            </div></td>
           </tr>
           {% endfor %}
           {% if not invites %}
@@ -120,11 +135,11 @@
             <td>{{ r.kind }}</td>
             <td>{{ r.value }}</td>
             <td data-ts="{{ r.retired_at or 0 }}"></td>
-            <td class="actions">
+            <td class="actions"><div class="action-group">
               {% if r.kind != 'token' %}
               <button type="button" class="btn-ghost tiny" data-action="release" data-kind="{{ r.kind }}" data-value="{{ r.value }}">Release</button>
               {% else %}&mdash;{% endif %}
-            </td>
+            </div></td>
           </tr>
           {% endfor %}
           {% if not retired %}
@@ -136,10 +151,21 @@
   </section>
 </div>
 
+<script src="/static/js/nav.js?v={{ asset_v }}"></script>
 <script>
+// Compact, because three of these columns sit side by side and a full locale
+// string ("7/22/2026, 11:39:30 AM") is most of the table's width. Seconds are
+// noise at this granularity; the exact value stays in the tooltip.
+const TS_FMT = new Intl.DateTimeFormat(undefined, {
+  year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+});
 document.querySelectorAll('[data-ts]').forEach(td => {
   const v = parseInt(td.dataset.ts, 10);
-  td.textContent = v ? new Date(v * 1000).toLocaleString() : (td.dataset.tsEmpty || '—');
+  td.classList.add('ts');
+  if (!v) { td.textContent = td.dataset.tsEmpty || '—'; return; }
+  const when = new Date(v * 1000);
+  td.textContent = TS_FMT.format(when);
+  td.title = when.toLocaleString();
 });
 
 async function postJSON(url, body) {

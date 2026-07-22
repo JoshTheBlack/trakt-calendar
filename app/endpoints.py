@@ -22,7 +22,7 @@ class Endpoint:
 ENDPOINTS: dict[str, Endpoint] = {
     "shows/new": Endpoint(
         key="shows/new",
-        label="New Shows (series premieres)",
+        label="Series Premieres",
         path="shows/new",
         media="show",
         has_episode=True,
@@ -46,7 +46,7 @@ ENDPOINTS: dict[str, Endpoint] = {
     ),
     "shows": Endpoint(
         key="shows",
-        label="All Episodes Airing",
+        label="All Episodes",
         path="shows",
         media="show",
         has_episode=True,

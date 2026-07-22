@@ -62,6 +62,9 @@ async def _json_body(request: Request) -> dict:
     return data if isinstance(data, dict) else {}
 
 
+TOO_MANY_STARTS = "Too many sign-in attempts from this address. Try again in a few minutes."
+
+
 async def _begin(request: Request, *, purpose: str, session_id: str | None = None,
                  invite_token: str | None = None) -> JSONResponse:
     """Request a PIN and record a handshake carrying it, before the browser ever
@@ -70,7 +73,13 @@ async def _begin(request: Request, *, purpose: str, session_id: str | None = Non
     The PIN is requested FIRST specifically so the handshake row can be created
     with `plex_pin_id` already set — nothing has to come back later and update
     it.
+
+    Throttled per address ahead of that, because this is the one unauthenticated
+    path that spends an outbound call to plex.tv and writes a row: without a
+    limit it is a free way to make this instance hammer a third party.
     """
+    if await auth.handshake_start_limited(request):
+        return _error(TOO_MANY_STARTS, 429)
     client_id = await plex_auth.ensure_client_identifier()
     try:
         pin = await plex_auth.request_pin(client_id)

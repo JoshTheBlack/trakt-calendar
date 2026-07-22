@@ -17,6 +17,8 @@
   <div class="auth-card">
     <h1>Sign in</h1>
 
+    <p class="auth-notice" id="cookieWarning" role="alert" hidden></p>
+
     <div class="auth-providers">
       {% if trakt_login_configured %}
       <a class="auth-provider-btn ready" href="/auth/trakt/start">Continue with Trakt</a>
@@ -48,6 +50,23 @@
 
 <script src="/static/js/plex-auth.js"></script>
 <script>
+// The server decides whether the session cookie carries `Secure`; only the
+// browser knows which protocol it is really on. When those disagree the browser
+// discards the cookie on arrival, so sign-in returns success and the very next
+// request is anonymous — indistinguishable from a wrong password unless we say
+// so. Checked here rather than server-side because behind a TLS-terminating
+// proxy the app cannot see the browser's protocol at all.
+(() => {
+  const cookieIsSecure = {{ "true" if cookie_is_secure else "false" }};
+  if (!cookieIsSecure || window.location.protocol === 'https:') return;
+  const box = document.getElementById('cookieWarning');
+  box.textContent = 'This instance issues secure session cookies, but you reached it '
+    + 'over http://. Your browser will discard the cookie and sign-in will not stick. '
+    + 'Set "cookie_secure" to "never" in data/settings.json, or reach this instance '
+    + 'over https://.';
+  box.hidden = false;
+})();
+
 const err = document.getElementById('error');
 document.getElementById('plexBtn').addEventListener('click', async () => {
   const btn = document.getElementById('plexBtn');
@@ -58,6 +77,9 @@ document.getElementById('plexBtn').addEventListener('click', async () => {
     window.location = data.redirect || '/';
   } catch (e) {
     err.textContent = e.message || 'Could not sign in with Plex.';
+    // Some browsers open the popup behind this window, and an extension or a
+    // network that blocks app.plex.tv leaves it hanging with nothing to click.
+    plexFallbackLink(err);
     btn.disabled = false;
   }
 });

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import dataclasses
+import json
 import logging
 import os
 import time
@@ -25,6 +26,7 @@ from fastapi.templating import Jinja2Templates
 
 from . import admin_routes
 from . import arr
+from . import assets
 from . import auth
 from . import auth_routes
 from . import authz
@@ -70,21 +72,9 @@ BASE_DIR = Path(__file__).resolve().parent
 HEARTBEAT_SECONDS = 60
 
 
-def _asset_version() -> str:
-    """Cache-busting token: newest mtime of the CSS/JS, recomputed each server start."""
-    files = [
-        BASE_DIR / "static/css/style.css",
-        BASE_DIR / "static/css/distrakt.css",
-        BASE_DIR / "static/js/app.js",
-        BASE_DIR / "static/js/distrakt.js",
-    ]
-    try:
-        return str(int(max(f.stat().st_mtime for f in files)))
-    except OSError:
-        return VERSION
-
-
-ASSET_VERSION = _asset_version()
+# Cache-busting token for every stylesheet and script. Lives in app/assets.py so
+# the route modules imported below can use it too without importing this one back.
+ASSET_VERSION = assets.ASSET_VERSION
 
 # In-memory Sonarr/Radarr health, refreshed by a background heartbeat + on save.
 INTEGRATION_HEALTH: dict[str, dict] = {
@@ -265,12 +255,17 @@ def _month_valid(value) -> bool:
         return False
 
 
-def _picker_context(request: Request, settings, year: int, endpoint):
+def _picker_context(request: Request, settings, year: int, endpoint, user=None):
     today = date.today()
     return {
         "request": request,
         "year": year,
         "endpoint": endpoint,
+        # The picker carries the same navigation the calendar does — it is a
+        # landing page people arrive on directly, and having no way from here to
+        # the account or admin screens made those reachable only by typing a URL.
+        "endpoints": endpoint_choices(),
+        "is_admin": bool(user and user.is_admin),
         "months": [{"num": m, "name": calendar.month_name[m]} for m in range(1, 13)],
         "current_month": today.month if year == today.year else None,
         "today_month": today.month,
@@ -311,7 +306,8 @@ async def index(request: Request):
 
     # No month specified -> show the month/year picker landing page (like the original front page).
     if not _month_valid(request.query_params.get("month")):
-        return templates.TemplateResponse(request, "pick.html", _picker_context(request, settings, year, endpoint))
+        return templates.TemplateResponse(
+            request, "pick.html", _picker_context(request, settings, year, endpoint, user))
 
     month = _valid_month(request.query_params.get("month"), today.month)
     tz = _resolve_viewer_tz(user, settings)
@@ -393,6 +389,7 @@ async def distrakt(request: Request):
     user = await auth.current_user(request)
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
+    network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     context = {
         "request": request,
         "year": year,
@@ -401,14 +398,12 @@ async def distrakt(request: Request):
         # For the announcement post's "which calendar view does the embedded link
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
-        # The network -> emoji map is app-wide configuration shared by every
-        # user's Discord posts, so EDITING it is an administrator's job. Reading
-        # it is not: the roster rows on this page fall back to these emoji when a
-        # network has no logo, so they are rendered in rather than fetched from
-        # the admin-only settings endpoint.
         "is_admin": bool(user and user.is_admin),
-        "network_emojis": settings.network_emojis,
-        "default_network_emoji": settings.default_network_emoji,
+        # This user's OWN map — it renders into their Discord posts and nobody
+        # else's. Rendered in rather than fetched because the roster rows fall
+        # back to these emoji whenever a network has no logo.
+        "network_emojis": network_emojis,
+        "default_network_emoji": default_network_emoji,
         "version": VERSION,
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,
@@ -420,9 +415,14 @@ async def distrakt(request: Request):
 async def pick(request: Request):
     """Month/year selector landing page (carried over from the original front page)."""
     settings = load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
     year = _valid_year(request.query_params.get("year"), date.today().year)
-    endpoint = get_endpoint(request.query_params.get("endpoint") or settings.endpoint or DEFAULT_ENDPOINT)
-    return templates.TemplateResponse(request, "pick.html", _picker_context(request, settings, year, endpoint))
+    endpoint = get_endpoint(
+        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
+    )
+    return templates.TemplateResponse(
+        request, "pick.html", _picker_context(request, settings, year, endpoint, user))
 
 
 def _season_param(value) -> int | None:
@@ -645,7 +645,7 @@ async def api_network_logo_regenerate(request: Request):
 
 
 @guard.get("/api/settings", AuthLevel.ADMIN)
-async def get_settings():
+async def get_settings(request: Request):
     """Configuration for the Settings screen, WITHOUT any credential in it.
 
     Credentials are write-only over this API: the response carries a flag per
@@ -654,14 +654,35 @@ async def get_settings():
     Sonarr/Radarr/Seerr API key to whoever asked for it.
     """
     settings = load_settings()
+    peer = (request.client.host if request.client else "") or ""
+    admin = await auth.current_user(request)
     return JSONResponse({
         **settings.redacted(),
+        # What `trusted_proxy_ips` has to cover, shown beside that field so the
+        # operator can read the answer off the screen instead of guessing their
+        # container network. This is the IMMEDIATE peer — the reverse proxy on a
+        # real deployment — not the forwarded client address.
+        "detected_peer_ip": peer,
+        # Whether forwarded headers are actually arriving AND being honored. The
+        # two disagreeing is the misconfiguration worth surfacing: headers
+        # present but the peer untrusted means every user is collapsed onto one
+        # address for rate limiting and the session list.
+        "forwarded_headers_present": any(
+            h in request.headers for h in ("x-forwarded-for", "x-real-ip", "forwarded")
+        ),
+        "peer_is_trusted_proxy": auth.peer_is_trusted_proxy(request, settings),
         # Raised at first-run setup when the Trakt token already in settings.json
-        # could not be resolved to an account id, so the Settings screen can
-        # prompt the administrator to reconnect. Cleared when they do.
+        # could not be resolved to an account, so the Settings screen can prompt
+        # the administrator to reconnect.
+        #
+        # DERIVED, not just read back: the stored flag records that setup failed,
+        # but what the notice actually asks for is a linked Trakt identity, and
+        # this caller either has one or does not. Trusting the flag alone left the
+        # prompt up after somebody linked by a route that forgot to clear it —
+        # a sticky "do this thing" that stayed after the thing was done.
         "trakt_reconnect_notice": bool(
             await db.get_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "")
-        ),
+        ) and not (admin and admin.has_trakt_identity),
         # Whether the per-user "Log in with Trakt" button can be offered at all.
         "trakt_login_configured": settings.trakt_login_configured,
         "trakt_redirect_uri": (
@@ -755,12 +776,22 @@ async def auth_device_poll(request: Request):
     settings.trakt_client_secret = client_secret
     settings = await _apply_new_trakt_token(settings, token)
     await refresh_integration_health()
+    # The token is known-good right now, so this is the best moment there will
+    # ever be to resolve it to an account and link it to the administrator who
+    # just authorized it. Without this the app-wide token renews while
+    # `linked_identities` stays empty — which leaves the "reconnect your Trakt
+    # account" notice up with nothing in the UI able to clear it, and leaves the
+    # tracker refusing this account for want of a linked identity.
+    admin = await auth.current_user(request)
+    linked = await trakt_routes.adopt_app_token(admin.user_id, settings) if admin else False
     # The token itself is not echoed back. It is already saved, so sending it to
     # the browser would put a Trakt bearer token in page memory for no purpose.
     return JSONResponse({
         "ok": True,
         "status": "authorized",
         "expires_at": settings.trakt_token_expires_at,
+        # Lets the Settings screen take the reconnect notice down without a reload.
+        "trakt_linked": linked,
     })
 
 
@@ -910,6 +941,12 @@ async def _distrakt_settings(user_id: int):
     that means nothing. The access level guarantees a linked Trakt identity, but
     a row can still hold an empty token, in which case `configured` goes false
     and the handlers take their existing "not configured" path.
+
+    The network->emoji map is per-user too, but it is NOT on this object: it was
+    removed from Settings entirely when it stopped being app-wide, so the
+    renderers take it as an argument (see _distrakt_month_payload). Keeping it off
+    `settings` is deliberate — there is no longer an app-wide value for a caller
+    to reach for by mistake.
     """
     token = await trakt_routes.access_token_for_user(user_id)
     return dataclasses.replace(
@@ -973,16 +1010,15 @@ async def _apply_not_watching(user_id: int, month_key: str, year: int, month: in
     return shows
 
 
-def _empty_month_payload(month_key: str, settings, readonly: bool = False,
-                         link_url: str | None = None) -> dict:
+def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
+                         readonly: bool = False, link_url: str | None = None) -> dict:
     """Headers-only render for a month with no roster + no Trakt call: an
     unconfigured/uninitialized month (readonly=False) or a never-tracked past
     month reached by navigating backward (readonly=True, §6 no-backfill)."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
-        "post1": discord_fmt.render_post1([], settings.network_emojis, settings.default_network_emoji,
-                                          link_url=link_url),
-        "post2": discord_fmt.render_post2([], settings.network_emojis, settings.default_network_emoji),
+        "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url),
+        "post2": discord_fmt.render_post2([], emojis, default_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1000,13 +1036,18 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     today = date.today()
     month_key = _month_key(year, month)
     link_url = await _distrakt_post_link(user_id, settings)
+    # This user's own map, fetched once and handed to every render below. It is
+    # not on `settings` any more — see _distrakt_settings.
+    emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     existing = await distrakt_store.load_month(user_id, month_key)
     if existing is None:
         blocked = await distrakt_store.is_backfill_blocked(user_id, month_key)
         if blocked or not settings.configured:
             # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
             # persisted, no Trakt call. `readonly` hides the add/edit affordances.
-            return _empty_month_payload(month_key, settings, readonly=blocked, link_url=link_url), 200
+            return _empty_month_payload(
+                month_key, emojis, default_emoji, readonly=blocked, link_url=link_url,
+            ), 200
 
     with span("payload.ensure_month", month=month_key, force=force_fresh):
         doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
@@ -1015,10 +1056,8 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     if doc.get("closed"):
         # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
         shows = distrakt_store.frozen_shows(doc)
-        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji,
-                                         link_url=link_url)
-        post2 = discord_fmt.render_post2(shows, settings.network_emojis, settings.default_network_emoji,
-                                         movies=doc.get("movies"))
+        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url)
+        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies"))
         return {
             "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
             "post1": post1, "post2": post2, "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1070,9 +1109,8 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
     with span("payload.render"):
-        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji,
-                                         link_url=link_url)
-        post2 = discord_fmt.render_post2(shows, settings.network_emojis, settings.default_network_emoji, movies=movies)
+        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url)
+        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies)
     return {
         "ok": True,
         "month": month_key,
@@ -1156,7 +1194,7 @@ async def api_distrakt_import(request: Request):
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
     doc = await distrakt_store.import_premieres(user_id, month_key, settings)
-    _register_networks([s.get("network") for s in (doc or {}).get("shows", [])])
+    await _register_networks(user_id, [s.get("network") for s in (doc or {}).get("shows", [])])
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     return JSONResponse(payload, status_code=status)
 
@@ -1174,12 +1212,108 @@ async def api_distrakt_backfill_networks(request: Request):
     year = _valid_year(data.get("year"), today.year)
     month = _valid_month(data.get("month"), today.month)
     doc = await distrakt_store.load_month(user_id, _month_key(year, month))
-    _register_networks([s.get("network") for s in (doc or {}).get("shows", [])])
-    settings = load_settings()
+    emojis = await _register_networks(
+        user_id, [s.get("network") for s in (doc or {}).get("shows", [])],
+    )
+    _, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     return JSONResponse({
         "ok": True,
-        "network_emojis": settings.network_emojis,
-        "default_network_emoji": settings.default_network_emoji,
+        "network_emojis": emojis,
+        "default_network_emoji": default_emoji,
+    })
+
+
+@guard.get("/api/distrakt/details", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_details(request: Request):
+    """The calendar's detail payload for one roster show, plus what THIS user has
+    watched of that season.
+
+    A separate route from /api/details rather than a parameter on it: that one is
+    CALENDAR_APPROVED, and a distrakt-approved account need not be calendar
+    approved. It also answers a different question — which episodes this
+    particular person has seen — that the calendar has no business knowing.
+
+    The slug comes from the user's own roster row, not the query string, so the
+    Trakt links this builds cannot be pointed somewhere else by the caller.
+    """
+    user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    trakt_id = request.query_params.get("trakt_id")
+    season = _season_param(request.query_params.get("season"))
+    if not trakt_id or season is None:
+        return JSONResponse({"ok": False, "error": "Missing trakt_id/season"}, status_code=400)
+    try:
+        trakt_id_int = int(trakt_id)
+    except (TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Invalid trakt_id"}, status_code=400)
+
+    details = await fetch_details(settings, "show", trakt_id, season)
+    row = await db.fetch_one(
+        "SELECT slug FROM distrakt_shows WHERE user_id = ? AND trakt_id = ? LIMIT 1",
+        (user_id, trakt_id_int),
+    )
+    progress = await db.fetch_one(
+        "SELECT watched_episodes_json FROM distrakt_show_progress "
+        "WHERE user_id = ? AND trakt_id = ? AND season = ?",
+        (user_id, trakt_id_int, season),
+    )
+    watched: list[int] = []
+    if progress is not None:
+        try:
+            parsed = json.loads(progress["watched_episodes_json"] or "[]")
+            watched = [int(n) for n in parsed if isinstance(n, (int, float))]
+        except (TypeError, ValueError):
+            watched = []
+    return JSONResponse({
+        "ok": True,
+        **details,
+        "slug": (row["slug"] if row else "") or "",
+        "season": season,
+        "watched_episodes": watched,
+    })
+
+
+@guard.get("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_emojis(request: Request):
+    """This user's network->emoji map."""
+    user_id = await _distrakt_user_id(request)
+    emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
+    return JSONResponse({
+        "ok": True, "network_emojis": emojis, "default_network_emoji": default_emoji,
+    })
+
+
+@guard.post("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_set_emojis(request: Request):
+    """Replace this user's network->emoji map.
+
+    DISTRAKT_APPROVED rather than ADMIN: the map is this account's own now, and
+    it decides how this account's Discord posts render. It used to be saved
+    through the admin-only settings endpoint, which is why only an administrator
+    could edit what every user's posts looked like.
+    """
+    user_id = await _distrakt_user_id(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    emojis = data.get("network_emojis")
+    if not isinstance(emojis, dict):
+        return JSONResponse(
+            {"ok": False, "error": "network_emojis must be an object"}, status_code=400,
+        )
+    default_emoji = str(data.get("default_network_emoji") or "").strip() or distrakt_store.DEFAULT_EMOJI
+    clean = {
+        str(k).strip(): str(v).strip()
+        for k, v in emojis.items() if str(k).strip()
+    }
+    await distrakt_store.set_emoji_prefs(user_id, clean, default_emoji)
+    return JSONResponse({
+        "ok": True, "network_emojis": clean, "default_network_emoji": default_emoji,
     })
 
 
@@ -1242,19 +1376,15 @@ async def api_distrakt_seasons(request: Request):
     return JSONResponse({"ok": True, "seasons": seasons})
 
 
-def _register_networks(networks) -> None:
-    """Auto-populate the network->emoji map (backlog item 3): any network not yet
-    mapped gets the default emoji as a placeholder so it appears in the editor,
-    ready to be customized. No-op for blank / already-mapped networks."""
-    settings = load_settings()
-    changed = False
-    for net in networks:
-        net = (net or "").strip()
-        if net and net not in settings.network_emojis:
-            settings.network_emojis[net] = settings.default_network_emoji
-            changed = True
-    if changed:
-        save_settings(settings)
+async def _register_networks(user_id: int, networks) -> dict:
+    """Auto-populate THIS user's network->emoji map: any network not yet mapped
+    gets the default emoji as a placeholder so it appears in their editor, ready
+    to customize. No-op for blank / already-mapped networks.
+
+    Per-user because it used to write settings.json, so importing a roster on any
+    tracker account registered its networks into the operator's map.
+    """
+    return await distrakt_store.register_networks(user_id, networks)
 
 
 @guard.post("/api/distrakt/add", AuthLevel.DISTRAKT_APPROVED)
@@ -1294,7 +1424,7 @@ async def api_distrakt_add(request: Request):
             status_code=400,
         )
     await distrakt_store.add_show(user_id, month_key, show)
-    _register_networks([show["network"]])
+    await _register_networks(user_id, [show["network"]])
     try:  # baseline the show's watch history now so its counts are correct immediately
         await watch_history.baseline_show(settings, user_id, show["trakt_id"])
     except Exception:  # never fail the add on a baseline hiccup — it self-heals on next load

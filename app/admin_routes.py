@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, authz
+from . import assets, auth, authz
 from .auth import AuthLevel
 
 router = APIRouter()
@@ -63,6 +63,7 @@ async def admin_page(request: Request):
         "users": users,
         "invites": invites,
         "retired": retired,
+        "asset_v": assets.ASSET_VERSION,
     })
 
 
@@ -205,11 +206,18 @@ async def admin_list_sessions(user_id: int):
 
 @guard.post("/api/admin/users/{user_id}/sessions/revoke", AuthLevel.ADMIN)
 async def admin_revoke_session(user_id: int, request: Request):
+    """Revoke ONE session belonging to this account.
+
+    Scoped to `user_id` rather than deleting whatever id was posted: the caller
+    is looking at one account's session list, and an id that isn't on it is a
+    stale row or a mistake, not an instruction to log somebody else out.
+    """
     data = await _json_body(request)
     session_id = str(data.get("session_id") or "")
     if not session_id:
         return _error("session_id is required.")
-    await auth.revoke_session(session_id)
+    if not await auth.revoke_user_session(user_id, session_id):
+        return _error("That session isn't on this account.", 404)
     return JSONResponse({"ok": True})
 
 

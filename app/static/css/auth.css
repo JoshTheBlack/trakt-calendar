@@ -8,6 +8,21 @@ body.auth-page {
     min-height: 100vh; padding: 24px;
 }
 
+/* A signed-in auth page (the account screen) carries the site header, so the
+   body stacks instead of centring — the header belongs at the top, not in the
+   middle of a flex row — and the card centres inside what is left. */
+body.auth-page.has-nav { display: block; padding: 0; }
+.auth-page-inner { display: flex; align-items: center; justify-content: center; padding: 40px 24px; }
+/* The header carries the wordmark now; a second logo above the card was the
+   same image twice on one screen. */
+body.auth-page.has-nav .auth-logo { display: none; }
+/* Bebas is a display face — .hero h1 sizes it for a month name; a one-word page
+   title wants the same treatment so both headers look identical. */
+.hero-lead h1 {
+    font-family: 'Bebas Neue', sans-serif; font-size: clamp(1.3rem, 2.4vw, 1.9rem);
+    letter-spacing: 1.5px; white-space: nowrap; color: var(--gold-soft);
+}
+
 .auth-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
 .auth-logo { height: 34px; opacity: 0.92; }
 
@@ -88,11 +103,10 @@ body.auth-page {
 
 /* Admin screen — same tokens and fonts as the auth pages above, but a wide
    table layout instead of a centered form. */
-.admin-shell { width: 100%; max-width: 1040px; margin: 0 auto; padding: 24px 20px 60px; display: flex; flex-direction: column; gap: 26px; }
-.admin-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-.admin-top h1 { font-family: 'Bebas Neue', sans-serif; font-size: 1.9rem; letter-spacing: 1px; color: var(--gold-soft); }
-.admin-top a { color: var(--accent-blue); font-size: 0.85rem; }
-.admin-top a:hover { text-decoration: underline; }
+/* Wide: the accounts table carries ten columns and a cluster of row actions, and
+   the alternative to the width is a horizontal scrollbar between the operator and
+   every button. */
+.admin-shell { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px 20px 60px; display: flex; flex-direction: column; gap: 26px; }
 .admin-section { background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 16px; padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; }
 .admin-section h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.25rem; letter-spacing: 1px; color: var(--gold-soft); }
 .admin-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
@@ -100,8 +114,20 @@ body.auth-page {
 .admin-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
 .admin-table th, .admin-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--card-border); vertical-align: middle; white-space: nowrap; }
 .admin-table th { color: var(--text-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
-.admin-table td.actions { display: flex; flex-wrap: wrap; gap: 6px; white-space: normal; }
-.admin-table .badge-row { display: flex; gap: 5px; flex-wrap: wrap; }
+/* `display: flex` on a <td> takes it OUT of table layout — it stops being a cell,
+   so it no longer sits in its column, the row grows to whatever height the
+   stacked content wants, and every cell after it slides out of alignment. The
+   flexing belongs to a wrapper INSIDE the cell; the cell stays a cell. */
+.admin-table td.actions { white-space: normal; }
+.admin-table td.actions .action-group {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    /* Wrap into a block rather than stretching the table sideways. */
+    max-width: 320px;
+}
+/* Same rule, same reason: the flexing lives in the wrapper, not the cell. */
+.admin-table td.badge-row .badge-group { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+/* Timestamps are the other width hog: three columns of full locale strings. */
+.admin-table td.ts { font-variant-numeric: tabular-nums; color: var(--text-dim); }
 .admin-empty { color: var(--text-faint); font-size: 0.82rem; }
 .btn-danger { border-color: rgba(224,56,77,0.5); color: var(--crimson); }
 .btn-danger:hover { background: rgba(224,56,77,0.1); border-color: var(--crimson); }

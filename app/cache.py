@@ -6,13 +6,14 @@ small file per lookup under data/cache/; the bytes now live in a single SQLite
 table shared with the calendar window cache, so the app has one TTL-blob-cache
 mechanism rather than two.
 
-The public get(key, ttl) / set(key, value) signatures are unchanged so the call
-sites in app/trakt.py did not have to move. Both are SYNCHRONOUS by design: they
-are invoked from inside already-async request handlers exactly the way the file
-reads were, and they touch a single indexed row on a local database. They reach
-the database through db.connection() rather than importing sqlite3 (which only
-app/db.py may do), and every failure is swallowed — a cache is best-effort and
-must never take a request down with it.
+get(key, ttl) / set(key, value) are ASYNC and go through app/db.py's helpers like
+every other database access in the app. They were briefly synchronous — reading
+and zlib-decompressing a ~200 KB blob on the event loop thread — which is exactly
+what the "every db call goes off-thread" rule exists to prevent. Both call sites
+are inside `async def` already, so awaiting them costs nothing.
+
+Every failure is swallowed: a cache is best-effort and must never take a request
+down with it.
 """
 from __future__ import annotations
 
@@ -49,39 +50,41 @@ def _decode(blob) -> object:
     return json.loads(zlib.decompress(blob).decode("utf-8"))
 
 
-def get(key: str, ttl_seconds: int):
+async def get(key: str, ttl_seconds: int):
     """Return the cached value for `key` if it was stored within `ttl_seconds`,
-    else None. ttl<=0 disables caching (an explicit "always miss")."""
+    else None. ttl<=0 disables caching (an explicit "always miss").
+
+    The decompress happens on the worker thread alongside the read rather than
+    back on the event loop — the payloads are hundreds of kilobytes, so the
+    unpacking is the more expensive half of this call.
+    """
     if ttl_seconds <= 0:
         return None
-    try:
-        conn = db.connection()
+    cutoff = db.now() - ttl_seconds
+
+    def _work(conn: db.Connection):
         row = conn.execute(
             "SELECT payload, cached_at FROM api_cache WHERE cache_key = ?", (key,)
         ).fetchone()
-    except db.DatabaseError:  # a locked or corrupt db must not fail the request
-        return None
-    if row is None:
-        return None
-    if (db.now() - int(row["cached_at"])) > ttl_seconds:
-        return None
-    try:
+        if row is None or int(row["cached_at"]) < cutoff:
+            return None
         return _decode(row["payload"])
-    except (zlib.error, ValueError):
+
+    try:
+        return await db.run(_work)
+    except (db.DatabaseError, zlib.error, ValueError):
+        # A locked or corrupt database, or a payload that no longer decodes,
+        # must read as a miss rather than failing the request behind it.
         return None
 
 
-def set(key: str, value) -> None:
+async def set(key: str, value) -> None:
     """Store `value` for `key`. Written with no per-row TTL: freshness for these
     detail lookups is decided by the ttl passed to get(), so the row is aged out
     by the size cap rather than the TTL sweep. Best-effort — a write failure is
     swallowed."""
-    try:
+    def _work(conn: db.Connection) -> None:
         blob = _encode(value)
-    except (TypeError, ValueError):
-        return
-    try:
-        conn = db.connection()
         conn.execute(
             "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
             "VALUES (?, ?, ?, NULL, ?) "
@@ -90,7 +93,10 @@ def set(key: str, value) -> None:
             "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size",
             (key, blob, db.now(), len(blob)),
         )
-    except db.DatabaseError:
+
+    try:
+        await db.run(_work)
+    except (db.DatabaseError, TypeError, ValueError):
         pass
 
 

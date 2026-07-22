@@ -8,18 +8,54 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <link rel="stylesheet" href="/static/css/auth.css">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
 </head>
-<body class="auth-page">
+{# `has-nav` swaps the centred sign-in layout for a header above centred content.
+   The signed-out pages (login, register, onboarding) keep the plain .auth-page
+   centring — there is nowhere for a nav to take you before you sign in. #}
+<body class="auth-page has-nav">
+
+<header class="hero">
+    <div class="hero-lead">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <h1>Account</h1>
+    </div>
+    <div class="hero-actions">
+        {% if user.calendar_approved %}
+        <a class="pill-btn" href="/">📅 Calendar</a>
+        {% endif %}
+        <details class="nav-menu">
+            <summary title="Account and settings">☰ Menu</summary>
+            <div class="nav-menu-items">
+                <a href="/me">👤 Account</a>
+                {% if user.is_admin %}
+                <a href="/admin">🛠️ Admin</a>
+                {% endif %}
+                <button type="button" onclick="signOut()">🚪 Sign out</button>
+            </div>
+        </details>
+    </div>
+</header>
+
+<div class="auth-page-inner">
 <div class="auth-shell">
-  <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
   <div class="auth-card">
     <h1>{{ user.username or "Your account" }}</h1>
 
     {% if not user.calendar_approved %}
     <p class="auth-notice"><strong>Your account is awaiting admin approval.</strong>
       You'll be able to open the calendar once an administrator approves it.</p>
+    {% endif %}
+
+    {# Only ever shown to someone who already HAS the tracker grant, so it
+       discloses nothing to anyone else. For them it is the missing half of the
+       gate, and without it the tracker just silently refuses with no way to work
+       out why. #}
+    {% if user.distrakt_approved and 'trakt' not in linked %}
+    <p class="auth-notice"><strong>Link your Trakt account to finish setting up distrakt.</strong>
+      It reads your own watch history with your own token, so it has nothing to read
+      until the account below is connected.</p>
     {% endif %}
 
     <div class="auth-list">
@@ -29,18 +65,23 @@
           {{ "Approved" if user.calendar_approved else "Pending" }}
         </span>
       </div>
+      {# Both rows are rendered ONLY when the answer is yes. distrakt is an
+         easter egg — telling someone it exists and they can't have it is worse
+         than not mentioning it, and "Not granted" is exactly that disclosure.
+         "Administrator: No" is the same shape of non-information for everybody
+         who isn't one. #}
+      {% if user.distrakt_approved %}
       <div class="row">
         <span class="label">distrakt access</span>
-        <span class="auth-badge {{ 'ok' if user.distrakt_approved else 'off' }}">
-          {{ "Approved" if user.distrakt_approved else "Not granted" }}
-        </span>
+        <span class="auth-badge ok">Approved</span>
       </div>
+      {% endif %}
+      {% if user.is_admin %}
       <div class="row">
         <span class="label">Administrator</span>
-        <span class="auth-badge {{ 'ok' if user.is_admin else 'off' }}">
-          {{ "Yes" if user.is_admin else "No" }}
-        </span>
+        <span class="auth-badge ok">Yes</span>
       </div>
+      {% endif %}
       <div class="row">
         <span class="label">Timezone</span>
         <span class="auth-badge off">{{ user.timezone or "Instance default" }}</span>
@@ -58,7 +99,9 @@
         {% elif trakt_login_configured %}
         <a class="btn-ghost tiny" href="/auth/trakt/link">Connect</a>
         {% else %}
-        <span class="auth-badge off">Not linked</span>
+        {# Not a dead end: say who can fix it, so this doesn't read as "linking
+           is broken". Only an administrator can, and only they are told how. #}
+        <span class="auth-badge off" title="{{ "Set the Trakt client ID, client secret, and public base URL in Settings." if user.is_admin else "An administrator has to finish setting up Trakt sign-in on this instance." }}">Unavailable</span>
         {% endif %}
       </div>
       <div class="row">
@@ -107,16 +150,14 @@
     </div>
     <p class="auth-error" id="credError" role="alert"></p>
 
-    <div class="auth-actions">
-      {% if user.calendar_approved %}
-      <a class="btn-ghost" href="/">Open the calendar</a>
-      {% endif %}
-      <button class="btn-ghost" id="logout" type="button">Sign out</button>
-    </div>
+    {# Both actions that used to sit here — open the calendar, sign out — are in
+       the header now, where they are on every other page too. #}
   </div>
 </div>
+</div>
 
-<script src="/static/js/plex-auth.js"></script>
+<script src="/static/js/nav.js?v={{ asset_v }}"></script>
+<script src="/static/js/plex-auth.js?v={{ asset_v }}"></script>
 <script>
 const plexConnect = document.getElementById('plexConnect');
 if (plexConnect) {
@@ -129,6 +170,7 @@ if (plexConnect) {
       window.location.reload();
     } catch (e) {
       err.textContent = e.message || 'Could not connect your Plex account.';
+      plexFallbackLink(err);
       plexConnect.disabled = false;
     }
   });
@@ -198,15 +240,8 @@ passwordForm.addEventListener('submit', (e) => {
   submitCredentialForm(passwordForm, '/api/me/password', 'Could not change your password.');
 });
 
-document.getElementById('logout').addEventListener('click', async () => {
-  const resp = await fetch('/logout', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: '{}',
-  });
-  const data = await resp.json().catch(() => ({}));
-  window.location = data.redirect || '/login';
-});
+// Signing out is the header menu's job now — see nav.js — so this page no longer
+// carries its own copy of the request.
 </script>
 </body>
 </html>

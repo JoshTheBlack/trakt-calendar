@@ -55,7 +55,12 @@ REVOKE_URL = f"{API_BASE}/oauth/revoke"
 # The authorization screen is a page a human looks at, so it lives on the site
 # rather than on the API host every other call here uses.
 AUTHORIZE_URL = "https://trakt.tv/oauth/authorize"
-ACCOUNT_URL = f"{API_BASE}/users/me"
+# NOT /users/me. A Trakt user's `ids` object is `{"slug": ...}` — there is no
+# numeric user id anywhere in the API, and /users/me does not expose the UUID
+# either. /users/settings returns the same user object WITH `ids.uuid`, which is
+# the only stable, non-reassignable handle Trakt gives out for an account.
+ACCOUNT_PATH = "/users/settings"
+ACCOUNT_URL = f"{API_BASE}{ACCOUNT_PATH}"
 
 # Where Trakt sends the browser back to. The operator registers exactly this
 # path under their public base URL on the Trakt API application.
@@ -63,7 +68,7 @@ CALLBACK_PATH = "/auth/trakt/callback"
 
 
 class AccountLookupError(Exception):
-    """`/users/me` could not be resolved to a usable identity."""
+    """The account endpoint could not be resolved to a usable identity."""
 
 
 def redirect_uri(public_base_url: str) -> str:
@@ -108,14 +113,25 @@ async def exchange_code(
 
 
 async def fetch_account(client_id: str, access_token: str) -> dict:
-    """Resolve a token to its owner: {"id": int, "name": str | None}.
+    """Resolve a token to its owner: {"id": str, "name": str | None}.
 
-    `id` is Trakt's immutable numeric account id, and it is the ONLY acceptable
-    key for a stored identity. A username or slug is changeable by its owner and
-    can be released and re-registered by somebody else, who would then inherit
-    whatever account it was linked to — so a response that carries no numeric id
-    raises rather than falling back to one. The name is for display only and is
-    refreshed on each sign-in.
+    `id` is the account's UUID, and it is the ONLY acceptable key for a stored
+    identity. A username or slug is changeable by its owner and can be released
+    and re-registered by somebody else, who would then inherit whatever account
+    it was linked to — so a response carrying no UUID raises rather than falling
+    back to one. The name is display-only and refreshed on each sign-in.
+
+    WHY /users/settings AND NOT /users/me: Trakt users have no numeric id. The
+    `ids` object on a user is `{"slug": ...}` — and `/users/me?extended=full`
+    returns exactly that and nothing more, on every account, verified live. The
+    UUID is only exposed by `/users/settings`, which returns the same user object
+    with `ids: {slug, uuid}`. Keying on a numeric id here was never merely
+    unavailable, it was impossible, and it made every Trakt sign-in fail with an
+    account-lookup error.
+
+    Nothing else from this response is read or stored. It also carries
+    `account.token`, an unrelated Trakt-internal value, which has no business in
+    this app's database or its logs.
 
     Raises AccountLookupError for every failure, including a network one, so the
     caller decides whether that is fatal.
@@ -124,7 +140,6 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 ACCOUNT_URL,
-                params={"extended": "full"},
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "trakt-api-version": "2",
@@ -132,16 +147,17 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
                 },
             )
         if resp.status_code != 200:
-            raise AccountLookupError(f"Trakt /users/me returned HTTP {resp.status_code}.")
+            raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned HTTP {resp.status_code}.")
         payload = resp.json()
     except httpx.HTTPError as exc:
-        raise AccountLookupError(f"Trakt /users/me failed: {exc}") from exc
+        raise AccountLookupError(f"Trakt {ACCOUNT_PATH} failed: {exc}") from exc
     except ValueError as exc:
-        raise AccountLookupError("Trakt /users/me returned a body that is not JSON.") from exc
-    trakt_id = ((payload or {}).get("ids") or {}).get("trakt")
-    if not isinstance(trakt_id, int):
-        raise AccountLookupError("Trakt /users/me returned no numeric account id.")
-    return {"id": trakt_id, "name": payload.get("name") or payload.get("username")}
+        raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned a body that is not JSON.") from exc
+    user = (payload or {}).get("user") or {}
+    uuid = ((user.get("ids") or {}).get("uuid") or "").strip()
+    if not uuid:
+        raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned no account UUID.")
+    return {"id": uuid, "name": user.get("name") or user.get("username")}
 
 
 class DevicePending(Exception):

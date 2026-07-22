@@ -33,6 +33,7 @@ TEXT, because they are payload rather than our clock.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
@@ -626,6 +627,103 @@ MIGRATION_6 = """
 ALTER TABLE share_links ADD COLUMN link_view_json TEXT;
 """
 
+# Migration 7 — widen login_attempts.key_type to admit 'handshake_ip', the
+# volume limiter over the provider sign-in start routes (those mint a handshake
+# row and, for Plex, call out to plex.tv, all before anyone has authenticated).
+# SQLite cannot alter a CHECK constraint in place, so the table is rebuilt. The
+# rows are ephemeral rate-limit state and are copied across anyway, since a
+# rebuild that silently forgot an in-progress lockout would be a way to clear one.
+MIGRATION_7 = """
+CREATE TABLE login_attempts_new (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_type     TEXT    NOT NULL CHECK (key_type IN
+                     ('username', 'ip', 'register_ip', 'invite_ip', 'share_ip',
+                      'handshake_ip')),
+    key_value    TEXT    NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    succeeded    INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO login_attempts_new (id, key_type, key_value, attempted_at, succeeded)
+    SELECT id, key_type, key_value, attempted_at, succeeded FROM login_attempts;
+DROP TABLE login_attempts;
+ALTER TABLE login_attempts_new RENAME TO login_attempts;
+CREATE INDEX ix_login_attempts_lookup ON login_attempts(key_type, key_value, attempted_at);
+"""
+
+# Migration 8 — two corrections to how share links behave.
+#
+# 1. EVERY link form answers. The Share panel offers a single dropdown that picks
+#    which URL it hands you, and that is presentation only: a link already given
+#    to somebody must not stop working because its owner later looked at a
+#    different one. Existing rows are opened up to match, since they were created
+#    under the old rule where only the token form started enabled.
+# 2. `retired_identifiers` gains the account the identifier came from, so an
+#    owner can reclaim a slug they themselves retired while it stays blocked for
+#    everybody else. Nullable: rows written before this (and by account deletion,
+#    where there is deliberately no owner left) carry no user.
+MIGRATION_8 = """
+UPDATE share_links SET enabled_token = 1, enabled_username = 1, enabled_slug = 1;
+ALTER TABLE retired_identifiers ADD COLUMN user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+"""
+
+# Migration 9 — the network->emoji map becomes PER USER.
+#
+# It was app-wide in settings.json, which made every tracker user edit the same
+# map: importing a roster on one account registered dozens of networks into the
+# operator's, and one person's emoji choices rendered in everybody's Discord
+# posts. The tracker is per-user in every other respect (§1.13), and this is the
+# last piece of it that was not.
+#
+# Nothing seeds a new account's map — it starts empty and fills in from that
+# user's own roster. But an instance upgrading from the app-wide version has a
+# real curated map in settings.json, and it belongs to the operator who built it,
+# so it is MOVED (once, here) onto the bootstrap admin rather than discarded.
+# After this the settings.json fields are gone and the per-user rows are the only
+# copy; the tracker's Backup export is what carries a map anywhere else.
+MIGRATION_9_SQL = """
+CREATE TABLE distrakt_prefs (
+    user_id               INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    -- JSON object of network name -> Discord emoji token.
+    network_emojis_json   TEXT    NOT NULL DEFAULT '{}',
+    -- The fallback for a network with no entry of its own.
+    default_network_emoji TEXT    NOT NULL DEFAULT ':tv:',
+    updated_at            INTEGER NOT NULL
+);
+"""
+
+
+def MIGRATION_9(conn: sqlite3.Connection) -> None:
+    _run_script(conn, MIGRATION_9_SQL)
+    # Read settings.json directly rather than through app.config: those fields are
+    # being deleted from the Settings model in this same change, so the model can
+    # no longer describe the file this is reading.
+    settings_file = DATA_DIR / "settings.json"
+    try:
+        raw = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    emojis = raw.get("network_emojis")
+    default_emoji = (raw.get("default_network_emoji") or ":tv:").strip() or ":tv:"
+    if not isinstance(emojis, dict) or not emojis:
+        return
+    owner = conn.execute(
+        "SELECT id FROM users WHERE is_bootstrap = 1 ORDER BY id LIMIT 1"
+    ).fetchone()
+    if owner is None:
+        # A fresh install: there is no operator to inherit it and no roster to
+        # apply it to. The map goes nowhere, which is the intended new behavior.
+        return
+    conn.execute(
+        "INSERT INTO distrakt_prefs (user_id, network_emojis_json, default_network_emoji, updated_at) "
+        "VALUES (?, ?, ?, ?) ON CONFLICT(user_id) DO NOTHING",
+        (int(owner["id"]), json.dumps({str(k): str(v) for k, v in emojis.items()}),
+         default_emoji, int(time.time())),
+    )
+    logger.info(
+        "Moved the app-wide network emoji map (%d entries) onto the bootstrap "
+        "administrator; it is per-user from now on.", len(emojis),
+    )
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -636,6 +734,9 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (4, MIGRATION_4),
     (5, MIGRATION_5),
     (6, MIGRATION_6),
+    (7, MIGRATION_7),
+    (8, MIGRATION_8),
+    (9, MIGRATION_9),
 ]
 
 
