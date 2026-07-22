@@ -480,6 +480,10 @@ async def me_page(request: Request):
         # removed — showing a button that always refuses would be worse than
         # showing none.
         "can_unlink": bool(account and account["password_hash"]) or len(identities) > 1,
+        # Drives whether the password form asks for a current password, and
+        # whether the "a password is your way back in" nudge is shown.
+        "has_password": bool(account and account["password_hash"]),
+        "min_password_length": auth.MIN_PASSWORD_LENGTH,
     })
 
 
@@ -496,6 +500,15 @@ async def unlink_identity(request: Request):
     provider = str(data.get("provider") or "").strip().lower()
     if provider not in ("trakt", "plex"):
         return _error("Unknown provider.")
+    # Imported here rather than at module scope: app.trakt_routes reads this
+    # module's message constants, so the dependency only runs one way at import
+    # time.
+    from . import trakt_routes
+
+    # Read before the unlink (the token lives on the row it deletes), spent only
+    # after one actually happened — an unlink that gets refused below must not
+    # leave the account linked to a token this app just killed.
+    token = await trakt_routes.stored_access_token(user.user_id) if provider == "trakt" else None
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
     except auth.LastLoginMethod:
@@ -505,7 +518,87 @@ async def unlink_identity(request: Request):
         )
     if not removed:
         return _error("That account isn't linked.", 404)
-    return JSONResponse({"ok": True, "redirect": "/me"})
+    warning = await trakt_routes.revoke_token_value(token)
+    return JSONResponse({"ok": True, "redirect": "/me", "warning": warning})
+
+
+@guard.post("/api/me/username", AuthLevel.SESSION)
+async def set_own_username(request: Request):
+    """Claim a username for an account that has none.
+
+    An account created through Plex or Trakt has no username and no password, so
+    without this it depends on an administrator for both. Claiming is one-way:
+    CHANGING an existing username is deliberately not offered here, because a
+    username is a public identifier — it is what /u/<name> share links are built
+    from — and handing it over silently would break every link already shared and
+    free the old name for somebody else to claim. That path stays with an
+    administrator, who has the retired-identifier machinery to do it safely.
+    """
+    user = await auth.require_session(request)
+    account = await auth.get_user(user.user_id)
+    if account and account["username"]:
+        return _error("You already have a username. An administrator can change it.", 409)
+    data = await _json_body(request)
+    username = str(data.get("username") or "").strip().lower()
+    if err := await auth.username_availability_error(username):
+        return _error(err)
+    try:
+        await auth.admin_set_username(user.user_id, username)
+    except db.IntegrityError:
+        # Lost a race between the availability check and this write; the UNIQUE
+        # column is the real arbiter, exactly as registration treats it.
+        return _error("That username is taken.")
+    return JSONResponse({"ok": True, "username": username})
+
+
+@guard.post("/api/me/password", AuthLevel.SESSION)
+async def set_own_password(request: Request):
+    """Set or change the signed-in account's password.
+
+    Changing an existing password requires the current one. Setting a FIRST
+    password does not, because there is nothing to prove — the live session is
+    the only credential such an account has, and requiring one would make the
+    feature unreachable for exactly the accounts that need it.
+
+    Setting a password revokes every session the account holds, so a
+    password-change after a compromise actually evicts the other party. The
+    caller is then re-issued a fresh session, since signing the person out of the
+    tab they just used would read as a failure.
+    """
+    user = await auth.require_session(request)
+    settings = load_settings()
+    ip = auth.client_ip(request, settings)
+    # The current-password check is a guess-checking oracle, so it is throttled
+    # on the same counter and thresholds a sign-in attempt is.
+    if await auth.is_locked_out("ip", ip, max_attempts=auth.LOGIN_MAX_ATTEMPTS,
+                                window_seconds=auth.LOGIN_WINDOW_SECONDS):
+        return _error("Too many attempts. Try again later.", 429)
+
+    data = await _json_body(request)
+    account = await auth.get_user(user.user_id)
+    stored_hash = account["password_hash"] if account else None
+    if stored_hash:
+        result = await auth.verify_password(stored_hash, str(data.get("current_password") or ""))
+        if not result.ok:
+            await auth.record_attempt("ip", ip, False)
+            return _error("That isn't your current password.", 403)
+
+    password = str(data.get("password") or "")
+    if password != str(data.get("password_confirm") or ""):
+        return _error("The two passwords don't match.")
+    if len(password) < auth.MIN_PASSWORD_LENGTH:
+        return _error(f"Use at least {auth.MIN_PASSWORD_LENGTH} characters.")
+
+    await auth.clear_attempts("ip", ip)
+    await auth.set_password(user.user_id, password)
+    session_id = await auth.create_session(
+        user.user_id,
+        user_agent=request.headers.get("user-agent"),
+        ip_address=ip,
+    )
+    response = JSONResponse({"ok": True})
+    auth.set_session_cookie(response, session_id, settings, request)
+    return response
 
 
 # ---------------------------------------------------------------------------

@@ -82,6 +82,25 @@
 .distrakt-copy-block:last-child { margin-bottom: 0; }
 .distrakt-copy-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--text-dim); font-size: 0.9rem; }
 .distrakt-copy-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* Backup panel */
+.distrakt-note { color: var(--text-dim); font-size: 0.82rem; line-height: 1.5; margin: 6px 0 10px; }
+.distrakt-note.ok { color: var(--green); }
+.distrakt-note.distrakt-warn { color: var(--crimson); }
+.distrakt-note code {
+    background: rgba(255,255,255,0.08); border-radius: 4px; padding: 1px 5px;
+    font-family: 'Consolas', 'Menlo', monospace;
+}
+.btn-danger { border-color: rgba(224,56,77,0.5); color: var(--crimson); }
+.btn-danger:hover:not(:disabled) { background: rgba(224,56,77,0.1); border-color: var(--crimson); }
+#restoreConfirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+#restoreConfirm label { color: var(--text-dim); font-size: 0.82rem; flex: 1 1 100%; }
+#restoreConfirm input[type="text"] {
+    flex: 0 1 220px; padding: 6px 10px; font-size: 0.82rem; color: var(--text);
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px;
+}
+#restoreFile { font-size: 0.82rem; color: var(--text-dim); }
 .distrakt-link-select {
     background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
     border-radius: 8px; padding: 4px 8px; color: var(--text); font-size: 0.8rem; max-width: 190px;

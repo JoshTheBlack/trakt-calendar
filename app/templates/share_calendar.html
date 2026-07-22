@@ -26,6 +26,67 @@
             </a>
         </div>
     </div>
+    {# A plain GET form: every control below is one of the query params this page
+       already accepts, so changing one is a navigation, not a write. There is no
+       session here and nothing is saved — a visitor's choice lives in their URL,
+       which also means they can share the view they landed on. #}
+    <form class="hero-controls" method="get">
+        <input type="hidden" name="year" value="{{ year }}">
+        <input type="hidden" name="month" value="{{ month }}">
+        <div class="control" title="Which calendar to show">
+            <label for="shareEndpoint">📡</label>
+            <select id="shareEndpoint" name="endpoint" onchange="this.form.submit()">
+                {% for ep in endpoints %}
+                <option value="{{ ep.key }}"{% if ep.key == endpoint_key %} selected{% endif %}>{{ ep.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="control">
+            <label for="shareCard">🎬</label>
+            <select id="shareCard" name="card" onchange="this.form.submit()">
+                {% for style in card_styles %}
+                <option value="{{ style }}"{% if style == view.card_style %} selected{% endif %}>
+                    {{ {'vertical': 'Poster on top', 'horizontal': 'Poster beside', 'poster': 'Poster only'}[style] }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="control">
+            <label for="sharePacking">🗓️</label>
+            <select id="sharePacking" name="packing" onchange="this.form.submit()">
+                {% for packing in day_packings %}
+                <option value="{{ packing }}"{% if packing == view.day_packing %} selected{% endif %}>
+                    {{ 'Stacked' if packing == 'stacked' else 'Packed beside' }}
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="control" title="Times and day grouping are rendered in this timezone">
+            <label for="shareTz">🌐</label>
+            <select id="shareTz" name="tz" onchange="this.form.submit()">
+                {% for tzgroup in timezone_groups %}
+                <optgroup label="{{ tzgroup.group }}">
+                    {% for tz in tzgroup['options'] %}
+                    <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                    {% endfor %}
+                </optgroup>
+                {% endfor %}
+            </select>
+        </div>
+        {# A select rather than a checkbox: an unchecked box is omitted from the
+           query string entirely, which reads as "not specified" and falls back to
+           the owner's default instead of to "show everything". Two explicit
+           values always send one. #}
+        <div class="control" title="Items the owner marked not watching">
+            <label for="shareHide">🚫</label>
+            <select id="shareHide" name="hidenw" onchange="this.form.submit()">
+                <option value="0"{% if not hide_not_watching %} selected{% endif %}>Showing all</option>
+                <option value="1"{% if hide_not_watching %} selected{% endif %}>Hiding not-watching</option>
+            </select>
+        </div>
+        <noscript><button type="submit" class="btn-ghost small">Apply</button></noscript>
+    </form>
+
     <div class="hero-actions">
         <span class="share-owner">📺 {{ owner_username or "Shared calendar" }}</span>
         <span class="hero-meta">📊 {{ total }}</span>

@@ -69,6 +69,21 @@ body.auth-page {
 .btn-ghost.tiny { padding: 4px 10px; font-size: 0.72rem; border-radius: 999px; text-decoration: none; }
 .btn-ghost.tiny:hover { color: var(--text); border-color: var(--gold-soft); }
 
+/* The username / password forms on the account page. Same card shell as a
+   .row so they read as part of the same list, but laid out as a wrapping line
+   of inputs rather than a label-and-badge pair. */
+.auth-inline-form {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 9px 12px; background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 8px; font-size: 0.85rem;
+}
+.auth-inline-form label { color: var(--text-dim); flex: 1 1 100%; }
+.auth-inline-form input {
+    flex: 1 1 140px; min-width: 0; padding: 6px 10px; font-size: 0.8rem;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; color: var(--text);
+}
+
 .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
 /* Admin screen — same tokens and fonts as the auth pages above, but a wide

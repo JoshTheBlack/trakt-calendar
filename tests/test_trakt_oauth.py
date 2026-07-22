@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlsplit
 os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-trakt-oauth-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import httpx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, auth_routes, db, trakt_auth, trakt_routes  # noqa: E402
@@ -651,6 +652,54 @@ class RefreshSerializationTests(TraktOAuthTestCase):
 
 
 class UnlinkTests(TraktOAuthTestCase):
+    """Unlinking now also asks Trakt to forget the authorization, so every test
+    here patches that call — without it they reach the real api.trakt.tv."""
+
+    def setUp(self):
+        super().setUp()
+        self.revoked: list[str] = []
+
+        async def _revoke(client_id, client_secret, access_token):
+            self.revoked.append(access_token)
+
+        patcher = patch.object(trakt_auth, "revoke_token", side_effect=_revoke)
+        self.revoke_mock = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_unlinking_revokes_the_token_at_trakt(self):
+        user = self.make_user("revoker", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/trakt/link"))
+        stored = self.identities()[0]["access_token"]
+        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.revoked, [stored])
+        self.assertIsNone(resp.json()["warning"])
+
+    def test_a_refused_unlink_does_not_revoke_the_token(self):
+        """The account keeps the identity, so the token it holds has to keep
+        working — revoking on the way to a refusal would leave the only way in
+        pointing at a dead credential."""
+        self.sign_out()
+        self.callback(self.start(invite=self.mint_invite()))
+        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.revoked, [])
+        self.assertEqual(len(self.identities()), 1)
+
+    def test_a_failed_revocation_still_unlinks_and_says_so(self):
+        """Trakt being unreachable is not a reason to refuse someone the removal
+        of their own link — but they are told, because finishing the job on
+        trakt.tv is something only they can do."""
+        user = self.make_user("warned", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/trakt/link"))
+        self.revoke_mock.side_effect = httpx.HTTPError("down")
+        resp = self.client.post("/api/me/identities/unlink", json={"provider": "trakt"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self.identities(), [])
+        self.assertIn("trakt.tv", resp.json()["warning"])
+
     def test_a_user_with_a_password_can_unlink(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)

@@ -16,11 +16,24 @@ from __future__ import annotations
 import json
 import secrets
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import auth, db
 from .endpoints import ENDPOINTS
 
 PREFERRED_KINDS = ("token", "username", "slug")
+
+# The view vocabulary a public share page understands, kept here rather than in
+# app/share_routes.py so the link BUILDER and the page's own param resolver
+# cannot drift apart — a value this module will happily put in a URL that the
+# page then rejects would be silently ignored at the far end.
+CARD_STYLES = ("vertical", "horizontal", "poster")
+DAY_PACKINGS = ("stacked", "packed")
+
+# Param name -> what counts as a usable value. `year`/`month` are navigation
+# rather than display and are deliberately absent: a link pinned to one month
+# would go stale the moment that month passed.
+LINK_VIEW_PARAMS = ("endpoint", "card", "packing", "hidenw", "tz")
 
 # kind -> the column that gates whether that form of the link answers at all.
 _ENABLED_COLUMN = {"token": "enabled_token", "username": "enabled_username", "slug": "enabled_slug"}
@@ -133,24 +146,110 @@ async def set_post_link(user_id: int, *, kind: str | None = ..., endpoint: str |
     await db.execute(f"UPDATE share_links SET {', '.join(columns)} WHERE user_id = ?", tuple(params))
 
 
-def share_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:
-    """The three public URLs for a share row, each None when it cannot be handed
-    out — the form is disabled, has nothing to resolve to, or the instance has no
-    configured public base URL to build an absolute link from.
+def link_view_error(view: dict) -> str | None:
+    """None when `view` is a usable set of share-link view params, else why not.
 
-    URLs are only ever built from the operator's configured origin, never from
-    the incoming request, so a spoofed Host header cannot make this app publish
-    somebody else's address as its own.
+    Whitelisted value by value rather than passed through, because these end up
+    in a URL handed to other people: an unrecognized key or value would be
+    dropped silently by the page that receives it, leaving a link that quietly
+    does not do what its author set it to do.
+    """
+    if not isinstance(view, dict):
+        return "Expected an object of view options."
+    for key, value in view.items():
+        if key not in LINK_VIEW_PARAMS:
+            return f"Unknown view option: {key}."
+        text = str(value)
+        if key == "endpoint" and text not in ENDPOINTS:
+            return "Unknown calendar view."
+        if key == "card" and text not in CARD_STYLES:
+            return "Unknown card style."
+        if key == "packing" and text not in DAY_PACKINGS:
+            return "Unknown day packing."
+        if key == "hidenw" and text not in ("0", "1"):
+            return "Hide-not-watching must be 0 or 1."
+        if key == "tz":
+            try:
+                ZoneInfo(text)
+            except (ZoneInfoNotFoundError, ValueError):
+                return "Unknown timezone."
+    return None
+
+
+def link_view(row) -> dict | None:
+    """The stored view params for this row's generated link, or None for "hand
+    out a bare link and let the page resolve the owner's own defaults"."""
+    if row is None:
+        return None
+    try:
+        stored = json.loads(row["link_view_json"] or "null")
+    except (TypeError, ValueError):
+        return None
+    return stored if isinstance(stored, dict) and stored else None
+
+
+async def set_link_view(user_id: int, view: dict | None) -> str | None:
+    """Store (or clear, with None) the view params the generated link carries.
+
+    This writes ONLY the link. The owner's own calendar preferences and the
+    share page's fallback defaults are untouched — customizing a link someone
+    else will open must not change how the owner's private calendar renders.
+    Returns an error string, having written nothing, when the view is unusable.
+    """
+    if view is not None:
+        if err := link_view_error(view):
+            return err
+        view = {key: str(view[key]) for key in LINK_VIEW_PARAMS if key in view}
+    await get_or_create(user_id)
+    payload = json.dumps(view) if view else None
+    await db.execute("UPDATE share_links SET link_view_json = ? WHERE user_id = ?", (payload, user_id))
+    return None
+
+
+def _form_path(row, kind: str, username: str | None) -> str | None:
+    """The path segment for one of the three link forms, or None when that form
+    is switched off or has nothing to resolve to."""
+    name = (username or "").strip()
+    if kind == "token":
+        return f"/s/{row['token']}" if row["enabled_token"] else None
+    if kind == "username":
+        return f"/u/{name}" if row["enabled_username"] and name else None
+    if kind == "slug":
+        return f"/c/{row['custom_slug']}" if row["enabled_slug"] and row["custom_slug"] else None
+    return None
+
+
+def build_url(row, username: str | None, base_url: str, kind: str,
+              params: dict | None = None) -> str | None:
+    """One share URL: origin + the chosen form's path + optional view params.
+
+    The origin is only ever the operator's configured one, never the incoming
+    request's, so a spoofed Host header cannot make this app publish somebody
+    else's address as the place to find its calendar.
     """
     base = (base_url or "").rstrip("/")
     if row is None or not base:
-        return {"token": None, "username": None, "slug": None}
-    name = (username or "").strip()
-    return {
-        "token": f"{base}/s/{row['token']}" if row["enabled_token"] else None,
-        "username": f"{base}/u/{name}" if row["enabled_username"] and name else None,
-        "slug": f"{base}/c/{row['custom_slug']}" if row["enabled_slug"] and row["custom_slug"] else None,
-    }
+        return None
+    path = _form_path(row, kind, username)
+    if path is None:
+        return None
+    query = urlencode({k: params[k] for k in LINK_VIEW_PARAMS if params and k in params})
+    return f"{base}{path}?{query}" if query else f"{base}{path}"
+
+
+def share_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:
+    """The three public URLs for a share row, bare — no view params. Each is None
+    when it cannot be handed out: the form is disabled, has nothing to resolve
+    to, or the instance has no configured public base URL."""
+    return {kind: build_url(row, username, base_url, kind) for kind in PREFERRED_KINDS}
+
+
+def generated_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:
+    """The three URLs as the Share panel hands them out — carrying whatever view
+    params the owner set on the link, which is the only thing those params
+    affect."""
+    view = link_view(row)
+    return {kind: build_url(row, username, base_url, kind, view) for kind in PREFERRED_KINDS}
 
 
 def post_link_url(row, username: str | None, base_url: str) -> str | None:
@@ -175,13 +274,17 @@ def post_link_with_view(row, username: str | None, base_url: str) -> str | None:
     """post_link_url plus the owner's chosen calendar view as a query param, so
     an announcement can point at the premieres list while the owner's own share
     page defaults to something else."""
-    url = post_link_url(row, username, base_url)
-    if url is None:
+    urls = share_urls(row, username, base_url)
+    kind = next(
+        (k for k in ([row["post_link_kind"], row["preferred_kind"], *PREFERRED_KINDS] if row is not None else [])
+         if k and urls.get(k)),
+        None,
+    )
+    if kind is None:
         return None
     endpoint = row["post_link_endpoint"]
-    if endpoint and endpoint in ENDPOINTS:
-        return f"{url}?{urlencode({'endpoint': endpoint})}"
-    return url
+    params = {"endpoint": endpoint} if endpoint and endpoint in ENDPOINTS else None
+    return build_url(row, username, base_url, kind, params)
 
 
 async def slug_error(slug: str, *, exclude_user_id: int | None = None) -> str | None:

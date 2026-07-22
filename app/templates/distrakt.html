@@ -42,6 +42,7 @@
         <nav class="distrakt-tabs">
             <button type="button" class="distrakt-tab active" data-tab="shows" onclick="switchTab('shows')">This month's shows</button>
             <button type="button" class="distrakt-tab" data-tab="copy" onclick="switchTab('copy')">Copy blocks</button>
+            <button type="button" class="distrakt-tab" data-tab="data" onclick="switchTab('data')">Backup</button>
             {# The emoji map is app-wide configuration shared by every user's
                posts, so it is edited from the administrator's settings surface
                only. Everyone else still sees the emoji, just can't change them. #}
@@ -87,6 +88,41 @@
                     <button type="button" class="btn-ghost small" onclick="copyBlock('post2')">Copy</button>
                 </div>
                 <textarea id="post2Text" class="distrakt-copy-textarea" readonly spellcheck="false"></textarea>
+            </div>
+        </section>
+
+        <section class="distrakt-panel distrakt-section" data-panel="data" hidden>
+            <div class="distrakt-section-head">
+                <h2>Backup</h2>
+            </div>
+            <p class="distrakt-note">Everything tracked here — every month, every show, your watch
+                progress and watched movies — as one file. It holds no credentials and nobody
+                else's data.</p>
+
+            <div class="distrakt-copy-block">
+                <div class="distrakt-copy-head"><span>Download a backup</span></div>
+                <p class="distrakt-note">Keep a copy locally. Restoring it later takes seconds.</p>
+                <a class="btn-ghost small" href="/api/distrakt/export" download>⤓ Download</a>
+            </div>
+
+            <div class="distrakt-copy-block">
+                <div class="distrakt-copy-head"><span>Restore from a backup</span></div>
+                {# Restore REPLACES rather than merges, so this is destructive in a
+                   way no other control on this page is. The typed acknowledgement
+                   is deliberately more friction than a confirm dialog: it cannot
+                   be dismissed by reflex, and it names what is about to happen. #}
+                <p class="distrakt-note distrakt-warn">This <strong>replaces</strong> everything
+                    currently tracked here with the contents of the file. What is here now is not
+                    recoverable afterwards unless you downloaded it first.</p>
+                <input type="file" id="restoreFile" accept="application/json,.json" onchange="onRestoreFileChosen()">
+                <div id="restoreConfirm" hidden>
+                    <label for="restoreAck">Type <code>REPLACE MY DATA</code> to confirm:</label>
+                    <input type="text" id="restoreAck" spellcheck="false" autocomplete="off"
+                           placeholder="REPLACE MY DATA" oninput="onRestoreAckInput()">
+                    <button type="button" class="btn-ghost small btn-danger" id="restoreBtn"
+                            onclick="restoreBackup()" disabled>Replace my data</button>
+                </div>
+                <p class="distrakt-note" id="restoreStatus"></p>
             </div>
         </section>
 

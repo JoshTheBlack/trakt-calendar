@@ -51,6 +51,7 @@ from .trakt import API_BASE
 DEVICE_CODE_URL = f"{API_BASE}/oauth/device/code"
 DEVICE_TOKEN_URL = f"{API_BASE}/oauth/device/token"
 TOKEN_URL = f"{API_BASE}/oauth/token"
+REVOKE_URL = f"{API_BASE}/oauth/revoke"
 # The authorization screen is a page a human looks at, so it lives on the site
 # rather than on the API host every other call here uses.
 AUTHORIZE_URL = "https://trakt.tv/oauth/authorize"
@@ -210,3 +211,22 @@ async def refresh_access_token(client_id: str, client_secret: str, refresh_token
         })
     resp.raise_for_status()
     return resp.json()
+
+
+async def revoke_token(client_id: str, client_secret: str, access_token: str) -> None:
+    """Tell Trakt to invalidate an access token, so the grant disappears from the
+    user's "connected apps" list rather than lingering there unused.
+
+    Deleting the local row is what stops this instance using a token; this is
+    what stops anyone using it. Raises on any failure so the caller can say so —
+    an unlink that could not reach Trakt still succeeded locally, but the user is
+    the only one who can finish the job on trakt.tv, and they can only do that if
+    they are told.
+    """
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(REVOKE_URL, json={
+            "token": access_token,
+            "client_id": client_id,
+            "client_secret": client_secret,
+        })
+    resp.raise_for_status()

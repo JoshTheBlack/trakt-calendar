@@ -30,14 +30,17 @@ from . import auth, calendar_cache, calendar_state, share_links
 from .auth import AuthLevel
 from .authz import Guard
 from .config import load_settings
-from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, get_endpoint
+from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
+from .timezones import build_options as build_timezone_options
 
 router = APIRouter()
 guard = Guard(router)
 templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
-_CARD_STYLES = ("vertical", "horizontal", "poster")
-_DAY_PACKINGS = ("stacked", "packed")
+# One definition, in the module that also builds the links carrying these
+# values, so a link can never offer a view this page would reject.
+_CARD_STYLES = share_links.CARD_STYLES
+_DAY_PACKINGS = share_links.DAY_PACKINGS
 
 # Purely anti-scrape — these pages never touch Trakt, so this is not protecting
 # a rate-limited upstream, just keeping a bot from hammering the cache reads.
@@ -220,6 +223,16 @@ async def _render(request: Request, share_row) -> Response:
         "view": {"card_style": card_style, "day_packing": day_packing},
         "as_of": as_of_label,
         "query_extra": _carry_query(request),
+        # The visitor's own view controls. Everything they drive is a GET with
+        # the same whitelisted params a hand-edited URL already carries, so they
+        # add no write surface and need no session — they just save the visitor
+        # from editing the query string by hand.
+        "endpoints": endpoint_choices(),
+        "endpoint_key": endpoint.key,
+        "card_styles": _CARD_STYLES,
+        "day_packings": _DAY_PACKINGS,
+        "hide_not_watching": hide_not_watching,
+        "timezone_groups": build_timezone_options(tz.key),
     }
     return templates.TemplateResponse(request, "share_calendar.html", context)
 
@@ -287,7 +300,13 @@ def _share_payload(row, username: str | None, settings) -> dict:
             "username": bool(row["enabled_username"]),
             "slug": bool(row["enabled_slug"]),
         },
-        "urls": share_links.share_urls(row, username, base),
+        # The links as handed out: carrying the owner's chosen view params, which
+        # is the ONLY thing those params affect — not the owner's own calendar,
+        # and not the share page's fallback for a link that omits them.
+        "urls": share_links.generated_urls(row, username, base),
+        # None == "use my current display", i.e. hand out a bare link and let the
+        # page resolve the owner's defaults.
+        "link_view": share_links.link_view(row),
     }
 
 
@@ -350,6 +369,29 @@ async def get_share_slug_check(request: Request):
         return JSONResponse({"ok": True, "available": False, "error": "Enter a slug."})
     err = await share_links.slug_error(slug, exclude_user_id=user.user_id)
     return JSONResponse({"ok": True, "available": err is None, "error": err})
+
+
+@guard.post("/api/me/share/view", AuthLevel.CALENDAR_APPROVED)
+async def post_share_view(request: Request):
+    """Set (or clear) the display options the generated link carries.
+
+    `{"view": null}` hands out a bare link, so whoever opens it sees the owner's
+    current display. `{"view": {...}}` pins those options into the URL instead.
+    Either way nothing about the owner's own calendar changes — this writes the
+    link and only the link.
+    """
+    user = await auth.current_user(request)
+    data = await _json_body(request)
+    if data is None or "view" not in data:
+        return JSONResponse({"ok": False, "error": "Expected {view}"}, status_code=400)
+    view = data["view"]
+    if view is not None and not isinstance(view, dict):
+        return JSONResponse({"ok": False, "error": "Expected {view}"}, status_code=400)
+    err = await share_links.set_link_view(user.user_id, view)
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    row = await share_links.get(user.user_id)
+    return JSONResponse(_share_payload(row, user.username, load_settings()))
 
 
 @guard.post("/api/me/share/rotate", AuthLevel.CALENDAR_APPROVED)

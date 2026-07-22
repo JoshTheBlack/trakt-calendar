@@ -286,7 +286,13 @@ document.querySelectorAll('[data-action="unlink"]').forEach(btn => {
       if (!confirm(data.error + '\n\nUnlink anyway?')) return;
       ({resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider, force: true}));
     }
-    if (resp.ok && data.ok) { window.location.reload(); return; }
+    if (resp.ok && data.ok) {
+      // Unlinked locally regardless; the warning is about the authorization
+      // still standing on the provider's side, which only its owner can clear.
+      if (data.warning) alert(data.warning);
+      window.location.reload();
+      return;
+    }
     setMsg('usersMsg', data.error || 'Could not unlink that account.', false);
   });
 });

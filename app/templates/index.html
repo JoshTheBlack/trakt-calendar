@@ -274,6 +274,20 @@
                         <input type="number" id="s_cache" name="cache_ttl_minutes" min="0" max="10080">
                     </div>
                 </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="s_calcache">Calendar cache (minutes)</label>
+                        <input type="number" id="s_calcache" name="calendar_cache_ttl_minutes" min="1" max="1440">
+                        <span class="hint">How long a week of calendar data is reused before refetching.
+                            Short, because premiere dates in the current month still move.</span>
+                    </div>
+                    <div class="field">
+                        <label for="s_cachecap">Cache size cap (MB)</label>
+                        <input type="number" id="s_cachecap" name="api_cache_max_bytes" min="16" max="65536">
+                        <span class="hint">Total budget for cached API responses. Past this, the
+                            least-recently-stored entries are evicted.</span>
+                    </div>
+                </div>
                 <div class="field checkbox">
                     <input type="checkbox" id="s_hide" name="hide_not_watching">
                     <label for="s_hide">Hide not-watching by default</label>
@@ -364,12 +378,70 @@
             </div>
 
             <div class="field">
-                <label for="share_preferred">Copy button reaches for</label>
+                <label for="share_preferred">Which link to generate</label>
                 <select id="share_preferred" onchange="setSharePreferred(this.value)">
                     <option value="token">The private token link</option>
                     <option value="username">The username link</option>
                     <option value="slug">The custom-name link</option>
                 </select>
+            </div>
+
+            <div class="settings-section">🎛️ How the link opens</div>
+            <p class="hint">These options are written into the link itself. They change nothing
+                about your own calendar — pick "use my current display" and whoever opens the
+                link simply sees it the way you have it set right now.</p>
+            <div class="field">
+                <label class="checkbox-label">
+                    <input type="radio" name="share_view_mode" value="current" onchange="setShareViewMode('current')"> Use my current display
+                </label>
+                <label class="checkbox-label">
+                    <input type="radio" name="share_view_mode" value="custom" onchange="setShareViewMode('custom')"> Choose display options for the link
+                </label>
+            </div>
+            <div id="share_view_options" hidden>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="share_view_endpoint">Calendar</label>
+                        <select id="share_view_endpoint" onchange="saveShareView()">
+                            {% for ep in endpoints %}
+                            <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="share_view_tz">Timezone</label>
+                        <select id="share_view_tz" onchange="saveShareView()">
+                            {% for tzgroup in viewer_timezone_groups %}
+                            <optgroup label="{{ tzgroup.group }}">
+                                {% for tz in tzgroup['options'] %}
+                                <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                                {% endfor %}
+                            </optgroup>
+                            {% endfor %}
+                        </select>
+                    </div>
+                </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="share_view_card">Card style</label>
+                        <select id="share_view_card" onchange="saveShareView()">
+                            <option value="vertical"{% if view.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
+                            <option value="horizontal"{% if view.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
+                            <option value="poster"{% if view.card_style == 'poster' %} selected{% endif %}>Poster only</option>
+                        </select>
+                    </div>
+                    <div class="field">
+                        <label for="share_view_packing">Day packing</label>
+                        <select id="share_view_packing" onchange="saveShareView()">
+                            <option value="stacked"{% if view.day_packing == 'stacked' %} selected{% endif %}>Stacked bands</option>
+                            <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Days packed beside each other</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="field checkbox">
+                    <input type="checkbox" id="share_view_hidenw" onchange="saveShareView()"{% if view.hide_not_watching %} checked{% endif %}>
+                    <label for="share_view_hidenw">Hide not-watching items on the shared page</label>
+                </div>
             </div>
         </div>
         <div class="modal-foot">

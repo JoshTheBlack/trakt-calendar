@@ -236,6 +236,12 @@ async def admin_unlink_identity(user_id: int, request: Request):
     if provider not in ("trakt", "plex"):
         return _error("Unknown provider.")
     force = bool(data.get("force"))
+    from . import trakt_routes  # deferred: trakt_routes reads app.auth_routes
+
+    # Read before the unlink (the token lives on the row it deletes), spent only
+    # after one actually happened — a first call that comes back asking for
+    # `force` must not kill the token and leave the identity linked to it.
+    token = await trakt_routes.stored_access_token(user_id) if provider == "trakt" else None
     try:
         removed = await auth.unlink_identity(user_id, provider, force=force)
     except auth.LastLoginMethod:
@@ -248,7 +254,7 @@ async def admin_unlink_identity(user_id: int, request: Request):
         }, status_code=409)
     if not removed:
         return _error("That account isn't linked.", 404)
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "warning": await trakt_routes.revoke_token_value(token)})
 
 
 # ---------------------------------------------------------------------------

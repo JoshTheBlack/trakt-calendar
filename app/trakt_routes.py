@@ -311,6 +311,50 @@ async def _clear_reconnect_notice(is_admin: bool) -> None:
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
 
 
+REVOKE_FAILED_NOTICE = (
+    "Unlinked here, but this instance could not tell Trakt to forget the "
+    "authorization. Remove it yourself under Settings > Connected apps on trakt.tv."
+)
+
+
+async def stored_access_token(user_id: int) -> str | None:
+    """`user_id`'s Trakt token exactly as stored, with no refresh attempted.
+
+    Read this BEFORE unlinking — the token lives on the row an unlink deletes,
+    so afterwards there is nothing left to revoke.
+    """
+    row = await db.fetch_one(
+        "SELECT access_token FROM linked_identities WHERE user_id = ? AND provider = ?",
+        (user_id, PROVIDER),
+    )
+    return (row["access_token"] if row else None) or None
+
+
+async def revoke_token_value(token: str | None, settings: Settings | None = None) -> str | None:
+    """Invalidate a Trakt token at Trakt's end. Returns None on success (or when
+    there was nothing to revoke), else a notice to show the user.
+
+    Call this only once the unlink has actually gone through. A failure here is
+    never allowed to undo it: the local row going away is what stops this
+    instance using the token, and rolling an unlink back because a third party
+    was unreachable would leave the user stuck with a link they asked to remove.
+    """
+    cfg = settings or load_settings()
+    if not token:
+        return None
+    if not (cfg.trakt_client_id and cfg.trakt_client_secret):
+        # Revocation is authenticated with the app's own credentials. Without
+        # them there is no call to make, and saying so is more useful than
+        # silently doing nothing.
+        return REVOKE_FAILED_NOTICE
+    try:
+        await trakt_auth.revoke_token(cfg.trakt_client_id, cfg.trakt_client_secret, token)
+    except httpx.HTTPError as exc:
+        logger.warning("Trakt token revocation failed for a linked account: %s", exc)
+        return REVOKE_FAILED_NOTICE
+    return None
+
+
 async def access_token_for_user(user_id: int, settings: Settings | None = None) -> str | None:
     """A currently-valid Trakt access token for `user_id`, or None.
 

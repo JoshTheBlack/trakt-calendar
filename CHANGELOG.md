@@ -23,11 +23,21 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🔁 Marking something not-watching now sends just that one change, so two open tabs can no longer overwrite each other.
 
 ### Public sharing
-- 🔗 Publish your calendar as a **read-only public page** — as an unguessable link, as `/u/your-name`, or as your own custom `/c/slug`. Enable any combination, pick which one the Share button copies, and rotate the private link at any time.
+- 🔗 Publish your calendar as a **read-only public page** — as an unguessable link, as `/u/your-name`, or as your own custom `/c/slug`. Enable any combination, pick which one gets generated, and rotate the private link at any time.
+- 🎛️ Choose **how the link opens**: hand it out reflecting your current display, or pin the calendar, card style, day packing, timezone, and hide-not-watching into the link itself. Either way your own calendar is untouched — the options are written into the URL, not into your settings.
+- 👀 Visitors get their own view controls on a shared page (endpoint, cards, days, timezone, hide-not-watching). They're plain links, so no sign-in and no saved state — and the URL they end up on is shareable too.
 - 🚫 Public pages make **zero API calls**, ever. They serve what is already cached (with a "data as of" line) rather than spending your rate limit for a stranger, and a bad link always 404s the same way regardless of why.
+
+### Your account
+- 🪪 Set your own **username and password** from the account page. An account created through Plex or Trakt starts with neither, and a password means you can still get in if you ever lose access to the linked service. Changing a password signs out every other session but keeps you signed in where you are.
+- 🔌 **Unlinking Plex or Trakt now revokes the authorization** at the provider instead of leaving it sitting in your connected-apps list. If that can't be reached, the unlink still happens and you're told to finish it there.
+
+### Ops
+- 🎚️ Calendar cache lifetime and the total cache size cap are now editable in Settings instead of only in the config file.
 
 ### 🥚
 - The hidden thing now checks whether it has anywhere to take you. If it doesn't, it just makes the noise.
+- Whatever it is you found, you can now take a copy of it home, and put it back.
 
 ## 🏷️ [1.0.1] - Unreleased
 

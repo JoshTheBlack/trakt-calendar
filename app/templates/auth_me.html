@@ -75,6 +75,38 @@
     </div>
     <p class="auth-error" id="linkError" role="alert"></p>
 
+    <div class="auth-list">
+      {% if not user.username %}
+      {# An account made through Plex or Trakt has no username. Claiming one is
+         offered once; changing it afterwards stays with an administrator,
+         because it is what /u/<name> share links are built from. #}
+      <form class="auth-inline-form" id="usernameForm">
+        <label for="newUsername">Choose a username</label>
+        <input type="text" id="newUsername" name="username" autocomplete="username" spellcheck="false"
+               placeholder="your-name" required>
+        <button class="btn-ghost tiny" type="submit">Save</button>
+      </form>
+      {% endif %}
+
+      <form class="auth-inline-form" id="passwordForm">
+        <label for="newPassword">{{ "Change your password" if has_password else "Set a password" }}</label>
+        {% if has_password %}
+        <input type="password" id="currentPassword" name="current_password" autocomplete="current-password"
+               placeholder="Current password" required>
+        {% endif %}
+        <input type="password" id="newPassword" name="password" autocomplete="new-password"
+               placeholder="New password" minlength="{{ min_password_length }}" required>
+        <input type="password" id="confirmPassword" name="password_confirm" autocomplete="new-password"
+               placeholder="Repeat new password" minlength="{{ min_password_length }}" required>
+        <button class="btn-ghost tiny" type="submit">Save</button>
+      </form>
+      {% if not has_password %}
+      <p class="auth-sub">A password means you can still sign in if you ever lose access to a
+        linked account.</p>
+      {% endif %}
+    </div>
+    <p class="auth-error" id="credError" role="alert"></p>
+
     <div class="auth-actions">
       {% if user.calendar_approved %}
       <a class="btn-ghost" href="/">Open the calendar</a>
@@ -116,13 +148,54 @@ document.querySelectorAll('[data-unlink]').forEach(btn => {
         body: JSON.stringify({provider}),
       });
       const data = await resp.json().catch(() => ({}));
-      if (resp.ok && data.ok) { window.location.reload(); return; }
+      if (resp.ok && data.ok) {
+        // The unlink succeeded either way; the warning is about the part only
+        // the user can finish, on the provider's own site.
+        if (data.warning) alert(data.warning);
+        window.location.reload();
+        return;
+      }
       err.textContent = data.error || 'Could not unlink that account.';
     } catch (e) {
       err.textContent = 'Could not reach the server.';
     }
     btn.disabled = false;
   });
+});
+
+// Both credential forms post JSON and report into one message line. A success
+// reloads, because either one changes what this page should be showing.
+async function submitCredentialForm(form, url, ok) {
+  const err = document.getElementById('credError');
+  err.textContent = '';
+  const body = {};
+  new FormData(form).forEach((value, key) => { body[key] = value; });
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    err.textContent = data.error || ok;
+  } catch (e) {
+    err.textContent = 'Could not reach the server.';
+  }
+}
+
+const usernameForm = document.getElementById('usernameForm');
+if (usernameForm) {
+  usernameForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitCredentialForm(usernameForm, '/api/me/username', 'Could not save that username.');
+  });
+}
+
+const passwordForm = document.getElementById('passwordForm');
+passwordForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  submitCredentialForm(passwordForm, '/api/me/password', 'Could not change your password.');
 });
 
 document.getElementById('logout').addEventListener('click', async () => {

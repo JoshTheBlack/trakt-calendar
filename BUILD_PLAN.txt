@@ -1150,6 +1150,53 @@ Revision 1 deferred these to the implementing chats. They are decided:
        user: disabling a form, or clearing the slug it named, would otherwise
        drop the link out of every future post silently. Publishing the link that
        still works is the visible failure mode.
+     [chat K finishing pass] 2026-07-22 — The §11.I "no owner-default editor"
+       gap was closed by BUILDING SOMETHING ELSE, on the operator's explicit
+       instruction. §5.4's six owner-default columns stay exactly as chat I left
+       them: seeded from user_prefs at row creation, mirrored by
+       POST /api/me/prefs and POST /api/me/timezone, with no editor. What the
+       Share panel now offers instead is a LINK BUILDER — "use my current
+       display" (hand out a bare URL, so the page resolves those same owner
+       defaults) or "choose display options for the link" (write them into the
+       URL's query string). Rationale, and it is a better decision than the plan's:
+       the owner-default columns are the fallback for a link that carries no
+       params, so an editor over them would have made "use my current display"
+       start meaning the customized view; and §7.3 already specifies these params,
+       already validates them, and already gives query params precedence over
+       owner defaults, so the builder is the mechanism the plan designed being
+       used as designed. New column `share_links.link_view_json` (migration 6),
+       new route POST /api/me/share/view.
+     [chat K finishing pass] 2026-07-22 — Unlinking a Trakt identity now calls
+       Trakt's /oauth/revoke, and REPORTS a failure to the user rather than
+       swallowing it (operator's choice between the two options offered). §11.D
+       listed the missing revocation as a known gap and nothing in §1-§9 covers
+       it. Ordering matters and cost a bug on the way: the token lives on the row
+       the unlink deletes, so it is READ first, but it is SPENT only after an
+       unlink actually succeeded — a first draft revoked before the attempt, so a
+       refused unlink (last login method, or an admin unlink that comes back
+       asking for `force`) killed the token and left the identity linked to it.
+       A revocation failure never blocks or reverses the unlink.
+     [chat K finishing pass] 2026-07-22 — Self-service username and password
+       landed at POST /api/me/username and POST /api/me/password (SESSION), and
+       §11.D's "an OAuth-only account cannot set either for itself" gap is
+       closed. §1.7 says password resets are an admin-driven manual action; that
+       still holds for a RESET (an admin setting a password for somebody who
+       cannot sign in). This is the account holder changing their own, from a
+       live session, which §1.7's rationale — no email, so no self-service reset
+       flow — does not argue against. Two deliberate limits: claiming a username
+       is offered ONCE, because a username is what /u/<name> links are built from
+       and silently freeing the old one is the §1.10 retirement hazard; and
+       setting a FIRST password asks for no current password, because there is
+       none and requiring one would make the feature unreachable for exactly the
+       accounts that need it. The current-password check is throttled on the
+       login limiter's own 'ip' counter and thresholds.
+     [chat K finishing pass] 2026-07-22 — `trakt._cached_get`'s `private=True`
+       reads and writes were verified against the test suite, and doing so
+       surfaced that two pre-existing unlink tests were reaching the REAL
+       api.trakt.tv (revocation is a live POST and nothing patched it). Patched
+       at app.trakt_auth.revoke_token in tests/test_trakt_oauth.py's UnlinkTests.
+       Worth recording because §9 says the suite is offline and it silently
+       stopped being so the moment a route grew a new outbound call.
 
 
 ================================================================================
@@ -1687,10 +1734,12 @@ The level is a required positional argument. Do NOT use `@app.get` /
     MOUNT /static        (declared via authz.declare_mount)
     STILL TO COME: /auth/plex/* (E), /s/*, /u/*, /c/* (I).
 
-  SESSION (signed in, any approval state)                          3 routes
+  SESSION (signed in, any approval state)                          5 routes
     GET  /me
     GET  /auth/trakt/link                      (added by D)
     POST /api/me/identities/unlink             (added by D)
+    POST /api/me/username                      (added by K)
+    POST /api/me/password                      (added by K)
     NOTE: the two Trakt callback routes are PUBLIC because a callback arrives
     from Trakt with no guarantee of a session, but the LINK entry point is
     SESSION — a link handshake is bound to the session that started it, so
@@ -1721,6 +1770,10 @@ The level is a required positional argument. Do NOT use `@app.get` /
     POST /api/distrakt/abandon
     GET  /api/distrakt/export      POST /api/distrakt/restore   (added by J)
     GET  /api/distrakt/share-link  POST /api/distrakt/share-link (added by K)
+    NOTE: chat I's /api/me/share* routes are CALENDAR_APPROVED, including the
+    POST /api/me/share/view that chat K added — the Share panel lives on the
+    calendar. The tracker's own link controls are the DISTRAKT_APPROVED pair
+    above, because a distrakt-approved account need not be calendar-approved.
     COUNT CORRECTION: this section previously said "EVERY /api/distrakt/* route
     (12 today)". There are ELEVEN /api/distrakt/* routes plus the /distrakt page
     = 12 total. §9K's "all 12 + the 2 new ones" should read "all 11 API routes,
@@ -4117,10 +4170,13 @@ PUBLIC SURFACE:
     conditions auth.require_distrakt enforces. It is a rendering hint only.
 
 SCHEMA:
-  Migration version 5 (appended; migrations 1-4 untouched). No new tables.
+  Migrations 5 and 6 (appended; migrations 1-4 untouched). No new tables.
     share_links  + post_link_kind      TEXT (nullable; NULL follows preferred_kind)
                  + post_link_endpoint  TEXT (nullable; NULL leaves the link bare)
-  Both beyond §5.4's column list — see DEVIATIONS 3.
+                 + link_view_json      TEXT (nullable; NULL = hand out a bare
+                                       link, so the page resolves the owner's
+                                       own defaults)
+  All three beyond §5.4's column list — see DEVIATIONS 3 and 5.
 
 DEVIATIONS:  (all four also appended to §2.1)
   1. trakt._cached_get gained `private=True` and the three user-scoped reads use
@@ -4144,6 +4200,27 @@ DEVIATIONS:  (all four also appended to §2.1)
      form instead of vanishing when a stored choice stops resolving (the user
      disables that form, or clears the slug it named). Silently dropping the link
      from every future post is the worse failure.
+  --- the finishing pass (below) added these four ---
+  5. §11.I's "owner-default editor" gap was closed by building a LINK BUILDER
+     instead, on the operator's instruction. §5.4's six owner-default columns are
+     untouched and still mirror user_prefs; the panel writes §7.3 view params
+     into the generated URL's query string instead. Better than the plan's shape:
+     the owner-default columns ARE the fallback for a param-less link, so editing
+     them would have made "use my current display" mean the customized view.
+     New column share_links.link_view_json (migration 6), new route
+     POST /api/me/share/view.
+  6. Trakt token revocation added on unlink, REPORTING failures (the operator
+     chose that over silent best-effort). Not covered anywhere in §1-§9; §11.D
+     listed its absence as a gap. The token is read before the unlink and spent
+     only after one succeeded — see §2.1 for the ordering bug that forced this.
+  7. Self-service username and password at POST /api/me/username and
+     POST /api/me/password (SESSION). §1.7 makes password RESETS admin-driven,
+     which still holds; this is an account holder changing their own from a live
+     session. Claiming a username is one-way, and a first password needs no
+     current one.
+  8. app/share_routes.py's card-style and day-packing whitelists now come from
+     app/share_links.py rather than being defined twice, so the link builder
+     cannot emit a view the public page would reject.
 
 TESTS:  (467 tests total in the suite, all green — 434 + 33 new)
   tests/test_distrakt_gating.py (33). Every tracker route is enumerated by hand
@@ -4202,30 +4279,107 @@ TESTS:  (467 tests total in the suite, all green — 434 + 33 new)
       chat took for admin.html, the Settings modal and the Share modal. What the
       template emits and what the routes behind them do IS covered above.
 
-KNOWN GAPS:  (nothing left for a later chat — this is the last one. What follows
-  is what remains open across §11.A-K and is DELIBERATELY DEFERRED. Every §10
-  STATUS line now reads "done".)
-  - No Settings-UI widget for `calendar_cache_ttl_minutes` or
-    `api_cache_max_bytes` (§11.G deviation 2). Both are read live from
-    settings.json and hand-editable; the admin screen is otherwise complete.
-    Cosmetic.
-  - The Share panel has no owner-default view editor (§11.I deviation 2) — the
-    six owner-default columns are seeded from user_prefs and mirrored by
-    POST /api/me/prefs and POST /api/me/timezone thereafter. Cosmetic, and only
-    wanted if "my share page should look different from my private view" turns
-    out to be a real want.
-  - A share page's month/endpoint navigation is plain query-string links rather
-    than the interactive selects the signed-in calendar has (§11.I). Cosmetic.
-  - Distrakt export/restore still has NO UI and no typed acknowledgement
-    (§11.J deviation 4). Both routes work and are tested. §10[K]'s scope line
-    does not include it and this chat did not add it; §1.20's typed-confirmation
-    requirement is therefore still outstanding for whenever the download/upload
-    control is built.
-  - data/state_*.json are still present and are still read by
-    calendar_state.import_legacy_state() at onboarding (§11.J deviation 3). They
-    become deletable on an instance once onboarding has run there once.
-    data/legacy_state_backup/ is permanent.
-  - Nothing revokes a Trakt token at Trakt's end on unlink (§11.D). The row goes,
-    so this instance can no longer use it, but the grant survives on trakt.tv.
-  - An OAuth-only account still cannot set a username or password for itself
-    (§11.D); an admin can do it for them from the admin screen.
+FINISHING TOUCHES  (same chat, later pass — 2026-07-22)
+  A second pass closed the remaining KNOWN GAPS listed across §11.A-K. Four of
+  them needed a decision the plan did not contain; those are in §2.1 and in
+  DEVIATIONS 5-8 above. What exists now:
+
+  1. TRACKER BACKUP UI (was §11.J deviation 4 / §1.20's typed acknowledgement).
+     A "Backup" tab on /distrakt: a download link straight to
+     GET /api/distrakt/export (a plain authenticated GET, so the browser's own
+     download handles it and takes the filename from the response), and a restore
+     that reads the chosen file, PARSES IT BEFORE ASKING ANYTHING (being told a
+     file is unreadable beats typing a confirmation and then finding out), shows
+     what it is about to write, and requires the phrase REPLACE MY DATA typed
+     literally before the button arms. §1.20's typed acknowledgement is now built.
+     app/static/js/distrakt.js: RESTORE_ACK, onRestoreFileChosen,
+     onRestoreAckInput, restoreBackup.
+
+  2. SHARE LINK BUILDER (was §11.I's "no owner-default editor" — built as
+     something else on the operator's instruction; see §2.1 and DEVIATIONS 5).
+     The Share panel gains "which link to generate" (the existing preferred_kind,
+     relabelled) and a two-way choice: "use my current display" hands out a bare
+     URL, "choose display options for the link" writes endpoint/card/packing/
+     hidenw/tz into its query string. THE OWNER'S OWN CALENDAR AND THE SHARE
+     PAGE'S OWN DEFAULTS ARE UNTOUCHED BY THIS — asserted directly in the tests,
+     because it is the entire point of storing the choice separately.
+       app/share_links.py: CARD_STYLES, DAY_PACKINGS, LINK_VIEW_PARAMS,
+         link_view_error(view), link_view(row), set_link_view(user_id, view),
+         build_url(row, username, base_url, kind, params=None),
+         share_urls (bare) / generated_urls (carrying the link view).
+       POST /api/me/share/view  {view: {...} | null}  CALENDAR_APPROVED.
+       app/share_routes.py now takes its card/packing whitelists from
+       app/share_links.py, so the builder cannot emit a view the page rejects.
+
+  3. SHARE PAGE VIEW CONTROLS (was §11.I's "plain query-string links").
+     A `<form method="get">` in the public page's header with selects for
+     endpoint, card style, day packing, timezone and hide-not-watching, plus
+     hidden year/month so changing a view option does not bounce the visitor to
+     today. GET-only against the params §7.3 already whitelists: no session, no
+     write surface, and the resulting URL is itself shareable. Hide-not-watching
+     is a SELECT rather than a checkbox — an unchecked box is omitted from a form
+     submission entirely, which reads as "unspecified" and falls back to the
+     owner's default instead of to "show everything".
+
+  4. CACHE SETTINGS WIDGETS (was §11.G deviation 2).
+     `calendar_cache_ttl_minutes` and `api_cache_max_bytes` now have inputs in
+     the admin Settings modal. The size cap is stored in bytes and edited in
+     MEGABYTES (app.js converts both ways) — nobody wants to count zeros.
+
+  5. TRAKT TOKEN REVOCATION ON UNLINK (was §11.D's last KNOWN GAP; see §2.1).
+     app/trakt_auth.revoke_token(client_id, client_secret, access_token) and, in
+     app/trakt_routes.py, stored_access_token(user_id) +
+     revoke_token_value(token, settings=None) -> notice | None. Both unlink
+     routes (self-service and admin) read the token BEFORE the unlink and spend
+     it only AFTER one succeeded, and surface REVOKE_FAILED_NOTICE when Trakt
+     could not be told. A failure never blocks or reverses the unlink.
+
+  6. SELF-SERVICE CREDENTIALS (was §11.D's OAuth-only gap; see §2.1).
+     POST /api/me/username (claim once, when the account has none) and
+     POST /api/me/password (set a first one, or change one with the current
+     password), both SESSION, both surfaced on /me. A password change revokes
+     every session the account holds and then reissues one for the caller, so a
+     change after a compromise evicts the other party without signing the owner
+     out of the tab they are using.
+
+  STILL OPEN, AND NOT A CODE TASK:
+  - data/state_*.json remain on this working copy. They are still the live input
+    to calendar_state.import_legacy_state() at onboarding, which has never run
+    here (data/app.db holds zero users), so they are the only copy of the real
+    not-watching data. OPERATOR INSTRUCTION, not a gap: once onboarding has run
+    on an instance it backs these up into data/legacy_state_backup/ and imports
+    them, after which the originals are safe to delete. Nothing else reads them.
+    data/legacy_state_backup/ is permanent and must never be deleted.
+
+  TESTS ADDED: tests/test_finishing_touches.py (36) — 506 in the suite, green.
+    - BackupPanelTests (5): the page offers both halves; the restore control
+      demands the typed phrase and its button ships disabled; the export is an
+      attachment carrying the schema version; download -> wipe -> restore round
+      trips THROUGH THE ROUTES; a restore lands on whoever asked and leaves the
+      account it came from untouched.
+    - ShareLinkViewOptionsTests (7): the default link carries no params; chosen
+      options appear in the query string; THEY DO NOT TOUCH user_prefs, the
+      account timezone, OR share_links' owner-default columns (three separate
+      assertions, because that promise is the design); clearing goes back to a
+      bare link; an unusable value is refused rather than silently dropped
+      (six cases); the options apply to whichever form is generated; and the
+      generated URL really does open the public page on that view.
+    - SharePageViewControlsTests (5): the controls render; they are a GET form
+      with no POST anywhere; they reflect what the URL asked for; year/month
+      survive a view change; hide-not-watching always sends a value.
+    - SelfServiceCredentialsTests (11): an OAuth-only account can claim a
+      username and set a first password; changing an existing username is
+      refused; taken/reserved/malformed names are refused; a username may not
+      collide with someone else's SLUG (the cross-namespace rule holds here
+      too); changing a password needs the current one and rejects a mismatch or
+      a short one; a change evicts other sessions but not the caller's; both
+      routes need a session; and /me offers exactly the forms that apply.
+    - CacheSettingsWidgetTests (3): both inputs render, save, and read back.
+    - TokenRevocationOnUnlinkTests (4): an admin unlink revokes; an admin unlink
+      that comes back asking for `force` revokes NOTHING YET and only spends the
+      token on the forced retry; unlinking Plex asks Trakt nothing; and with no
+      client credentials configured it reports rather than calling.
+    tests/test_trakt_oauth.py UnlinkTests gained 3 (revocation happens, a
+    refused unlink does not revoke, a failed revocation still unlinks and says
+    so) and now patches app.trakt_auth.revoke_token — without which it reached
+    the real api.trakt.tv (see §2.1).

@@ -7,6 +7,9 @@ const currentTotalShows = parseInt(BODY.dataset.total, 10) || 0;
 const currentTotal = currentTotalShows;
 const STATE_URL = `/api/state?month=${MONTH}&year=${YEAR}&endpoint=${encodeURIComponent(ENDPOINT)}`;
 
+// The cache size cap is stored in bytes and edited in megabytes.
+const MB = 1024 * 1024;
+
 let notWatching = new Set();
 let historyLog = [];
 let lastKnownStats = { total: null, watching: null, notWatching: null };
@@ -509,6 +512,9 @@ async function openSettings() {
         document.getElementById('s_networks').value = (s.network_filter || []).join(', ');
         document.getElementById('s_limit').value = s.pagination_limit || 300;
         document.getElementById('s_cache').value = (s.cache_ttl_minutes ?? 720);
+        document.getElementById('s_calcache').value = (s.calendar_cache_ttl_minutes ?? 10);
+        // Stored in bytes; shown in MB, because nobody wants to count zeros.
+        document.getElementById('s_cachecap').value = Math.round((s.api_cache_max_bytes ?? 1073741824) / MB);
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
         // Sonarr / Radarr
         document.getElementById('s_sonarr_url').value = s.sonarr_url || '';
@@ -579,6 +585,8 @@ async function saveSettings(event) {
         network_filter: document.getElementById('s_networks').value,
         pagination_limit: parseInt(document.getElementById('s_limit').value, 10) || 300,
         cache_ttl_minutes: parseInt(document.getElementById('s_cache').value, 10) || 0,
+        calendar_cache_ttl_minutes: parseInt(document.getElementById('s_calcache').value, 10) || 10,
+        api_cache_max_bytes: (parseInt(document.getElementById('s_cachecap').value, 10) || 1024) * MB,
         hide_not_watching: document.getElementById('s_hide').checked,
         sonarr_url: document.getElementById('s_sonarr_url').value.trim(),
         sonarr_quality_profile_id: parseInt(document.getElementById('s_sonarr_qp').value, 10) || 0,
@@ -628,6 +636,58 @@ function renderShare() {
         box.hidden = !url;
         if (url) document.getElementById('share_url_' + kind).value = url;
     }
+    renderShareView();
+}
+
+// The link's display options. A null link_view means the URL goes out bare, so
+// whoever opens it sees whatever the owner's calendar currently resolves to;
+// otherwise the options below are written into the query string. Neither case
+// touches the owner's own view — that is the whole point of storing them here
+// rather than reusing the calendar preferences.
+function renderShareView() {
+    const view = shareState.link_view;
+    const custom = !!view;
+    document.querySelector('input[name="share_view_mode"][value="current"]').checked = !custom;
+    document.querySelector('input[name="share_view_mode"][value="custom"]').checked = custom;
+    document.getElementById('share_view_options').hidden = !custom;
+    if (!custom) return;
+    if (view.endpoint) document.getElementById('share_view_endpoint').value = view.endpoint;
+    if (view.tz) document.getElementById('share_view_tz').value = view.tz;
+    if (view.card) document.getElementById('share_view_card').value = view.card;
+    if (view.packing) document.getElementById('share_view_packing').value = view.packing;
+    document.getElementById('share_view_hidenw').checked = view.hidenw === '1';
+}
+
+async function postShareView(view) {
+    try {
+        const res = await fetch('/api/me/share/view', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ view })
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        shareState = d;
+        renderShare();
+    } catch (e) { toast('Could not update the link options', false); }
+}
+
+function setShareViewMode(mode) {
+    if (mode === 'current') { postShareView(null); return; }
+    // Switching to custom seeds the controls from what this page is currently
+    // showing, so the first save reproduces the link the owner already had
+    // rather than snapping it to some unrelated default.
+    document.getElementById('share_view_options').hidden = false;
+    saveShareView();
+}
+
+function saveShareView() {
+    postShareView({
+        endpoint: document.getElementById('share_view_endpoint').value,
+        tz: document.getElementById('share_view_tz').value,
+        card: document.getElementById('share_view_card').value,
+        packing: document.getElementById('share_view_packing').value,
+        hidenw: document.getElementById('share_view_hidenw').checked ? '1' : '0',
+    });
 }
 
 async function openShare() {

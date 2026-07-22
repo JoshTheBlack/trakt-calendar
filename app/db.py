@@ -614,6 +614,18 @@ ALTER TABLE share_links ADD COLUMN post_link_kind TEXT;
 ALTER TABLE share_links ADD COLUMN post_link_endpoint TEXT;
 """
 
+# Migration 6 — the view options the Share panel writes into the link it hands
+# out. Deliberately NOT the owner-default columns above: those are the share
+# PAGE's fallback and are mirrored from the owner's own calendar preferences, so
+# writing them here would change how the owner's private calendar renders as a
+# side effect of customizing a link.
+MIGRATION_6 = """
+-- The query string the generated share link carries, as a JSON object of the
+-- public view params. NULL means "hand out a bare link", which lets the page
+-- resolve the owner's own defaults — the "use my current display" case.
+ALTER TABLE share_links ADD COLUMN link_view_json TEXT;
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -623,6 +635,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (3, MIGRATION_3),
     (4, MIGRATION_4),
     (5, MIGRATION_5),
+    (6, MIGRATION_6),
 ]
 
 
