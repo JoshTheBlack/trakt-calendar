@@ -59,12 +59,18 @@
         <button type="button" id="hideToggle" class="pill-btn{% if settings.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()" title="Toggle hiding not-watching items">
             <span id="hideToggleLabel">{% if settings.hide_not_watching %}🚫 Hiding{% else %}👁️ Showing all{% endif %}</span>
         </button>
-        {% if (endpoint.media == 'movie' and settings.radarr_configured) or (endpoint.media != 'movie' and settings.sonarr_configured) %}
+        {# Library writes land in the operator's own Sonarr/Radarr and Seerr
+           requests all carry one app-wide key, so these are an administrator's
+           affordance. Left out of the page entirely for everyone else — a button
+           that always fails is worse than no button. #}
+        {% if is_admin and ((endpoint.media == 'movie' and settings.radarr_configured) or (endpoint.media != 'movie' and settings.sonarr_configured)) %}
         <button type="button" id="addAllBtn" class="pill-btn" onclick="addAllToArr()" title="Add every watching item this month to {{ 'Radarr' if endpoint.media == 'movie' else 'Sonarr' }}">
             <img class="pill-icon" src="/static/icons/{{ 'radarr' if endpoint.media == 'movie' else 'sonarr' }}.png" alt=""> Add all
         </button>
         {% endif %}
+        {% if is_admin %}
         <button type="button" class="pill-btn" onclick="openSettings()">⚙️ Settings</button>
+        {% endif %}
         <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)" hidden>🧵 Distrakt</a>
     </div>
 </header>
@@ -138,6 +144,7 @@
                             <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
                                 <img src="/static/images/traktlogo.png" alt="Trakt">
                             </a>
+                            {% if is_admin %}
                             {% if item.media == 'movie' and settings.radarr_configured %}
                             <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>
                             {% elif item.media != 'movie' and settings.sonarr_configured %}
@@ -145,6 +152,7 @@
                             {% endif %}
                             {% if settings.seer_configured %}
                             <button type="button" class="arr-btn seer" data-arr="seer" onclick="addToArr(this, event)" title="Request on Seerr"><img src="/static/icons/seer.png" alt=""><span>Seerr</span></button>
+                            {% endif %}
                             {% endif %}
                         </div>
                     </div>
@@ -161,6 +169,7 @@
     <p>Idea &amp; design by great_vc — Python rebuild &nbsp;&nbsp;<span class="version-tag">🏷️ v{{ version }} · {{ build }}</span></p>
 </footer>
 
+{% if is_admin %}
 <!-- Settings modal (requirement C) -->
 <div id="settingsModal" class="modal-overlay" onclick="if(event.target===this) closeSettings()">
     <div class="modal">
@@ -170,6 +179,18 @@
         </div>
         <form id="settingsForm" onsubmit="return saveSettings(event)">
             <div class="modal-body">
+                <div class="field" id="s_reconnect_box" hidden>
+                    <p class="auth-notice">
+                        This instance's saved Trakt token could not be matched to a Trakt
+                        account, so it isn't linked to your login.
+                        <a href="/auth/trakt/link">Reconnect your Trakt account</a>.
+                    </p>
+                </div>
+                <div class="field">
+                    <label for="s_base_url">Public base URL</label>
+                    <input type="text" id="s_base_url" name="public_base_url" placeholder="https://shows.example.com" autocomplete="off" spellcheck="false">
+                    <span class="hint" id="s_redirect_hint">The origin people reach this app on — no path, no trailing slash. Required for "Log in with Trakt", and used for every link the app generates.</span>
+                </div>
                 <div class="field">
                     <label for="s_client_id">Trakt Client ID</label>
                     <input type="text" id="s_client_id" name="trakt_client_id" autocomplete="off" spellcheck="false">
@@ -177,18 +198,21 @@
                 </div>
                 <div class="field">
                     <label for="s_client_secret">Trakt Client Secret</label>
-                    <input type="password" id="s_client_secret" name="trakt_client_secret" autocomplete="off" spellcheck="false">
+                    <input type="password" id="s_client_secret" data-secret="1" name="trakt_client_secret" autocomplete="off" spellcheck="false">
                     <span class="hint">Same page as the Client ID — needed to obtain/refresh the access token below.</span>
                 </div>
                 <div class="field">
                     <label for="s_access_token">Trakt Access Token</label>
-                    <input type="password" id="s_access_token" name="trakt_access_token" autocomplete="off" spellcheck="false">
+                    <input type="password" id="s_access_token" data-secret="1" name="trakt_access_token" autocomplete="off" spellcheck="false">
                     <span class="hint" id="s_token_status"></span>
                 </div>
                 <div class="auth-box">
                     <button type="button" class="btn-ghost small" onclick="startDeviceAuth()">🔑 Authorize with Trakt</button>
                     <button type="button" class="btn-ghost small" onclick="refreshTraktToken()">↻ Refresh token now</button>
                     <div id="authStatus" class="hint"></div>
+                    <div class="hint">Device pairing — needs no redirect URI, so it still works if
+                        the registered one is wrong. This authorizes the app-wide connection used
+                        for calendar data, not any one person's login.</div>
                 </div>
                 <div class="two-col">
                     <div class="field">
@@ -243,7 +267,7 @@
                 <div class="settings-section">📺 Sonarr <span class="hint">(add-to-library button on shows)</span></div>
                 <div class="two-col">
                     <div class="field"><label for="s_sonarr_url">Sonarr URL</label><input type="text" id="s_sonarr_url" name="sonarr_url" placeholder="http://localhost:8989" spellcheck="false"></div>
-                    <div class="field"><label for="s_sonarr_key">Sonarr API key</label><input type="password" id="s_sonarr_key" name="sonarr_api_key" autocomplete="off" spellcheck="false"></div>
+                    <div class="field"><label for="s_sonarr_key">Sonarr API key</label><input type="password" id="s_sonarr_key" data-secret="1" name="sonarr_api_key" autocomplete="off" spellcheck="false"></div>
                 </div>
                 <div class="two-col">
                     <div class="field"><label for="s_sonarr_qp">Quality profile</label><select id="s_sonarr_qp" name="sonarr_quality_profile_id"></select></div>
@@ -254,7 +278,7 @@
                 <div class="settings-section">🎬 Radarr <span class="hint">(add-to-library button on movies)</span></div>
                 <div class="two-col">
                     <div class="field"><label for="s_radarr_url">Radarr URL</label><input type="text" id="s_radarr_url" name="radarr_url" placeholder="http://localhost:7878" spellcheck="false"></div>
-                    <div class="field"><label for="s_radarr_key">Radarr API key</label><input type="password" id="s_radarr_key" name="radarr_api_key" autocomplete="off" spellcheck="false"></div>
+                    <div class="field"><label for="s_radarr_key">Radarr API key</label><input type="password" id="s_radarr_key" data-secret="1" name="radarr_api_key" autocomplete="off" spellcheck="false"></div>
                 </div>
                 <div class="two-col">
                     <div class="field"><label for="s_radarr_qp">Quality profile</label><select id="s_radarr_qp" name="radarr_quality_profile_id"></select></div>
@@ -265,12 +289,12 @@
                 <div class="settings-section">🎟️ Seerr <span class="hint">(request button — Overseerr / Jellyseerr lineage)</span></div>
                 <div class="two-col">
                     <div class="field"><label for="s_seer_url">Seerr URL</label><input type="text" id="s_seer_url" name="seer_url" placeholder="http://localhost:5055" spellcheck="false"></div>
-                    <div class="field"><label for="s_seer_key">Seerr API key</label><input type="password" id="s_seer_key" name="seer_api_key" autocomplete="off" spellcheck="false"></div>
+                    <div class="field"><label for="s_seer_key">Seerr API key</label><input type="password" id="s_seer_key" data-secret="1" name="seer_api_key" autocomplete="off" spellcheck="false"></div>
                 </div>
 
                 <div class="settings-section">🖼️ TMDB <span class="hint">(network logos for Discord emoji art)</span></div>
                 <div class="two-col">
-                    <div class="field"><label for="s_tmdb_key">TMDB API key</label><input type="password" id="s_tmdb_key" name="tmdb_api_key" autocomplete="off" spellcheck="false"></div>
+                    <div class="field"><label for="s_tmdb_key">TMDB API key</label><input type="password" id="s_tmdb_key" data-secret="1" name="tmdb_api_key" autocomplete="off" spellcheck="false"></div>
                 </div>
             </div>
             <div class="modal-foot">
@@ -280,6 +304,7 @@
         </form>
     </div>
 </div>
+{% endif %}
 
 <!-- Details modal (requirement G) -->
 <div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeDetails()">
@@ -295,6 +320,12 @@
     </div>
 </div>
 
+<script>
+    // Server-resolved from the session. Purely a rendering hint: every route the
+    // admin-only controls call is gated independently, so a tampered value buys
+    // nothing beyond buttons that 403.
+    window.IS_ADMIN = {{ "true" if is_admin else "false" }};
+</script>
 <script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>
 </html>

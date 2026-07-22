@@ -19,8 +19,11 @@ function toast(message, ok) {
     setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 4200);
 }
 
-let networkEmojis = {};
-let defaultEmoji = ':tv:';
+// Seeded from the page, which renders the app-wide map server-side. Only an
+// admin can re-read or edit it through the settings endpoint, but everyone
+// viewing this page needs the emoji to fall back to when a network has no logo.
+let networkEmojis = window.NETWORK_EMOJIS || {};
+let defaultEmoji = window.DEFAULT_NETWORK_EMOJI || ':tv:';
 let emojiEntries = [];
 
 function emojiFor(network) {
@@ -412,7 +415,10 @@ async function addPickedShow(season) {
 }
 
 // ---- Network -> emoji map editor (saves via the existing POST /api/settings) ----
+// Admin-only: the map is app-wide configuration and the settings endpoint that
+// backs it is gated. Its tab and panel aren't rendered for anyone else.
 async function loadEmojiMap() {
+    if (!window.IS_ADMIN) return;
     try {
         const res = await fetch('/api/settings', { cache: 'no-store' });
         const s = await res.json();

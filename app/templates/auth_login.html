@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in &ndash; Trakt New Shows</title>
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <link rel="stylesheet" href="/static/css/auth.css">
+</head>
+<body class="auth-page">
+<div class="auth-shell">
+  <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
+  <div class="auth-card">
+    <h1>Sign in</h1>
+
+    <div class="auth-providers">
+      {% if trakt_login_configured %}
+      <a class="auth-provider-btn ready" href="/auth/trakt/start">Continue with Trakt</a>
+      {% else %}
+      <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Trakt client ID, client secret, and public base URL in Settings">Continue with Trakt <span class="soon">Off</span></button>
+      {% endif %}
+      <button type="button" class="auth-provider-btn" disabled title="Coming soon">Continue with Plex <span class="soon">Soon</span></button>
+    </div>
+    <div class="auth-divider">or</div>
+
+    <div class="auth-form">
+      <div class="field">
+        <label for="username">Username</label>
+        <input id="username" type="text" autocomplete="username" autofocus>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" type="password" autocomplete="current-password">
+      </div>
+      <p class="auth-error" id="error" role="alert"></p>
+      <button class="btn-primary" id="submit" type="button">Sign in</button>
+    </div>
+
+    <div class="auth-links">
+      <span>Have an invite link? <a href="/register">Register</a></span>
+    </div>
+  </div>
+</div>
+
+<script>
+const err = document.getElementById('error');
+async function submit() {
+  err.textContent = '';
+  const btn = document.getElementById('submit');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) { window.location = data.redirect || '/'; return; }
+    err.textContent = data.error || 'Invalid username or password.';
+  } catch (e) {
+    err.textContent = 'Could not reach the server.';
+  }
+  btn.disabled = false;
+}
+document.getElementById('submit').addEventListener('click', submit);
+document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+</script>
+</body>
+</html>

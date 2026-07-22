@@ -1,0 +1,72 @@
+/* Sign-in, registration, onboarding, and account pages. A small stylesheet of
+   its own rather than folding into style.css: these pages share the same
+   design tokens (:root, fonts) but none of the calendar/card layout, and
+   loading the whole grid stylesheet for a login form would be pure waste. */
+
+body.auth-page {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 24px;
+}
+
+.auth-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
+.auth-logo { height: 34px; opacity: 0.92; }
+
+.auth-card {
+    width: 100%; background: var(--bg-panel); border: 1px solid var(--card-border);
+    border-radius: 16px; padding: 30px 28px; box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+    display: flex; flex-direction: column; gap: 18px;
+}
+.auth-card h1 {
+    font-family: 'Bebas Neue', sans-serif; font-size: 1.7rem; letter-spacing: 1px;
+    color: var(--gold-soft);
+}
+.auth-sub { color: var(--text-dim); font-size: 0.85rem; line-height: 1.5; margin-top: -10px; }
+.auth-form { display: flex; flex-direction: column; gap: 14px; }
+
+.auth-error {
+    color: var(--crimson); font-size: 0.82rem; min-height: 1.1em; line-height: 1.5;
+}
+.auth-notice {
+    color: var(--gold-soft); font-size: 0.8rem; line-height: 1.5;
+    background: rgba(232,181,69,0.08); border: 1px solid rgba(232,181,69,0.25);
+    border-radius: 8px; padding: 10px 12px;
+}
+
+.auth-links { display: flex; justify-content: space-between; gap: 12px; font-size: 0.8rem; color: var(--text-faint); flex-wrap: wrap; }
+.auth-links a { color: var(--accent-blue); }
+.auth-links a:hover { text-decoration: underline; }
+
+.auth-divider { display: flex; align-items: center; gap: 10px; color: var(--text-faint); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--card-border); }
+
+.auth-providers { display: flex; flex-direction: column; gap: 10px; }
+.auth-provider-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 16px; border-radius: 8px; border: 1px solid var(--card-border);
+    background: rgba(255,255,255,0.03); color: var(--text-dim); font-family: inherit;
+    font-weight: 600; font-size: 0.85rem; cursor: not-allowed;
+}
+.auth-provider-btn .soon { font-size: 0.68rem; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; margin-left: auto; }
+/* A provider that is actually wired up. Rendered as a link rather than a button
+   because starting the flow is a top-level navigation away from this page. */
+.auth-provider-btn.ready { color: var(--text); cursor: pointer; text-decoration: none; }
+.auth-provider-btn.ready:hover { background: rgba(255,255,255,0.07); border-color: var(--gold-soft); }
+
+.auth-list { display: flex; flex-direction: column; gap: 8px; }
+.auth-list .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 9px 12px; background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 8px; font-size: 0.85rem;
+}
+.auth-list .row .label { color: var(--text-dim); }
+.auth-badge { font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.auth-badge.ok { color: #0a0c10; background: var(--green); }
+.auth-badge.pending { color: #0a0c10; background: var(--gold-soft); }
+.auth-badge.off { color: var(--text-dim); background: rgba(255,255,255,0.06); }
+
+/* Sits inside an .auth-list row next to the badge, so it has to stay small
+   enough not to change the row's height. */
+.btn-ghost.tiny { padding: 4px 10px; font-size: 0.72rem; border-radius: 999px; text-decoration: none; }
+.btn-ghost.tiny:hover { color: var(--text); border-color: var(--gold-soft); }
+
+.auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }

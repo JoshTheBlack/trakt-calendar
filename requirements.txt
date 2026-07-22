@@ -1,5 +1,11 @@
 fastapi==0.139.2
 hypercorn==0.18.0
+# Argon2id password hashing, at the library's own defaults (see app/auth.py).
+argon2-cffi==25.1.0
+# Already a transitive FastAPI/Starlette dependency, pinned explicitly because
+# app/db.py and app/auth.py import it directly to push blocking sqlite3 and
+# Argon2 work off the event loop.
+anyio==4.14.2
 jinja2==3.1.6
 httpx==0.28.1
 python-multipart==0.0.32

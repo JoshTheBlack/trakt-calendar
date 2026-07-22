@@ -42,7 +42,12 @@
         <nav class="distrakt-tabs">
             <button type="button" class="distrakt-tab active" data-tab="shows" onclick="switchTab('shows')">This month's shows</button>
             <button type="button" class="distrakt-tab" data-tab="copy" onclick="switchTab('copy')">Copy blocks</button>
+            {# The emoji map is app-wide configuration shared by every user's
+               posts, so it is edited from the administrator's settings surface
+               only. Everyone else still sees the emoji, just can't change them. #}
+            {% if is_admin %}
             <button type="button" class="distrakt-tab" data-tab="emoji" onclick="switchTab('emoji')">Emoji map</button>
+            {% endif %}
         </nav>
 
         <section class="distrakt-panel" data-panel="shows">
@@ -72,6 +77,7 @@
             </div>
         </section>
 
+        {% if is_admin %}
         <section class="distrakt-panel distrakt-section" data-panel="emoji" hidden>
             <h2>Network → emoji map</h2>
             <div id="emojiRows" class="emoji-rows"></div>
@@ -85,6 +91,7 @@
             </div>
             <button type="button" class="btn-primary" onclick="saveEmojiMap()">Save emoji map</button>
         </section>
+        {% endif %}
     </div>
 </main>
 
@@ -117,6 +124,12 @@
 <script>
     window.DISTRAKT_YEAR = {{ year }};
     window.DISTRAKT_MONTH = {{ month }};
+    window.IS_ADMIN = {{ "true" if is_admin else "false" }};
+    // Rendered in rather than fetched: the roster falls back to these emoji for
+    // networks with no logo, and the endpoint that serves the map is for
+    // administrators only.
+    window.NETWORK_EMOJIS = {{ network_emojis | tojson }};
+    window.DEFAULT_NETWORK_EMOJI = {{ default_network_emoji | tojson }};
 </script>
 <script src="/static/js/distrakt.js?v={{ asset_v }}"></script>
 </body>

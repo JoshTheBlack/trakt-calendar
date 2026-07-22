@@ -22,15 +22,21 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from . import arr
+from . import auth
+from . import auth_routes
+from . import authz
+from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
 from . import logos
 from . import seer
 from . import state as state_store
 from . import trakt_auth
+from . import trakt_routes
 from . import watch_history
+from .auth import AuthLevel
 from .perftrace import span
-from .config import Settings, load_settings, save_settings
+from .config import Settings, apply_update, load_settings, public_base_url_error, save_settings
 from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
 from .trakt import (
@@ -136,6 +142,20 @@ async def _maybe_refresh_trakt_token() -> None:
     logger.info("Trakt token auto-refreshed (next expiry %s)", settings.trakt_token_expires_at)
 
 
+async def _sweep_auth_rows() -> None:
+    """Delete expired sessions, abandoned OAuth/PIN handshakes, and login/
+    registration attempt rows old enough that no rate limiter still needs them.
+
+    All three expire by a stored timestamp rather than by any self-expiring
+    token, so without this sweep their rows would accumulate forever. Cheap
+    indexed deletes.
+    """
+    now = db.now()
+    await auth.sweep_expired_sessions(now)
+    await db.execute("DELETE FROM auth_handshakes WHERE expires_at <= ?", (now,))
+    await auth.sweep_login_attempts(now)
+
+
 async def _heartbeat_loop() -> None:
     while True:
         try:
@@ -146,11 +166,20 @@ async def _heartbeat_loop() -> None:
             await _maybe_refresh_trakt_token()
         except Exception:
             pass
+        try:
+            await _sweep_auth_rows()
+        except Exception:
+            pass
         await asyncio.sleep(HEARTBEAT_SECONDS)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Schema first — everything after this point may touch the database.
+    await db.init()
+    # Loud, once, at boot: a route nobody declared is being refused to every
+    # caller, and the operator should hear about it here rather than from a user.
+    authz.log_undeclared_routes(_app)
     await refresh_integration_health()
     task = asyncio.create_task(_heartbeat_loop())
     try:
@@ -161,9 +190,24 @@ async def lifespan(_app: FastAPI):
         await _trakt.aclose_shared_client()
 
 
-app = FastAPI(title="Trakt New Shows", lifespan=lifespan)
+# The interactive API docs are off: they are a complete, unauthenticated
+# inventory of every endpoint in the app, and nothing here is a public API that
+# anyone consumes from a schema.
+app = FastAPI(title="Trakt New Shows", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
+
+app.include_router(auth_routes.router)
+app.include_router(trakt_routes.router)
+
+# Every route below is registered through this, which requires an access level
+# and refuses to register one without it.
+guard = authz.Guard(app)
+# Styles, scripts, images, and the easter egg's audio. Nothing here is derived
+# from anyone's data.
+authz.declare_mount(app, "/static", AuthLevel.PUBLIC)
+authz.install(app)
 
 
 def _valid_month(value, fallback: int) -> int:
@@ -187,7 +231,9 @@ def _nav(year: int, month: int) -> dict:
     return {"prev_month": prev_m, "prev_year": prev_y, "next_month": next_m, "next_year": next_y}
 
 
-@app.get("/healthz")
+# Deliberately reachable by anyone: a container orchestrator's liveness probe
+# carries no session, and the response says nothing about the instance.
+@guard.get("/healthz", AuthLevel.PUBLIC)
 async def healthz():
     return {"ok": True}
 
@@ -215,9 +261,12 @@ def _picker_context(request: Request, settings, year: int, endpoint):
     }
 
 
-@app.get("/")
+@guard.get("/", AuthLevel.CALENDAR_APPROVED)
 async def index(request: Request):
     settings = load_settings()
+    # Already resolved and cached by the dependency that let this request in.
+    user = await auth.current_user(request)
+    is_admin = bool(user and user.is_admin)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
     endpoint_key = request.query_params.get("endpoint") or settings.endpoint or DEFAULT_ENDPOINT
@@ -258,7 +307,13 @@ async def index(request: Request):
         "total": len(items),
         "error": error,
         "generated": datetime.now().strftime("%H:%M"),
-        "integrations": INTEGRATION_HEALTH,
+        # Sonarr/Radarr/Seerr writes land in the operator's own shared libraries
+        # and Seerr's requests all carry one app-wide API key, so they are an
+        # administrator's affordance. The buttons and health state are left out
+        # of the page entirely for everyone else rather than rendered into a
+        # guaranteed 403.
+        "is_admin": is_admin,
+        "integrations": INTEGRATION_HEALTH if is_admin else {},
         "version": VERSION,
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,
@@ -266,14 +321,17 @@ async def index(request: Request):
     return templates.TemplateResponse(request, "index.html", context)
 
 
-@app.get("/distrakt")
+@guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt(request: Request):
-    """Hidden Discord-tracker page (easter egg only — see BUILD_PLAN.txt).
+    """Hidden Discord-tracker page, reached through an easter egg rather than any
+    link in the UI.
 
     Renders the shell for the requested {year, month}; the page's JS fetches the
     computed month via /api/distrakt/month (which lazily rolls the month over).
     Month-nav prev/next mirror the main calendar's nav (see index.html)."""
     today = date.today()
+    settings = load_settings()
+    user = await auth.current_user(request)
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
     context = {
@@ -281,6 +339,14 @@ async def distrakt(request: Request):
         "year": year,
         "month": month,
         "nav": _nav(year, month),
+        # The network -> emoji map is app-wide configuration shared by every
+        # user's Discord posts, so EDITING it is an administrator's job. Reading
+        # it is not: the roster rows on this page fall back to these emoji when a
+        # network has no logo, so they are rendered in rather than fetched from
+        # the admin-only settings endpoint.
+        "is_admin": bool(user and user.is_admin),
+        "network_emojis": settings.network_emojis,
+        "default_network_emoji": settings.default_network_emoji,
         "version": VERSION,
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,
@@ -288,7 +354,7 @@ async def distrakt(request: Request):
     return templates.TemplateResponse(request, "distrakt.html", context)
 
 
-@app.get("/pick")
+@guard.get("/pick", AuthLevel.CALENDAR_APPROVED)
 async def pick(request: Request):
     """Month/year selector landing page (carried over from the original front page)."""
     settings = load_settings()
@@ -304,7 +370,7 @@ def _season_param(value) -> int | None:
         return None
 
 
-@app.get("/api/tile")
+@guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)
 async def api_tile(request: Request):
     """Compact season info for a tile (requirement F)."""
     settings = load_settings()
@@ -318,7 +384,7 @@ async def api_tile(request: Request):
     return JSONResponse({"ok": True, **info})
 
 
-@app.get("/api/details")
+@guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)
 async def api_details(request: Request):
     """Full detail payload for the modal (requirement G)."""
     settings = load_settings()
@@ -332,7 +398,7 @@ async def api_details(request: Request):
     return JSONResponse({"ok": True, **details})
 
 
-@app.get("/api/state")
+@guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)
 async def get_state(request: Request):
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
@@ -341,7 +407,7 @@ async def get_state(request: Request):
     return JSONResponse(state_store.load_state(endpoint.key, year, month))
 
 
-@app.post("/api/state")
+@guard.post("/api/state", AuthLevel.CALENDAR_APPROVED)
 async def post_state(request: Request):
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
@@ -360,12 +426,20 @@ async def post_state(request: Request):
     return JSONResponse({"ok": True})
 
 
-_LOGO_CACHE_HEADERS = {"Cache-Control": "public, max-age=86400"}
+# `private` rather than `public`: this response now requires a session, so a
+# shared cache in front of the app has no business holding a copy.
+_LOGO_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 
-@app.get("/api/network-logo")
+@guard.get("/api/network-logo", AuthLevel.CALENDAR_APPROVED)
 async def api_network_logo(request: Request):
     """A processed network-logo PNG tile for a network name (calendar + distrakt).
+
+    Calendar-level, which is where these are overwhelmingly requested from. The
+    distrakt page shows them too, so a user approved for distrakt but NOT for the
+    calendar sees the emoji fallback there instead of logos — the same thing that
+    happens for any network without a logo, and not worth a second access level.
+
     Generates it from TMDB on first request when `tmdb` is supplied and a TMDB key
     is set; serves the disk cache thereafter. 404 -> the caller falls back to the
     emoji/text tag."""
@@ -383,7 +457,7 @@ async def api_network_logo(request: Request):
     return FileResponse(path, media_type="image/png", filename=filename, headers=_LOGO_CACHE_HEADERS)
 
 
-@app.post("/api/network-logo/regenerate")
+@guard.post("/api/network-logo/regenerate", AuthLevel.ADMIN)
 async def api_network_logo_regenerate(request: Request):
     """Drop a single network's cached logo and re-resolve it from TMDB."""
     try:
@@ -399,33 +473,65 @@ async def api_network_logo_regenerate(request: Request):
     return JSONResponse({"ok": True, "network": name, "generated": bool(path and path.exists())})
 
 
-@app.get("/api/settings")
+@guard.get("/api/settings", AuthLevel.ADMIN)
 async def get_settings():
-    return JSONResponse(load_settings().to_dict())
+    """Configuration for the Settings screen, WITHOUT any credential in it.
+
+    Credentials are write-only over this API: the response carries a flag per
+    secret saying whether one is stored, never the value. This route used to hand
+    the Trakt access token, the Trakt client secret, the TMDB key, and every
+    Sonarr/Radarr/Seerr API key to whoever asked for it.
+    """
+    settings = load_settings()
+    return JSONResponse({
+        **settings.redacted(),
+        # Raised at first-run setup when the Trakt token already in settings.json
+        # could not be resolved to an account id, so the Settings screen can
+        # prompt the administrator to reconnect. Cleared when they do.
+        "trakt_reconnect_notice": bool(
+            await db.get_meta(auth_routes.TRAKT_RECONNECT_NOTICE, "")
+        ),
+        # Whether the per-user "Log in with Trakt" button can be offered at all.
+        "trakt_login_configured": settings.trakt_login_configured,
+        "trakt_redirect_uri": (
+            trakt_auth.redirect_uri(settings.public_base_url)
+            if settings.public_base_url else ""
+        ),
+    })
 
 
-@app.post("/api/settings")
+@guard.post("/api/settings", AuthLevel.ADMIN)
 async def post_settings(request: Request):
-    ctype = request.headers.get("content-type", "")
-    if "application/json" in ctype:
+    """Save a partial settings update.
+
+    A secret that is absent or blank keeps its stored value, and an explicit null
+    clears it — see config.apply_update. That is what lets the Settings screen
+    render its credential inputs empty (it cannot read them back) without the
+    first save wiping every credential the instance has.
+    """
+    try:
         data = await request.json()
-    else:
-        form = await request.form()
-        data = dict(form)
-    # Merge onto current settings so partial saves keep untouched fields.
-    current = load_settings().to_dict()
-    current.update(data)
-    settings = Settings.from_dict(current)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    settings = apply_update(load_settings(), data)
+    # Rejected on save rather than on use: a base URL with a path or a trailing
+    # slash builds a redirect URI that no longer matches the one registered on
+    # the Trakt application, and Trakt compares the two exactly — so the failure
+    # would otherwise surface much later as an unreadable error mid-sign-in.
+    if err := public_base_url_error(settings.public_base_url):
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
     save_settings(settings)
     # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config right away,
     # and invalidate the library cache so the next fetch re-pulls with the new credentials
     # (rather than serving the stale/empty cache until the TTL expires or a restart).
     await refresh_integration_health()
     LIBRARY_CACHE["_ts"] = 0.0
-    return JSONResponse({"ok": True, "settings": settings.to_dict()})
+    return JSONResponse({"ok": True, "settings": settings.redacted()})
 
 
-@app.post("/api/auth/device/start")
+@guard.post("/api/auth/device/start", AuthLevel.ADMIN)
 async def auth_device_start(request: Request):
     """Begin Trakt's OAuth device-code flow. Accepts an in-progress (unsaved)
     client_id from the Settings form, falling back to the saved one — same
@@ -445,7 +551,7 @@ async def auth_device_start(request: Request):
     return JSONResponse({"ok": True, **code})
 
 
-@app.post("/api/auth/device/poll")
+@guard.post("/api/auth/device/poll", AuthLevel.ADMIN)
 async def auth_device_poll(request: Request):
     """Check whether the user has approved the device code yet. On success,
     persists client_id/client_secret + the new token pair to settings.json so
@@ -478,15 +584,16 @@ async def auth_device_poll(request: Request):
     settings.trakt_client_secret = client_secret
     settings = await _apply_new_trakt_token(settings, token)
     await refresh_integration_health()
+    # The token itself is not echoed back. It is already saved, so sending it to
+    # the browser would put a Trakt bearer token in page memory for no purpose.
     return JSONResponse({
         "ok": True,
         "status": "authorized",
-        "access_token": settings.trakt_access_token,
         "expires_at": settings.trakt_token_expires_at,
     })
 
 
-@app.post("/api/auth/refresh")
+@guard.post("/api/auth/refresh", AuthLevel.ADMIN)
 async def auth_refresh():
     """Manual "refresh now" button — uses whatever is already saved (the
     device-auth flow is what actually seeds client_secret/refresh_token)."""
@@ -503,20 +610,20 @@ async def auth_refresh():
     return JSONResponse({"ok": True, "expires_at": settings.trakt_token_expires_at})
 
 
-@app.get("/api/integrations/status")
+@guard.get("/api/integrations/status", AuthLevel.ADMIN)
 async def integrations_status():
     """Cached Sonarr/Radarr health (refreshed by the heartbeat + on save)."""
     return JSONResponse(INTEGRATION_HEALTH)
 
 
-@app.get("/api/integrations/library")
+@guard.get("/api/integrations/library", AuthLevel.ADMIN)
 async def integrations_library():
     """Ids already in each library, so the UI can mark added items (TTL-cached)."""
     await refresh_library()
     return JSONResponse({k: LIBRARY_CACHE[k] for k in ("sonarr", "radarr", "seer")})
 
 
-@app.post("/api/integrations/options")
+@guard.post("/api/integrations/options", AuthLevel.ADMIN)
 async def integrations_options(request: Request):
     """Quality profiles + root folders for the Settings dropdowns. Accepts the URL +
     API key from the (possibly unsaved) form, falling back to saved settings."""
@@ -540,7 +647,7 @@ async def integrations_options(request: Request):
     return JSONResponse({"ok": True, **opts})
 
 
-@app.post("/api/integrations/add")
+@guard.post("/api/integrations/add", AuthLevel.ADMIN)
 async def integrations_add(request: Request):
     """Add a title to Sonarr (show/TVDB), Radarr (movie/TMDB), or Seerr (request/TMDB).
 
@@ -609,7 +716,7 @@ def _merge_live_show(rec: dict, watched_lookup: dict, detail: dict) -> dict:
     return show
 
 
-@app.get("/api/distrakt/list")
+@guard.get("/api/distrakt/list", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_list(request: Request):
     """Raw (unbucketed) shows stored for a month — the plain management list."""
     today = date.today()
@@ -756,7 +863,7 @@ async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: 
     }, 200
 
 
-@app.get("/api/distrakt/month")
+@guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_month(request: Request):
     """Computed buckets + the two copy-paste POST 1/POST 2 markdown blocks.
 
@@ -772,7 +879,7 @@ async def api_distrakt_month(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
-@app.post("/api/distrakt/refresh")
+@guard.post("/api/distrakt/refresh", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_refresh(request: Request):
     """Force a fresh totals refresh (§3): bypass the 24h season cache + re-stamp
     totals_refreshed_at for the OPEN month, then return the same shape as GET
@@ -788,7 +895,7 @@ async def api_distrakt_refresh(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
-@app.get("/api/distrakt/months")
+@guard.get("/api/distrakt/months", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_months():
     """Available YYYY-MM docs for the history nav, plus the real current month
     (always navigable even before it has been initialized)."""
@@ -798,7 +905,7 @@ async def api_distrakt_months():
     return JSONResponse({"ok": True, "months": months, "current": current})
 
 
-@app.post("/api/distrakt/import")
+@guard.post("/api/distrakt/import", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_import(request: Request):
     """Pull this month's calendar premieres into the OPEN month (shows/new -> New,
     shows/premieres minus new -> Returning; skips existing + not-watching). The
@@ -827,7 +934,7 @@ async def api_distrakt_import(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
-@app.post("/api/distrakt/backfill-networks")
+@guard.post("/api/distrakt/backfill-networks", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_backfill_networks(request: Request):
     """Register every network used by this month's roster into the emoji map
     (with the default emoji) so they all show up in the editor. Returns the map."""
@@ -848,7 +955,7 @@ async def api_distrakt_backfill_networks(request: Request):
     })
 
 
-@app.post("/api/distrakt/remove")
+@guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_remove(request: Request):
     """Delete a show+season from an OPEN month (cleanup mistakes / abandons).
     Frozen past months are read-only."""
@@ -876,7 +983,7 @@ async def api_distrakt_remove(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
-@app.get("/api/distrakt/search")
+@guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_search(request: Request):
     settings = load_settings()
     if not settings.configured:
@@ -889,7 +996,7 @@ async def api_distrakt_search(request: Request):
     return JSONResponse({"ok": True, "results": results})
 
 
-@app.get("/api/distrakt/seasons")
+@guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_seasons(request: Request):
     """Aired seasons for a show (add-flow season picker) — not in BUILD_PLAN's
     route list, but required so the browser can call fetch_show_seasons()."""
@@ -921,7 +1028,7 @@ def _register_networks(networks) -> None:
         save_settings(settings)
 
 
-@app.post("/api/distrakt/add")
+@guard.post("/api/distrakt/add", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_add(request: Request):
     """Persist a show+season into the {year,month} doc (identity), baseline its
     watch history, and register its network in the emoji map."""
@@ -966,7 +1073,7 @@ async def api_distrakt_add(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
-@app.post("/api/distrakt/abandon")
+@guard.post("/api/distrakt/abandon", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_abandon(request: Request):
     """Toggle a show+season's abandoned flag. On abandon, freezes
     `abandoned_form` = the current live inline form minus premiere/finale dates

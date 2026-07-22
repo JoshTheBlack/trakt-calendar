@@ -46,6 +46,11 @@ async function setLayout(key, value) {
         document.body.classList.add('pack-' + value);
     }
     updateCols();
+    // The layout already changed on screen; this only persists it. It writes the
+    // app-wide settings file, which is an administrator's to change, so for
+    // anyone else the choice applies to this page load and isn't saved. Per-user
+    // view preferences are what will make it stick for everyone.
+    if (!window.IS_ADMIN) return;
     try {
         await fetch('/api/settings', {
             method: 'POST',
@@ -192,7 +197,10 @@ function toast(message, ok) {
     setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 300); }, 4200);
 }
 
+// The add/request buttons and the health state behind them only exist for an
+// administrator, so nobody else polls for them.
 document.addEventListener('DOMContentLoaded', () => {
+    if (!window.IS_ADMIN) return;
     refreshArrStatus();
     refreshLibrary();
     setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
@@ -207,7 +215,9 @@ async function toggleHideNotWatching() {
     label.textContent = hide ? '🚫 Hiding' : '👁️ Showing all';
     btn.classList.toggle('active', hide);
     updateEmptyDays();
-    // Persist the preference so it sticks across reloads.
+    // Persists to the app-wide settings file, so same as setLayout: an
+    // administrator's to save, everyone else's for this page load only.
+    if (!window.IS_ADMIN) return;
     try {
         await fetch('/api/settings', {
             method: 'POST',
@@ -376,14 +386,85 @@ function updateEmptyDays() {
 
 
 // ---- Settings modal (requirement C) ----
+// Credentials are write-only: the server sends back a flag per secret saying
+// whether one is stored, never the value. So each credential input renders
+// EMPTY, with a placeholder saying whether something is saved, and an empty
+// input on save means "leave it as it is". Clearing one is a deliberate act —
+// the ✕ next to the field — because otherwise every save would wipe them all.
+function applySecretState(secretsSet) {
+    document.querySelectorAll('input[data-secret]').forEach(input => {
+        const stored = !!(secretsSet || {})[input.name];
+        input.value = '';
+        input.dataset.stored = stored ? '1' : '';
+        input.dataset.clear = '';
+        input.placeholder = stored ? 'Saved — leave blank to keep it' : 'Not set';
+        const button = input.parentElement && input.parentElement.querySelector('[data-role="clear-secret"]');
+        if (button) button.hidden = !stored;
+        setSecretHint(input);
+    });
+}
+
+function setSecretHint(input) {
+    const row = input.parentElement;
+    const hint = row && row.querySelector('[data-role="secret-hint"]');
+    if (!hint) return;
+    hint.textContent = input.dataset.clear ? 'Will be cleared when you save.' : '';
+}
+
+function clearSecret(button) {
+    const input = button.parentElement.querySelector('input[data-secret]');
+    if (!input) return;
+    input.value = '';
+    input.dataset.clear = '1';
+    input.placeholder = 'Will be cleared';
+    setSecretHint(input);
+}
+
+// Each credential input gets a ✕ beside it, built here rather than repeated six
+// times in the template.
+function buildSecretControls() {
+    document.querySelectorAll('input[data-secret]').forEach(input => {
+        const row = input.parentElement;
+        if (!row || row.querySelector('[data-role="clear-secret"]')) return;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn-ghost small';
+        button.dataset.role = 'clear-secret';
+        button.textContent = '✕ Clear';
+        button.title = 'Remove the saved value when you save';
+        button.hidden = true;
+        button.addEventListener('click', () => clearSecret(button));
+        const hint = document.createElement('span');
+        hint.className = 'hint';
+        hint.dataset.role = 'secret-hint';
+        input.insertAdjacentElement('afterend', hint);
+        input.insertAdjacentElement('afterend', button);
+    });
+}
+
+// A secret goes into the payload only when the admin typed a new one or asked
+// for it to be cleared. Anything else is omitted, which is what tells the server
+// to leave the stored value alone.
+function collectSecrets() {
+    const payload = {};
+    document.querySelectorAll('input[data-secret]').forEach(input => {
+        const typed = input.value.trim();
+        if (typed) payload[input.name] = typed;
+        else if (input.dataset.clear) payload[input.name] = null;
+    });
+    return payload;
+}
+
 async function openSettings() {
+    buildSecretControls();
     try {
         const res = await fetch('/api/settings', { cache: 'no-store' });
         const s = await res.json();
+        document.getElementById('s_base_url').value = s.public_base_url || '';
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
-        document.getElementById('s_client_secret').value = s.trakt_client_secret || '';
-        document.getElementById('s_access_token').value = s.trakt_access_token || '';
+        applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
+        updateTraktLoginHints(s);
         document.getElementById('s_timezone').value = s.timezone || '';
         document.getElementById('s_endpoint').value = s.endpoint || 'shows/new';
         document.getElementById('s_genres').value = s.genres || '';
@@ -394,16 +475,12 @@ async function openSettings() {
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
         // Sonarr / Radarr
         document.getElementById('s_sonarr_url').value = s.sonarr_url || '';
-        document.getElementById('s_sonarr_key').value = s.sonarr_api_key || '';
         ensureOption(document.getElementById('s_sonarr_qp'), s.sonarr_quality_profile_id, 'Profile #' + s.sonarr_quality_profile_id);
         ensureOption(document.getElementById('s_sonarr_rf'), s.sonarr_root_folder, s.sonarr_root_folder);
         document.getElementById('s_radarr_url').value = s.radarr_url || '';
-        document.getElementById('s_radarr_key').value = s.radarr_api_key || '';
         ensureOption(document.getElementById('s_radarr_qp'), s.radarr_quality_profile_id, 'Profile #' + s.radarr_quality_profile_id);
         ensureOption(document.getElementById('s_radarr_rf'), s.radarr_root_folder, s.radarr_root_folder);
         document.getElementById('s_seer_url').value = s.seer_url || '';
-        document.getElementById('s_seer_key').value = s.seer_api_key || '';
-        document.getElementById('s_tmdb_key').value = s.tmdb_api_key || '';
     } catch (e) { console.error(e); }
     document.getElementById('settingsModal').classList.add('open');
 }
@@ -421,8 +498,14 @@ function ensureOption(sel, value, label) {
 
 async function loadArrOptions(kind) {
     const url = document.getElementById('s_' + kind + '_url').value.trim();
-    const key = document.getElementById('s_' + kind + '_key').value.trim();
-    if (!url || !key) { toast('Enter the ' + kind + ' URL and API key first', false); return; }
+    const keyInput = document.getElementById('s_' + kind + '_key');
+    const key = keyInput.value.trim();
+    // A blank key with one already saved is the normal case now that the field
+    // can't be read back — the server falls back to the stored one.
+    if (!url || !(key || keyInput.dataset.stored)) {
+        toast('Enter the ' + kind + ' URL and API key first', false);
+        return;
+    }
     try {
         const res = await fetch('/api/integrations/options', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -449,9 +532,9 @@ function closeSettings() {
 async function saveSettings(event) {
     event.preventDefault();
     const payload = {
+        ...collectSecrets(),
+        public_base_url: document.getElementById('s_base_url').value.trim(),
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
-        trakt_client_secret: document.getElementById('s_client_secret').value.trim(),
-        trakt_access_token: document.getElementById('s_access_token').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
         genres: document.getElementById('s_genres').value.trim(),
@@ -461,16 +544,12 @@ async function saveSettings(event) {
         cache_ttl_minutes: parseInt(document.getElementById('s_cache').value, 10) || 0,
         hide_not_watching: document.getElementById('s_hide').checked,
         sonarr_url: document.getElementById('s_sonarr_url').value.trim(),
-        sonarr_api_key: document.getElementById('s_sonarr_key').value.trim(),
         sonarr_quality_profile_id: parseInt(document.getElementById('s_sonarr_qp').value, 10) || 0,
         sonarr_root_folder: document.getElementById('s_sonarr_rf').value,
         radarr_url: document.getElementById('s_radarr_url').value.trim(),
-        radarr_api_key: document.getElementById('s_radarr_key').value.trim(),
         radarr_quality_profile_id: parseInt(document.getElementById('s_radarr_qp').value, 10) || 0,
         radarr_root_folder: document.getElementById('s_radarr_rf').value,
-        seer_url: document.getElementById('s_seer_url').value.trim(),
-        seer_api_key: document.getElementById('s_seer_key').value.trim(),
-        tmdb_api_key: document.getElementById('s_tmdb_key').value.trim()
+        seer_url: document.getElementById('s_seer_url').value.trim()
     };
     try {
         const res = await fetch('/api/settings', {
@@ -478,7 +557,13 @@ async function saveSettings(event) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
         });
-        if (!res.ok) throw new Error('save failed');
+        const d = await res.json().catch(() => ({}));
+        if (!res.ok || !d.ok) {
+            // The server validates the public base URL, so its message says what
+            // is wrong with the value rather than just that the save failed.
+            toast(d.error || 'Could not save settings', false);
+            return false;
+        }
         window.location.reload();
     } catch (e) {
         console.error(e);
@@ -501,6 +586,20 @@ function updateTokenStatus(expiresAt) {
         : `Token valid until ${when.toLocaleDateString()} (refreshes automatically once it expires).`;
 }
 
+// Shows the exact redirect URI to register on the Trakt application (it has to
+// match byte for byte, so showing it beats describing it), and raises the
+// reconnect prompt left behind when a saved token couldn't be matched to an
+// account during first-run setup.
+function updateTraktLoginHints(s) {
+    const hint = document.getElementById('s_redirect_hint');
+    if (hint && s.trakt_redirect_uri) {
+        hint.textContent = 'Register this exact redirect URI on your Trakt application: '
+            + s.trakt_redirect_uri;
+    }
+    const box = document.getElementById('s_reconnect_box');
+    if (box) box.hidden = !s.trakt_reconnect_notice;
+}
+
 function stopDeviceAuthPolling() {
     if (deviceAuthTimer) { clearInterval(deviceAuthTimer); deviceAuthTimer = null; }
 }
@@ -508,10 +607,15 @@ function stopDeviceAuthPolling() {
 async function startDeviceAuth() {
     stopDeviceAuthPolling();
     const clientId = document.getElementById('s_client_id').value.trim();
-    const clientSecret = document.getElementById('s_client_secret').value.trim();
+    const secretInput = document.getElementById('s_client_secret');
+    const clientSecret = secretInput.value.trim();
     const box = document.getElementById('authStatus');
     if (!clientId) { toast('Enter your Trakt Client ID first', false); return; }
-    if (!clientSecret) { toast('Enter your Trakt Client Secret first', false); return; }
+    // Blank is fine when one is already saved; the poll endpoint falls back to it.
+    if (!clientSecret && !secretInput.dataset.stored) {
+        toast('Enter your Trakt Client Secret first', false);
+        return;
+    }
     box.textContent = 'Requesting a device code…';
     try {
         const res = await fetch('/api/auth/device/start', {
@@ -551,9 +655,14 @@ async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
         if (d.status === 'pending' || d.status === 'slow_down') return;  // keep waiting
         stopDeviceAuthPolling();
         if (d.status === 'authorized') {
-            document.getElementById('s_access_token').value = d.access_token || '';
+            // The token isn't sent back — it is already saved server-side, and
+            // putting a bearer token in page memory would serve no purpose.
+            const tokenInput = document.getElementById('s_access_token');
+            tokenInput.value = '';
+            tokenInput.dataset.stored = '1';
+            tokenInput.placeholder = 'Saved — leave blank to keep it';
             updateTokenStatus(d.expires_at);
-            box.textContent = '✅ Authorized! Access token filled in above.';
+            box.textContent = '✅ Authorized! The access token has been saved.';
             toast('Trakt authorized', true);
         } else {
             box.textContent = d.error || 'Authorization failed.';
@@ -567,7 +676,11 @@ async function pollDeviceAuth(deviceCode, clientId, clientSecret, deadline) {
 async function refreshTraktToken() {
     const box = document.getElementById('authStatus');
     try {
-        const res = await fetch('/api/auth/refresh', { method: 'POST' });
+        // Body-less, but still declared JSON: every mutating request in this app
+        // has to be, or it is refused before it reaches the handler.
+        const res = await fetch('/api/auth/refresh', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        });
         const d = await res.json();
         if (!d.ok) { toast(d.error || 'Refresh failed', false); if (box) box.textContent = d.error || ''; return; }
         updateTokenStatus(d.expires_at);
@@ -659,6 +772,7 @@ async function openDetails(card, event) {
 function buildDetailsActions(card, media, title) {
     const actions = document.getElementById('detailsActions');
     actions.innerHTML = '';
+    if (!window.IS_ADMIN) return;
     const labels = {
         sonarr: 'Add to Sonarr', radarr: 'Add to Radarr', seer: 'Request on Seerr'
     };
