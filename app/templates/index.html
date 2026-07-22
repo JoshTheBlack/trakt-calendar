@@ -397,6 +397,11 @@
     // admin-only controls call is gated independently, so a tampered value buys
     // nothing beyond buttons that 403.
     window.IS_ADMIN = {{ "true" if is_admin else "false" }};
+    // Whether the hidden tracker has anything to open for this account. Purely
+    // what the easter egg does on the client — the page and every one of its
+    // endpoints check the same two conditions server-side, so setting this by
+    // hand gets you a refusal rather than a tracker.
+    window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
 </script>
 <script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import dataclasses
 import logging
 import os
 import time
@@ -365,6 +366,12 @@ async def index(request: Request):
         # of the page entirely for everyone else rather than rendered into a
         # guaranteed 403.
         "is_admin": is_admin,
+        # The same two conditions the tracker's own access level enforces, asked
+        # here so the easter egg knows whether it has anywhere to send this
+        # person. Resolved from the session rather than probed over HTTP: an
+        # endpoint answering "may I?" is itself a disclosure that there is
+        # something to be allowed into.
+        "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
         "integrations": INTEGRATION_HEALTH if is_admin else {},
         "version": VERSION,
         "build": BUILD_LABEL,
@@ -391,6 +398,9 @@ async def distrakt(request: Request):
         "year": year,
         "month": month,
         "nav": _nav(year, month),
+        # For the announcement post's "which calendar view does the embedded link
+        # open on" selector; the same list the calendar's endpoint picker uses.
+        "endpoints": endpoint_choices(),
         # The network -> emoji map is app-wide configuration shared by every
         # user's Discord posts, so EDITING it is an administrator's job. Reading
         # it is not: the roster rows on this page fall back to these emoji when a
@@ -877,28 +887,71 @@ def _merge_live_show(rec: dict, watched_lookup: dict, detail: dict) -> dict:
     return show
 
 
+async def _distrakt_user_id(request: Request) -> int:
+    """The signed-in user whose tracker this request is for. Every distrakt route
+    is gated DISTRAKT_APPROVED, so a user is always present by the time a handler
+    runs; current_user is cached on the request by the dependency that gated it."""
+    user = await auth.current_user(request)
+    return user.user_id
+
+
+async def _distrakt_settings(user_id: int):
+    """The app-wide settings with the Trakt credential swapped for `user_id`'s own.
+
+    The tracker reads one person's private watch history — their progress, their
+    plays, their movies — so every Trakt call it makes has to authenticate as
+    THEM. The token in settings.json belongs to the operator and would hand every
+    user the operator's viewing instead of their own. Everything else on the
+    object (the network emoji map, the TMDB key, the genre/country strings) is
+    genuinely app-wide and is carried through untouched.
+
+    The refresh token is cleared as well: nothing downstream refreshes, and
+    leaving the operator's beside somebody else's access token would be a pairing
+    that means nothing. The access level guarantees a linked Trakt identity, but
+    a row can still hold an empty token, in which case `configured` goes false
+    and the handlers take their existing "not configured" path.
+    """
+    token = await trakt_routes.access_token_for_user(user_id)
+    return dataclasses.replace(
+        load_settings(), trakt_access_token=token or "", trakt_refresh_token="",
+    )
+
+
+async def _distrakt_post_link(user_id: int, settings) -> str | None:
+    """The public calendar link this user's announcement post embeds, or None when
+    they have nothing publishable — no configured public base URL, or every link
+    form switched off. Omitted rather than rendered empty in that case."""
+    row = await share_links.get_or_create(user_id)
+    user = await auth.get_user(user_id)
+    return share_links.post_link_with_view(
+        row, user["username"] if user else None, settings.public_base_url,
+    )
+
+
 @guard.get("/api/distrakt/list", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_list(request: Request):
     """Raw (unbucketed) shows stored for a month — the plain management list."""
+    user_id = await _distrakt_user_id(request)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
-    doc = distrakt_store.load_month(_month_key(year, month))
+    doc = await distrakt_store.load_month(user_id, _month_key(year, month))
     return JSONResponse({"ok": True, "month": _month_key(year, month), "shows": (doc or {}).get("shows", [])})
 
 
-def _apply_not_watching(month_key: str, year: int, month: int, shows: list[dict], committed: bool) -> list[dict]:
-    """§5 main-calendar not-watching, date-gated on the month's 1st (committed):
+async def _apply_not_watching(user_id: int, month_key: str, year: int, month: int,
+                              shows: list[dict], committed: bool) -> list[dict]:
+    """This user's own main-calendar not-watching marks, date-gated on the month's
+    1st (committed):
 
       - PREVIEW (before the 1st): not-watching HIDES the show from the tracker —
-        excluded from the list + both posts, but KEPT in the doc so un-toggling
-        brings it straight back ("not-watching removes from distrakt prior to the
-        1st").
+        excluded from the list + both posts, but KEPT in the roster so un-toggling
+        brings it straight back.
       - COMMITTED (on/after the 1st): not-watching promotes the roster show to
         Abandoned (persisted, form frozen). One-directional — never un-abandons;
         the dedicated /distrakt toggle + Delete stay the source of truth. The
         `abandoned` guard means a steady-state read does no extra writes."""
-    nw_ids = distrakt_store.not_watching_ids(year, month)
+    nw_ids = await calendar_state.not_watching_ids(user_id, year, month)
     if not nw_ids:
         return shows
 
@@ -912,51 +965,58 @@ def _apply_not_watching(month_key: str, year: int, month: int, shows: list[dict]
         if show.get("abandoned") or not matched(show):
             continue
         form = discord_fmt.freeze_form(show)
-        distrakt_store.set_abandoned(month_key, show["trakt_id"], show["season"], True, abandoned_form=form)
+        await distrakt_store.set_abandoned(user_id, month_key, show["trakt_id"], show["season"],
+                                           True, abandoned_form=form)
         show["abandoned"] = True
         show["abandoned_form"] = form
         show["bucket"] = "abandoned"
     return shows
 
 
-def _empty_month_payload(month_key: str, settings, readonly: bool = False) -> dict:
+def _empty_month_payload(month_key: str, settings, readonly: bool = False,
+                         link_url: str | None = None) -> dict:
     """Headers-only render for a month with no roster + no Trakt call: an
     unconfigured/uninitialized month (readonly=False) or a never-tracked past
     month reached by navigating backward (readonly=True, §6 no-backfill)."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
-        "post1": discord_fmt.render_post1([], settings.network_emojis, settings.default_network_emoji),
+        "post1": discord_fmt.render_post1([], settings.network_emojis, settings.default_network_emoji,
+                                          link_url=link_url),
         "post2": discord_fmt.render_post2([], settings.network_emojis, settings.default_network_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
-async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: bool = False) -> tuple[dict, int]:
-    """Shared body for GET /api/distrakt/month + POST /api/distrakt/refresh.
+async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
+                                  force_fresh: bool = False) -> tuple[dict, int]:
+    """Shared body for GET /api/distrakt/month + POST /api/distrakt/refresh, for
+    ONE user's tracker.
 
     Lazily rolls the month over (ensure_month), then either renders a CLOSED
     month from its frozen snapshot (no Trakt) or computes the OPEN month live
-    (auto-refreshing totals when stale >24h, §3; or always when force_fresh).
-    A never-tracked PAST/gap month (backward nav) is rendered empty + read-only
-    and never created (§6 no-backfill). Returns (json_payload, http_status)."""
+    (or always when force_fresh). A never-tracked PAST/gap month (backward nav)
+    is rendered empty + read-only and never created. Returns (json_payload,
+    http_status)."""
     today = date.today()
     month_key = _month_key(year, month)
-    existing = distrakt_store.load_month(month_key)
+    link_url = await _distrakt_post_link(user_id, settings)
+    existing = await distrakt_store.load_month(user_id, month_key)
     if existing is None:
-        blocked = distrakt_store.is_backfill_blocked(month_key)
+        blocked = await distrakt_store.is_backfill_blocked(user_id, month_key)
         if blocked or not settings.configured:
             # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
             # persisted, no Trakt call. `readonly` hides the add/edit affordances.
-            return _empty_month_payload(month_key, settings, readonly=blocked), 200
+            return _empty_month_payload(month_key, settings, readonly=blocked, link_url=link_url), 200
 
     with span("payload.ensure_month", month=month_key, force=force_fresh):
-        doc = await distrakt_store.ensure_month(year, month, settings, today=today)
+        doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     month_key = doc["month"]
 
     if doc.get("closed"):
         # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
         shows = distrakt_store.frozen_shows(doc)
-        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji)
+        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji,
+                                         link_url=link_url)
         post2 = discord_fmt.render_post2(shows, settings.network_emojis, settings.default_network_emoji,
                                          movies=doc.get("movies"))
         return {
@@ -969,8 +1029,8 @@ async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: 
     # roster tracks the calendar (and un-not-watching re-adds a previously excluded
     # premiere). A COMMITTED month is stable — premieres only re-import on demand.
     if not committed and settings.configured:
-        await distrakt_store.import_premieres(month_key, settings)
-        doc = distrakt_store.load_month(month_key) or doc
+        await distrakt_store.import_premieres(user_id, month_key, settings)
+        doc = await distrakt_store.load_month(user_id, month_key) or doc
 
     records = doc.get("shows", [])
     if records and not settings.configured:
@@ -979,7 +1039,7 @@ async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: 
     # so the network-logo <img> gets a tmdb to generate from on this same load.
     if records and settings.configured:
         with span("payload.backfill_tmdb"):
-            doc = await distrakt_store.backfill_tmdb(month_key, settings) or doc
+            doc = await distrakt_store.backfill_tmdb(user_id, month_key, settings) or doc
         records = doc.get("shows", [])
     # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
     # stale load re-baseline the whole watch history):
@@ -996,7 +1056,7 @@ async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: 
     if settings.configured:
         with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
             state = await watch_history.sync_and_baseline(
-                settings, [r["trakt_id"] for r in records], force=force_fresh, today=today,
+                settings, user_id, [r["trakt_id"] for r in records], force=force_fresh, today=today,
             )
             watched_lookup = watch_history.watched_map(state)
             mstart, mend = watch_history.month_bounds(month_key)
@@ -1004,13 +1064,14 @@ async def _distrakt_month_payload(year: int, month: int, settings, force_fresh: 
             sp.set(watched_keys=len(watched_lookup), movies=len(movies))
 
     with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
-        shows = await distrakt_store.compute_live_shows(records, settings, fresh=season_fresh, watched_lookup=watched_lookup) if records else []
-    shows = _apply_not_watching(month_key, year, month, shows, committed)
+        shows = await distrakt_store.compute_live_shows(user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup) if records else []
+    shows = await _apply_not_watching(user_id, month_key, year, month, shows, committed)
     if records and season_fresh:
-        distrakt_store.stamp_refreshed(month_key)
+        await distrakt_store.stamp_refreshed(user_id, month_key)
 
     with span("payload.render"):
-        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji)
+        post1 = discord_fmt.render_post1(shows, settings.network_emojis, settings.default_network_emoji,
+                                         link_url=link_url)
         post2 = discord_fmt.render_post2(shows, settings.network_emojis, settings.default_network_emoji, movies=movies)
     return {
         "ok": True,
@@ -1031,20 +1092,22 @@ async def api_distrakt_month(request: Request):
     OPEN month: live x/y + cadence/dates recomputed (1x /sync/watched/shows + 1x
     season call per show), auto-refreshed if totals are stale >24h (§3). CLOSED /
     past month: rendered from the frozen snapshot with NO Trakt calls. Opening an
-    uninitialized month lazily rolls it over first (§6, see ensure_month)."""
+    uninitialized month lazily rolls it over first (see ensure_month)."""
+    user_id = await _distrakt_user_id(request)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
     with span("GET /api/distrakt/month", ym=f"{year}-{month:02d}"):
-        payload, status = await _distrakt_month_payload(year, month, load_settings())
+        payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id))
     return JSONResponse(payload, status_code=status)
 
 
 @guard.post("/api/distrakt/refresh", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_refresh(request: Request):
-    """Force a fresh totals refresh (§3): bypass the 24h season cache + re-stamp
+    """Force a fresh totals refresh: bypass the 24h season cache + re-stamp
     totals_refreshed_at for the OPEN month, then return the same shape as GET
     /api/distrakt/month. CLOSED months are frozen (nothing to refresh)."""
+    user_id = await _distrakt_user_id(request)
     try:
         data = await request.json()
     except ValueError:
@@ -1052,17 +1115,19 @@ async def api_distrakt_refresh(request: Request):
     today = date.today()
     year = _valid_year(data.get("year"), today.year)
     month = _valid_month(data.get("month"), today.month)
-    payload, status = await _distrakt_month_payload(year, month, load_settings(), force_fresh=True)
+    payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id),
+                                                    force_fresh=True)
     return JSONResponse(payload, status_code=status)
 
 
 @guard.get("/api/distrakt/months", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_months():
-    """Available YYYY-MM docs for the history nav, plus the real current month
-    (always navigable even before it has been initialized)."""
+async def api_distrakt_months(request: Request):
+    """This user's tracked YYYY-MM months for the history nav, plus the real
+    current month (always navigable even before it has been initialized)."""
+    user_id = await _distrakt_user_id(request)
     today = date.today()
     current = _month_key(today.year, today.month)
-    months = sorted(set(distrakt_store.list_months()) | {current})
+    months = sorted(set(await distrakt_store.list_months(user_id)) | {current})
     return JSONResponse({"ok": True, "months": months, "current": current})
 
 
@@ -1073,7 +1138,8 @@ async def api_distrakt_import(request: Request):
     manual "Import from calendar" action — e.g. to seed the current month when its
     doc already exists (so lazy-init's one-shot premiere seeding was skipped).
     Returns the same shape as GET /api/distrakt/month."""
-    settings = load_settings()
+    user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     try:
@@ -1084,14 +1150,14 @@ async def api_distrakt_import(request: Request):
     year = _valid_year(data.get("year"), today.year)
     month = _valid_month(data.get("month"), today.month)
     month_key = _month_key(year, month)
-    if distrakt_store.is_backfill_blocked(month_key):
+    if await distrakt_store.is_backfill_blocked(user_id, month_key):
         return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
-    doc = await distrakt_store.ensure_month(year, month, settings, today=today)
+    doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
-    doc = await distrakt_store.import_premieres(month_key, settings)
+    doc = await distrakt_store.import_premieres(user_id, month_key, settings)
     _register_networks([s.get("network") for s in (doc or {}).get("shows", [])])
-    payload, status = await _distrakt_month_payload(year, month, settings)
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     return JSONResponse(payload, status_code=status)
 
 
@@ -1099,6 +1165,7 @@ async def api_distrakt_import(request: Request):
 async def api_distrakt_backfill_networks(request: Request):
     """Register every network used by this month's roster into the emoji map
     (with the default emoji) so they all show up in the editor. Returns the map."""
+    user_id = await _distrakt_user_id(request)
     try:
         data = await request.json()
     except ValueError:
@@ -1106,7 +1173,7 @@ async def api_distrakt_backfill_networks(request: Request):
     today = date.today()
     year = _valid_year(data.get("year"), today.year)
     month = _valid_month(data.get("month"), today.month)
-    doc = distrakt_store.load_month(_month_key(year, month))
+    doc = await distrakt_store.load_month(user_id, _month_key(year, month))
     _register_networks([s.get("network") for s in (doc or {}).get("shows", [])])
     settings = load_settings()
     return JSONResponse({
@@ -1120,6 +1187,7 @@ async def api_distrakt_backfill_networks(request: Request):
 async def api_distrakt_remove(request: Request):
     """Delete a show+season from an OPEN month (cleanup mistakes / abandons).
     Frozen past months are read-only."""
+    user_id = await _distrakt_user_id(request)
     try:
         data = await request.json()
     except ValueError:
@@ -1133,20 +1201,20 @@ async def api_distrakt_remove(request: Request):
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
     month_key = _month_key(year, month)
-    doc = distrakt_store.load_month(month_key)
+    doc = await distrakt_store.load_month(user_id, month_key)
     if doc is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
-    if not distrakt_store.remove_show(month_key, trakt_id, season):
+    if not await distrakt_store.remove_show(user_id, month_key, trakt_id, season):
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
-    payload, status = await _distrakt_month_payload(year, month, load_settings())  # recomputed month (1d)
+    payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id))  # recomputed month (1d)
     return JSONResponse(payload, status_code=status)
 
 
 @guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_search(request: Request):
-    settings = load_settings()
+    settings = await _distrakt_settings(await _distrakt_user_id(request))
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
@@ -1161,7 +1229,7 @@ async def api_distrakt_search(request: Request):
 async def api_distrakt_seasons(request: Request):
     """Aired seasons for a show (add-flow season picker) — not in BUILD_PLAN's
     route list, but required so the browser can call fetch_show_seasons()."""
-    settings = load_settings()
+    settings = await _distrakt_settings(await _distrakt_user_id(request))
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     trakt_id = request.query_params.get("id")
@@ -1191,9 +1259,10 @@ def _register_networks(networks) -> None:
 
 @guard.post("/api/distrakt/add", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_add(request: Request):
-    """Persist a show+season into the {year,month} doc (identity), baseline its
-    watch history, and register its network in the emoji map."""
-    settings = load_settings()
+    """Persist a show+season into this user's {year,month} roster (identity),
+    baseline their watch history, and register its network in the emoji map."""
+    user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     try:
@@ -1216,32 +1285,33 @@ async def api_distrakt_add(request: Request):
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
     month_key = _month_key(year, month)
-    if distrakt_store.is_backfill_blocked(month_key):
-        # §6 no-backfill: refuse to create a never-tracked past/gap month even via
-        # a manual add (keeps the store growing forward-only, consistent with the
-        # read path's read-only rendering of such months).
+    if await distrakt_store.is_backfill_blocked(user_id, month_key):
+        # No backfill: refuse to create a never-tracked past/gap month even via a
+        # manual add (keeps a user's store growing forward-only, consistent with
+        # the read path's read-only rendering of such months).
         return JSONResponse(
             {"ok": False, "error": "Can't add shows to a past month that was never tracked."},
             status_code=400,
         )
-    distrakt_store.add_show(month_key, show)
+    await distrakt_store.add_show(user_id, month_key, show)
     _register_networks([show["network"]])
     try:  # baseline the show's watch history now so its counts are correct immediately
-        await watch_history.baseline_show(settings, show["trakt_id"])
+        await watch_history.baseline_show(settings, user_id, show["trakt_id"])
     except Exception:  # never fail the add on a baseline hiccup — it self-heals on next load
         logger.warning("baseline_show failed for %s", show["trakt_id"], exc_info=True)
-    payload, status = await _distrakt_month_payload(year, month, settings)  # return the recomputed month (1d)
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     return JSONResponse(payload, status_code=status)
 
 
 @guard.post("/api/distrakt/abandon", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_abandon(request: Request):
     """Toggle a show+season's abandoned flag. On abandon, freezes
-    `abandoned_form` = the current live inline form minus premiere/finale dates
-    (§4/§5), via discord_fmt.freeze_form — so the Discord line stays stable even
-    after the show would otherwise have moved buckets. Un-abandoning clears it
+    `abandoned_form` = the current live inline form minus premiere/finale dates,
+    via discord_fmt.freeze_form — so the Discord line stays stable even after the
+    show would otherwise have moved buckets. Un-abandoning clears it
     (distrakt_store.set_abandoned's job). If Trakt isn't configured (or the show
-    isn't found), abandoned_form falls back to None, same as pre-Chat-4."""
+    isn't found), abandoned_form falls back to None."""
+    user_id = await _distrakt_user_id(request)
     try:
         data = await request.json()
     except ValueError:
@@ -1259,12 +1329,12 @@ async def api_distrakt_abandon(request: Request):
 
     abandoned_form = None
     if abandoned:
-        doc = distrakt_store.load_month(month_key)
+        doc = await distrakt_store.load_month(user_id, month_key)
         rec = next(
             (r for r in (doc or {}).get("shows", []) if r.get("trakt_id") == trakt_id and r.get("season") == season),
             None,
         )
-        settings = load_settings()
+        settings = await _distrakt_settings(user_id)
         if rec is not None and settings.configured:
             watched_lookup, detail = await asyncio.gather(
                 fetch_watched_map(settings, [trakt_id]),
@@ -1272,8 +1342,104 @@ async def api_distrakt_abandon(request: Request):
             )
             abandoned_form = discord_fmt.freeze_form(_merge_live_show(rec, watched_lookup, detail))
 
-    rec = distrakt_store.set_abandoned(month_key, trakt_id, season, abandoned, abandoned_form=abandoned_form)
+    rec = await distrakt_store.set_abandoned(user_id, month_key, trakt_id, season, abandoned,
+                                             abandoned_form=abandoned_form)
     if rec is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
-    payload, status = await _distrakt_month_payload(year, month, load_settings())  # recomputed month (1d)
+    payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id))  # recomputed month (1d)
     return JSONResponse(payload, status_code=status)
+
+
+@guard.get("/api/distrakt/export", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_export(request: Request):
+    """Download the REQUESTING user's complete distrakt dataset as one JSON
+    document — every month, show row, watch state, per-season progress, and movie
+    watch. Contains no tokens and no other user's data, and doubles as the input
+    POST /api/distrakt/restore takes back."""
+    user_id = await _distrakt_user_id(request)
+    doc = await distrakt_store.export_user_data(user_id)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return JSONResponse(doc, headers={
+        "Content-Disposition": f'attachment; filename="distrakt-export-{stamp}.json"',
+    })
+
+
+@guard.post("/api/distrakt/restore", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_restore(request: Request):
+    """Replace the requesting user's distrakt data with an exported document.
+
+    REPLACE, not merge, in one transaction: a merge would need conflict rules for
+    every field and has no clear use case. The restoring user comes from the
+    session — any user_id in the file is ignored, so a document can never write
+    into someone else's tracker. This is deliberately NOT the same thing as
+    POST /api/distrakt/import, which pulls premieres in from the calendar."""
+    user_id = await _distrakt_user_id(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    try:
+        await distrakt_store.restore_user_data(user_id, data)
+    except distrakt_store.RestoreError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    except db.DatabaseError as exc:
+        logger.warning("distrakt restore failed for user %s", user_id, exc_info=True)
+        return JSONResponse({"ok": False, "error": f"Could not restore this file: {exc}"}, status_code=400)
+    months = await distrakt_store.list_months(user_id)
+    return JSONResponse({"ok": True, "months": months})
+
+
+async def _share_link_payload(user_id: int) -> dict:
+    """What the announcement post's link controls need: the resolved URL plus
+    which of the three forms are actually publishable right now, so the selector
+    can offer only the ones that would produce a working link."""
+    settings = load_settings()
+    row = await share_links.get_or_create(user_id)
+    user = await auth.get_user(user_id)
+    username = user["username"] if user else None
+    urls = share_links.share_urls(row, username, settings.public_base_url)
+    return {
+        "ok": True,
+        "base_url_missing": not bool(settings.public_base_url),
+        "url": share_links.post_link_with_view(row, username, settings.public_base_url),
+        # None means "whatever the share panel prefers" rather than a fixed form,
+        # which is a different state from having picked that same form outright.
+        "kind": row["post_link_kind"],
+        "preferred_kind": row["preferred_kind"],
+        "endpoint": row["post_link_endpoint"],
+        "available": {kind: bool(url) for kind, url in urls.items()},
+    }
+
+
+@guard.get("/api/distrakt/share-link", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_share_link(request: Request):
+    """This user's current announcement-post link settings."""
+    return JSONResponse(await _share_link_payload(await _distrakt_user_id(request)))
+
+
+@guard.post("/api/distrakt/share-link", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_set_share_link(request: Request):
+    """Choose which share-link form the announcement post embeds and which
+    calendar view it opens on.
+
+    Both fields are optional and each is only written when present, so the two
+    controls save independently. An empty string clears the choice: the link form
+    goes back to following the share panel's preferred kind, and the view goes
+    back to whatever the owner's share defaults already resolve to.
+    """
+    user_id = await _distrakt_user_id(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    kind = data["kind"] or None if "kind" in data else ...
+    endpoint = data["endpoint"] or None if "endpoint" in data else ...
+    if kind is ... and endpoint is ...:
+        return JSONResponse({"ok": False, "error": "Nothing to update"}, status_code=400)
+    try:
+        await share_links.set_post_link(user_id, kind=kind, endpoint=endpoint)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    return JSONResponse(await _share_link_payload(user_id))

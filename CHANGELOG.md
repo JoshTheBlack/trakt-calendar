@@ -2,6 +2,57 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.1.0] - Unreleased
+
+### Accounts & access
+- 👥 The app is now **multi-user with sign-in**. First run walks you through creating the admin account and adopts your existing Trakt connection and watching/not-watching data onto it — nothing to migrate by hand.
+- 🔐 Sign in with a **username and password**, **Plex**, or **Trakt** — all three can be linked to one account from your profile page.
+- 🎟️ **Registration is invite-only** by default. Admins issue invite links with an optional label, expiry, and use limit; an invite normally grants calendar access on the spot, and every unusable invite (expired, revoked, used up, never existed) shows the same page.
+- ✅ Access is granted **per account and per area** — calendar access and the hidden area are separate, deliberate grants.
+- 🛡️ **Every route now declares who may call it**, and anything undeclared is refused. This closes the big one: `GET /api/settings` used to hand the Trakt token, Trakt client secret, TMDB key, and every *arr API key to anyone who asked. Credentials are now write-only — the Settings screen shows which are set, never what they are.
+- 🧯 Hardened against cross-site requests: changes must be JSON and same-origin, sessions are server-side and revocable, sign-in is rate-limited per username and per address, and the interactive API docs are switched off.
+
+### Admin interface
+- 🧑‍✈️ A new **/admin** screen: list accounts with their linked providers and last activity, approve or revoke each kind of access, promote/demote admins, reset passwords, disable or delete accounts, revoke individual sessions or sign someone out everywhere, and manage invites and their redemptions.
+- 🧹 Two separate destructive actions — **wipe data** (reversible; keeps the account and its links) and **delete account** (full, typed confirmation, retires the username and share links so nobody inherits them).
+
+### Your calendar, your view
+- 🗓️ Card style, day packing, hide-not-watching, **timezone**, and your watching/not-watching marks are now **per account** — two people looking at the same month see the same shows with their own marks and their own layout.
+- 🌍 All times are stored in UTC and rendered in **your** timezone, with a picker in the header and a one-click "use my device timezone". No silent auto-detection: month and day boundaries shift with the zone, so the change is yours to make.
+- ⚡ Calendar data is fetched once per week-long window and **shared across everyone**, refreshed on a short TTL, with genre/country/network/language filtering applied per viewer instead of per request to Trakt. Fewer API calls, faster loads, and the per-show detail cache moved into the same store.
+- 🔁 Marking something not-watching now sends just that one change, so two open tabs can no longer overwrite each other.
+
+### Public sharing
+- 🔗 Publish your calendar as a **read-only public page** — as an unguessable link, as `/u/your-name`, or as your own custom `/c/slug`. Enable any combination, pick which one the Share button copies, and rotate the private link at any time.
+- 🚫 Public pages make **zero API calls**, ever. They serve what is already cached (with a "data as of" line) rather than spending your rate limit for a stranger, and a bad link always 404s the same way regardless of why.
+
+### 🥚
+- The hidden thing now checks whether it has anywhere to take you. If it doesn't, it just makes the noise.
+
+## 🏷️ [1.0.1] - Unreleased
+
+### Authentication
+- 🔑 **Authorize with Trakt** from the Settings panel — a device-code flow pairs the app on trakt.tv instead of pasting an access token by hand. Adds a **Trakt Client Secret** field alongside the Client ID.
+- ↻ Access tokens now **refresh automatically** (with a manual *Refresh token now* button), and Settings shows the current token's expiry status.
+
+### Network logos
+- 🖼️ Network badges on cards now show the **real network logo** instead of a text label — looked up per show from TMDB and rendered as a rounded tile, falling back to the 📡 network name when no logo is available.
+- 🗝️ New **TMDB API key** setting. Logos are processed once and cached on disk, with a regenerate action to rebuild them.
+
+### Interface
+- 🎯 Rebuilt the header as a **compact sticky bar** — endpoint / cards / days controls collapse to icon pills with tooltips, and the item count and generated time merge into a single meta line.
+- 🙈 **Hiding not-watching** is smarter: days where every item is hidden collapse entirely, and packed layout now sizes each day's columns to only the visible cards.
+- 🧹 Removed the storage/sync panel — saves are silent on success and only raise a toast if persistence actually fails.
+
+### Ops
+- 🔇 The per-request access log is **off by default** (set `ACCESS_LOG=1` to bring it back); app diagnostics log at INFO while third-party libraries are quieted to WARNING.
+- 📦 Added Pillow + cairosvg for logo rendering; the Docker image now installs `libcairo2`, `libjpeg`, and `zlib` to match.
+- 🧪 Added an offline test suite (69 tests, no credentials or network required).
+
+### 🥚
+- There's something hidden in here now. No hints — you'll know it when you find it.
+- It makes a noise.
+
 ## 🏷️ [1.0.0] - 2026-07-20
 
 First release — a self-hosted Python app for browsing new TV/movie premieres by month, powered by the Trakt API.

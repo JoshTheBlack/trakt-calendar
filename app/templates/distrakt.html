@@ -64,7 +64,20 @@
             <div class="distrakt-copy-block">
                 <div class="distrakt-copy-head">
                     <span>POST 1 — announcement</span>
-                    <button type="button" class="btn-ghost small" onclick="copyBlock('post1')">Copy</button>
+                    <div class="distrakt-copy-actions">
+                        <!-- Which of your share links the post embeds, and which
+                             calendar view it opens on. Both are remembered. -->
+                        <select id="postLinkKind" class="distrakt-link-select" title="Which share link to embed"
+                                onchange="savePostLink()"></select>
+                        <select id="postLinkEndpoint" class="distrakt-link-select" title="Which calendar view the link opens"
+                                onchange="savePostLink()">
+                            <option value="">Link: default view</option>
+                            {% for ep in endpoints %}
+                            <option value="{{ ep.key }}">Link: {{ ep.label }}</option>
+                            {% endfor %}
+                        </select>
+                        <button type="button" class="btn-ghost small" onclick="copyBlock('post1')">Copy</button>
+                    </div>
                 </div>
                 <textarea id="post1Text" class="distrakt-copy-textarea" readonly spellcheck="false"></textarea>
             </div>

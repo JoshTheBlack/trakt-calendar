@@ -1018,7 +1018,14 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ---- Hidden /distrakt reveal: Konami code + footer build-tap (kept independent) ----
+// Both unlocks only lead anywhere for an account the server would actually let
+// into the tracker. For everyone else the Konami code plays the sound and stops
+// there, which reads as a self-contained joke rather than a locked door, and the
+// footer tap does nothing at all — audio from a stray tap on a version number
+// would startle someone who wasn't looking for an easter egg and give the game
+// away in the process.
 function revealSecret() {
+    if (!window.DISTRAKT_AVAILABLE) return;
     // Remember that the easter egg has been used so the calendar can surface a
     // permanent Distrakt nav button on future visits.
     try { localStorage.setItem('distraktRevealed', '1'); } catch (e) {}
@@ -1027,6 +1034,7 @@ function revealSecret() {
 
 // Once revealed, show the Distrakt nav button on the calendar.
 document.addEventListener('DOMContentLoaded', () => {
+    if (!window.DISTRAKT_AVAILABLE) return;
     let revealed = false;
     try { revealed = localStorage.getItem('distraktRevealed') === '1'; } catch (e) {}
     const nav = document.getElementById('distraktNav');
@@ -1040,7 +1048,9 @@ document.addEventListener('keydown', (e) => {
     konamiBuffer.push(e.key);
     konamiBuffer = konamiBuffer.slice(-KONAMI_SEQUENCE.length);
     if (konamiBuffer.length === KONAMI_SEQUENCE.length && konamiBuffer.every((k, i) => k === KONAMI_SEQUENCE[i])) {
-        revealSecret();
+        konamiBuffer = [];
+        if (window.DISTRAKT_AVAILABLE) revealSecret();
+        else new Audio('/static/audio/distrakt.mp3').play().catch(() => {});
     }
 });
 
@@ -1050,6 +1060,7 @@ let buildTapCount = 0;
 let buildTapLast = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
+    if (!window.DISTRAKT_AVAILABLE) return;
     const tag = document.querySelector('.version-tag');
     if (!tag) return;
     tag.addEventListener('click', () => {

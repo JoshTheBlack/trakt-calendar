@@ -34,6 +34,9 @@ EXPECTED_TABLES = {
     "api_cache", "calendar_not_watching", "calendar_view_state",
     # Migration 3 — public share links.
     "share_links",
+    # Migration 4 — the per-user distrakt tracker data model.
+    "distrakt_months", "distrakt_shows", "distrakt_watch_state",
+    "distrakt_show_progress", "distrakt_movie_watches",
 }
 
 

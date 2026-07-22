@@ -1612,11 +1612,15 @@ async def list_sessions(user_id: int):
 # Per-user tables cleared by wipe_user_data(), beyond the account row itself.
 # Each entry is (table_name, user_id_column); a later table that holds per-user
 # data appends its own entry here rather than teaching wipe_user_data a new
-# special case. The per-user distrakt tables are added here when that data layer
-# lands.
+# special case.
 WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = (
     ("calendar_not_watching", "user_id"),
     ("calendar_view_state", "user_id"),
+    ("distrakt_shows", "user_id"),
+    ("distrakt_months", "user_id"),
+    ("distrakt_watch_state", "user_id"),
+    ("distrakt_show_progress", "user_id"),
+    ("distrakt_movie_watches", "user_id"),
 )
 
 

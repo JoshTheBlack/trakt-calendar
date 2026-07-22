@@ -287,15 +287,7 @@ def _share_payload(row, username: str | None, settings) -> dict:
             "username": bool(row["enabled_username"]),
             "slug": bool(row["enabled_slug"]),
         },
-        "urls": {
-            "token": f"{base}/s/{row['token']}" if base and row["enabled_token"] else None,
-            "username": (
-                f"{base}/u/{username}" if base and row["enabled_username"] and username else None
-            ),
-            "slug": (
-                f"{base}/c/{row['custom_slug']}" if base and row["enabled_slug"] and row["custom_slug"] else None
-            ),
-        },
+        "urls": share_links.share_urls(row, username, base),
     }
 
 

@@ -1057,6 +1057,44 @@ Revision 1 deferred these to the implementing chats. They are decided:
        controls at all — only enable/disable, preferred-kind, slug, and
        rotation, exactly the surface §10[I] lists. AFFECTS NOTHING DOWNSTREAM:
        chat J/K's distrakt work doesn't touch share_links' view columns.
+     [chat J] 2026-07-22 — `distrakt_movie_watches` carries `title` and `year`
+       columns beyond §5.11's (user_id, trakt_id, watched_at). §5.11's column
+       list drops them, but the OPEN month's Discord Post 2 renders its
+       **Movies** section from THIS cache (watch_history.movies_in_range ->
+       render_post2), not from the frozen snapshot — the only place the frozen
+       `movies_json` covers is a CLOSED month. Without title/year every open
+       month's movie line would render blank. This is the same class of
+       load-bearing omission §5.8/§5.8a already call out for started_airing /
+       finished_airing / movies_json; the fix is the same. AFFECTS NOTHING
+       DOWNSTREAM — two extra columns on a table no later chat reads directly.
+     [chat J] 2026-07-22 — `distrakt_months.totals_refreshed_at` is INTEGER whole
+       UTC seconds, not the ISO string the JSON documents held, per the schema's
+       one timestamp representation; `distrakt.is_stale` now compares integers.
+       By contrast `distrakt_watch_state.last_synced` stays TEXT: it is the ISO
+       date cursor handed straight back to Trakt as `start_at`, so it is payload
+       rather than our clock, the same split §11.A drew for Trakt's `watched_at`.
+       Affects nothing downstream — is_stale/stamp_refreshed are the only readers.
+     [chat J] 2026-07-22 — data/state_*.json were NOT deleted, though §11.H
+       deviation 3 assigned that to this chat once not_watching_ids() moved off
+       them (which it did — distrakt now reads calendar_state, and app/state.py
+       IS removed). Deleting them here would have destroyed real data: on this
+       working copy `data/app.db` holds ZERO users at schema v1 and
+       data/legacy_state_backup/ DOES NOT EXIST, i.e. onboarding — and therefore
+       calendar_state.import_legacy_state(), which is what backs these files up
+       and imports them — has never run. The files are still the live INPUT to
+       that first-run importer, not a leftover of the old read path. §11.H's
+       "deletion becomes safe once not_watching_ids() moves" overlooked that the
+       legacy importer is a second, independent reader. AFFECTS THE OPERATOR, not
+       a later chat: the files become deletable after onboarding has run once on
+       an instance (it copies them to data/legacy_state_backup/ and imports them
+       onto the bootstrap admin). Nothing in the code reads them any more except
+       that importer. data/legacy_state_backup/ remains permanent and untouched.
+     [chat J] 2026-07-22 — §1.20's "the UI confirms with a typed acknowledgement"
+       is NOT built: this chat ships the two routes and the data layer, and
+       §10[J]'s scope line lists only the endpoints. Export/restore is reachable
+       over HTTP and covered by tests, but has no control on the /distrakt page
+       yet. AFFECTS a later UI pass (chat K already touches distrakt.html/js for
+       the share embed and could add the button + typed confirmation there).
      [chat I] 2026-07-22 — auth.username_availability_error() now ALSO checks
        share_links.custom_slug for a collision. §1.10's cross-namespace rule
        was always bidirectional, but nothing existed for a username to collide
@@ -1069,6 +1107,49 @@ Revision 1 deferred these to the implementing chats. They are decided:
        import the other direction would cycle. AFFECTS CHATS C/D/E/F's own
        callers of username_availability_error not at all: same signature, same
        return convention, one more case where it now returns non-None.
+     [chat K] 2026-07-22 — `trakt._cached_get` gained `private=True`, and the
+       three user-scoped Trakt reads (`/shows/{id}/progress/watched` in both
+       fetch_watched_map and fetch_show_progress_detail, and
+       `/sync/last_activities`) now use it: the response is neither read from nor
+       WRITTEN TO `api_cache`. All three already passed `fresh=True`, so nothing
+       was ever served from those entries — but fresh=True still WROTE them, and
+       api_cache is keyed by request URL and shared instance-wide. Before this
+       chat every one of those calls carried the same app-wide token, so one
+       identity owned every such entry and the shared key was correct; pointing
+       them at per-user tokens is exactly what makes two users' progress collide
+       on one key. Closing the write is a two-line change and removes the whole
+       class rather than relying on every future reader remembering fresh=True.
+       AFFECTS NOTHING DOWNSTREAM (K is the last chat); it does mean a repeated
+       progress read now always hits the network, which was already true.
+     [chat K] 2026-07-22 — §10[K]'s "a Settings option for which calendar view
+       that embedded link reflects" landed on the tracker's own Copy-blocks
+       panel, next to the link-form selector, NOT in the admin Settings modal.
+       Two reasons, both structural: §1.14 is a HARD RULE that settings.json
+       holds nothing specific to an individual user, and this value is per-user
+       by definition; and the Settings modal is admin-only and app-wide, while a
+       distrakt-approved account need be neither an admin nor even
+       calendar-approved (§8 already spells that combination out for
+       /api/network-logo), so a control living there would be unreachable for
+       exactly the users who need it. Both controls are therefore backed by two
+       new DISTRAKT_APPROVED routes, GET/POST /api/distrakt/share-link, rather
+       than by POST /api/me/share/preferred (CALENDAR_APPROVED, same problem).
+     [chat K] 2026-07-22 — `share_links` gained two nullable columns in
+       migration 5, `post_link_kind` and `post_link_endpoint`. §2 item 4 says the
+       announcement post DEFAULTS to the user's preferred_kind with a selector
+       that switches which form appears, "remembered per user" — "default to"
+       only means something if the selector's value is a separate remembered
+       choice, so writing preferred_kind directly would have collapsed two
+       settings into one and made the calendar's Share button and the tracker's
+       copy button fight over it. NULL in either column means "follow the share
+       panel" / "leave the link bare", so an account that never opens the tracker
+       is unaffected. §5.4's column list grows by two.
+     [chat K] 2026-07-22 — The embedded link falls back down
+       post_link_kind -> preferred_kind -> any enabled form, rather than
+       rendering nothing when the stored choice stops resolving. §2 item 4 does
+       not cover the case, and it is reachable without any further action by the
+       user: disabling a form, or clearing the slug it named, would otherwise
+       drop the link out of every future post silently. Publishing the link that
+       still works is the visible failure mode.
 
 
 ================================================================================
@@ -1629,7 +1710,7 @@ The level is a required positional argument. Do NOT use `@app.get` /
     restrictive of the two candidates.
     STILL TO COME: share-link management (I), per-user pref writes (G/H).
 
-  DISTRAKT_APPROVED (+ linked Trakt identity)                     12 routes
+  DISTRAKT_APPROVED (+ linked Trakt identity)                     16 routes
     GET  /distrakt
     GET  /api/distrakt/list        GET  /api/distrakt/month
     GET  /api/distrakt/months      GET  /api/distrakt/search
@@ -1638,6 +1719,8 @@ The level is a required positional argument. Do NOT use `@app.get` /
     POST /api/distrakt/backfill-networks
     POST /api/distrakt/remove      POST /api/distrakt/add
     POST /api/distrakt/abandon
+    GET  /api/distrakt/export      POST /api/distrakt/restore   (added by J)
+    GET  /api/distrakt/share-link  POST /api/distrakt/share-link (added by K)
     COUNT CORRECTION: this section previously said "EVERY /api/distrakt/* route
     (12 today)". There are ELEVEN /api/distrakt/* routes plus the /distrakt page
     = 12 total. §9K's "all 12 + the 2 new ones" should read "all 11 API routes,
@@ -1889,7 +1972,7 @@ append to §2.1 if anything diverged, before ending the session.
       Depends on: G, H.
       Model: Sonnet — read-only surface over an already-solved data path.
 
-  [J] Distrakt per-user data-layer migration + export/import STATUS: not started
+  [J] Distrakt per-user data-layer migration + export/import STATUS: done 2026-07-22
       Scope: rework app/distrakt.py's per-month JSON docs and
       app/watch_history.py's watch_state.json into §5.8-§5.11 + §5.8a, per
       §1.13. A GENUINE REWORK, not a find/replace of file-IO calls: every
@@ -1917,7 +2000,7 @@ append to §2.1 if anything diverged, before ending the session.
       tables) and mistakes corrupt tracked-show data across users.
 
   [K] Distrakt gating + per-user Trakt data source + share-link embed
-                                                             STATUS: not started
+                                                             STATUS: done 2026-07-22
       Scope: /distrakt and all /api/distrakt/* require (logged in) AND
       (distrakt_approved) AND (linked Trakt identity) — enforced through chat
       B's declaration mechanism, tested route by route; the §7.6 easter-egg
@@ -3704,3 +3787,445 @@ KNOWN GAPS:
     wants a different endpoint/card style/timezone edits the URL. Adding
     equivalent `<select>`s (GET-only, no session, no write) is a small,
     later, purely-cosmetic addition.
+
+
+--------------------------------------------------------------------------------
+11.J  Distrakt per-user data layer + export/restore         IMPLEMENTED 2026-07-22
+--------------------------------------------------------------------------------
+
+FILES ADDED:
+  tests/test_distrakt_export.py    Export/restore: round-trip identity, scoping,
+                                   schema refusal, atomicity, + both routes (11).
+
+FILES REMOVED:
+  app/state.py                     The shared per-(endpoint,year,month) JSON
+                                   store. Nothing imported it once distrakt's
+                                   roster overlay moved to calendar_state.
+                                   NOTE: data/state_*.json are NOT deleted — see
+                                   DEVIATIONS 3.
+
+FILES CHANGED:
+  app/db.py           + MIGRATION_4 appended to MIGRATIONS (the five distrakt
+                      tables). Migrations 1-3 untouched.
+  app/distrakt.py     REWORKED: per-month JSON docs -> distrakt_months +
+                      distrakt_shows, every function keyed by user_id; the roster
+                      not-watching read moved onto calendar_state; is_stale /
+                      totals_refreshed_at now integer seconds; + export/restore.
+  app/watch_history.py REWORKED: watch_state.json -> distrakt_watch_state +
+                      distrakt_show_progress + distrakt_movie_watches, per user.
+                      The pure folders/readers are UNCHANGED; only _load/_save
+                      around them changed shape (and became async).
+  app/auth.py         WIPE_DATA_TABLES gains the five distrakt tables (§11.F
+                      deviation 2 now fully resolved).
+  app/main.py         every distrakt handler resolves the session user and threads
+                      user_id into the data layer (+ `_distrakt_user_id`);
+                      `_apply_not_watching` and `_distrakt_month_payload` take
+                      user_id and are async; api_distrakt_months gained a
+                      `request` parameter it never had; + the two new routes.
+  tests/test_db.py    EXPECTED_TABLES gains the five migration-4 tables.
+  tests/test_distrakt.py / test_rollover.py / test_watch_history.py  PORTED.
+
+PUBLIC SURFACE:
+
+  app/distrakt.py — EVERY function below is per-user; user_id is the FIRST
+  argument on all of them. All the storage ones are now ASYNC (they were sync).
+  CHAT K: the Trakt token these use is whatever `settings` carries — see THE
+  TOKEN SEAM at the end of this block.
+    async load_month(user_id, month) -> dict | None
+      -> {month, closed, totals_refreshed_at, movies?, shows: [...]}. None when
+         the user has no row for that month. `movies` is present ONLY on a frozen
+         month, mirroring the old document.
+    async save_month(user_id, doc) -> None      # whole-doc replace, one txn
+    async list_months(user_id) -> list[str]
+    async add_show(user_id, month, show) -> None
+      -> upsert by (trakt_id, season); creates the month row if absent. NEW pair
+         inserts a full normalized record, EXISTING pair updates only the
+         updatable columns present in `show`. Returns None (the old file version
+         returned the whole doc; no caller used it).
+    async set_abandoned(user_id, month, trakt_id, season, abandoned,
+                        abandoned_form=None) -> dict | None
+    async remove_show(user_id, month, trakt_id, season) -> bool
+    async can_initialize(user_id, month_key) -> bool
+    async is_backfill_blocked(user_id, month_key) -> bool
+    async maybe_freeze_prior(user_id, month_key, settings, today=None) -> None
+    async ensure_month(user_id, year, month, settings, today=None) -> dict
+    async import_premieres(user_id, month_key, settings) -> dict | None
+    async backfill_tmdb(user_id, month_key, settings) -> dict | None
+    async compute_live_shows(user_id, records, settings, fresh=False,
+                             watched_lookup=None) -> list[dict]
+    async stamp_refreshed(user_id, month_key) -> None     # returns None now
+    STILL SYNC AND PURE (unchanged semantics):
+      new_month_doc(month) ; frozen_shows(doc) ; month_committed(month_key, today)
+      is_stale(doc, max_age_hours=24)   # now compares INTEGER seconds
+    REMOVED: distrakt.not_watching_ids() — callers use
+      calendar_state.not_watching_ids(user_id, year, month) directly (chat G's).
+
+  app/distrakt.py — EXPORT / RESTORE
+    EXPORT_SCHEMA = 1
+    RestoreError(ValueError)
+    async export_user_data(user_id) -> dict
+      -> {"schema": 1, "exported_at": <int>, "<table>": [ {col: val}, ... ] × 5}.
+         One list per table, columns MINUS user_id — table-faithful on purpose, so
+         export -> restore is an exact identity. No tokens, no other user's rows.
+    async restore_user_data(user_id, doc) -> None
+      -> REPLACE not merge, ONE transaction: deletes the user's rows in all five
+         tables, inserts the document's. Any `user_id` in the file is IGNORED —
+         every row is written under the user_id argument. Raises RestoreError for
+         an unknown `schema` or a non-list table; a row that violates the schema
+         raises db.DatabaseError and rolls the whole restore back.
+
+  app/watch_history.py — the in-memory state dict shape is UNCHANGED
+  ({last_synced, beacons, shows: {tid: {season: [eps]}}, movies: {tid: {...}}}),
+  so watched_map / movies_in_range / month_bounds / the _apply_* folders /
+  _set_show_baseline / _beacons / _removed_changed are all untouched.
+    async _load(user_id) -> dict ; async _save(user_id, state) -> None
+      -> replaced the JSON file read/write. Private, but the tests drive them.
+    async baseline_show(settings, user_id, trakt_id) -> None
+    async sync(settings, user_id, force=False, today=None) -> dict
+    async sync_and_baseline(settings, user_id, roster_trakt_ids, force=False,
+                            today=None) -> dict
+
+  app/main.py (both AuthLevel.DISTRAKT_APPROVED, registered through authz.Guard)
+    GET  /api/distrakt/export   -> the calling user's whole dataset, with a
+                                   Content-Disposition attachment filename.
+    POST /api/distrakt/restore  -> {…export document…}; 200 {ok, months} |
+                                   400 {ok: false, error} for a bad/unknown doc.
+                                   DELIBERATELY NOT the same thing as the
+                                   pre-existing POST /api/distrakt/import, which
+                                   pulls premieres in from the calendar.
+    async _distrakt_user_id(request) -> int    # the one place handlers resolve
+                                   the session user for the tracker.
+
+  THE TOKEN SEAM — CHAT K READ THIS. This chat changed STORAGE scoping only. Every
+  Trakt call still authenticates with the APP-WIDE token in settings.json, exactly
+  as before, and reaches the network through the `settings` object passed in. The
+  distrakt handlers in app/main.py all obtain it from one call, `load_settings()`,
+  and hand it to the data functions above; `user_id` travels beside it and never
+  affects which credential is used. To move distrakt onto the requesting user's
+  own token, hand those functions a settings object carrying that user's token
+  (trakt_routes.access_token_for_user(user_id) is chat D's source for it) — the
+  call sites to change are the `load_settings()` results passed into
+  _distrakt_month_payload / ensure_month / import_premieres / backfill_tmdb /
+  compute_live_shows / watch_history.sync_and_baseline / baseline_show. No
+  function signature has to change for that swap.
+
+SCHEMA:
+  Migration version 4 (appended; migrations 1-3 untouched). All five tables carry
+  `user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE`.
+    distrakt_months        (user_id, month, closed, totals_refreshed_at,
+                           movies_json, created_at); PK (user_id, month).
+                           totals_refreshed_at is INTEGER seconds (DEVIATIONS 2).
+    distrakt_shows         (user_id, month, trakt_id, tmdb, slug, media, title,
+                           season, network, abandoned, abandoned_form, watched,
+                           total, cadence, premiere, finale, bucket,
+                           started_airing, finished_airing);
+                           UNIQUE (user_id, month, trakt_id, season).
+                           started_airing/finished_airing ARE PRESENT (§5.8).
+    distrakt_watch_state   (user_id UNIQUE, last_synced TEXT, beacons_json).
+    distrakt_show_progress (user_id, trakt_id, season, watched_episodes_json);
+                           PK (user_id, trakt_id, season).
+    distrakt_movie_watches (user_id, trakt_id, watched_at TEXT, title, year);
+                           PK (user_id, trakt_id). watched_at is Trakt's ISO
+                           string verbatim; title/year are additions (DEVIATIONS 1).
+
+DEVIATIONS:  (all four also appended to §2.1)
+  1. distrakt_movie_watches gained `title` and `year`, which §5.11's column list
+     omits. The OPEN month's Post 2 **Movies** section renders from this cache,
+     not from the frozen movies_json, so without them every open month's movie
+     line renders blank — the same load-bearing omission §5.8/§5.8a already flag
+     for started_airing / finished_airing / movies_json. AFFECTS NOTHING
+     DOWNSTREAM.
+  2. totals_refreshed_at is INTEGER whole UTC seconds (was an ISO string in the
+     JSON documents), per the schema's single timestamp convention; is_stale
+     compares integers. distrakt_watch_state.last_synced stays TEXT because it is
+     the ISO date cursor handed back to Trakt as `start_at` — payload, not our
+     clock. Affects nothing downstream.
+  3. data/state_*.json were NOT deleted, though §11.H deviation 3 assigned that
+     here. app/state.py IS removed and distrakt's roster overlay HAS moved to
+     calendar_state, so the stated precondition is met — but the files are still
+     the live input to calendar_state.import_legacy_state(), a SECOND reader
+     §11.H's reasoning missed, and on this working copy that importer has never
+     run (data/app.db has zero users at schema v1; data/legacy_state_backup/ does
+     not exist). Deleting them would have destroyed the only copy of real
+     not-watching data and broken the first-run upgrade path. AFFECTS THE
+     OPERATOR: they become deletable once onboarding has run on an instance,
+     which backs them up and imports them. data/legacy_state_backup/ untouched.
+  4. §1.20's "the UI confirms with a typed acknowledgement" is not built — this
+     chat ships the routes and data layer, which is what §10[J]'s scope line
+     lists. AFFECTS a later UI pass; see KNOWN GAPS.
+
+TESTS:  (434 tests total in the suite, all green — 410 + 24 net)
+  PORTED (the point of this chat's test work — all three were built on the file
+  document model and all three now run against the per-user tables):
+    tests/test_distrakt.py (15, was 13) — _derive_season is untouched and still
+      passes verbatim; the store tests moved onto (user_id, month) rows. NEW here:
+      a frozen-snapshot round trip asserting the airing flags, bucket, tmdb and
+      the month-level movies survive save -> load, which is what makes a frozen
+      month render offline.
+    tests/test_rollover.py (21, was 15) — the freeze/rollover coverage kept
+      intact: init from scratch, not-watching exclusion, freeze-prior + drop
+      completed/abandoned + carry forward, frozen month untouched (no Trakt),
+      unconfigured not persisted, backward-nav no-backfill, preview does NOT
+      freeze, import_premieres merge, remove_show, can_initialize, month
+      committed boundary, staleness. The not-watching overlay is NO LONGER
+      mocked: real rows go through calendar_state.set_not_watching, so the
+      roster-is-built-from-this-user's-calendar-decisions wiring is proven rather
+      than stubbed.
+    tests/test_watch_history.py (16, was 10) — the pure folders/readers are
+      byte-identical tests (they never changed); the sync tests moved onto the
+      per-user tables, plus a storage round trip and replace-not-accumulate.
+  NEW — the per-user guarantees the shared model could not make:
+    tests/test_rollover.py PerUserIsolationTests (4): two users' rosters are
+      independent IN BOTH DIRECTIONS (reads, a mutation on one side, and a delete
+      on the other); month lists and the backfill gate are per user; ONE USER'S
+      not-watching mark does not drop the premiere from another user's roster;
+      FREEZE-PRIOR-MONTH FIRES PER USER INDEPENDENTLY — the first user reaching
+      the 1st freezes only their own July, and the other's July stays open until
+      their own first access. Plus StampRefreshedTests: stamping one user's month
+      leaves the other's stale.
+    tests/test_watch_history.py: two users keep independent watch state; a sync
+      for one user does not fold events into another's cache; baseline_show lands
+      on the named user only.
+    tests/test_distrakt_export.py (11): export -> restore ROUND-TRIP IDENTITY;
+      a frozen month survives a wipe + restore verbatim; export contains only the
+      caller's rows; RESTORE IGNORES A user_id PRESENT IN THE FILE (planted at
+      both document and row level, asserted against the row counts of both
+      accounts); restore replaces rather than merges; restore REFUSES AN UNKNOWN
+      SCHEMA (higher, zero, null, and a string "1"), writing nothing; a document
+      that fails part-way leaves the previous data byte-identical (the one-
+      transaction guarantee); and both routes end to end, including that a
+      restore onto a different signed-in account moves the data to whoever asked,
+      and that a non-distrakt user gets 401/403 from both.
+  app/state.py's removal broke nothing: the whole suite is green and a grep for
+  `app.state` / `state_store` / `import state` across app/ and tests/ returns
+  nothing.
+  DELIBERATELY NOT COVERED HERE:
+    - Anything against the real Trakt API — every fetch is patched, as in the
+      files this chat ported.
+    - That distrakt uses the REQUESTING USER's Trakt token rather than
+      settings.json's — chat K owns that swap and its test (§9K). This chat
+      deliberately left the token app-wide (see THE TOKEN SEAM).
+    - Route-by-route gating of all 14 distrakt routes — chat K (§9K); the two new
+      routes' own gating is covered here, and tests/test_route_gating.py's
+      "every route declares a level" guard already covers them structurally.
+
+KNOWN GAPS:
+  - No UI for export/restore (DEVIATIONS 4). The routes work and are tested; the
+    /distrakt page has no download/upload control and no typed-acknowledgement
+    confirmation yet. A later UI pass (chat K is already in distrakt.html/js).
+  - data/state_*.json still exist on this working copy and are still read by
+    calendar_state.import_legacy_state() at onboarding (DEVIATIONS 3). Nothing
+    else reads them.
+  - `distrakt.is_stale` has no caller in the request path — the open-month
+    auto-refresh-when-stale behaviour §3 describes is driven by the explicit
+    Refresh button (force_fresh) today, not by a staleness check on load. That
+    predates this chat; the function and its tests are kept because
+    stamp_refreshed still records the timestamp it reads.
+  - save_month replaces a month's show rows wholesale (delete + re-insert). Fine
+    at roster sizes, and it is what makes the freeze pass and lazy init a single
+    atomic write, but a future refactor could diff instead.
+
+
+--------------------------------------------------------------------------------
+11.K  Distrakt gating + per-user Trakt token + share-link embed
+                                                           IMPLEMENTED 2026-07-22
+--------------------------------------------------------------------------------
+
+FILES ADDED:
+  tests/test_distrakt_gating.py    The §9K suite: the four-actor gate matrix over
+                                   every tracker route, the per-user token proof,
+                                   the DISTRAKT_AVAILABLE flag, and the Post 1
+                                   link embed (33 tests).
+
+FILES CHANGED:
+  app/main.py         + _distrakt_settings(user_id) (the token swap) and
+                      + _distrakt_post_link(user_id, settings); every distrakt
+                      handler that reaches Trakt now takes its settings from the
+                      former instead of load_settings(); _distrakt_month_payload
+                      and _empty_month_payload pass link_url into render_post1;
+                      `/` puts `distrakt_available` in context and /distrakt puts
+                      `endpoints`; + GET/POST /api/distrakt/share-link.
+  app/trakt.py        _cached_get gained `private=True` — neither read nor write
+                      the shared blob cache; set on fetch_watched_map,
+                      fetch_show_progress_detail and fetch_last_activities.
+  app/db.py           + MIGRATION_5 (two columns on share_links). 1-4 untouched.
+  app/share_links.py  + set_post_link, share_urls, post_link_url,
+                      post_link_with_view.
+  app/share_routes.py _share_payload's inline URL building replaced by
+                      share_links.share_urls (one implementation, two callers).
+  app/discord_fmt.py  render_post1 gained `link_url`; the trailing link line is
+                      omitted entirely when there is nothing to link to.
+  app/templates/index.html      + window.DISTRAKT_AVAILABLE.
+  app/templates/distrakt.html   + the two link selectors beside the Post 1 Copy
+                      button, inside a new .distrakt-copy-actions wrapper.
+  app/static/js/app.js          both unlocks consult DISTRAKT_AVAILABLE: Konami
+                      navigates when available and otherwise plays
+                      /static/audio/distrakt.mp3 and stops; the 7-tap version
+                      click and the nav-button reveal do nothing when not.
+  app/static/js/distrakt.js     + renderPostLink/loadPostLink/savePostLink.
+  app/static/css/distrakt.css   + .distrakt-copy-actions, .distrakt-link-select.
+
+PUBLIC SURFACE:
+
+  app/main.py
+    async _distrakt_settings(user_id) -> Settings
+      -> THE TOKEN SWAP §11.J's TOKEN SEAM described. The app-wide settings with
+         trakt_access_token replaced by
+         trakt_routes.access_token_for_user(user_id) and trakt_refresh_token
+         blanked; everything else (client id, network emoji map, TMDB key,
+         genres/countries) carried through untouched. An identity row with no
+         token yields "" and therefore settings.configured False, which the
+         handlers already treat as "not configured" — it never falls back to
+         settings.json's token.
+    async _distrakt_post_link(user_id, settings) -> str | None
+    async _share_link_payload(user_id) -> dict
+      -> {ok, base_url_missing, url, kind, preferred_kind, endpoint,
+          available: {token, username, slug}}
+
+  app/share_links.py
+    async set_post_link(user_id, *, kind=..., endpoint=...) -> None
+      -> `...` means "don't touch this field", None means "clear it". Raises
+         ValueError for an unknown kind or endpoint key.
+    share_urls(row, username, base_url) -> {token, username, slug} of str|None
+      -> SYNCHRONOUS and pure. Each is None when that form is disabled, has
+         nothing to resolve to, or there is no configured public base URL.
+    post_link_url(row, username, base_url) -> str | None
+      -> post_link_kind -> preferred_kind -> any enabled form -> None.
+    post_link_with_view(row, username, base_url) -> str | None
+      -> the above plus ?endpoint=<post_link_endpoint> when one is set.
+
+  app/discord_fmt.py
+    render_post1(shows, emoji_map=None, default_emoji=":tv:", link_url=None) -> str
+      -> appends "**Full calendar:** <url>" as a final paragraph when link_url is
+         truthy, and nothing at all otherwise. The angle brackets are Discord's
+         own preview suppression.
+
+  app/trakt.py
+    _cached_get(..., private: bool = False)
+      -> private responses depend on WHOSE token asked, and the cache key is the
+         URL alone, so they bypass the shared cache in both directions.
+
+  app/main.py routes (both AuthLevel.DISTRAKT_APPROVED)
+    GET  /api/distrakt/share-link   -> _share_link_payload
+    POST /api/distrakt/share-link   {kind?, endpoint?} -> the same payload;
+                                    "" clears either; 400 for an unknown value
+                                    or a body carrying neither field.
+
+  TEMPLATE CONTRACT
+    index.html renders `window.DISTRAKT_AVAILABLE`, computed server-side from
+    the session as (distrakt_approved AND has_trakt_identity) — the same two
+    conditions auth.require_distrakt enforces. It is a rendering hint only.
+
+SCHEMA:
+  Migration version 5 (appended; migrations 1-4 untouched). No new tables.
+    share_links  + post_link_kind      TEXT (nullable; NULL follows preferred_kind)
+                 + post_link_endpoint  TEXT (nullable; NULL leaves the link bare)
+  Both beyond §5.4's column list — see DEVIATIONS 3.
+
+DEVIATIONS:  (all four also appended to §2.1)
+  1. trakt._cached_get gained `private=True` and the three user-scoped reads use
+     it, so a progress/activity response is no longer WRITTEN to the shared,
+     URL-keyed api_cache. Nothing ever read those entries (every caller passed
+     fresh=True) but fresh=True still wrote them, and they were only ever correct
+     while one app-wide token owned every one of them — which is precisely what
+     this chat ends. AFFECTS NOTHING DOWNSTREAM.
+  2. The "which calendar view the embedded link reflects" option lives on the
+     tracker's Copy-blocks panel, not in the admin Settings modal: §1.14 forbids
+     per-user values in settings.json, and that modal is admin-only and app-wide
+     while a distrakt-approved account need be neither an admin nor
+     calendar-approved. Backed by GET/POST /api/distrakt/share-link rather than
+     the CALENDAR_APPROVED /api/me/share/* routes, which have the same problem.
+  3. share_links gained post_link_kind + post_link_endpoint (migration 5). §2
+     item 4's "default to the user's preferred_kind" only means something if the
+     selector remembers a separate choice; writing preferred_kind directly would
+     have made the calendar's Share button and the tracker's copy button fight
+     over one value.
+  4. The embedded link falls back post_link_kind -> preferred_kind -> any enabled
+     form instead of vanishing when a stored choice stops resolving (the user
+     disables that form, or clears the slug it named). Silently dropping the link
+     from every future post is the worse failure.
+
+TESTS:  (467 tests total in the suite, all green — 434 + 33 new)
+  tests/test_distrakt_gating.py (33). Every tracker route is enumerated by hand
+  rather than discovered from the router, so a route that loses its declaration
+  fails this file instead of quietly dropping out of it: 8 GETs (/distrakt,
+  list, month, months, search, seasons, export, share-link) and 8 POSTs
+  (refresh, import, backfill-networks, remove, add, abandon, restore,
+  share-link) — the 11 original API routes, the page, chat J's two, and this
+  chat's two.
+    - RefusedActorTests (5): EACH ROUTE INDIVIDUALLY refuses a signed-out caller
+      (401 login_required), an approved account with NO linked Trakt identity
+      (403 trakt_link_required), a linked and calendar-approved account WITHOUT
+      the tracker grant (403 distrakt_not_approved), an account whose only link
+      is Plex (403 trakt_link_required), and an ADMIN without the grant (403 —
+      being an administrator is not the tracker grant).
+    - AdmittedActorTests (3): the one qualifying actor is admitted to every
+      route (asserted as "not 401/403", since the routes answer 200/400/404 on
+      their own merits); the page renders; and one user's roster is invisible
+      to another through both /list and /export.
+    - RequestingUsersTokenTests (7): settings.json is given a DISTINCT app-wide
+      token throughout, so "used the user's" and "used none" cannot be confused.
+      _distrakt_settings carries the user's token and not the instance's, blanks
+      the operator's refresh token, and keeps the app-wide client id; the token
+      comes from trakt_routes.access_token_for_user (patched and asserted
+      awaited with the right user_id — pinning the RENEWING source rather than a
+      raw row read); EVERY Authorization header a month read produces is the
+      requesting user's, with the app-wide value absent; two users reading the
+      same month each send their own; search and seasons (the two endpoints that
+      take no user_id and read no rows) use it too; a linked identity with an
+      empty token yields "not configured" and issues NO Trakt call rather than
+      falling back to settings.json's; and a private Trakt response is not
+      present in the shared cache afterwards.
+    - EasterEggFlagTests (6): the template emits DISTRAKT_AVAILABLE=false for an
+      unapproved user, false for approval WITHOUT a Trakt link, false for a link
+      WITHOUT approval, and true only for both; and A FORGED true STILL GETS 403
+      from /distrakt and from every other tracker GET.
+    - Post1ShareLinkTests (12): the default embedded link is the form the share
+      panel prefers; the selector switches it; the choice is remembered per user
+      and does not leak to another account; clearing it goes back to following
+      the panel; the view option rides along as ?endpoint=; the two controls save
+      independently; unknown kinds/endpoints are 400; a form that stops resolving
+      falls back rather than vanishing; NO public_base_url omits the link line
+      cleanly (no "Full calendar", no "://" anywhere in the post) and reports
+      base_url_missing; every form disabled omits it; the URL is built from the
+      configured origin and a spoofed Host header does not appear in it; and
+      another user's token never appears in this user's post.
+  PORTED: nothing. tests/test_discord_fmt.py's render_post1 cases pass unchanged
+    because link_url defaults to None and the line is omitted entirely without
+    one; the whole pre-existing suite was re-run and is green.
+  DELIBERATELY NOT COVERED HERE:
+    - Anything against the real Trakt API. The pooled client is replaced by a
+      recorder that returns an empty list and remembers the Authorization header
+      it was handed — which is the only place a token becomes observable.
+    - The two selectors' own JavaScript and the easter-egg key handling —
+      exercised by hand, not under a browser test, the same posture every other
+      chat took for admin.html, the Settings modal and the Share modal. What the
+      template emits and what the routes behind them do IS covered above.
+
+KNOWN GAPS:  (nothing left for a later chat — this is the last one. What follows
+  is what remains open across §11.A-K and is DELIBERATELY DEFERRED. Every §10
+  STATUS line now reads "done".)
+  - No Settings-UI widget for `calendar_cache_ttl_minutes` or
+    `api_cache_max_bytes` (§11.G deviation 2). Both are read live from
+    settings.json and hand-editable; the admin screen is otherwise complete.
+    Cosmetic.
+  - The Share panel has no owner-default view editor (§11.I deviation 2) — the
+    six owner-default columns are seeded from user_prefs and mirrored by
+    POST /api/me/prefs and POST /api/me/timezone thereafter. Cosmetic, and only
+    wanted if "my share page should look different from my private view" turns
+    out to be a real want.
+  - A share page's month/endpoint navigation is plain query-string links rather
+    than the interactive selects the signed-in calendar has (§11.I). Cosmetic.
+  - Distrakt export/restore still has NO UI and no typed acknowledgement
+    (§11.J deviation 4). Both routes work and are tested. §10[K]'s scope line
+    does not include it and this chat did not add it; §1.20's typed-confirmation
+    requirement is therefore still outstanding for whenever the download/upload
+    control is built.
+  - data/state_*.json are still present and are still read by
+    calendar_state.import_legacy_state() at onboarding (§11.J deviation 3). They
+    become deletable on an instance once onboarding has run there once.
+    data/legacy_state_backup/ is permanent.
+  - Nothing revokes a Trakt token at Trakt's end on unlink (§11.D). The row goes,
+    so this instance can no longer use it, but the grant survives on trakt.tv.
+  - An OAuth-only account still cannot set a username or password for itself
+    (§11.D); an admin can do it for them from the admin screen.

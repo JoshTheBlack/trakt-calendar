@@ -502,6 +502,118 @@ CREATE TABLE share_links (
 );
 """
 
+# Migration 4 — the distrakt tracker's per-user data model. The tracker used to
+# be one shared set of per-month JSON documents plus a single watch_state.json;
+# every user now keeps their own independent roster, buckets, and watch history,
+# so all five tables are keyed by user_id. The month-level fields (whether a
+# month is frozen, when its totals were last refreshed, the movies watched during
+# it) live on distrakt_months; the per-show fields on distrakt_shows. The three
+# watch-history tables hold the incremental progress cache each user's counts are
+# derived from.
+MIGRATION_4 = """
+-- One row per (user, month) — the month-level state that used to sit at the top
+-- of each YYYY-MM.json document.
+CREATE TABLE distrakt_months (
+    user_id             INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    month               TEXT    NOT NULL,          -- 'YYYY-MM'
+    -- Once a month is frozen it renders forever from the stored snapshot with no
+    -- Trakt calls; the "still live" months are the ones where this is 0.
+    closed              INTEGER NOT NULL DEFAULT 0,
+    -- When the open month's live totals were last recomputed (whole UTC seconds),
+    -- so a routine load can skip the refetch until they age out. NULL until first
+    -- stamped.
+    totals_refreshed_at INTEGER,
+    -- The movies watched during this month, snapshotted at freeze time so the
+    -- frozen Discord Post 2 keeps its Movies section offline forever. NULL while
+    -- the month is still open (its movies come from the live watch-history cache).
+    movies_json         TEXT,
+    created_at          INTEGER NOT NULL,
+    PRIMARY KEY (user_id, month)
+);
+
+-- One row per (user, month, show, season) — the roster records. Keyed by
+-- (trakt_id, season) within a user's month, mirroring how a show+season was
+-- addressed inside the old document.
+CREATE TABLE distrakt_shows (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    month           TEXT    NOT NULL,
+    trakt_id        INTEGER NOT NULL,
+    tmdb            INTEGER,
+    slug            TEXT    NOT NULL DEFAULT '',
+    media           TEXT    NOT NULL DEFAULT 'show',
+    title           TEXT    NOT NULL DEFAULT '',
+    season          INTEGER NOT NULL,
+    network         TEXT    NOT NULL DEFAULT '',
+    abandoned       INTEGER NOT NULL DEFAULT 0,
+    -- The rendered inline Discord line, frozen at the moment of abandoning so it
+    -- stays stable even after the show would otherwise change buckets. NULL when
+    -- not abandoned.
+    abandoned_form  TEXT,
+    watched         INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    cadence         TEXT,
+    premiere        TEXT,
+    finale          TEXT,
+    bucket          TEXT,
+    -- Persisted onto each record at freeze time (and dropped by revision 1's
+    -- draft schema): without them a frozen month re-renders every show as
+    -- not-yet-aired / not-finished and its bucket rendering silently changes.
+    started_airing  INTEGER NOT NULL DEFAULT 0,
+    finished_airing INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (user_id, month, trakt_id, season)
+);
+
+-- One row per user — the singleton fields from watch_state.json: the history
+-- cursor and the last_activities beacon set the incremental sync gates on.
+CREATE TABLE distrakt_watch_state (
+    user_id      INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    -- The ISO date we last synced through, passed straight back to Trakt as the
+    -- history start_at cursor — kept as the string Trakt speaks rather than
+    -- re-encoded.
+    last_synced  TEXT,
+    beacons_json TEXT
+);
+
+-- One row per (user, show, season) — the completed-episode set per season,
+-- stored as a sorted JSON list exactly as the in-memory cache holds it.
+CREATE TABLE distrakt_show_progress (
+    user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    trakt_id              INTEGER NOT NULL,
+    season                INTEGER NOT NULL,
+    watched_episodes_json TEXT    NOT NULL DEFAULT '[]',
+    PRIMARY KEY (user_id, trakt_id, season)
+);
+
+-- One row per (user, movie) — a watched movie. watched_at is Trakt's own ISO
+-- timestamp stored verbatim (third-party payload, not our clock), so it stays
+-- TEXT. title/year travel with it because the open month's Post 2 renders the
+-- movie line from this cache, not from the frozen snapshot.
+CREATE TABLE distrakt_movie_watches (
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    trakt_id   INTEGER NOT NULL,
+    watched_at TEXT,
+    title      TEXT NOT NULL DEFAULT '',
+    year       INTEGER,
+    PRIMARY KEY (user_id, trakt_id)
+);
+"""
+
+# Migration 5 — the share link the tracker embeds in its announcement post. Both
+# columns are NULL by default and NULL means "follow what the share panel already
+# says", so an account that never touches the tracker behaves exactly as before.
+MIGRATION_5 = """
+-- Which of the three link forms the announcement post carries. NULL follows
+-- preferred_kind; a value here is the deliberate override for that one post,
+-- which is why it is not just a second write to preferred_kind (the copy button
+-- on the calendar and the one on the tracker are different audiences).
+ALTER TABLE share_links ADD COLUMN post_link_kind TEXT;
+
+-- Which calendar view the embedded link opens on, as the endpoint key carried in
+-- its query string. NULL leaves the link bare, so it opens on whatever the owner
+-- defaults already resolve to.
+ALTER TABLE share_links ADD COLUMN post_link_endpoint TEXT;
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -509,6 +621,8 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
     (3, MIGRATION_3),
+    (4, MIGRATION_4),
+    (5, MIGRATION_5),
 ]
 
 

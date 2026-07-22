@@ -220,9 +220,17 @@ def _render_keepup(shows: list[dict], emoji_map: dict, default_emoji: str) -> st
     return "\n".join(lines)
 
 
-def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:") -> str:
-    """POST 1 (announcement): **New Shows** + **Returning**. No link line (§6:
-    intentionally omitted — see BUILD_PLAN §6)."""
+def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:",
+                 link_url: str | None = None) -> str:
+    """POST 1 (announcement): **New Shows** + **Returning**, optionally followed
+    by a link line pointing at the poster's own public calendar.
+
+    `link_url` is omitted entirely when there is nothing to link to, rather than
+    rendered as an empty or broken line. It is wrapped in angle brackets, which
+    is Discord's own way of suppressing the link preview card — an announcement
+    that already lists a month of shows does not want a second, larger block
+    underneath it.
+    """
     emoji_map = emoji_map or {}
     groups = _group_by_bucket(shows)
     news = sorted(groups["new"], key=_premiere_sort_key)
@@ -231,6 +239,8 @@ def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji
         _section("**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
         _section("**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
     ]
+    if link_url:
+        sections.append(f"**Full calendar:** <{link_url}>")
     return "\n\n".join(sections)
 
 

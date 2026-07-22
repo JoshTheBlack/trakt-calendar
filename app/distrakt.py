@@ -1,25 +1,35 @@
-"""Per-month persistence store for the hidden "distrakt" tracker (BUILD_PLAN §6).
+"""Per-user persistence and rollover for the hidden "distrakt" tracker.
 
-One JSON doc per month at data/distrakt/YYYY-MM.json. This module is a PURE store:
-load / save / list, plus add-show and set-abandoned mutations. It deliberately
-contains NO rollover logic (Chat 5) and NO bucket computation (Chat 4) — it only
-persists and reads back the month document.
+Each distrakt user keeps their OWN independent roster: their own tracked shows,
+their own Cleanup/Keepup/Completed/Abandoned buckets built from their own Trakt
+watch history, and their own pair of Discord posts. Nothing here is shared
+between users — every lookup and mutation is scoped by user_id.
 
-Mirrors app/state.py's file-IO conventions (DATA_DIR, ensure-dir, plain JSON),
-with atomic writes so an in-place update can't leave a truncated doc behind.
+Two storage shapes:
+  - distrakt_months holds the month-level state (whether the month is frozen,
+    when its totals were last refreshed, the movies snapshotted at freeze time),
+    keyed (user_id, month).
+  - distrakt_shows holds one row per tracked (user_id, month, trakt_id, season).
+
+In memory a month is still the same `doc` dict the renderers and the pure
+rollover logic have always consumed —
+    {month, closed, totals_refreshed_at, movies?, shows: [record, ...]}
+— so load_month assembles that shape from the two tables and save_month writes it
+back; only the storage underneath changed, not the document the logic reasons about.
+
+The Trakt reads (premieres, season detail, watch history) still authenticate with
+the app-wide token carried on `settings`; user_id scopes the STORAGE. Handing a
+user's own token in is a separate step — the only input to change is the
+`settings`/token these functions and watch_history's are given.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import tempfile
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
 
-from .config import DATA_DIR, _ensure_data_dir
-
-DISTRAKT_DIR = DATA_DIR / "distrakt"
+from . import calendar_state, db
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -27,38 +37,27 @@ _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _INT_FIELDS = ("trakt_id", "season", "watched", "total")
 _BOOL_FIELDS = ("abandoned",)
 
+# The distrakt_shows columns beyond (user_id, month), in insert order. The bool
+# columns are stored as 0/1; everything else passes through.
+_SHOW_COLUMNS = (
+    "trakt_id", "tmdb", "slug", "media", "title", "season", "network",
+    "abandoned", "abandoned_form", "watched", "total", "cadence", "premiere",
+    "finale", "bucket", "started_airing", "finished_airing",
+)
+# Columns an in-place update is allowed to touch (identity keys excluded).
+_UPDATABLE_COLUMNS = frozenset(_SHOW_COLUMNS) - {"trakt_id", "season"}
+_BOOL_COLUMNS = frozenset(("abandoned", "started_airing", "finished_airing"))
+
+_INSERT_SHOW_SQL = (
+    "INSERT INTO distrakt_shows (user_id, month, " + ", ".join(_SHOW_COLUMNS) + ") "
+    "VALUES (" + ", ".join(["?"] * (2 + len(_SHOW_COLUMNS))) + ")"
+)
+
 
 def _validate_month(month: str) -> str:
     if not isinstance(month, str) or not _MONTH_RE.match(month):
         raise ValueError(f"month must be 'YYYY-MM', got {month!r}")
     return month
-
-
-def _month_path(month: str):
-    return DISTRAKT_DIR / f"{_validate_month(month)}.json"
-
-
-def _ensure_distrakt_dir() -> None:
-    _ensure_data_dir()
-    DISTRAKT_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _atomic_write(path, text: str) -> None:
-    """Write via a temp file in the same dir + os.replace so readers never see a
-    half-written doc (state.py writes in place; the tracker updates docs in place
-    far more often, so the atomicity matters here)."""
-    _ensure_distrakt_dir()
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-        os.replace(tmp, path)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 
 def new_month_doc(month: str) -> dict:
@@ -72,9 +71,9 @@ def new_month_doc(month: str) -> dict:
 
 
 def _normalize_show(show: dict) -> dict:
-    """Build a full show record from `show`, filling schema defaults (§6)."""
+    """Build a full show record from `show`, filling schema defaults."""
     incoming = dict(show or {})
-    record = {
+    return {
         "trakt_id": int(incoming["trakt_id"]),
         "tmdb": int(incoming["tmdb"]) if incoming.get("tmdb") not in (None, "") else None,
         "slug": str(incoming.get("slug") or ""),
@@ -91,15 +90,15 @@ def _normalize_show(show: dict) -> dict:
         "finale": incoming.get("finale"),
         "bucket": incoming.get("bucket"),
     }
-    return record
 
 
 def _coerce_update(fields: dict) -> dict:
-    """Coerce the subset of keys present in `fields` for an in-place update."""
+    """Coerce the subset of updatable keys present in `fields` for an in-place
+    update, dropping identity keys and anything not a real column."""
     out = {}
     for k, v in (fields or {}).items():
-        if k in ("trakt_id", "season"):
-            continue  # identity keys — never rewritten by an update
+        if k not in _UPDATABLE_COLUMNS:
+            continue  # identity key or not a stored column
         if k in _INT_FIELDS:
             out[k] = int(v) if v is not None else 0
         elif k in _BOOL_FIELDS:
@@ -109,99 +108,227 @@ def _coerce_update(fields: dict) -> dict:
     return out
 
 
-def _find_show(doc: dict, trakt_id: int, season: int) -> dict | None:
-    for rec in doc.get("shows") or []:
-        if rec.get("trakt_id") == trakt_id and rec.get("season") == season:
-            return rec
-    return None
+def _show_params(user_id: int, month: str, rec: dict) -> tuple:
+    """Positional values for _INSERT_SHOW_SQL from a record dict."""
+    return (
+        user_id, month,
+        int(rec["trakt_id"]),
+        int(rec["tmdb"]) if rec.get("tmdb") not in (None, "") else None,
+        str(rec.get("slug") or ""),
+        str(rec.get("media") or "show"),
+        str(rec.get("title") or ""),
+        int(rec["season"]),
+        str(rec.get("network") or ""),
+        1 if rec.get("abandoned") else 0,
+        rec.get("abandoned_form"),
+        int(rec.get("watched") or 0),
+        int(rec.get("total") or 0),
+        rec.get("cadence"),
+        rec.get("premiere"),
+        rec.get("finale"),
+        rec.get("bucket"),
+        1 if rec.get("started_airing") else 0,
+        1 if rec.get("finished_airing") else 0,
+    )
 
 
-def load_month(month: str) -> dict | None:
-    """Return the stored month doc, or None if it has not been created yet.
+def _row_to_show(row) -> dict:
+    """A distrakt_shows row back into the record shape the renderers consume."""
+    return {
+        "trakt_id": row["trakt_id"],
+        "tmdb": row["tmdb"],
+        "slug": row["slug"] or "",
+        "media": row["media"] or "show",
+        "title": row["title"] or "",
+        "season": row["season"],
+        "network": row["network"] or "",
+        "abandoned": bool(row["abandoned"]),
+        "abandoned_form": row["abandoned_form"],
+        "watched": row["watched"],
+        "total": row["total"],
+        "cadence": row["cadence"],
+        "premiere": row["premiere"],
+        "finale": row["finale"],
+        "bucket": row["bucket"],
+        "started_airing": bool(row["started_airing"]),
+        "finished_airing": bool(row["finished_airing"]),
+    }
 
-    (None — rather than an empty default — lets Chat 5's rollover distinguish an
-    uninitialized month from an initialized-but-empty one.)
+
+async def load_month(user_id: int, month: str) -> dict | None:
+    """Return this user's stored month doc, or None if it has not been created.
+
+    None — rather than an empty default — lets the rollover logic distinguish an
+    uninitialized month from an initialized-but-empty one.
     """
-    path = _month_path(month)
-    if not path.exists():
+    month = _validate_month(month)
+    mrow = await db.fetch_one(
+        "SELECT closed, totals_refreshed_at, movies_json FROM distrakt_months "
+        "WHERE user_id = ? AND month = ?",
+        (user_id, month),
+    )
+    if mrow is None:
         return None
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
-def save_month(doc: dict) -> None:
-    """Persist a month doc. `doc['month']` must be a valid 'YYYY-MM'."""
-    month = _validate_month((doc or {}).get("month"))
-    _atomic_write(_month_path(month), json.dumps(doc, indent=2))
-
-
-def list_months() -> list[str]:
-    """Sorted list of 'YYYY-MM' for which a doc exists on disk."""
-    if not DISTRAKT_DIR.exists():
-        return []
-    months = []
-    for entry in DISTRAKT_DIR.iterdir():
-        if entry.suffix == ".json" and _MONTH_RE.match(entry.stem):
-            months.append(entry.stem)
-    return sorted(months)
-
-
-def add_show(month: str, show: dict) -> dict:
-    """Upsert a show+season into `month`, creating the month doc if needed.
-
-    Keyed by (trakt_id, season): a new pair is appended as a full record; an
-    existing pair is updated in place with whatever keys `show` carries (so this
-    doubles as the live-counts writer for Chat 4/5). Returns the saved doc.
-    """
-    doc = load_month(month) or new_month_doc(month)
-    tid = int(show["trakt_id"])
-    season = int(show["season"])
-    existing = _find_show(doc, tid, season)
-    if existing is None:
-        doc["shows"].append(_normalize_show(show))
-    else:
-        existing.update(_coerce_update(show))
-    save_month(doc)
+    rows = await db.fetch_all(
+        "SELECT * FROM distrakt_shows WHERE user_id = ? AND month = ? ORDER BY rowid",
+        (user_id, month),
+    )
+    doc = {
+        "month": month,
+        "closed": bool(mrow["closed"]),
+        "totals_refreshed_at": mrow["totals_refreshed_at"],
+        "shows": [_row_to_show(r) for r in rows],
+    }
+    # `movies` only exists on a frozen month (snapshotted at freeze time). Mirror
+    # the file model, where the key was simply absent until then.
+    if mrow["movies_json"] is not None:
+        doc["movies"] = json.loads(mrow["movies_json"])
     return doc
 
 
-def set_abandoned(
+async def save_month(user_id: int, doc: dict) -> None:
+    """Persist a whole month doc for `user_id` in one transaction: upsert the
+    month-level row, then replace the month's show rows with the doc's.
+
+    Whole-doc replace matches how the freeze pass and the lazy init build a doc
+    (from scratch or by recomputing every record); the per-item mutators below
+    write single rows instead.
+    """
+    month = _validate_month((doc or {}).get("month"))
+    closed = 1 if doc.get("closed") else 0
+    totals = doc.get("totals_refreshed_at")
+    movies = doc.get("movies")
+    movies_json = None if movies is None else json.dumps(movies)
+    shows = doc.get("shows") or []
+
+    def _work(conn: db.Connection) -> None:
+        conn.execute(
+            "INSERT INTO distrakt_months "
+            "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(user_id, month) DO UPDATE SET "
+            "closed = excluded.closed, totals_refreshed_at = excluded.totals_refreshed_at, "
+            "movies_json = excluded.movies_json",
+            (user_id, month, closed, totals, movies_json, db.now()),
+        )
+        conn.execute("DELETE FROM distrakt_shows WHERE user_id = ? AND month = ?", (user_id, month))
+        for rec in shows:
+            conn.execute(_INSERT_SHOW_SQL, _show_params(user_id, month, rec))
+
+    await db.transaction(_work)
+
+
+async def list_months(user_id: int) -> list[str]:
+    """Sorted list of 'YYYY-MM' this user has a month row for."""
+    rows = await db.fetch_all(
+        "SELECT month FROM distrakt_months WHERE user_id = ? ORDER BY month",
+        (user_id,),
+    )
+    return [r["month"] for r in rows]
+
+
+async def add_show(user_id: int, month: str, show: dict) -> None:
+    """Upsert a show+season into `user_id`'s `month`, creating the month row if
+    needed. Keyed by (trakt_id, season): a new pair is inserted as a full record;
+    an existing pair is updated in place with whatever updatable keys `show`
+    carries (so this doubles as a live-counts writer)."""
+    month = _validate_month(month)
+    tid = int(show["trakt_id"])
+    season = int(show["season"])
+
+    def _work(conn: db.Connection) -> None:
+        conn.execute(
+            "INSERT INTO distrakt_months "
+            "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
+            "VALUES (?, ?, 0, NULL, NULL, ?) ON CONFLICT(user_id, month) DO NOTHING",
+            (user_id, month, db.now()),
+        )
+        existing = conn.execute(
+            "SELECT trakt_id FROM distrakt_shows "
+            "WHERE user_id = ? AND month = ? AND trakt_id = ? AND season = ?",
+            (user_id, month, tid, season),
+        ).fetchone()
+        if existing is None:
+            conn.execute(_INSERT_SHOW_SQL, _show_params(user_id, month, _normalize_show(show)))
+            return
+        updates = _coerce_update(show)
+        if not updates:
+            return
+        cols = list(updates)
+        set_clause = ", ".join(f"{c} = ?" for c in cols)
+        params = [(1 if updates[c] else 0) if c in _BOOL_COLUMNS else updates[c] for c in cols]
+        params += [user_id, month, tid, season]
+        conn.execute(
+            f"UPDATE distrakt_shows SET {set_clause} "
+            "WHERE user_id = ? AND month = ? AND trakt_id = ? AND season = ?",
+            params,
+        )
+
+    await db.transaction(_work)
+
+
+async def set_abandoned(
+    user_id: int,
     month: str,
     trakt_id: int,
     season: int,
     abandoned: bool,
     abandoned_form: str | None = None,
 ) -> dict | None:
-    """Toggle a show's abandoned flag (§4/§5). Returns the updated record, or
-    None if the month or the show+season isn't present.
+    """Toggle a show's abandoned flag. Returns the updated record, or None if the
+    month or the show+season isn't present for this user.
 
-    When abandoning, `abandoned_form` freezes the rendered inline form (the
-    renderer that produces it lands in Chat 4; callers may pass None until then).
-    Un-abandoning clears the frozen form.
+    When abandoning, `abandoned_form` freezes the rendered inline form so the
+    Discord line stays stable; un-abandoning clears it.
     """
-    doc = load_month(month)
-    if doc is None:
-        return None
-    rec = _find_show(doc, int(trakt_id), int(season))
-    if rec is None:
-        return None
-    rec["abandoned"] = bool(abandoned)
-    rec["abandoned_form"] = abandoned_form if abandoned else None
-    save_month(doc)
-    return rec
+    month = _validate_month(month)
+    tid, season = int(trakt_id), int(season)
+
+    def _work(conn: db.Connection) -> dict | None:
+        row = conn.execute(
+            "SELECT trakt_id FROM distrakt_shows "
+            "WHERE user_id = ? AND month = ? AND trakt_id = ? AND season = ?",
+            (user_id, month, tid, season),
+        ).fetchone()
+        if row is None:
+            return None
+        conn.execute(
+            "UPDATE distrakt_shows SET abandoned = ?, abandoned_form = ? "
+            "WHERE user_id = ? AND month = ? AND trakt_id = ? AND season = ?",
+            (1 if abandoned else 0, abandoned_form if abandoned else None,
+             user_id, month, tid, season),
+        )
+        updated = conn.execute(
+            "SELECT * FROM distrakt_shows "
+            "WHERE user_id = ? AND month = ? AND trakt_id = ? AND season = ?",
+            (user_id, month, tid, season),
+        ).fetchone()
+        return _row_to_show(updated)
+
+    return await db.transaction(_work)
+
+
+async def remove_show(user_id: int, month: str, trakt_id, season) -> bool:
+    """Delete a show+season from a user's month. Returns True if a record was
+    removed. Callers guard closed (frozen) months."""
+    month = _validate_month(month)
+    result = await db.execute(
+        "DELETE FROM distrakt_shows "
+        "WHERE user_id = ? AND month = ? AND trakt_id = ? AND season = ?",
+        (user_id, month, int(trakt_id), int(season)),
+    )
+    return result.rowcount > 0
 
 
 # ===========================================================================
-# CHAT 5 — lazy month rollover, prior-month freeze, and totals staleness
-# (BUILD_PLAN §3 refresh + §6 rollover). This is the ORCHESTRATOR layer on top
-# of the pure store above; it is the only part that reaches out to Trakt (via
-# app/trakt.py) + reads the main-calendar not-watching store (app/state.py).
+# Lazy month rollover, prior-month freeze, and totals staleness. This is the
+# orchestrator layer on top of the pure store above; it is the only part that
+# reaches out to Trakt (via app/trakt.py) and reads the per-user main-calendar
+# not-watching store (app/calendar_state.py).
 # ===========================================================================
 
-TOTALS_STALE_HOURS = 24        # §3: auto-refresh open-month totals if stale >24h
-WATCHED_RECENCY_DAYS = 60      # §6 step (d): only seed genuinely active shows
+TOTALS_STALE_HOURS = 24        # auto-refresh open-month totals if stale >24h
+WATCHED_RECENCY_DAYS = 60      # only seed genuinely active shows from history
 
 
 def _prev_month_key(month_key: str) -> str:
@@ -209,20 +336,20 @@ def _prev_month_key(month_key: str) -> str:
     return f"{year - 1:04d}-12" if month == 1 else f"{year:04d}-{month - 1:02d}"
 
 
-def can_initialize(month_key: str) -> bool:
-    """§6 "no backfill of months earlier than the initial seed". Only a brand-new
-    store (no docs yet -> seed) or a month strictly AFTER the latest tracked month
-    (forward rollover) may be initialized. This stops backward / gap month-nav
-    from silently creating (and Trakt-seeding) historical month docs — the store
-    only ever grows forward. YYYY-MM strings compare chronologically."""
-    months = list_months()  # sorted ascending
+async def can_initialize(user_id: int, month_key: str) -> bool:
+    """No backfill of months earlier than a user's initial seed. Only a brand-new
+    store (no months yet -> seed) or a month strictly AFTER their latest tracked
+    month (forward rollover) may be initialized. This stops backward / gap
+    month-nav from silently creating (and Trakt-seeding) historical months — a
+    user's store only ever grows forward. YYYY-MM strings compare chronologically."""
+    months = await list_months(user_id)  # sorted ascending
     return not months or month_key > months[-1]
 
 
-def is_backfill_blocked(month_key: str) -> bool:
-    """True when `month_key` has no doc AND may not be initialized (a past / gap
-    month reached by navigating backward) — the caller renders it read-only."""
-    return load_month(month_key) is None and not can_initialize(month_key)
+async def is_backfill_blocked(user_id: int, month_key: str) -> bool:
+    """True when `month_key` has no doc for this user AND may not be initialized (a
+    past / gap month reached by navigating backward) — rendered read-only."""
+    return (await load_month(user_id, month_key)) is None and not await can_initialize(user_id, month_key)
 
 
 def month_committed(month_key: str, today: date | None = None) -> bool:
@@ -236,30 +363,17 @@ def month_committed(month_key: str, today: date | None = None) -> bool:
     return (today.year, today.month) >= (year, month)
 
 
-async def maybe_freeze_prior(month_key: str, settings, today: date | None = None) -> None:
-    """Freeze the immediately-prior month, but ONLY once `month_key` has begun
-    (first access on/after the 1st) and the prior is still open. This is what
-    keeps a NEW month's pre-1st preview from freezing the still-current prior
-    month. Idempotent — a closed/absent prior is left alone."""
+async def maybe_freeze_prior(user_id: int, month_key: str, settings, today: date | None = None) -> None:
+    """Freeze `user_id`'s immediately-prior month, but ONLY once `month_key` has
+    begun (first access on/after the 1st) and the prior is still open. This is
+    what keeps a NEW month's pre-1st preview from freezing the still-current prior
+    month. Idempotent — a closed/absent prior is left alone. Per user: one user
+    reaching the 1st does not freeze anyone else's prior month."""
     if not month_committed(month_key, today):
         return
-    prior = load_month(_prev_month_key(month_key))
+    prior = await load_month(user_id, _prev_month_key(month_key))
     if prior is not None and not prior.get("closed"):
-        await _freeze_month(prior, settings)
-
-
-def not_watching_ids(year: int, month: int) -> set[str]:
-    """Union of main-calendar not-watching ids for the roster's source endpoints
-    (shows/new + shows/premieres) for this year/month (§5). Ids are the calendar
-    card's `data-id` = slug (preferred) or str(trakt_id) — matched against a
-    stored record's slug / trakt_id."""
-    from . import state as state_store
-    ids: set[str] = set()
-    for endpoint_key in ("shows/new", "shows/premieres"):
-        st = state_store.load_state(endpoint_key, int(year), int(month))
-        for x in st.get("notWatching") or []:
-            ids.add(str(x))
-    return ids
+        await _freeze_month(user_id, prior, settings)
 
 
 def _matches_not_watching(rec: dict, nw_ids: set[str]) -> bool:
@@ -268,8 +382,8 @@ def _matches_not_watching(rec: dict, nw_ids: set[str]) -> bool:
 
 def _identity_record(src: dict) -> dict:
     """Identity-only projection (no live counts/dates/bucket; abandoned reset) —
-    used to carry a show forward into a new month (Chat 4 handoff: identity only,
-    recompute live once the new month opens)."""
+    used to carry a show forward into a new month (identity only; recompute live
+    once the new month opens)."""
     return {
         "trakt_id": int(src["trakt_id"]),
         "tmdb": src.get("tmdb"),
@@ -283,12 +397,12 @@ def _identity_record(src: dict) -> dict:
     }
 
 
-async def compute_live_shows(records: list[dict], settings, fresh: bool = False,
+async def compute_live_shows(user_id: int, records: list[dict], settings, fresh: bool = False,
                              watched_lookup: dict | None = None) -> list[dict]:
     """Merge each stored record with its live Trakt-derived fields into the flat
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
 
-    Watched counts (`x`) come from the incremental watch-history cache
+    Watched counts (`x`) come from `user_id`'s incremental watch-history cache
     (app/watch_history) — the caller may pass a pre-synced `watched_lookup`
     (avoids re-syncing when it also needs the movies from the same state); if
     omitted we sync here. Totals/dates (`y`, cadence, premiere/finale) come from
@@ -313,7 +427,7 @@ async def compute_live_shows(records: list[dict], settings, fresh: bool = False,
     if watched_lookup is None:
         with span("cls.sync+seasons", n=len(records), fresh=fresh):
             state, details = await asyncio.gather(
-                watch_history.sync_and_baseline(settings, [rec["trakt_id"] for rec in records], force=fresh),
+                watch_history.sync_and_baseline(settings, user_id, [rec["trakt_id"] for rec in records], force=fresh),
                 _season_details(),
             )
         watched_lookup = watch_history.watched_map(state)
@@ -339,10 +453,9 @@ async def compute_live_shows(records: list[dict], settings, fresh: bool = False,
         show["bucket"] = discord_fmt.bucket_of(show, show)
         shows.append(show)
 
-    # X/Y diagnostic (BUILD_PLAN "0/Y" audit): distinguishes an EMPTY watched
-    # lookup (no progress returned — see fetch_watched_map) from a NON-empty
-    # lookup that simply doesn't line up with the stored records (an id/season
-    # key mismatch), by printing a small sample of each.
+    # X/Y diagnostic: distinguishes an EMPTY watched lookup (no progress returned)
+    # from a NON-empty lookup that simply doesn't line up with the stored records
+    # (an id/season key mismatch), by printing a small sample of each.
     logger.info(
         "compute_live_shows: %d record(s), watched-lookup has %d key(s), %d matched",
         len(records), len(watched_lookup), matched,
@@ -360,9 +473,9 @@ async def compute_live_shows(records: list[dict], settings, fresh: bool = False,
 
 def frozen_shows(doc: dict) -> list[dict]:
     """LIVE SHOW SHAPE list for a CLOSED month, straight from the stored snapshot
-    — NO Trakt calls (§3). `_freeze_month` already persisted watched/total/
-    cadence/premiere/finale/started_airing/finished_airing/bucket onto each
-    record, so the discord_fmt renderers read them as-is."""
+    — NO Trakt calls. `_freeze_month` already persisted watched/total/cadence/
+    premiere/finale/started_airing/finished_airing/bucket onto each record, so the
+    discord_fmt renderers read them as-is."""
     out = []
     for rec in doc.get("shows") or []:
         show = dict(rec)
@@ -372,15 +485,15 @@ def frozen_shows(doc: dict) -> list[dict]:
     return out
 
 
-async def _freeze_month(doc: dict, settings) -> dict:
+async def _freeze_month(user_id: int, doc: dict, settings) -> dict:
     """Compute one final live snapshot for `doc`, persist counts/dates/bucket onto
     each stored record, mark it closed, stamp totals_refreshed_at, save. After
-    this the month renders forever from the frozen snapshot with no Trakt (§3)."""
+    this the month renders forever from the frozen snapshot with no Trakt calls."""
     from . import watch_history
     records = doc.get("shows") or []
-    state = await watch_history.sync_and_baseline(settings, [r["trakt_id"] for r in records], force=True)
+    state = await watch_history.sync_and_baseline(settings, user_id, [r["trakt_id"] for r in records], force=True)
     watched_lookup = watch_history.watched_map(state)
-    shows = await compute_live_shows(records, settings, fresh=True, watched_lookup=watched_lookup)
+    shows = await compute_live_shows(user_id, records, settings, fresh=True, watched_lookup=watched_lookup)
     by_key = {(int(s["trakt_id"]), int(s["season"])): s for s in shows}
     for rec in records:
         s = by_key.get((int(rec["trakt_id"]), int(rec["season"])))
@@ -394,39 +507,35 @@ async def _freeze_month(doc: dict, settings) -> dict:
         rec["started_airing"] = bool(s["started_airing"])
         rec["finished_airing"] = bool(s["finished_airing"])
         rec["bucket"] = s["bucket"]
-    # Snapshot the movies watched during this month so the frozen POST 2 keeps
-    # its **Movies** section offline forever.
+    # Snapshot the movies watched during this month so the frozen POST 2 keeps its
+    # **Movies** section offline forever.
     mstart, mend = watch_history.month_bounds(doc["month"])
     doc["movies"] = watch_history.movies_in_range(state, mstart, mend)
     doc["closed"] = True
-    doc["totals_refreshed_at"] = datetime.now(timezone.utc).isoformat()
-    save_month(doc)
+    doc["totals_refreshed_at"] = db.now()
+    await save_month(user_id, doc)
     return doc
 
 
 def is_stale(doc: dict | None, max_age_hours: int = TOTALS_STALE_HOURS) -> bool:
     """True if the open month's totals have never been stamped or are older than
-    `max_age_hours` (§3: auto-refresh on load if stale >24h)."""
+    `max_age_hours` (auto-refresh on load if stale >24h)."""
     ts = (doc or {}).get("totals_refreshed_at")
     if not ts:
         return True
     try:
-        dt = datetime.fromisoformat(ts)
+        ts = int(ts)
     except (TypeError, ValueError):
         return True
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return datetime.now(timezone.utc) - dt > timedelta(hours=max_age_hours)
+    return (db.now() - ts) > max_age_hours * 3600
 
 
-def stamp_refreshed(month_key: str) -> dict | None:
-    """Record that the open month's live totals were just refreshed (§3)."""
-    doc = load_month(month_key)
-    if doc is None:
-        return None
-    doc["totals_refreshed_at"] = datetime.now(timezone.utc).isoformat()
-    save_month(doc)
-    return doc
+async def stamp_refreshed(user_id: int, month_key: str) -> None:
+    """Record that a user's open month totals were just refreshed."""
+    await db.execute(
+        "UPDATE distrakt_months SET totals_refreshed_at = ? WHERE user_id = ? AND month = ?",
+        (db.now(), user_id, _validate_month(month_key)),
+    )
 
 
 def _calendar_record(item: dict) -> dict:
@@ -443,7 +552,7 @@ def _calendar_record(item: dict) -> dict:
 
 
 async def _premiere_records(settings, year: int, month: int) -> list[dict]:
-    """This month's calendar premieres split by §2a: shows/new -> New (S01);
+    """This month's calendar premieres split by rule: shows/new -> New (S01);
     shows/premieres minus shows/new -> Returning (S02+)."""
     from .endpoints import get_endpoint
     from .trakt import fetch_calendar
@@ -471,7 +580,7 @@ async def _premiere_records(settings, year: int, month: int) -> list[dict]:
 
 async def _add_premieres(doc: dict, present: set[tuple[int, int]], settings,
                          year: int, month: int, nw_ids: set[str]) -> int:
-    """Append this month's premieres to `doc` (skip existing + not-watching, §5).
+    """Append this month's premieres to `doc` (skip existing + not-watching).
     Mutates `doc['shows']`/`present`; returns the number added."""
     added = 0
     for rec in await _premiere_records(settings, year, month):
@@ -484,27 +593,27 @@ async def _add_premieres(doc: dict, present: set[tuple[int, int]], settings,
     return added
 
 
-async def import_premieres(month_key: str, settings) -> dict | None:
-    """Merge this month's calendar premieres into an OPEN month doc (skip existing
-    + not-watching). Powers the manual "Import from calendar" action and the
-    preview-month auto-populate. No-op on a missing/closed month."""
-    doc = load_month(month_key)
+async def import_premieres(user_id: int, month_key: str, settings) -> dict | None:
+    """Merge this month's calendar premieres into `user_id`'s OPEN month (skip
+    existing + not-watching). Powers the manual "Import from calendar" action and
+    the preview-month auto-populate. No-op on a missing/closed month."""
+    doc = await load_month(user_id, month_key)
     if doc is None or doc.get("closed"):
         return doc
     year, month = int(month_key[:4]), int(month_key[5:7])
     present = {(int(s["trakt_id"]), int(s["season"])) for s in doc.get("shows") or []}
-    nw_ids = not_watching_ids(year, month)
+    nw_ids = await calendar_state.not_watching_ids(user_id, year, month)
     if await _add_premieres(doc, present, settings, year, month, nw_ids):
-        save_month(doc)
+        await save_month(user_id, doc)
     return doc
 
 
-async def backfill_tmdb(month_key: str, settings) -> dict | None:
+async def backfill_tmdb(user_id: int, month_key: str, settings) -> dict | None:
     """Fill in `tmdb` for records added before it was stored (one-time per show).
     Resolves tmdb from the trakt_id via Trakt, dedup by show, persists if changed."""
     from .perftrace import span
     from .trakt import fetch_show_tmdb, shared_client
-    doc = load_month(month_key)
+    doc = await load_month(user_id, month_key)
     if doc is None:
         return None
     missing = [r for r in (doc.get("shows") or []) if not r.get("tmdb")]
@@ -522,31 +631,14 @@ async def backfill_tmdb(month_key: str, settings) -> dict | None:
                 rec["tmdb"] = int(tmdb)
                 changed = True
         if changed:
-            save_month(doc)
+            await save_month(user_id, doc)
     return doc
 
 
-def remove_show(month: str, trakt_id, season) -> bool:
-    """Delete a show+season from a month doc (cleanup of mistakes / abandons).
-    Returns True if a record was removed. Pure store op — callers guard closed
-    (frozen) months."""
-    doc = load_month(month)
-    if doc is None:
-        return False
-    tid, season = int(trakt_id), int(season)
-    shows = doc.get("shows") or []
-    kept = [s for s in shows if not (s.get("trakt_id") == tid and s.get("season") == season)]
-    if len(kept) == len(shows):
-        return False
-    doc["shows"] = kept
-    save_month(doc)
-    return True
-
-
 async def _history_records(settings, present: set[tuple[int, int]]) -> list[dict]:
-    """§6 step (d): in-progress-but-unfinished shows from recent watch history not
-    already in the roster. A candidate is dropped if its season is fully watched
-    (completed) or has zero watched episodes (nothing in progress)."""
+    """In-progress-but-unfinished shows from recent watch history not already in
+    the roster. A candidate is dropped if its season is fully watched (completed)
+    or has zero watched episodes (nothing in progress)."""
     from .trakt import fetch_season_detail, fetch_watched_progress
     progress = await fetch_watched_progress(settings, since_days=WATCHED_RECENCY_DAYS)
     candidates = [
@@ -576,8 +668,8 @@ async def _history_records(settings, present: set[tuple[int, int]]) -> list[dict
     return out
 
 
-async def ensure_month(year: int, month: int, settings, today: date | None = None) -> dict:
-    """Lazy, scheduler-free month rollover (§6). Returns the month doc.
+async def ensure_month(user_id: int, year: int, month: int, settings, today: date | None = None) -> dict:
+    """Lazy, scheduler-free month rollover for one user. Returns the month doc.
 
     On EVERY access it first freezes the prior month IF the accessed month has
     begun (maybe_freeze_prior) — so a pre-1st preview of a new month leaves the
@@ -589,7 +681,7 @@ async def ensure_month(year: int, month: int, settings, today: date | None = Non
           only; live fields recompute once this month opens). Prior buckets come
           from its frozen snapshot when closed, else computed live (preview case).
       (c) Add this month's calendar premieres (shows/new -> New, shows/premieres
-          minus new -> Returning), EXCLUDING not-watching (§5 before-commit).
+          minus new -> Returning), EXCLUDING not-watching (before-commit).
       (d) Add in-progress-but-unfinished shows from recent history not present.
 
     An already-initialized month is returned untouched (aside from the prior-month
@@ -597,23 +689,23 @@ async def ensure_month(year: int, month: int, settings, today: date | None = Non
     """
     today = today or date.today()
     month_key = f"{int(year):04d}-{int(month):02d}"
-    existing = load_month(month_key)
+    existing = await load_month(user_id, month_key)
 
     # Freeze the prior month only once THIS month has actually begun (not during a
     # pre-1st preview). Skip when accessing an already-closed month (settled).
     if settings and getattr(settings, "configured", False) and (existing is None or not existing.get("closed")):
-        await maybe_freeze_prior(month_key, settings, today)
+        await maybe_freeze_prior(user_id, month_key, settings, today)
 
     if existing is not None:
-        return load_month(month_key)
+        return await load_month(user_id, month_key)
     if not (settings and getattr(settings, "configured", False)):
         # Initialization needs Trakt (premieres + history); without credentials
         # return a transient, UNPERSISTED empty doc so a proper init still happens
         # once Trakt is configured (rather than baking in an empty month).
         return new_month_doc(month_key)
-    if not can_initialize(month_key):
+    if not await can_initialize(user_id, month_key):
         # Backward / gap navigation to a never-tracked past month: DO NOT backfill
-        # (§6) — return a transient, UNPERSISTED empty doc (rendered read-only).
+        # — return a transient, UNPERSISTED empty doc (rendered read-only).
         return new_month_doc(month_key)
 
     doc = new_month_doc(month_key)
@@ -622,10 +714,10 @@ async def ensure_month(year: int, month: int, settings, today: date | None = Non
     # (b) Carry forward everything except Completed / Abandoned. An open (not-yet-
     # frozen) prior is bucketed live so a preview rollover still drops the right
     # shows; a frozen prior reuses its stored buckets.
-    prior = load_month(_prev_month_key(month_key))
+    prior = await load_month(user_id, _prev_month_key(month_key))
     if prior is not None:
         prior_shows = frozen_shows(prior) if prior.get("closed") \
-            else await compute_live_shows(prior.get("shows") or [], settings)
+            else await compute_live_shows(user_id, prior.get("shows") or [], settings)
         for s in prior_shows:
             if s.get("abandoned") or s.get("bucket") in ("completed", "abandoned"):
                 continue
@@ -635,8 +727,8 @@ async def ensure_month(year: int, month: int, settings, today: date | None = Non
             doc["shows"].append(_normalize_show(_identity_record(s)))
             present.add(key)
 
-    # (c) This month's premieres, minus not-watching (excluded before commit, §5).
-    nw_ids = not_watching_ids(int(year), int(month))
+    # (c) This month's premieres, minus not-watching (excluded before commit).
+    nw_ids = await calendar_state.not_watching_ids(user_id, int(year), int(month))
     await _add_premieres(doc, present, settings, int(year), int(month), nw_ids)
 
     # (d) In-progress-but-unfinished shows from recent history.
@@ -647,6 +739,79 @@ async def ensure_month(year: int, month: int, settings, today: date | None = Non
         doc["shows"].append(_normalize_show(rec))
         present.add(key)
 
-    doc["totals_refreshed_at"] = datetime.now(timezone.utc).isoformat()
-    save_month(doc)
+    doc["totals_refreshed_at"] = db.now()
+    await save_month(user_id, doc)
     return doc
+
+
+# ===========================================================================
+# Per-user JSON export / restore. The export is one user's complete distrakt
+# dataset — every month, show row, watch-state row, per-season progress, and
+# movie watch — as a single document carrying a schema version. Restore is the
+# inverse, REPLACE (not merge) in one transaction, scoped to the requesting user.
+# ===========================================================================
+
+# Bump only on an incompatible change to the exported shape. Restore refuses a
+# version it doesn't understand rather than guessing at an older/newer layout.
+EXPORT_SCHEMA = 1
+
+# (table, columns-excluding-user_id). The export lists rows verbatim so an
+# export -> restore round trip is an identity; restore always writes user_id from
+# the session, never from the file.
+_EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("distrakt_months", ("month", "closed", "totals_refreshed_at", "movies_json", "created_at")),
+    ("distrakt_shows", ("month", *_SHOW_COLUMNS)),
+    ("distrakt_watch_state", ("last_synced", "beacons_json")),
+    ("distrakt_show_progress", ("trakt_id", "season", "watched_episodes_json")),
+    ("distrakt_movie_watches", ("trakt_id", "watched_at", "title", "year")),
+)
+
+
+class RestoreError(ValueError):
+    """A restore document that cannot be applied (unknown schema, wrong shape)."""
+
+
+async def export_user_data(user_id: int) -> dict:
+    """The requesting user's complete distrakt dataset as one JSON-able document.
+    Contains no tokens and no other user's data."""
+    doc: dict = {"schema": EXPORT_SCHEMA, "exported_at": db.now()}
+    for table, cols in _EXPORT_TABLES:
+        rows = await db.fetch_all(
+            f"SELECT {', '.join(cols)} FROM {table} WHERE user_id = ?",
+            (user_id,),
+        )
+        doc[table] = [{c: row[c] for c in cols} for row in rows]
+    return doc
+
+
+async def restore_user_data(user_id: int, doc: dict) -> None:
+    """Replace `user_id`'s distrakt data with the document's, in one transaction.
+
+    REPLACE, not merge: the user's existing rows in all five tables are deleted
+    and the file's inserted. Any `user_id` present in the file is IGNORED — every
+    row is written under the session user. Refuses an unknown schema version.
+    """
+    if not isinstance(doc, dict):
+        raise RestoreError("restore document must be an object")
+    if doc.get("schema") != EXPORT_SCHEMA:
+        raise RestoreError(f"unsupported distrakt export schema: {doc.get('schema')!r}")
+    payload: dict[str, list] = {}
+    for table, _cols in _EXPORT_TABLES:
+        rows = doc.get(table, [])
+        if not isinstance(rows, list):
+            raise RestoreError(f"{table} must be a list")
+        payload[table] = rows
+
+    def _work(conn: db.Connection) -> None:
+        for table, _cols in _EXPORT_TABLES:
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+        for table, cols in _EXPORT_TABLES:
+            collist = ", ".join(("user_id", *cols))
+            placeholders = ", ".join(["?"] * (1 + len(cols)))
+            sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders})"
+            for row in payload[table]:
+                if not isinstance(row, dict):
+                    raise RestoreError(f"{table} rows must be objects")
+                conn.execute(sql, [user_id, *((row.get(c)) for c in cols)])
+
+    await db.transaction(_work)

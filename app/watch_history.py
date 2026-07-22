@@ -1,9 +1,10 @@
-"""Incremental watch-history cache for the distrakt tracker.
+"""Incremental watch-history cache for the distrakt tracker, per user.
 
 Fetching per-show progress on every page load was correct but slow (one call per
-tracked show). This module caches watch state on disk and keeps it fresh cheaply:
+tracked show). This module caches each user's watch state and keeps it fresh
+cheaply:
 
-  - BASELINE: when a show first enters the roster it is baselined once from
+  - BASELINE: when a show first enters a user's roster it is baselined once from
     /shows/{id}/progress/watched -> the exact set of completed episode numbers
     per season (authoritative + deduped).
   - INCREMENTAL: on each load we hit /sync/last_activities (a tiny, fixed-size
@@ -18,59 +19,115 @@ tracked show). This module caches watch state on disk and keeps it fresh cheaply
   - UNWATCH / FORCE: if the removed_at beacon changes (or the Refresh button
     forces it) we re-baseline every cached show from progress and re-seed movies.
 
-State file: data/distrakt/watch_state.json. Sets are stored as sorted lists
-(JSON has no set). Counts are len(list). Pure helpers (watched_map,
-movies_in_range, month_bounds, the _apply_* folders) are unit-tested offline.
+Storage: three per-user SQLite tables (distrakt_watch_state,
+distrakt_show_progress, distrakt_movie_watches). In memory the state is the same
+dict shape it always was — {last_synced, beacons, shows: {tid: {season: [eps]}},
+movies: {tid: {title, year, watched_at}}} — so the pure folders and readers
+(watched_map, movies_in_range, month_bounds, the _apply_* folders) are unchanged;
+only _load / _save around them talk to the database instead of a JSON file.
+
+The Trakt calls still authenticate with the app-wide token carried on `settings`;
+`user_id` scopes the STORAGE only. Pointing a user's own token at the fetches is a
+separate step — the one input to change is what `settings` (and thus the token)
+these functions are handed.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
-import tempfile
 from datetime import date, datetime, timezone
 
-from .config import DATA_DIR, _ensure_data_dir
+from . import db
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
-
-DISTRAKT_DIR = DATA_DIR / "distrakt"
-STATE_PATH = DISTRAKT_DIR / "watch_state.json"
 
 
 def _default_state() -> dict:
     return {"last_synced": None, "beacons": None, "shows": {}, "movies": {}}
 
 
-def _load() -> dict:
-    try:
-        state = json.loads(STATE_PATH.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return _default_state()
-    # Fill any missing top-level keys (forward-compatible).
-    base = _default_state()
-    base.update({k: v for k, v in state.items() if k in base})
-    base["shows"] = base.get("shows") or {}
-    base["movies"] = base.get("movies") or {}
-    return base
+async def _load(user_id: int) -> dict:
+    """Assemble this user's in-memory state dict from the three storage tables.
+
+    A user with no rows yet gets the empty default, exactly as a missing file did.
+    """
+    state = _default_state()
+    ws = await db.fetch_one(
+        "SELECT last_synced, beacons_json FROM distrakt_watch_state WHERE user_id = ?",
+        (user_id,),
+    )
+    if ws is not None:
+        state["last_synced"] = ws["last_synced"]
+        state["beacons"] = json.loads(ws["beacons_json"]) if ws["beacons_json"] else None
+    prog = await db.fetch_all(
+        "SELECT trakt_id, season, watched_episodes_json FROM distrakt_show_progress "
+        "WHERE user_id = ?",
+        (user_id,),
+    )
+    shows: dict = {}
+    for row in prog:
+        shows.setdefault(str(int(row["trakt_id"])), {})[str(int(row["season"]))] = list(
+            json.loads(row["watched_episodes_json"] or "[]")
+        )
+    state["shows"] = shows
+    movies_rows = await db.fetch_all(
+        "SELECT trakt_id, watched_at, title, year FROM distrakt_movie_watches WHERE user_id = ?",
+        (user_id,),
+    )
+    state["movies"] = {
+        str(int(row["trakt_id"])): {
+            "title": row["title"] or "",
+            "year": row["year"],
+            "watched_at": row["watched_at"] or "",
+        }
+        for row in movies_rows
+    }
+    return state
 
 
-def _save(state: dict) -> None:
-    _ensure_data_dir()
-    DISTRAKT_DIR.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(STATE_PATH.parent), suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(state, indent=2))
-        os.replace(tmp, STATE_PATH)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+async def _save(user_id: int, state: dict) -> None:
+    """Persist a user's whole state back to the three tables in one transaction.
+
+    The progress and movie tables are replaced wholesale for this user rather than
+    diffed: a roster is small and bounded, and a full replace is the exact analogue
+    of rewriting the single JSON document the state used to live in.
+    """
+    beacons = state.get("beacons")
+    beacons_json = None if beacons is None else json.dumps(beacons)
+    last_synced = state.get("last_synced")
+    shows = state.get("shows") or {}
+    movies = state.get("movies") or {}
+
+    def _work(conn: db.Connection) -> None:
+        conn.execute(
+            "INSERT INTO distrakt_watch_state (user_id, last_synced, beacons_json) "
+            "VALUES (?, ?, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "last_synced = excluded.last_synced, beacons_json = excluded.beacons_json",
+            (user_id, last_synced, beacons_json),
+        )
+        conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
+        for tid_s, seasons in shows.items():
+            for season_s, eps in (seasons or {}).items():
+                conn.execute(
+                    "INSERT INTO distrakt_show_progress "
+                    "(user_id, trakt_id, season, watched_episodes_json) VALUES (?, ?, ?, ?)",
+                    (user_id, int(tid_s), int(season_s), json.dumps(list(eps or []))),
+                )
+        conn.execute("DELETE FROM distrakt_movie_watches WHERE user_id = ?", (user_id,))
+        for tid_s, movie in movies.items():
+            conn.execute(
+                "INSERT INTO distrakt_movie_watches "
+                "(user_id, trakt_id, watched_at, title, year) VALUES (?, ?, ?, ?, ?)",
+                (
+                    user_id, int(tid_s), (movie or {}).get("watched_at") or "",
+                    (movie or {}).get("title") or "", (movie or {}).get("year"),
+                ),
+            )
+
+    await db.transaction(_work)
 
 
 # ---------------------------------------------------------------------------
@@ -186,16 +243,16 @@ def _month_start_of(today: date) -> str:
 # Orchestration (Trakt I/O)
 # ---------------------------------------------------------------------------
 
-async def baseline_show(settings, trakt_id) -> None:
+async def baseline_show(settings, user_id: int, trakt_id) -> None:
     """Baseline one show from progress/watched (called when it enters the roster)."""
     from .trakt import fetch_show_progress_detail
     detail = await fetch_show_progress_detail(settings, trakt_id)
-    state = _load()
+    state = await _load(user_id)
     _set_show_baseline(state, trakt_id, detail)
-    _save(state)
+    await _save(user_id, state)
 
 
-async def sync(settings, force: bool = False, today: date | None = None) -> dict:
+async def sync(settings, user_id: int, force: bool = False, today: date | None = None) -> dict:
     """Gated incremental sync (see module docstring). Returns the (saved) state.
 
     Fast path: last_activities unchanged -> return cache, no history pull.
@@ -204,7 +261,7 @@ async def sync(settings, force: bool = False, today: date | None = None) -> dict
     from .perftrace import span
     from .trakt import fetch_history, fetch_last_activities, fetch_show_progress_detail
     today = today or datetime.now(timezone.utc).date()
-    state = _load()
+    state = await _load(user_id)
     with span("wh.last_activities"):
         la = await fetch_last_activities(settings)
     beacons = _beacons(la)
@@ -235,18 +292,19 @@ async def sync(settings, force: bool = False, today: date | None = None) -> dict
 
     state["last_synced"] = _now_date_iso()
     state["beacons"] = beacons
-    _save(state)
+    await _save(user_id, state)
     return state
 
 
-async def sync_and_baseline(settings, roster_trakt_ids, force: bool = False, today: date | None = None) -> dict:
+async def sync_and_baseline(settings, user_id: int, roster_trakt_ids, force: bool = False,
+                            today: date | None = None) -> dict:
     """`sync`, then guarantee every roster show has a baseline (so shows that
     entered via calendar/rollover/history — not the manual add flow — still get
     counts on first view). Returns the state; read counts via `watched_map` and
     movies via `movies_in_range`."""
     from .perftrace import span
     from .trakt import fetch_show_progress_detail, shared_client
-    state = await sync(settings, force=force, today=today)
+    state = await sync(settings, user_id, force=force, today=today)
     missing = list(dict.fromkeys(
         int(t) for t in roster_trakt_ids if t is not None and str(int(t)) not in (state.get("shows") or {})
     ))
@@ -258,5 +316,5 @@ async def sync_and_baseline(settings, roster_trakt_ids, force: bool = False, tod
             ))
             for tid, detail in zip(missing, details):
                 _set_show_baseline(state, tid, detail)
-        _save(state)
+        await _save(user_id, state)
     return state

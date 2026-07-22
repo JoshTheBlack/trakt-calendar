@@ -80,7 +80,12 @@
 .distrakt-section-head h2 { margin: 0; }
 .distrakt-copy-block { margin-bottom: 18px; }
 .distrakt-copy-block:last-child { margin-bottom: 0; }
-.distrakt-copy-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; color: var(--text-dim); font-size: 0.9rem; }
+.distrakt-copy-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--text-dim); font-size: 0.9rem; }
+.distrakt-copy-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.distrakt-link-select {
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; padding: 4px 8px; color: var(--text); font-size: 0.8rem; max-width: 190px;
+}
 .distrakt-copy-textarea {
     width: 100%; min-height: 160px; resize: vertical;
     background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);

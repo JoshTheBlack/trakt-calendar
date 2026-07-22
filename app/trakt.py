@@ -201,6 +201,7 @@ async def _cached_get(
     ttl_seconds: int | None = None,
     fresh: bool = False,
     raise_errors: bool = False,
+    private: bool = False,
 ):
     """GET a Trakt path (with disk caching keyed by path+params). Returns parsed JSON or None.
 
@@ -209,10 +210,16 @@ async def _cached_get(
     `raise_errors=True` raises TraktError instead of silently returning None — used
     by callers (search, seasons) where a swallowed 401 previously looked identical
     to a genuine "no results" response, making auth failures invisible in the UI.
+
+    `private=True` means the RESPONSE DEPENDS ON WHOSE TOKEN ASKED — a watch
+    history, a progress record, an activity beacon. The cache is keyed by URL and
+    shared by the whole instance, so such a response must never be written to it:
+    two people asking for the same show's progress send the identical URL and
+    would otherwise overwrite, and potentially be served, each other's viewing.
     """
     url = f"{API_BASE}/{path}?{urlencode(params)}"
     ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
-    if not fresh:
+    if not fresh and not private:
         cached = cache.get(url, ttl)
         if cached is not None:
             _perf.debug("cacheHIT  %s", path)  # DEBUG: 1 line/season, noisy on warm loads
@@ -241,7 +248,8 @@ async def _cached_get(
         if raise_errors:
             raise TraktError("Trakt API returned an unreadable response.")
         return None
-    cache.set(url, data)
+    if not private:
+        cache.set(url, data)
     return data
 
 
@@ -476,15 +484,17 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
     per-show progress endpoint is the authoritative source of a user's season
     completion and always includes `seasons[].completed`.
 
-    Never cached (live x). One shared httpx client pools the fan-out (backlog 1b).
-    Errored/absent shows just contribute no keys (that show renders 0)."""
+    Never cached — both because `x` is live and because a progress record belongs
+    to whoever's token asked for it, and the cache is keyed by URL alone. One
+    shared httpx client pools the fan-out (backlog 1b). Errored/absent shows just
+    contribute no keys (that show renders 0)."""
     unique = sorted({int(t) for t in trakt_ids if t is not None})
     if not unique:
         return {}
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     client = shared_client()
     results = await asyncio.gather(*(
-        _cached_get(client, settings, f"shows/{tid}/progress/watched", params, fresh=True)
+        _cached_get(client, settings, f"shows/{tid}/progress/watched", params, private=True)
         for tid in unique
     ))
     lookup: dict[tuple[int, int], int] = {}
@@ -510,7 +520,7 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
 async def fetch_last_activities(settings: Settings) -> dict:
     """/sync/last_activities -> the small per-type "last changed at" beacon blob
     (fixed size, independent of library size). Used to gate the history sync."""
-    res = await _cached_get(shared_client(), settings, "sync/last_activities", {}, fresh=True)
+    res = await _cached_get(shared_client(), settings, "sync/last_activities", {}, private=True)
     return res if isinstance(res, dict) else {}
 
 
@@ -518,10 +528,11 @@ async def fetch_show_progress_detail(settings: Settings, trakt_id,
                                      client: httpx.AsyncClient | None = None) -> dict[int, list[int]]:
     """/shows/{id}/progress/watched -> {season_number: [completed episode numbers]}.
     The per-show baseline: authoritative, deduped completion straight from Trakt.
+    Never cached — this is one person's viewing, and the cache key is the URL.
     Pass a shared `client` when batching."""
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     c = client or shared_client()
-    res = await _cached_get(c, settings, f"shows/{trakt_id}/progress/watched", params, fresh=True)
+    res = await _cached_get(c, settings, f"shows/{trakt_id}/progress/watched", params, private=True)
     out: dict[int, list[int]] = {}
     if isinstance(res, dict):
         for season in res.get("seasons") or []:

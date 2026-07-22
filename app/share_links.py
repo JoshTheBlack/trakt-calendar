@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import json
 import secrets
+from urllib.parse import urlencode
 
 from . import auth, db
+from .endpoints import ENDPOINTS
 
 PREFERRED_KINDS = ("token", "username", "slug")
 
@@ -101,6 +103,85 @@ async def set_preferred_kind(user_id: int, kind: str) -> None:
         raise ValueError(f"Unknown share kind: {kind!r}")
     await get_or_create(user_id)
     await db.execute("UPDATE share_links SET preferred_kind = ? WHERE user_id = ?", (kind, user_id))
+
+
+async def set_post_link(user_id: int, *, kind: str | None = ..., endpoint: str | None = ...) -> None:
+    """Choose what the tracker's announcement post embeds: which link form, and
+    which calendar view it opens on.
+
+    Each argument is skipped entirely when not passed, and an explicit None means
+    "go back to following the share panel" (the preferred kind) or "leave the
+    link bare" (no view in the query string). `...` rather than None as the
+    sentinel is what makes those two cases distinguishable.
+    """
+    if kind is not ... and kind is not None and kind not in PREFERRED_KINDS:
+        raise ValueError(f"Unknown share kind: {kind!r}")
+    if endpoint is not ... and endpoint is not None and endpoint not in ENDPOINTS:
+        raise ValueError(f"Unknown endpoint: {endpoint!r}")
+    await get_or_create(user_id)
+    columns: list[str] = []
+    params: list = []
+    if kind is not ...:
+        columns.append("post_link_kind = ?")
+        params.append(kind)
+    if endpoint is not ...:
+        columns.append("post_link_endpoint = ?")
+        params.append(endpoint)
+    if not columns:
+        return
+    params.append(user_id)
+    await db.execute(f"UPDATE share_links SET {', '.join(columns)} WHERE user_id = ?", tuple(params))
+
+
+def share_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:
+    """The three public URLs for a share row, each None when it cannot be handed
+    out — the form is disabled, has nothing to resolve to, or the instance has no
+    configured public base URL to build an absolute link from.
+
+    URLs are only ever built from the operator's configured origin, never from
+    the incoming request, so a spoofed Host header cannot make this app publish
+    somebody else's address as its own.
+    """
+    base = (base_url or "").rstrip("/")
+    if row is None or not base:
+        return {"token": None, "username": None, "slug": None}
+    name = (username or "").strip()
+    return {
+        "token": f"{base}/s/{row['token']}" if row["enabled_token"] else None,
+        "username": f"{base}/u/{name}" if row["enabled_username"] and name else None,
+        "slug": f"{base}/c/{row['custom_slug']}" if row["enabled_slug"] and row["custom_slug"] else None,
+    }
+
+
+def post_link_url(row, username: str | None, base_url: str) -> str | None:
+    """The share URL to embed in the tracker's announcement post, or None when
+    this account has no publishable link at all.
+
+    Falls back down the chain post_link_kind -> preferred_kind -> any enabled
+    form, because a stored choice can stop resolving after the fact (the user
+    disables that form, or clears the slug it pointed at) and silently dropping
+    the link from every future post is a worse answer than publishing the one
+    that still works.
+    """
+    urls = share_urls(row, username, base_url)
+    candidates = [row["post_link_kind"], row["preferred_kind"], *PREFERRED_KINDS] if row is not None else []
+    for kind in candidates:
+        if kind and urls.get(kind):
+            return urls[kind]
+    return None
+
+
+def post_link_with_view(row, username: str | None, base_url: str) -> str | None:
+    """post_link_url plus the owner's chosen calendar view as a query param, so
+    an announcement can point at the premieres list while the owner's own share
+    page defaults to something else."""
+    url = post_link_url(row, username, base_url)
+    if url is None:
+        return None
+    endpoint = row["post_link_endpoint"]
+    if endpoint and endpoint in ENDPOINTS:
+        return f"{url}?{urlencode({'endpoint': endpoint})}"
+    return url
 
 
 async def slug_error(slug: str, *, exclude_user_id: int | None = None) -> str | None:
