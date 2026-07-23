@@ -350,6 +350,22 @@ body.hide-not-watching .card.not-watching { display: none; }
 .field.checkbox { flex-direction: row; align-items: center; gap: 10px; }
 .field.checkbox input { width: 18px; height: 18px; accent-color: var(--gold); }
 .field.checkbox label { font-weight: 400; }
+/* Certification chip pickers (Content floor + Filters). The vocabulary is a
+   small frozen external standard, so these replace free-text entry: each chip
+   cycles grey (ignored) -> green (keep only these) -> red (exclude these), the
+   three states calendar_filter reads back as an include token, a `-` exclude
+   token, or absence. */
+.chip-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.cert-chip {
+    cursor: pointer; user-select: none; line-height: 1;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-dim);
+    padding: 6px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; font-family: inherit;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.cert-chip:hover { border-color: var(--text-dim); }
+.cert-chip.on-include { color: var(--green); border-color: rgba(34,197,94,0.55); background: rgba(34,197,94,0.12); }
+.cert-chip.on-exclude { color: var(--crimson); border-color: rgba(224,56,77,0.55); background: rgba(224,56,77,0.12); text-decoration: line-through; }
+.cert-chip.on-exclude::before { content: '\2212'; margin-right: 2px; }
 .modal-foot { padding: 18px 24px; border-top: 1px solid var(--card-border); display: flex; justify-content: flex-end; gap: 12px; }
 .btn-primary { cursor: pointer; background: linear-gradient(90deg, var(--gold), var(--crimson)); color: #0a0c10; border: none; padding: 10px 22px; border-radius: 8px; font-weight: 700; font-family: inherit; font-size: 0.88rem; }
 .btn-primary:hover { filter: brightness(1.08); }

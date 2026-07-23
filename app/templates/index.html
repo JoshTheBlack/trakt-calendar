@@ -387,6 +387,20 @@
                         <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code> to exclude.</span>
                     </div>
                 </div>
+                <p class="hint">Certifications are a fixed rating list — click a chip to cycle it:
+                    <strong>grey</strong> (ignored) → <strong>green</strong> (keep only these) →
+                    <strong>red</strong> (exclude these). Leave every chip grey to filter nothing. Shows and
+                    movies use different rating systems, so each has its own row.</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label>Show certifications <span class="hint">(TV Parental Guidelines)</span></label>
+                        <div class="chip-picker" id="s_show_certifications" data-vocab="TV-Y,TV-Y7,TV-G,TV-PG,TV-14,TV-MA,NR"></div>
+                    </div>
+                    <div class="field">
+                        <label>Movie certifications <span class="hint">(MPA film ratings)</span></label>
+                        <div class="chip-picker" id="s_movie_certifications" data-vocab="G,PG,PG-13,R,NC-17,NR"></div>
+                    </div>
+                </div>
                 <div class="field">
                     <label for="s_networks">Networks</label>
                     <textarea id="s_networks" name="network_filter" spellcheck="false"
@@ -494,6 +508,19 @@
                            placeholder="us, gb, -jp">
                     <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code> to exclude.
                         Blank means everywhere.</span>
+                </div>
+                <p class="hint">Certifications: click a chip to cycle it —
+                    <strong>grey</strong> (ignored) → <strong>green</strong> (keep only these) →
+                    <strong>red</strong> (exclude these). Leave every chip grey to keep every rating.</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label>Show certifications <span class="hint">(TV ratings)</span></label>
+                        <div class="chip-picker" id="f_show_certifications" data-vocab="TV-Y,TV-Y7,TV-G,TV-PG,TV-14,TV-MA,NR"></div>
+                    </div>
+                    <div class="field">
+                        <label>Movie certifications <span class="hint">(film ratings)</span></label>
+                        <div class="chip-picker" id="f_movie_certifications" data-vocab="G,PG,PG-13,R,NC-17,NR"></div>
+                    </div>
                 </div>
                 <div class="field">
                     <label for="f_networks">Networks</label>
