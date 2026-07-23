@@ -753,6 +753,79 @@ INSERT INTO not_watching_shows (user_id, item_id, created_at)
 DROP TABLE calendar_not_watching;
 """
 
+# Migration 11 — consolidate configuration out of settings.json and into the DB.
+#
+# settings.json historically held everything: the Trakt/Sonarr/Radarr/Seerr/TMDB
+# credentials, every non-secret global, and the two file-only recovery settings.
+# This splits that one file into three homes so each class has a single storage
+# location and one read/write boundary. The credentials move to app_secrets (a
+# store a later change can encrypt at rest); the non-secret globals move to
+# app_settings; only cookie_secure + allow_open_registration stay in the file,
+# deliberately file-only so an operator can edit them to recover from a lockout
+# with no app running and no sqlite tooling.
+#
+# This migration copies the values INTO the DB but does NOT rewrite the file:
+# load_settings() reduces settings.json to the two recovery fields on the first
+# boot after the copy is committed. Doing the file shrink there rather than here is
+# what keeps the move crash-safe — a crash can never leave the file already
+# shrunk while the table inserts were rolled back, so the file stays the intact
+# source of truth to retry from.
+MIGRATION_11_SQL = """
+CREATE TABLE app_secrets (
+    -- One row per config.SECRET_FIELDS name. `value` is plaintext until at-rest
+    -- encryption is enabled, after which it is `enc:v1:`-prefixed ciphertext; the
+    -- two coexist the same way the linked_identities tokens do. An unset secret
+    -- has no row rather than an empty one.
+    name  TEXT PRIMARY KEY,
+    value TEXT
+);
+CREATE TABLE app_settings (
+    -- A single row, name='app', whose value is the JSON document of every
+    -- non-secret global. One row rather than key-per-field keeps load/save a
+    -- straight move of the JSON that used to sit in settings.json and leaves the
+    -- Settings dataclass API untouched. Never sealed — these carry no secret.
+    name  TEXT PRIMARY KEY,
+    value TEXT
+);
+"""
+
+
+def MIGRATION_11(conn: sqlite3.Connection) -> None:
+    _run_script(conn, MIGRATION_11_SQL)
+    # Imported here, not at module top, to avoid a cycle: config imports db lazily
+    # for exactly this store, so db must not import config's Settings model eagerly.
+    from .config import SECRET_FIELDS, Settings, global_field_names
+    settings_file = DATA_DIR / "settings.json"
+    try:
+        raw = json.loads(settings_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        # Fresh install, or an unreadable file: nothing to copy. The empty tables
+        # are enough — load_settings() seeds from the environment and defaults, and
+        # the first save populates them.
+        return
+    if not isinstance(raw, dict):
+        return
+    settings = Settings.from_dict(raw)
+    globals_doc = {name: getattr(settings, name) for name in sorted(global_field_names())}
+    conn.execute(
+        "INSERT INTO app_settings (name, value) VALUES ('app', ?) "
+        "ON CONFLICT(name) DO NOTHING",
+        (json.dumps(globals_doc),),
+    )
+    for name in sorted(SECRET_FIELDS):
+        value = getattr(settings, name, "")
+        if value:
+            conn.execute(
+                "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
+                "ON CONFLICT(name) DO NOTHING",
+                (name, value),
+            )
+    logger.info(
+        "Consolidated configuration from settings.json into the database; "
+        "settings.json is reduced to its recovery fields on next load."
+    )
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -767,6 +840,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (8, MIGRATION_8),
     (9, MIGRATION_9),
     (10, MIGRATION_10),
+    (11, MIGRATION_11),
 ]
 
 

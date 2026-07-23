@@ -40,6 +40,8 @@ EXPECTED_TABLES = {
     "distrakt_show_progress", "distrakt_movie_watches",
     # Migration 9 / 10 — per-user emoji map, and show-level not-watching.
     "distrakt_prefs", "not_watching_shows",
+    # Migration 11 — configuration consolidated out of settings.json.
+    "app_secrets", "app_settings",
 }
 
 

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 import os
 import re
 import sys
@@ -358,6 +359,16 @@ class SettingsRedactionTests(GatingTestCase):
                 # only its name inside the `secrets_set` flags.
                 self.assertNotIn(value, resp.text)
                 self.assertNotIn(name, payload)
+
+    def test_no_credential_is_written_to_settings_json_on_disk(self):
+        """Secrets persist to the DB now, not the file. settings.json is reduced to
+        the two file-only recovery fields, so no credential value — and no global —
+        is left sitting in it in the clear."""
+        on_disk = config.SETTINGS_FILE.read_text(encoding="utf-8")
+        for value in SECRET_VALUES.values():
+            self.assertNotIn(value, on_disk)
+        self.assertNotIn("public-client-id", on_disk)
+        self.assertEqual(set(json.loads(on_disk)), {"cookie_secure", "allow_open_registration"})
 
     def test_the_response_says_which_credentials_are_stored(self):
         payload = self.client.get("/api/settings").json()

@@ -1,8 +1,12 @@
 """Front-end-editable configuration (requirement C).
 
-Settings persist to data/settings.json (git-ignored). Everything that used to be
-a hardcoded PHP variable — including the Trakt API credentials — now lives here and
-is editable from the Settings modal in the UI.
+Everything that used to be a hardcoded PHP variable is editable from the Settings
+modal in the UI. Persistence is split across three homes, assembled back into one
+Settings object by load_settings(): the credentials live in the app_secrets table
+(where they can be encrypted at rest), the non-secret globals in app_settings, and
+only the two file-only recovery settings (cookie_secure, allow_open_registration)
+stay in data/settings.json (git-ignored) so an operator can hand-edit them to
+recover from a lockout with no app or database tooling.
 """
 from __future__ import annotations
 
@@ -53,6 +57,13 @@ SECRET_FIELDS = frozenset({
     "seer_api_key",
     "tmdb_api_key",
 })
+
+# The only two settings that stay in settings.json. File-only on purpose: an
+# operator locked out of the UI can edit a plain file and restart to recover, with
+# no app running and no sqlite tooling — and cookie_secure is read on the cookie
+# path before the DB is necessarily consulted. Everything else lives in the DB
+# (secrets in app_secrets, the rest in app_settings); these two do not move.
+RECOVERY_FIELDS = frozenset({"cookie_secure", "allow_open_registration"})
 
 
 @dataclass
@@ -162,8 +173,10 @@ class Settings:
         return cls(**clean)
 
     def to_dict(self) -> dict:
-        """Every field including the secrets. For persistence only — anything
-        heading for a client goes through redacted()."""
+        """Every field including the secrets — the full internal view. save_settings
+        routes each field to its store from here (secrets to app_secrets, globals to
+        app_settings, the two recovery fields to settings.json); apply_update merges
+        onto it. Anything heading for a client goes through redacted() instead."""
         return asdict(self)
 
     def redacted(self) -> dict:
@@ -278,20 +291,162 @@ def _ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def load_settings() -> Settings:
-    _ensure_data_dir()
-    if SETTINGS_FILE.exists():
-        try:
-            return Settings.from_dict(json.loads(SETTINGS_FILE.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            pass
-    # First-run: seed from legacy config.php values via env, if provided.
-    return Settings(
-        trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
-        trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
+def global_field_names() -> frozenset[str]:
+    """Every Settings field that persists to the app_settings store — that is, all
+    of them except the sealed SECRET_FIELDS and the two file-only RECOVERY_FIELDS.
+    Derived from the dataclass so a newly added non-secret field lands there
+    automatically."""
+    return frozenset(
+        name for name in Settings.__dataclass_fields__  # type: ignore[attr-defined]
+        if name not in SECRET_FIELDS and name not in RECOVERY_FIELDS
     )
 
 
-def save_settings(settings: Settings) -> None:
+def _read_settings_file() -> dict:
+    """The raw settings.json as a dict, or {} when it is missing or unreadable.
+
+    A corrupt file reads as empty rather than raising, so a bad hand-edit degrades
+    to defaults (which the operator then sees and fixes) instead of failing boot.
+    """
+    if not SETTINGS_FILE.exists():
+        return {}
+    try:
+        data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _read_db_config() -> tuple[dict, dict]:
+    """The non-secret globals and the secrets held in the DB, as two dicts.
+
+    Returns ({}, {}) if the config tables are not present yet, so a call before the
+    schema is migrated falls back to the file/defaults rather than raising. Values
+    are returned verbatim; opening any sealed secret happens at the point of use,
+    not here.
+    """
+    from . import db  # local import: db imports this module, so the cycle is broken here
+    try:
+        conn = db.connection()
+        row = conn.execute("SELECT value FROM app_settings WHERE name = 'app'").fetchone()
+        secret_rows = conn.execute("SELECT name, value FROM app_secrets").fetchall()
+    except db.DatabaseError:
+        return {}, {}
+    globals_doc: dict = {}
+    if row is not None and row["value"]:
+        try:
+            loaded = json.loads(row["value"])
+            if isinstance(loaded, dict):
+                globals_doc = loaded
+        except json.JSONDecodeError:
+            globals_doc = {}
+    secrets = {
+        r["name"]: r["value"]
+        for r in secret_rows
+        if r["name"] in SECRET_FIELDS and r["value"] is not None
+    }
+    return globals_doc, secrets
+
+
+def _write_settings_file(data: dict) -> None:
+    """Write settings.json atomically (temp file + os.replace) so a crash mid-write
+    can never leave a truncated recovery file behind."""
     _ensure_data_dir()
-    SETTINGS_FILE.write_text(json.dumps(settings.to_dict(), indent=2), encoding="utf-8")
+    tmp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, SETTINGS_FILE)
+
+
+def load_settings() -> Settings:
+    """Assemble one Settings object from its three homes: the two recovery fields
+    from settings.json, the non-secret globals from app_settings, and the secrets
+    from app_secrets. Everything downstream still sees a fully-populated Settings;
+    only where each field persists has changed.
+    """
+    _ensure_data_dir()
+    file_data = _read_settings_file()
+    globals_doc, secrets = _read_db_config()
+
+    if not file_data and not globals_doc and not secrets:
+        # Nothing persisted anywhere: first run. Seed from the legacy config.php
+        # values via env exactly as before. Not written back here — the first
+        # explicit save persists it.
+        return Settings(
+            trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
+            trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
+        )
+
+    # The DB is the home for globals and secrets; the file contributes the recovery
+    # fields. A value present in the file wins, so an operator can still change any
+    # setting by hand-editing settings.json and restarting (the recovery path) —
+    # and any non-recovery key added that way is folded into the DB and dropped from
+    # the file just below, so the file never re-accumulates config.
+    merged = {**globals_doc, **secrets, **file_data}
+    settings = Settings.from_dict(merged)
+
+    file_has_db_owned_keys = any(key not in RECOVERY_FIELDS for key in file_data)
+    if file_has_db_owned_keys:
+        from . import db
+        # Only reduce the file when we own the write path (not inside a caller's
+        # transaction), so the DB copy is committed before the file is shrunk — a
+        # rolled-back transaction must never strand a value that has already been
+        # removed from the file. If we are inside one, skip it; the next plain
+        # load reduces the file safely.
+        if not db.connection().in_transaction:
+            save_settings(settings)
+
+    return settings
+
+
+def save_settings(settings: Settings) -> None:
+    """Persist to the three homes: the globals JSON to app_settings, each set
+    secret to app_secrets (an unset one is deleted, not stored empty), and the two
+    recovery fields to settings.json. The Settings dataclass API is unchanged; only
+    the destinations moved.
+    """
+    _ensure_data_dir()
+    from . import db
+
+    data = settings.to_dict()
+    globals_doc = {name: data[name] for name in sorted(global_field_names())}
+    secrets = {name: data.get(name, "") for name in SECRET_FIELDS}
+    recovery = {name: data[name] for name in sorted(RECOVERY_FIELDS)}
+
+    def _persist(conn) -> None:
+        conn.execute(
+            "INSERT INTO app_settings (name, value) VALUES ('app', ?) "
+            "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+            (json.dumps(globals_doc),),
+        )
+        for name, value in secrets.items():
+            if value:
+                conn.execute(
+                    "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
+                    "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
+                    (name, value),
+                )
+            else:
+                # An unset secret is absence of a row, so `secrets_set` and storage
+                # agree and a cleared credential leaves nothing behind.
+                conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
+
+    conn = db.connection()
+    owns = not conn.in_transaction
+    if owns:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _persist(conn)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
+    else:
+        _persist(conn)
+
+    # File last, and only once the DB write is durable: the DB is the source of
+    # truth for globals and secrets, so a crash between the two must leave the DB
+    # correct and merely the tiny recovery file stale — never a secret stranded in
+    # a rolled-back table. When participating in a caller's transaction we cannot
+    # know it will commit, so the caller owns the file write in that case.
+    if owns:
+        _write_settings_file(recovery)
