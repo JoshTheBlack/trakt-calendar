@@ -388,6 +388,7 @@ function renderDistraktDetails(d) {
         html += yt
             ? `<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/${esc(yt)}"
                    title="Trailer" loading="lazy"
+                   referrerpolicy="strict-origin-when-cross-origin"
                    allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
                    allowfullscreen></iframe></div>`
             : `<a class="pill-btn" href="${esc(d.trailer)}" target="_blank" rel="noopener">Watch trailer ↗</a>`;

@@ -58,19 +58,48 @@ def _emoji_for(show: dict, emoji_map: dict, default_emoji: str) -> str:
     return emoji_map.get(show.get("network") or "", default_emoji)
 
 
+def _premiere_month_day(show: dict) -> tuple[int, int] | None:
+    """(month, day) of a show's season premiere from its "M/D" string, or None
+    when it has no usable premiere date."""
+    premiere = show.get("premiere")
+    if not premiere:
+        return None
+    try:
+        month, day = (int(p) for p in str(premiere).split("/", 1))
+        return month, day
+    except (ValueError, TypeError):
+        return None
+
+
 def _premiere_sort_key(show: dict):
     """(month, day, title) — the July sample sorts New/Returning chronologically
     by premiere date, not alphabetically; unknown premieres sort last. Same-day
     ties break alphabetically ignoring "The" (matches the sample's 7/15 and 7/16
     ties)."""
-    premiere = show.get("premiere")
-    month, day = 99, 99
-    if premiere:
-        try:
-            month, day = (int(p) for p in premiere.split("/", 1))
-        except (ValueError, TypeError):
-            month, day = 99, 99
+    md = _premiere_month_day(show)
+    month, day = md if md else (99, 99)
     return (month, day, _sort_title(show.get("title")))
+
+
+def _month_number(month) -> int | None:
+    """The month number from a tracker month given either as an int (7) or a
+    'YYYY-MM' string ('2026-07')."""
+    if isinstance(month, int):
+        return month
+    try:
+        return int(str(month)[5:7])
+    except (ValueError, IndexError):
+        return None
+
+
+def premiered_in_month(show: dict, month_number: int) -> bool:
+    """Whether this show's season premiere falls in `month_number` — the test for
+    POST 1 membership. A premiere date is what makes a show one of this month's
+    announcements, independent of whether it has begun airing yet; a show carried
+    over from an earlier month premiered then, so its month differs and it is not
+    re-announced."""
+    md = _premiere_month_day(show)
+    return md is not None and md[0] == month_number
 
 
 # ---------------------------------------------------------------------------
@@ -221,9 +250,21 @@ def _render_keepup(shows: list[dict], emoji_map: dict, default_emoji: str) -> st
 
 
 def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:",
-                 link_url: str | None = None) -> str:
-    """POST 1 (announcement): **New Shows** + **Returning**, optionally followed
-    by a link line pointing at the poster's own public calendar.
+                 link_url: str | None = None, month=None) -> str:
+    """POST 1 (announcement): a SNAPSHOT of this month's premieres — **New Shows**
+    (a season 1 premiere) + **Returning** (a later season's premiere) — optionally
+    followed by a link line pointing at the poster's own public calendar.
+
+    Membership is by PREMIERE DATE, not by the airing lifecycle. A show announced
+    here stays here once its episodes start; only POST 2 moves it on into Keepup /
+    Cleanup. It leaves POST 1 only if its premiere date moves out of this month
+    (then it belongs to that other month's announcement) or it is abandoned. That
+    is the difference from POST 2, whose New/Returning sections DO empty as shows
+    begin airing.
+
+    `month` is the tracker month, as 'YYYY-MM' or an int. Without it — a caller
+    that only wants the rendering — this falls back to the not-yet-airing
+    lifecycle buckets, which is POST 1's pre-snapshot behaviour.
 
     `link_url` is omitted entirely when there is nothing to link to, rather than
     rendered as an empty or broken line. It is wrapped in angle brackets, which
@@ -232,9 +273,19 @@ def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji
     underneath it.
     """
     emoji_map = emoji_map or {}
-    groups = _group_by_bucket(shows)
-    news = sorted(groups["new"], key=_premiere_sort_key)
-    returning = sorted(groups["returning"], key=_premiere_sort_key)
+    month_number = _month_number(month)
+    if month_number is None:
+        groups = _group_by_bucket(shows)
+        news, returning = groups["new"], groups["returning"]
+    else:
+        premieres = [
+            s for s in shows
+            if not s.get("abandoned") and premiered_in_month(s, month_number)
+        ]
+        news = [s for s in premieres if int(s.get("season") or 1) == 1]
+        returning = [s for s in premieres if int(s.get("season") or 1) != 1]
+    news = sorted(news, key=_premiere_sort_key)
+    returning = sorted(returning, key=_premiere_sort_key)
     sections = [
         _section("**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
         _section("**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),

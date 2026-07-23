@@ -20,6 +20,7 @@ import re
 import sys
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, db, distrakt as distrakt_store, share_links  # noqa: E402
+from app import auth, cache, calendar_cache, db, distrakt as distrakt_store, share_links, trakt  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -274,6 +275,101 @@ class SharePageViewControlsTests(FinishingTestCase):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7&hidenw=1").text
         self.assertIn('<option value="0"', body)
         self.assertIn('<option value="1" selected>', body)
+
+
+class SharePageDetailsModalTests(FinishingTestCase):
+    """Clicking a card on a public page opens the SAME details modal as the
+    calendar page (cast, trailer, episodes) — served CACHE-ONLY from what the
+    owner's own views already fetched, so a public click never calls Trakt."""
+
+    def setUp(self):
+        super().setUp()
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                               trakt_access_token="tok"))
+        self.user_id = self._make_user("modalowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = self.client.get("/api/me/share").json()["token"]
+        self.client.cookies.clear()
+        # A cached window so the page renders a card to wire up.
+        entry = {
+            "first_aired": "2026-07-15T20:00:00Z",
+            "episode": {"season": 2, "number": 5, "title": "The One"},
+            "show": {"title": "Test Show", "year": 2026, "network": "HBO",
+                     "country": "us", "language": "en", "runtime": 50,
+                     "status": "returning series", "rating": 8.4, "genres": ["drama"],
+                     "overview": "A tense plot.",
+                     "ids": {"slug": "test-show", "trakt": 123, "tmdb": 789}},
+        }
+        start = calendar_cache.window_start(date(2026, 7, 15))
+        asyncio.run(calendar_cache.store_window(
+            "shows/new", start, [entry], 600, db.now()))
+
+    def _seed_detail_cache(self):
+        """Write the raw Trakt payloads the OWNER's own detail view would have
+        cached, at the exact URLs fetch_details reads."""
+        from urllib.parse import urlencode
+        base = f"{trakt.API_BASE}"
+        ext = urlencode({"extended": "full"})
+        asyncio.run(cache.set(f"{base}/shows/123?{ext}", {
+            "title": "Test Show", "year": 2026, "overview": "Full overview.",
+            "status": "returning_series", "network": "HBO", "runtime": 50,
+            "genres": ["drama"], "rating": 8.4,
+            "trailer": "https://youtu.be/dQw4w9WgXcQ"}))
+        asyncio.run(cache.set(f"{base}/shows/123/people?{ext}", {
+            "cast": [{"person": {"name": "A Actor"}, "character": "Lead"}]}))
+        asyncio.run(cache.set(f"{base}/shows/123/seasons/2?{ext}", [
+            {"number": 5, "title": "The One", "first_aired": "2026-07-15T20:00:00Z",
+             "rating": 8.0}]))
+
+    def _no_network(self):
+        """A client whose .get fails the test — cache_only must never reach it."""
+        class _Boom:
+            async def get(self, *a, **k):
+                raise AssertionError("share details must not call Trakt")
+        return patch("app.trakt.shared_client", return_value=_Boom())
+
+    def test_the_page_wires_cards_to_the_modal(self):
+        body = self.client.get(f"/s/{self.token}?year=2026&month=7").text
+        self.assertIn('onclick="openShareDetails(this, event)"', body)
+        self.assertIn('id="detailsModal"', body)
+        self.assertIn("/static/js/share.js", body)
+
+    def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
+        self._seed_detail_cache()
+        with self._no_network():
+            resp = self.client.get(f"/s/{self.token}/details?media=show&id=123&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        d = resp.json()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["overview"], "Full overview.")
+        self.assertEqual(d["status"], "Returning Series")  # normalized like the calendar
+        self.assertEqual(d["cast"][0]["name"], "A Actor")
+        self.assertTrue(d["trailer"])
+        self.assertEqual(d["episodes"][0]["number"], 5)
+
+    def test_an_uncached_show_returns_ok_with_empty_fields(self):
+        """A show the owner never opened has nothing cached — the modal renders
+        around the blanks rather than triggering a fetch."""
+        with self._no_network():
+            resp = self.client.get(f"/s/{self.token}/details?media=show&id=555&season=1")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        d = resp.json()
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["overview"], "")
+        self.assertEqual(d["cast"], [])
+
+    def test_details_reach_through_the_username_url_form_too(self):
+        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
+        self._seed_detail_cache()
+        with self._no_network():
+            resp = self.client.get("/u/modalowner/details?media=show&id=123&season=2")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["cast"][0]["name"], "A Actor")
+
+    def test_a_bad_token_details_request_is_a_404(self):
+        with self._no_network():
+            resp = self.client.get("/s/not-a-real-token/details?media=show&id=123&season=2")
+        self.assertEqual(resp.status_code, 404)
 
 
 class SelfServiceCredentialsTests(FinishingTestCase):

@@ -490,6 +490,67 @@ class CookieMismatchWarningTests(HardeningTestCase):
         self.assertEqual(body["cookie_secure"], "always")
 
 
+class CookieSecureEditingTests(HardeningTestCase):
+    """cookie_secure is editable in Settings now, with the one self-locking
+    change refused rather than the whole field left hand-edited.
+
+    The refusal is judged by main._cookie_secure_error on the BROWSER's scheme,
+    so it is unit-tested with constructed requests the same way
+    detect_cookie_secure is — a TestClient will not carry an authenticated Secure
+    cookie over an http:// base_url, which is the very situation under test."""
+
+    @staticmethod
+    def _req(origin=None):
+        from starlette.requests import Request as StarletteRequest
+        headers = [(b"origin", origin.encode())] if origin else []
+        return StarletteRequest({"type": "http", "method": "POST", "path": "/api/settings",
+                                 "headers": headers})
+
+    def _error(self, mode, origin):
+        from app import main
+        return main._cookie_secure_error(Settings(cookie_secure=mode), self._req(origin))
+
+    def test_always_from_a_genuinely_http_browser_is_refused(self):
+        """The lockout: a Secure cookie is discarded by an http browser, so the
+        admin's next request has no session and they can't undo it."""
+        err = self._error("always", "http://box.local:8000")
+        self.assertIsNotNone(err)
+        self.assertIn("http://", err)
+
+    def test_always_behind_a_tls_proxy_is_allowed(self):
+        """The browser's Origin is https even though the app sees http on the
+        internal hop — the reverse-proxy case "always" exists for."""
+        self.assertIsNone(self._error("always", "https://shows.example.com"))
+
+    def test_always_with_no_origin_is_allowed(self):
+        """Can't prove the browser is on http, so don't block — though a real save
+        from the Settings screen always carries an Origin."""
+        self.assertIsNone(self._error("always", None))
+
+    def test_auto_and_never_over_http_are_allowed(self):
+        """Neither yields a Secure cookie, so neither can lock anyone out."""
+        self.assertIsNone(self._error("auto", "http://box.local:8000"))
+        self.assertIsNone(self._error("never", "http://box.local:8000"))
+
+    def test_an_unknown_value_is_rejected(self):
+        self.assertIsNotNone(self._error("sometimes", "https://shows.example.com"))
+
+    def test_a_valid_change_saves_through_the_route(self):
+        """End to end on the authenticated https client — the normal path."""
+        self.make_user("admin", is_admin=True)
+        self.login("admin")
+        resp = self.client.post("/api/settings", json={"cookie_secure": "auto"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(load_settings().cookie_secure, "auto")
+
+    def test_an_unknown_value_is_rejected_through_the_route(self):
+        self.make_user("admin", is_admin=True)
+        self.login("admin")
+        resp = self.client.post("/api/settings", json={"cookie_secure": "sometimes"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(load_settings().cookie_secure, "always")  # unchanged
+
+
 class ShareLinkSelectorTests(HardeningTestCase):
     """The Share panel's dropdown is PRESENTATION: it picks which URL you are
     handed. Every published form keeps answering, because a link already given to

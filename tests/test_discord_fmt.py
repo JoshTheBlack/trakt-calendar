@@ -15,6 +15,7 @@ Run from the repo root:
 """
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -205,7 +206,59 @@ class RenderPost1Tests(unittest.TestCase):
             "> :_pa:`Star Trek: Strange New Worlds S04 (0/10, Thu)` 7/23 - 9/24\n"
             "> :SYFY:`The Ark S03 (0/12, Wed)` 7/29 - 10/14"
         )
-        self.assertEqual(fmt.render_post1(self.shows, self.emoji, ":tv:"), expected)
+        self.assertEqual(fmt.render_post1(self.shows, self.emoji, ":tv:", month="2026-07"), expected)
+
+
+class Post1IsAPremiereSnapshotTests(unittest.TestCase):
+    """POST 1 is the month's announcement snapshot: every show that PREMIERES this
+    month, kept once it starts airing. Only a premiere date that moves to another
+    month (or an abandon) removes it — that is what separates it from POST 2,
+    whose New/Returning sections empty as shows begin airing."""
+
+    MONTH = "2026-07"
+
+    def _post1_titles(self, shows):
+        out = fmt.render_post1(shows, {}, ":tv:", month=self.MONTH)
+        # Each line is "> <emoji>`Title Snn (...)` ...": pull the title before Snn.
+        return [m.group(1) for ln in out.splitlines()
+                if ln.startswith("> ") for m in [re.search(r"`(.+?) S\d", ln)] if m]
+
+    def test_a_premiere_that_has_started_airing_stays_in_post1(self):
+        """The bug: once episodes began, the show dropped out of the
+        announcement. It must not."""
+        aired = show("Already Airing", 1, "HBO", 3, 8, "Sun", "7/6", "8/24",
+                     started=True, finished=False)
+        self.assertIn("Already Airing", self._post1_titles([aired]))
+
+    def test_a_finished_or_completed_premiere_still_stays(self):
+        binged = show("Bingewatched", 1, "Netflix", 8, 8, "b", "7/2", None,
+                      started=True, finished=True)
+        self.assertIn("Bingewatched", self._post1_titles([binged]))
+
+    def test_a_carryover_from_a_prior_month_is_not_announced(self):
+        """Premiered in June, still airing in July — it belongs to June's
+        announcement, not this one, even though it's in July's roster."""
+        june = show("June Carryover", 2, "AMC", 4, 10, "Mon", "6/15", "8/1",
+                    started=True)
+        self.assertNotIn("June Carryover", self._post1_titles([june]))
+
+    def test_a_premiere_whose_date_moved_out_of_the_month_is_pruned(self):
+        moved = show("Slipped to August", 1, "Hulu", 0, 8, "Fri", "8/3", None)
+        self.assertNotIn("Slipped to August", self._post1_titles([moved]))
+
+    def test_an_abandoned_premiere_is_dropped(self):
+        gone = show("Dropped It", 1, "Peacock", 1, 8, "Tue", "7/9", None,
+                    started=True, abandoned=True)
+        self.assertNotIn("Dropped It", self._post1_titles([gone]))
+
+    def test_season_one_is_new_and_later_seasons_are_returning(self):
+        s1 = show("Fresh", 1, "FX", 0, 8, "Sun", "7/10", None)
+        s3 = show("Back Again", 3, "FX", 0, 8, "Sun", "7/11", None, started=True)
+        out = fmt.render_post1([s1, s3], {}, ":tv:", month=self.MONTH)
+        new_block, returning_block = out.split("**Returning**")
+        self.assertIn("Fresh", new_block)
+        self.assertNotIn("Back Again", new_block)
+        self.assertIn("Back Again", returning_block)
 
 
 class RenderPost2Tests(unittest.TestCase):

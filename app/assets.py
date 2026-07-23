@@ -26,6 +26,7 @@ _CACHED_ASSETS = (
     "static/js/distrakt.js",
     "static/js/nav.js",
     "static/js/plex-auth.js",
+    "static/js/share.js",
 )
 
 # Falls back to a constant when the files can't be stat'd — a wrong-but-stable

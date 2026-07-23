@@ -16,10 +16,11 @@ ENV PYTHONUNBUFFERED=1 \
 # ignored, so every user collapses onto the proxy's address and per-IP login rate
 # limiting becomes instance-wide.
 #
-# Used in two places on purpose. Hypercorn reads it at process start (see CMD)
-# and cannot be reconfigured from the running app; the app's own copy is the
-# `trusted_proxy_ips` setting, which this seeds on first run and the admin
-# Settings screen edits thereafter.
+# The APP reads this env var, not the server: config.py seeds the admin-editable
+# `trusted_proxy_ips` setting from it on first run, and app/auth.py does all the
+# X-Forwarded-For parsing itself off the raw connection peer. Hypercorn is left
+# out of it deliberately — it only rewrites the client via an opt-in ProxyFix
+# middleware this app does not use, so it always hands the app the true peer.
 ENV TRUSTED_PROXY_IPS=127.0.0.1/32
 
 WORKDIR /app
@@ -43,8 +44,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
 
-# Shell form so $TRUSTED_PROXY_IPS expands — hypercorn needs the value at start,
-# and exec form would pass the literal string. `exec` keeps hypercorn as PID 1 so
-# it still receives the container's stop signal directly.
-CMD exec hypercorn app.main:app --bind 0.0.0.0:8000 --access-logfile - \
-    --forwarded-allow-ips "$TRUSTED_PROXY_IPS"
+# Exec form: no shell, so hypercorn is PID 1 and receives the container's stop
+# signal directly. No --forwarded-allow-ips — Hypercorn has no such option (it
+# was an unrecognized-argument crash on start), and the app reads TRUSTED_PROXY_IPS
+# itself (see the ENV note above), so the server needs no proxy configuration.
+CMD ["hypercorn", "app.main:app", "--bind", "0.0.0.0:8000", "--access-logfile", "-"]

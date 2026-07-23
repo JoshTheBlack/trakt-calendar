@@ -12,6 +12,7 @@ every request). Delete the files to regenerate.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from io import BytesIO
@@ -264,3 +265,48 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
         img.save(tile)
         logger.info("logo[%s]: GENERATED -> %s", network, tile.name)
     return tile
+
+
+async def ensure_logos(settings, roster) -> int:
+    """Best-effort pre-generation of the network tiles a roster needs. Returns how
+    many were newly generated.
+
+    `roster` is any iterable of (network_name, tmdb_id). WHY THIS EXISTS: both the
+    calendar and the tracker render each network as an <img> pointing at
+    /api/network-logo, which generates the tile on a cache miss — but ONLY when
+    that request carries a usable tmdb. A show added before tmdb was stored sends
+    an empty one, so if a network appears solely on such shows its tile is never
+    generated and it shows the emoji fallback forever, even though a sibling with
+    a tmdb could have produced it. Warming the cache from the whole roster removes
+    that dependence on which show happened to load first.
+
+    Cheap once warm: a network whose tile already exists (or is negative-cached)
+    is a single path check and no TMDB call, so this is safe to run on every load
+    — it does real work only for the genuinely-missing, exactly like backfill.
+    """
+    if not getattr(settings, "tmdb_configured", False):
+        return 0
+    # First tmdb seen per still-missing network; dedup so one TMDB lookup covers
+    # every show on that network.
+    want: dict[str, int] = {}
+    for network, tmdb in roster:
+        name = (network or "").strip()
+        if not name or not tmdb or name in want:
+            continue
+        if _tile_path(name).exists() or is_negative(name):
+            continue
+        want[name] = int(tmdb)
+    if not want:
+        return 0
+    with span("logos.ensure_logos", n=len(want)):
+        results = await asyncio.gather(
+            *(ensure_logo(settings, name, tmdb) for name, tmdb in want.items()),
+            return_exceptions=True,
+        )
+    generated = 0
+    for name, result in zip(want, results):
+        if isinstance(result, Exception):
+            logger.warning("logo pre-warm failed for %s: %s", name, result)
+        elif result is not None:
+            generated += 1
+    return generated

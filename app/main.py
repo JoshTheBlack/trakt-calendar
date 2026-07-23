@@ -63,7 +63,7 @@ from .trakt import (
 
 logger = logging.getLogger(__name__)
 
-VERSION = "1.1.0"  # keep in sync with CHANGELOG.md
+VERSION = "1.1.1"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 COMMIT = os.environ.get("APP_COMMIT", "").strip()
@@ -802,6 +802,38 @@ async def get_settings(request: Request):
     })
 
 
+_COOKIE_SECURE_MODES = ("always", "auto", "never")
+
+
+def _cookie_secure_error(settings, request: Request) -> str | None:
+    """Reject a cookie_secure change that is invalid or self-locking.
+
+    The lockout: "always" makes the session cookie Secure, and a browser on plain
+    http:// silently discards a Secure cookie — so the operator's next request
+    arrives with no session and they can't get back to this screen to undo it,
+    which is exactly why this used to be hand-edited only.
+
+    Judged on the BROWSER's scheme (Origin/Referer), never the request's own,
+    because behind a TLS-terminating proxy the app sees http while the browser is
+    on https — that is the case "always" exists for and must stay allowed. The
+    browser scheme also does not depend on trusted_proxy_ips being right, so the
+    guard holds on a fresh instance whose proxy list is still the default. A save
+    from this screen always carries an Origin (mutating + same-origin), so a
+    missing scheme here means we genuinely can't tell, and we allow it.
+    """
+    mode = (settings.cookie_secure or "").strip().lower()
+    if mode not in _COOKIE_SECURE_MODES:
+        return f"Session cookie security must be one of: {', '.join(_COOKIE_SECURE_MODES)}."
+    settings.cookie_secure = mode  # normalize what gets saved
+    if mode == "always" and auth.browser_scheme(request) == "http":
+        return (
+            "You're viewing this over http://, so a Secure session cookie would be "
+            "discarded by your browser and lock you out. Serve this over https:// "
+            "(a reverse proxy in front counts), or choose Auto or Never."
+        )
+    return None
+
+
 @guard.post("/api/settings", AuthLevel.ADMIN)
 async def post_settings(request: Request):
     """Save a partial settings update.
@@ -823,6 +855,8 @@ async def post_settings(request: Request):
     # the Trakt application, and Trakt compares the two exactly — so the failure
     # would otherwise surface much later as an unreadable error mid-sign-in.
     if err := public_base_url_error(settings.public_base_url):
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    if "cookie_secure" in data and (err := _cookie_secure_error(settings, request)):
         return JSONResponse({"ok": False, "error": err}, status_code=400)
     save_settings(settings)
     # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config right away,
@@ -1153,7 +1187,7 @@ def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
     month reached by navigating backward (readonly=True, §6 no-backfill)."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
-        "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url),
+        "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2([], emojis, default_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1192,7 +1226,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     if doc.get("closed"):
         # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
         shows = distrakt_store.frozen_shows(doc)
-        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url)
+        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
         post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies"))
         return {
             "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
@@ -1244,8 +1278,16 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
+    # Pre-warm the network-logo cache for the whole roster now that tmdb has been
+    # backfilled, so a show manually added before logos existed doesn't depend on
+    # some OTHER show requesting its network's logo first (see logos.ensure_logos).
+    # Best-effort and self-limiting: a no-op once each network's tile is on disk.
+    if shows and settings.configured:
+        with span("payload.ensure_logos"):
+            await logos.ensure_logos(settings, [(s.get("network"), s.get("tmdb")) for s in shows])
+
     with span("payload.render"):
-        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url)
+        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
         post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies)
     return {
         "ok": True,

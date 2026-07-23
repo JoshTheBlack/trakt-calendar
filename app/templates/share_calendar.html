@@ -112,7 +112,19 @@
             </div>
             <div class="grid">
                 {% for item in group['items'] %}
-                <div class="card{% if item.not_watching %} not-watching{% endif %}">
+                {# Clicking opens the same details modal as the calendar page —
+                   cast, trailer, episodes — fetched from the owner's token-scoped
+                   details endpoint (see share.js). The card carries only the
+                   identity the fetch needs plus a title/poster to show instantly
+                   while it loads. A JS enhancement: with it off, the poster's own
+                   Trakt link still reaches the full details. #}
+                <div class="card{% if item.not_watching %} not-watching{% endif %}"
+                     data-trakt-id="{{ item.trakt_id if item.trakt_id is not none else '' }}"
+                     data-media="{{ item.media }}"
+                     data-season="{{ item.season if item.season is not none else '' }}"
+                     data-title="{{ item.title }}"
+                     data-poster="{{ item.poster or '/static/images/nopostertv.png' }}"
+                     onclick="openShareDetails(this, event)">
                     <div class="poster-wrap">
                         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
                         {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
@@ -155,5 +167,21 @@
 <footer class="site-footer">
     <p>A read-only shared calendar &mdash; no sign-in required.</p>
 </footer>
+
+<!-- Details modal — same content as the calendar page (cast, trailer, episodes),
+     served cache-only from what the owner's own views already fetched. -->
+<div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeShareDetails()">
+    <div class="modal wide">
+        <div class="modal-head">
+            <h2 id="detailsTitle">Details</h2>
+            <div class="modal-head-right">
+                <button type="button" class="modal-close" onclick="closeShareDetails()">&times;</button>
+            </div>
+        </div>
+        <div class="modal-body" id="detailsBody"></div>
+    </div>
+</div>
+
+<script src="/static/js/share.js"></script>
 </body>
 </html>

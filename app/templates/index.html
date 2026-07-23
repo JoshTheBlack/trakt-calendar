@@ -258,12 +258,20 @@
                         <input type="text" id="s_trusted_proxies" name="trusted_proxy_ips" placeholder="127.0.0.1/32" autocomplete="off" spellcheck="false">
                         <span class="hint" id="s_proxy_hint"></span>
                     </div>
-                    {# Read-only on purpose: a wrong value here logs everyone out of the
-                       screen that would fix it, so cookie_secure stays hand-edited in
-                       settings.json. Shown because a mismatch is otherwise invisible. #}
-                    <div class="field" id="s_cookie_box" hidden>
-                        <label>Session cookies</label>
-                        <span class="hint" id="s_cookie_hint"></span>
+                    {# Editable, but the server refuses the one setting that would
+                       lock the operator out: "always" while the browser is
+                       genuinely on http:// discards the Secure cookie. The
+                       reverse-proxy case (browser on https, app on http) is NOT
+                       that, and is allowed — the check reads the browser's own
+                       scheme, not the internal hop. #}
+                    <div class="field">
+                        <label for="s_cookie_secure">Session cookie security</label>
+                        <select id="s_cookie_secure" name="cookie_secure" onchange="updateCookieHint()">
+                            <option value="always">Always — mark Secure (any HTTPS, incl. behind a reverse proxy)</option>
+                            <option value="auto">Auto — detect per request</option>
+                            <option value="never">Never — plain-HTTP LAN only</option>
+                        </select>
+                        <span class="hint" id="s_cookie_hint" data-base="The session cookie's Secure flag. &quot;Always&quot; is right for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself sees plain HTTP.">The session cookie's Secure flag. "Always" is right for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself sees plain HTTP.</span>
                     </div>
                 </div>
 

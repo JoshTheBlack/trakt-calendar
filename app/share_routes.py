@@ -26,7 +26,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import auth, calendar_cache, calendar_state, share_links
+from . import auth, calendar_cache, calendar_state, share_links, trakt
 from .auth import AuthLevel
 from .authz import Guard
 from .config import load_settings
@@ -274,6 +274,53 @@ async def share_by_slug(request: Request, slug: str):
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_slug(slug))
+
+
+# ---------------------------------------------------------------------------
+# details for a card on a public page — same modal content as the calendar
+# ---------------------------------------------------------------------------
+# CACHE-ONLY, so §1.9 holds: this never calls Trakt. The owner's own calendar
+# views already fetch and cache each show's detail (cast, trailer, episodes);
+# this serves that cache back to visitors. A show the owner has not viewed comes
+# back with empty fields and the modal renders around them — no public request
+# ever spends the owner's rate limit. Rate-limited per IP like every other share
+# request; no membership gate is needed because there is no fetch to amplify.
+
+def _season_param(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def _details(request: Request, share_row) -> Response:
+    settings = load_settings()
+    if await _share_rate_limited(request, settings):
+        return _too_many_requests()
+    if share_row is None:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    media = request.query_params.get("media", "show")
+    trakt_id = (request.query_params.get("id") or "").strip()
+    if not trakt_id:
+        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    season = _season_param(request.query_params.get("season"))
+    details = await trakt.fetch_details(settings, media, trakt_id, season, cache_only=True)
+    return JSONResponse({"ok": True, **details})
+
+
+@guard.get("/s/{token}/details", AuthLevel.PUBLIC)
+async def share_details_by_token(request: Request, token: str):
+    return await _details(request, await share_links.resolve_by_token(token))
+
+
+@guard.get("/u/{username}/details", AuthLevel.PUBLIC)
+async def share_details_by_username(request: Request, username: str):
+    return await _details(request, await share_links.resolve_by_username(username))
+
+
+@guard.get("/c/{slug}/details", AuthLevel.PUBLIC)
+async def share_details_by_slug(request: Request, slug: str):
+    return await _details(request, await share_links.resolve_by_slug(slug))
 
 
 # ---------------------------------------------------------------------------

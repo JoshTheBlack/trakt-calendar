@@ -531,6 +531,7 @@ async function openSettings() {
         document.getElementById('s_base_url').value = s.public_base_url || '';
         document.getElementById('s_trusted_proxies').value = s.trusted_proxy_ips || '';
         updateProxyHint(s);
+        document.getElementById('s_cookie_secure').value = (s.cookie_secure || 'always').toLowerCase();
         updateCookieHint(s);
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
         applySecretState(s.secrets_set);
@@ -666,6 +667,7 @@ async function saveSettings(event) {
         ...collectSecrets(),
         public_base_url: document.getElementById('s_base_url').value.trim(),
         trusted_proxy_ips: document.getElementById('s_trusted_proxies').value.trim(),
+        cookie_secure: document.getElementById('s_cookie_secure').value,
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
@@ -961,30 +963,30 @@ function updateProxyHint(s) {
     hint.textContent = text;
 }
 
-// cookie_secure is resolved from the browser at onboarding and hand-edited after,
-// so it can drift: a data dir that started on localhost and later moved behind
-// HTTPS keeps "never" and quietly serves session cookies with no Secure flag.
-// Only the browser knows the real protocol, so the comparison happens here.
+// The stored policy can drift from reality — a data dir that started on
+// localhost and later moved behind HTTPS keeps "never" and quietly serves
+// session cookies with no Secure flag. Only the browser knows the real protocol,
+// so this compares the saved value against it and warns in place, over the
+// field's own explanatory text. `s` may be the settings response OR nothing (a
+// re-check after the dropdown changes), so the mode is read from the control
+// when not passed.
 function updateCookieHint(s) {
-    const box = document.getElementById('s_cookie_box');
+    const select = document.getElementById('s_cookie_secure');
     const hint = document.getElementById('s_cookie_hint');
-    if (!box || !hint) return;
-    const mode = (s.cookie_secure || 'always').toLowerCase();
+    if (!select || !hint) return;
+    const mode = ((s && s.cookie_secure) || select.value || 'always').toLowerCase();
     const isHttps = window.location.protocol === 'https:';
     let text = '';
     if (mode === 'never' && isHttps) {
-        text = 'Set to "never", but you reached this page over https://. Session cookies '
-            + 'are going out without the Secure flag — set "cookie_secure" to "always" in '
-            + 'data/settings.json.';
+        text = 'You reached this page over https:// but cookies are set to "never" — '
+            + 'they are going out without the Secure flag. Choose "Always".';
     } else if (mode === 'always' && !isHttps) {
-        text = 'Set to "always", but you reached this page over http://. Anyone signing in '
-            + 'over http:// will have their cookie discarded — set "cookie_secure" to '
-            + '"never" in data/settings.json, or serve this instance over https://.';
+        text = 'You reached this page over http://. Saving "Always" would make the session '
+            + 'cookie Secure and your browser would discard it, locking you out — this is '
+            + 'refused. Serve over https:// (a reverse proxy counts), or choose Auto or Never.';
     }
-    hint.textContent = text;
+    hint.textContent = text || hint.dataset.base || '';
     hint.classList.toggle('warn', !!text);
-    // Nothing to say when the policy matches reality; the field stays out of the way.
-    box.hidden = !text;
 }
 
 function stopDeviceAuthPolling() {
@@ -1265,7 +1267,7 @@ function renderDetails(d, poster, media, season) {
         const yt = youTubeId(d.trailer);
         html += `<div class="details-section-title">▶️ Trailer</div>`;
         html += yt
-            ? `<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/${yt}" title="Trailer" loading="lazy" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>`
+            ? `<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/${yt}" title="Trailer" loading="lazy" referrerpolicy="strict-origin-when-cross-origin" allow="accelerometer; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe></div>`
             : `<a class="pill-btn" href="${esc(d.trailer)}" target="_blank" rel="noopener">Watch trailer ↗</a>`;
     }
 

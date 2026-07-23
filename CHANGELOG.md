@@ -2,6 +2,22 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.1.1] - 2026-07-22
+
+### Fixes
+- 🐳 **The Docker image starts again.** The container passed `--forwarded-allow-ips` to Hypercorn, which has no such option, so it crashed on boot with "unrecognized arguments". The app reads `TRUSTED_PROXY_IPS` itself and does its own forwarded-header parsing, so the flag was never needed — it's gone.
+- ▶️ **Trailer embeds play behind a reverse proxy again.** The YouTube embed needs to send its origin to verify the page, and a `Referrer-Policy` in front of the app (e.g. from Traefik) was stripping it, so the player showed an error instead. The trailer iframe now sets its own `referrerpolicy` so it works regardless of the proxy's policy.
+
+### Admin interface
+- 🍪 **Session cookie security is now set in Settings → Server**, instead of only by hand-editing `data/settings.json`. Choose Always (the default, correct for any HTTPS deployment including behind a reverse proxy), Auto (detect per request), or Never (plain-HTTP LAN only). Picking "Always" while you're actually on `http://` is refused with an explanation rather than silently locking you out.
+
+### Public sharing
+- 🪟 **Clicking a card on a shared calendar now opens the full details** — overview, trailer, cast, and episode list — the same modal the calendar page shows. It's served entirely from what your own views already cached, so a shared page still makes **zero Trakt calls**: shows you've opened yourself show everything, and any others fill in as you browse them.
+
+### 🥚
+- Its decorations now fill themselves in on the things you pinned up by hand before it knew how to make them, instead of only on what it gathered itself.
+- Its first notice holds the whole month again — a thing stays listed there once it has begun, and only drops off if it moves out of the month entirely.
+
 ## 🏷️ [1.1.0] - 2026-07-22
 
 ### Accounts & access

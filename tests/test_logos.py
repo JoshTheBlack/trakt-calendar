@@ -41,6 +41,65 @@ class PickNetworkTests(unittest.TestCase):
         self.assertIsNone(logos._pick_network([], "AMC"))
 
 
+class EnsureLogosTests(unittest.IsolatedAsyncioTestCase):
+    """Pre-warm: generate the tiles a roster needs, so a show added before tmdb
+    was stored doesn't depend on another show requesting its network first."""
+
+    CFG = SimpleNamespace(tmdb_configured=True)
+
+    async def test_one_lookup_per_network_and_missing_tmdb_skipped(self):
+        roster = [
+            ("AMC", 11), ("AMC", 12),      # same network twice -> one call
+            ("Netflix", 20),
+            ("HBO", None), ("", 30),       # no tmdb / no name -> skipped
+        ]
+        seen = []
+
+        async def fake(settings, network, tmdb):
+            seen.append((network, tmdb))
+            return logos._tile_path(network)
+
+        with patch("app.logos._tile_path", side_effect=lambda n: __import__("pathlib").Path(f"/nope/{n}.png")), \
+             patch("app.logos.is_negative", return_value=False), \
+             patch("app.logos.ensure_logo", side_effect=fake):
+            generated = await logos.ensure_logos(self.CFG, roster)
+
+        self.assertEqual(sorted(seen), [("AMC", 11), ("Netflix", 20)])
+        self.assertEqual(generated, 2)
+
+    async def test_already_cached_or_negative_networks_are_skipped(self):
+        async def fake(settings, network, tmdb):
+            return logos._tile_path(network)
+
+        # AMC has a tile already; HBO is negative-cached; only Netflix is missing.
+        with patch("app.logos._tile_path") as tile, \
+             patch("app.logos.is_negative", side_effect=lambda n: n == "HBO"), \
+             patch("app.logos.ensure_logo", side_effect=fake) as gen:
+            tile.side_effect = lambda n: SimpleNamespace(exists=lambda: n == "AMC")
+            await logos.ensure_logos(self.CFG, [("AMC", 1), ("HBO", 2), ("Netflix", 3)])
+
+        called = {c.args[1] for c in gen.call_args_list}
+        self.assertEqual(called, {"Netflix"})
+
+    async def test_no_tmdb_key_is_a_noop(self):
+        with patch("app.logos.ensure_logo") as gen:
+            n = await logos.ensure_logos(SimpleNamespace(tmdb_configured=False), [("AMC", 1)])
+        self.assertEqual(n, 0)
+        gen.assert_not_called()
+
+    async def test_a_failure_on_one_network_does_not_sink_the_rest(self):
+        async def fake(settings, network, tmdb):
+            if network == "AMC":
+                raise RuntimeError("tmdb down")
+            return logos._tile_path(network)
+
+        with patch("app.logos._tile_path", side_effect=lambda n: __import__("pathlib").Path(f"/nope/{n}.png")), \
+             patch("app.logos.is_negative", return_value=False), \
+             patch("app.logos.ensure_logo", side_effect=fake):
+            generated = await logos.ensure_logos(self.CFG, [("AMC", 1), ("Netflix", 2)])
+        self.assertEqual(generated, 1)  # Netflix survived
+
+
 class FetchWatchedProgressTests(unittest.IsolatedAsyncioTestCase):
     async def test_aggregates_distinct_episodes_from_history(self):
         events = [

@@ -109,6 +109,9 @@ class Settings:
     # proxy the app itself is served over plain HTTP, so detection would report
     # "http" and ship session cookies without Secure on every real HTTPS
     # deployment. Use "never" only when genuinely serving over plain HTTP.
+    # Editable in Settings > Server; the route guards the one self-locking change
+    # (setting "always" from a browser that is genuinely on http). See
+    # main._cookie_secure_error.
     cookie_secure: str = "always"
     # Comma-separated CIDRs whose X-Forwarded-For this app will honor. Seeded
     # from the TRUSTED_PROXY_IPS env var on first run, editable in Settings after

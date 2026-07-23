@@ -202,6 +202,7 @@ async def _cached_get(
     fresh: bool = False,
     raise_errors: bool = False,
     private: bool = False,
+    cache_only: bool = False,
 ):
     """GET a Trakt path (with disk caching keyed by path+params). Returns parsed JSON or None.
 
@@ -210,6 +211,12 @@ async def _cached_get(
     `raise_errors=True` raises TraktError instead of silently returning None — used
     by callers (search, seasons) where a swallowed 401 previously looked identical
     to a genuine "no results" response, making auth failures invisible in the UI.
+
+    `cache_only=True` NEVER makes a network call: it returns the cached value or
+    None. This is what lets a public share page reuse detail data the OWNER's own
+    views already fetched and cached, without a public request ever spending the
+    owner's Trakt rate limit — the read-only-cache half of the calendar cache's
+    allow_fetch=False rule, applied to the detail lookups.
 
     `private=True` means the RESPONSE DEPENDS ON WHOSE TOKEN ASKED — a watch
     history, a progress record, an activity beacon. The cache is keyed by URL and
@@ -224,6 +231,10 @@ async def _cached_get(
         if cached is not None:
             _perf.debug("cacheHIT  %s", path)  # DEBUG: 1 line/season, noisy on warm loads
             return cached
+    if cache_only:
+        # A public share request: never reach for the network, whatever the reason
+        # the cache missed (cold, expired). The caller renders what it got.
+        return None
     t0 = _time.perf_counter()
     try:
         resp = await client.get(url, headers=_headers(settings))
@@ -286,17 +297,23 @@ async def fetch_tile_info(settings: Settings, media: str, trakt_id: str, season:
     return {"season": season, **_summarize_season(episodes, tz)}
 
 
-async def fetch_details(settings: Settings, media: str, trakt_id: str, season: int | None) -> dict:
-    """Full detail payload for the modal (requirement G): overview, cast, episode list."""
+async def fetch_details(settings: Settings, media: str, trakt_id: str, season: int | None,
+                        cache_only: bool = False) -> dict:
+    """Full detail payload for the modal (requirement G): overview, cast, episode list.
+
+    `cache_only=True` serves purely from cache and never calls Trakt — the mode a
+    public share page uses so a visitor's click reuses what the owner's own views
+    already cached rather than spending the owner's rate limit. Fields with no
+    cached source come back empty, and the modal renders around them."""
     tz = ZoneInfo(settings.timezone)
     base = "movies" if media == "movie" else "shows"
     client = shared_client()
     tasks = {
-        "info": _cached_get(client, settings, f"{base}/{trakt_id}", {"extended": "full"}),
-        "people": _cached_get(client, settings, f"{base}/{trakt_id}/people", {"extended": "full"}),
+        "info": _cached_get(client, settings, f"{base}/{trakt_id}", {"extended": "full"}, cache_only=cache_only),
+        "people": _cached_get(client, settings, f"{base}/{trakt_id}/people", {"extended": "full"}, cache_only=cache_only),
     }
     if media != "movie" and season is not None:
-        tasks["episodes"] = _cached_get(client, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"})
+        tasks["episodes"] = _cached_get(client, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"}, cache_only=cache_only)
     results = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
 
     info = results.get("info") or {}
