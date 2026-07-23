@@ -171,7 +171,7 @@ async function addToArr(el, event) {
 
 // Add every *watching* item on this page to Sonarr/Radarr. Each add runs via the
 // same per-item path (so it toasts individually) with limited concurrency.
-async function addAllToArr() {
+async function addAllToArr(event) {
     // Only the Sonarr/Radarr buttons (not Seerr) — this month's endpoint is TV-only or movie-only.
     const btns = [...document.querySelectorAll('.card:not(.not-watching) .arr-btn')]
         .filter(b => b.dataset.arr !== 'seer' && !b.disabled && b.dataset.added !== '1' && b.dataset.busy !== '1');
@@ -179,11 +179,14 @@ async function addAllToArr() {
         toast('Nothing to add — check items are watching and Sonarr/Radarr are reachable.', false);
         return;
     }
-    if (!confirm(`Add ${btns.length} watching item${btns.length === 1 ? '' : 's'} to your library?`)) return;
-    toast(`Adding ${btns.length} item${btns.length === 1 ? '' : 's'}…`, true);
-    let i = 0;
-    const worker = async () => { while (i < btns.length) { await addToArr(btns[i++]); } };
-    await Promise.all([worker(), worker(), worker()]);  // 3 concurrent
+    confirmInline(event.currentTarget,
+        `Add ${btns.length} watching item${btns.length === 1 ? '' : 's'} to your library?`,
+        async () => {
+            toast(`Adding ${btns.length} item${btns.length === 1 ? '' : 's'}…`, true);
+            let i = 0;
+            const worker = async () => { while (i < btns.length) { await addToArr(btns[i++]); } };
+            await Promise.all([worker(), worker(), worker()]);  // 3 concurrent
+        });
 }
 
 function toast(message, ok) {
@@ -574,11 +577,37 @@ function encAddButton(row, label, handler, ghost) {
     row.appendChild(btn);
 }
 
+// The panel's own heading, not just the status line beneath it: "Secret
+// encryption at rest" read as true whether or not anything was actually
+// encrypted, which is exactly backwards for a security control. This makes
+// the plaintext case impossible to mistake for the encrypted one at a glance.
+function renderEncryptionHeading(s) {
+    const heading = document.getElementById('s_enc_heading');
+    if (s.phase === 'encrypted' && s.health !== 'key_missing' && !s.needs_reseal) {
+        heading.textContent = '🔒 Secrets encrypted at rest';
+        heading.className = 'settings-section enc-encrypted';
+    } else if (s.health === 'key_missing') {
+        heading.textContent = '⚠️ Secrets encrypted, key missing';
+        heading.className = 'settings-section enc-plain';
+    } else if (s.phase === 'encrypted' && s.needs_reseal) {
+        // `phase` is a one-way ratchet — once a backfill has run it stays
+        // "encrypted" forever, even if something written afterward (e.g. a
+        // relink that landed while the key was unavailable) is still plaintext.
+        // Read the actual rows instead of trusting the flag at face value.
+        heading.textContent = '⚠️ Some secrets are unencrypted';
+        heading.className = 'settings-section enc-plain';
+    } else {
+        heading.textContent = '⚠️ Secrets are stored in plaintext';
+        heading.className = 'settings-section enc-plain';
+    }
+}
+
 function renderEncryption(s) {
     const status = document.getElementById('s_enc_status');
     const actions = document.getElementById('s_enc_actions');
     const reveal = document.getElementById('s_enc_reveal');
     const err = document.getElementById('s_enc_error');
+    renderEncryptionHeading(s);
     actions.innerHTML = '';
     reveal.hidden = true; reveal.innerHTML = '';
     err.hidden = true; err.textContent = '';
@@ -588,13 +617,37 @@ function renderEncryption(s) {
         status.innerHTML = '⚠️ Secrets are encrypted, but <code>' + esc(env) + '</code> is not set — ' +
             'they are unreadable but intact. Restore the key and restart. Do <strong>not</strong> ' +
             're-save credentials or re-link while it is missing: that overwrites the encrypted values.';
+        // A plain link here would be easy to miss — bare <a> tags render as
+        // unstyled text (see the global `a { text-decoration: none }` reset),
+        // so this is a real button, not prose with a link buried in it.
+        encAddButton(actions, 'Lost the key for good? Recover here →',
+            () => { window.location.href = '/admin/encryption/recovery'; });
         return;
     }
     if (s.phase === 'encrypted') {
+        if (s.needs_reseal) {
+            status.innerHTML = 'Everything was sealed once, but at least one secret or linked ' +
+                'token was written since — most likely while <code>' + esc(env) + '</code> was ' +
+                'briefly unavailable — and is stored in the clear right now. Encrypt again to seal ' +
+                'just that value; anything already sealed is left untouched.';
+            encAddButton(actions, 'Encrypt secrets now', encEncryptNow);
+            return;
+        }
         status.textContent = '🔒 Stored secrets are encrypted at rest.';
         return;
     }
     if (s.key_valid) {
+        if (s.phase === 'opted_out') {
+            // Already declined once with this key present. Repeating the exact
+            // same "Encrypt secrets now / Not now" offer here is why "Not now"
+            // looked like a no-op — the panel showed the identical prompt either
+            // way, so nothing visibly changed. This is the resting state
+            // instead: a single action, no repeat decision to make.
+            status.innerHTML = 'Not encrypted. A valid key is set in <code>' + esc(env) + '</code> — ' +
+                'turn encryption on whenever you’re ready.';
+            encAddButton(actions, 'Encrypt secrets now', encEncryptNow);
+            return;
+        }
         status.innerHTML = 'A valid key is set in <code>' + esc(env) + '</code>. Encrypt the stored ' +
             'secrets now — no restart needed.';
         encAddButton(actions, 'Encrypt secrets now', encEncryptNow);
@@ -682,22 +735,25 @@ function encCopyKey() {
     toast('Key copied — store it somewhere safe', true);
 }
 
-async function encVerify() {
+async function encVerify(event) {
     const { ok, data } = await encPost('/api/admin/encryption/verify', {});
     if (!ok) { encError(data.error); return; }
     if (!data.detected) {
         encError('No valid key found in the environment yet. Set ENCRYPTION_KEY and restart, then try again.');
         return;
     }
-    encEncryptNow();
+    encEncryptNow(event);
 }
 
-async function encEncryptNow() {
-    if (!confirm('Encrypt every stored secret and linked token now? Make sure you have saved the key first.')) return;
-    const { ok, data } = await encPost('/api/admin/encryption/encrypt', {});
-    if (!ok) { encError(data.error); return; }
-    toast('Secrets encrypted at rest', true);
-    loadEncryptionState();
+async function encEncryptNow(event) {
+    confirmInline(event.currentTarget,
+        'Encrypt every stored secret and linked token now? Make sure you have saved the key first.',
+        async () => {
+            const { ok, data } = await encPost('/api/admin/encryption/encrypt', {});
+            if (!ok) { encError(data.error); return; }
+            toast('Secrets encrypted at rest', true);
+            loadEncryptionState();
+        }, { danger: true });
 }
 
 async function encOptOut() {
@@ -1003,14 +1059,17 @@ function checkShareSlug() {
     }, 500);
 }
 
-async function rotateShareToken() {
-    if (!confirm('Rotate the token link? The old link will stop working immediately.')) return;
-    try {
-        const res = await fetch('/api/me/share/rotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        shareState = await res.json();
-        renderShare();
-        toast('Token link rotated', true);
-    } catch (e) { toast('Could not rotate token', false); }
+async function rotateShareToken(event) {
+    confirmInline(event.currentTarget,
+        'Rotate the token link? The old link will stop working immediately.',
+        async () => {
+            try {
+                const res = await fetch('/api/me/share/rotate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                shareState = await res.json();
+                renderShare();
+                toast('Token link rotated', true);
+            } catch (e) { toast('Could not rotate token', false); }
+        }, { danger: true });
 }
 
 function copyShareUrl() {

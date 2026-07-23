@@ -121,21 +121,24 @@ async function importFromCalendar() {
 }
 
 // Delete a show from the tracker entirely (cleanup mistakes, incl. abandoned ones).
-async function deleteShow(traktId, season) {
-    if (!confirm('Remove this show from the tracker for this month? This cannot be undone.')) return;
-    try {
-        const res = await fetch('/api/distrakt/remove', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH, trakt_id: traktId, season })
-        });
-        const d = await res.json();
-        if (!d.ok) throw new Error(d.error || 'failed');
-        toast('Removed from tracker', true);
-        applyMonthResponse(d);  // mutation returns the recomputed month (1d)
-    } catch (e) {
-        toast('Could not remove show', false);
-    }
+async function deleteShow(traktId, season, event) {
+    confirmInline(event.currentTarget,
+        'Remove this show from the tracker for this month? This cannot be undone.',
+        async () => {
+            try {
+                const res = await fetch('/api/distrakt/remove', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH, trakt_id: traktId, season })
+                });
+                const d = await res.json();
+                if (!d.ok) throw new Error(d.error || 'failed');
+                toast('Removed from tracker', true);
+                applyMonthResponse(d);  // mutation returns the recomputed month (1d)
+            } catch (e) {
+                toast('Could not remove show', false);
+            }
+        }, { danger: true });
 }
 
 // Read-only months hide the add/edit affordances and show a banner (abandon
@@ -289,7 +292,7 @@ function showRow(s) {
     else if (s.bucket === 'keepup') dates = s.finale || '?/?';
     const actions = monthClosed ? '' : `
             <button type="button" class="btn-ghost small" onclick="toggleAbandon(${s.trakt_id}, ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>
-            <button type="button" class="btn-ghost small danger" onclick="deleteShow(${s.trakt_id}, ${s.season})" title="Remove from tracker">✕</button>`;
+            <button type="button" class="btn-ghost small danger" onclick="deleteShow(${s.trakt_id}, ${s.season}, event)" title="Remove from tracker">✕</button>`;
     const net = s.network || '';
     // Prefer the TMDB network logo (shared cache with the calendar); if it isn't
     // cached (404) fall back to the mapped emoji token.

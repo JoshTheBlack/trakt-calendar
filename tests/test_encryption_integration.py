@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cryptography.fernet import Fernet  # noqa: E402
 
-from app import auth, db, encryption_flow, secrets_box, trakt, trakt_routes  # noqa: E402
+from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box, trakt, trakt_routes  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
 from app.endpoints import get_endpoint  # noqa: E402
 
@@ -266,6 +266,131 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
             refresh_token="bobs-new-refresh", token_expires_at=None,
         ))
         self.assertEqual(asyncio.run(trakt_routes.access_token_for_user(user_id)), "bobs-new-token")
+
+
+class StartupPlaintextWarningTests(EncryptionIntegrationTestCase):
+    """The one-line startup warning (app.main._warn_on_key_state) has to catch
+    the window a bare is_enabled() check misses: a key configured in the
+    environment does not mean the rows already in the database are sealed —
+    only running the backfill does that. A key present with an unsealed row
+    still on disk must still warn."""
+
+    def _warn(self) -> list[str]:
+        with self.assertLogs("app.main", level="WARNING") as logged:
+            asyncio.run(main._warn_on_key_state(encryption_flow.HEALTHY))
+        return logged.output
+
+    def test_no_key_and_a_plaintext_secret_warns(self):
+        _set_key(None)
+        save_settings(Settings(sonarr_api_key="plain-secret"))
+        self.assertTrue(any("UNENCRYPTED" in m for m in self._warn()))
+
+    def test_a_key_present_but_the_backfill_not_yet_run_still_warns(self):
+        """The exact regression this covers: a valid key in the environment used
+        to silence the warning outright, even though the secret written before
+        the key existed is still plaintext on disk until the backfill runs."""
+        _set_key(None)
+        save_settings(Settings(sonarr_api_key="plain-secret"))
+        _set_key(KEY)  # key now present; nothing has been backfilled yet
+        self.assertTrue(any("UNENCRYPTED" in m for m in self._warn()))
+
+    def test_once_actually_sealed_no_warning(self):
+        _set_key(None)
+        save_settings(Settings(sonarr_api_key="plain-secret"))
+        _set_key(KEY)
+        asyncio.run(encryption_flow.encrypt_now())
+        with self.assertRaises(AssertionError):  # assertLogs raises if nothing logged
+            self._warn()
+
+    def test_no_secrets_at_all_no_warning(self):
+        _set_key(None)
+        with self.assertRaises(AssertionError):
+            self._warn()
+
+
+class NeedsResealTests(EncryptionIntegrationTestCase):
+    """`phase` is a one-way ratchet (it flips to `encrypted` once and stays
+    there), but a row can go back to plaintext afterward — most plausibly a
+    relink or credential re-save landing while the key was briefly missing,
+    now blocked by the guard in app.auth.link_provider_identity, but the
+    signal has to exist independent of that guard too: it is what lets the
+    Settings panel and the startup warning both tell a stale `encrypted` flag
+    apart from an instance that is actually fully sealed."""
+
+    def test_fully_sealed_instance_reports_no_reseal_needed(self):
+        _set_key(KEY)
+        save_settings(Settings(sonarr_api_key="secret"))
+        asyncio.run(encryption_flow.encrypt_now())
+        self.assertFalse(asyncio.run(secrets_backfill.unsealed_present()))
+
+    def test_a_row_written_after_encrypting_while_keyless_is_detected(self):
+        """The exact shape of the bug report this covers: an instance already
+        fully encrypted, then a per-user token written while the key was
+        absent (bypassing the guard directly, as a stand-in for "the guard
+        didn't exist yet" / any other path that writes a token) leaves one row
+        plaintext even though `phase` still reads `encrypted`."""
+        _set_key(KEY)
+        save_settings(Settings(sonarr_api_key="secret"))
+        user_id = asyncio.run(auth.create_user(
+            username="alice", password=None, settings=Settings()))
+
+        def _link(conn):
+            return auth.insert_linked_identity(
+                conn, user_id=user_id, provider="trakt", provider_user_id="uuid-1",
+                access_token="alice-token", refresh_token="alice-refresh",
+            )
+
+        identity_id = asyncio.run(db.transaction(_link))
+        asyncio.run(encryption_flow.encrypt_now())
+        self.assertEqual(asyncio.run(encryption_flow.get_phase()), encryption_flow.PHASE_ENCRYPTED)
+        self.assertFalse(asyncio.run(secrets_backfill.unsealed_present()))
+
+        # A token lands in the clear — the key was unavailable at write time,
+        # bypassing seal() the same way a pre-guard relink did.
+        _set_key(None)
+        asyncio.run(auth.store_identity_tokens(
+            identity_id, access_token="fresh-plaintext-token",
+            refresh_token="fresh-plaintext-refresh", token_expires_at=None))
+        _set_key(KEY)
+
+        self.assertTrue(asyncio.run(secrets_backfill.unsealed_present()))
+        # `encrypt_now` is idempotent and safe to run again — the same "Encrypt
+        # secrets now" button the Settings panel re-offers when needs_reseal is
+        # true — and it seals only what is actually still plaintext.
+        asyncio.run(encryption_flow.encrypt_now())
+        self.assertFalse(asyncio.run(secrets_backfill.unsealed_present()))
+        raw = asyncio.run(db.fetch_value(
+            "SELECT access_token FROM linked_identities WHERE id = ?", (identity_id,)))
+        self.assertTrue(raw.startswith(secrets_box.PREFIX))
+        self.assertEqual(asyncio.run(trakt_routes.access_token_for_user(user_id)),
+                         "fresh-plaintext-token")
+
+    def test_status_endpoint_reports_needs_reseal(self):
+        from fastapi.testclient import TestClient
+        from app.main import app
+
+        _set_key(KEY)
+        save_settings(Settings(sonarr_api_key="secret"))
+        asyncio.run(encryption_flow.encrypt_now())
+
+        client = TestClient(app, base_url="https://testserver",
+                            headers={"Origin": "https://testserver"})
+        try:
+            resp = client.post("/onboarding", json={
+                "username": "josh", "password": "hunter2hunter2",
+                "password_confirm": "hunter2hunter2",
+            })
+            self.assertEqual(resp.status_code, 200, resp.text)
+            status = client.get("/api/admin/encryption").json()
+            self.assertFalse(status["needs_reseal"])
+
+            _set_key(None)
+            save_settings(Settings(radarr_api_key="a-fresh-radarr-key"))
+            _set_key(KEY)
+            status = client.get("/api/admin/encryption").json()
+            self.assertTrue(status["needs_reseal"])
+        finally:
+            client.close()
 
 
 if __name__ == "__main__":

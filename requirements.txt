@@ -19,3 +19,7 @@ cairosvg==2.9.0
 # at rest in the DB. Ships manylinux and Windows wheels, so it resolves in both
 # the .venv and the Docker build without a compiler.
 cryptography==49.0.0
+# Loads a local .env file for `python run.py` (non-Docker dev), so ENCRYPTION_KEY
+# and friends can be set once in a gitignored file instead of the shell profile.
+# Docker deployments set real environment variables and never touch this.
+python-dotenv==1.2.2

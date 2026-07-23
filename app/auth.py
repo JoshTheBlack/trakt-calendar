@@ -26,7 +26,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response
 
-from . import db, secrets_box
+from . import db, encryption_flow, secrets_box
 from .config import TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings
 
 logger = logging.getLogger(__name__)
@@ -1137,6 +1137,18 @@ class AccountUnavailable(Exception):
     """The identity resolved to an account that cannot be signed in to."""
 
 
+class IdentityWritesBlocked(Exception):
+    """A link/relink was refused because the encryption key is unhealthy.
+
+    Linking an identity that already exists here calls _refresh_identity, which
+    overwrites the row's stored tokens outright — exactly the same overwrite
+    save_settings() already refuses for app-level secrets while the key is
+    missing or wrong, and for the same reason: sealing is a pass-through
+    without a working key, so the fresh tokens would land as plaintext over
+    ciphertext the original key could still recover.
+    """
+
+
 class LastLoginMethod(Exception):
     """Unlinking would leave the account with no way to sign in at all."""
 
@@ -1178,8 +1190,13 @@ async def link_provider_identity(*, identity: ProviderIdentity, user_id: int) ->
     Raises IdentityInUse when the provider account already belongs to someone
     else here. Re-linking one this account already holds is not an error — it
     just refreshes the stored token, which is what a user clicking "reconnect"
-    is asking for.
+    is asking for — which is exactly why IdentityWritesBlocked is checked here
+    first: that refresh overwrites the row's existing tokens unconditionally,
+    so it is refused up front rather than partway through, the same guard
+    save_settings() already applies to app-level secrets.
     """
+    if encryption_flow.secret_writes_blocked():
+        raise IdentityWritesBlocked()
     ts = db.now()
 
     def _work(conn: db.Connection) -> LoginOutcome:

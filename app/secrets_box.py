@@ -197,13 +197,19 @@ def open_(stored: str | None) -> str | None:
         ) from exc
 
 
-def plaintext_storage_warning(secrets_present: bool) -> str | None:
-    """The one-line warning to surface at startup when secrets sit in the clear.
+def plaintext_storage_warning(unsealed_present: bool) -> str | None:
+    """The one-line warning to surface at startup when something is stored in
+    the clear right now.
 
-    Returns a message when there are stored secrets but no key is configured to
-    seal them, otherwise None. Kept parameterized (the caller reports whether any
-    secret is stored) so this module needs no DB import."""
-    if secrets_present and not is_enabled():
+    Takes the ANSWER (is any row actually unsealed?), not is_enabled(), because
+    a key can be configured without every row being sealed under it yet — the
+    seal-in-place backfill runs on the admin's confirmation, not the instant a
+    key lands in the environment. Gating this on is_enabled() alone would
+    silence the warning the moment a key is set, even though the existing rows
+    are still plaintext until that backfill actually runs — exactly the window
+    this warning exists to cover. The caller checks the real rows for the
+    `enc:v1:` prefix, so this module still needs no DB import."""
+    if unsealed_present:
         return (
             f"Secrets are stored UNENCRYPTED in the database. Set {ENV_VAR} to a "
             "Fernet key and enable at-rest encryption to protect them in backups "

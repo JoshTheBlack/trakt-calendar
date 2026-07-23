@@ -238,6 +238,15 @@ async def _finish_link(request: Request, settings: Settings,
                        status=409, back="/me", back_label="Back to your account")
     except auth.AccountUnavailable:
         return _notice(request, "Sign-in failed", auth.HANDSHAKE_REJECTED, status=403)
+    except auth.IdentityWritesBlocked:
+        return _notice(
+            request, "Encryption needs attention",
+            "This instance's stored secrets are encrypted, but the key is currently "
+            "missing or wrong, so linking is refused rather than writing a fresh token "
+            "in the clear. An administrator needs to restore ENCRYPTION_KEY (see "
+            "Settings) before linking can continue.",
+            status=409, back="/me", back_label="Back to your account",
+        )
     await _clear_reconnect_notice(current.is_admin)
     response = RedirectResponse("/me", status_code=303)
     auth.clear_handshake_cookie(response, settings, request)
@@ -379,6 +388,13 @@ async def adopt_app_token(user_id: int, settings: Settings) -> tuple[bool, str |
         )
     except auth.AccountUnavailable:
         return False, "This login can't be linked to right now."
+    except auth.IdentityWritesBlocked:
+        return False, (
+            "Stored secrets are encrypted, but the key is currently missing or wrong, "
+            "so this login was not linked to the app-wide token — that would have "
+            "written a fresh, unsealed one over it. Restore ENCRYPTION_KEY, then "
+            "authorize again."
+        )
     await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
     return True, None
 

@@ -8,6 +8,15 @@ Environment:
 import logging
 import os
 
+# Loads a gitignored .env file in the project root, if present, before anything
+# reads os.environ — in particular ENCRYPTION_KEY, which app/secrets_box.py
+# caches from the environment on first use. Docker never runs this file (its
+# CMD invokes hypercorn directly), so a real environment variable is still the
+# only way in there; this is purely a non-Docker dev convenience. A variable
+# already set in the actual environment wins over the .env file either way.
+from dotenv import load_dotenv
+load_dotenv()
+
 import hypercorn.asyncio
 from hypercorn.config import Config
 

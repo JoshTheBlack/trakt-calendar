@@ -86,7 +86,7 @@
            affordance. Left out of the page entirely for everyone else — a button
            that always fails is worse than no button. #}
         {% if is_admin and ((endpoint.media == 'movie' and settings.radarr_configured) or (endpoint.media != 'movie' and settings.sonarr_configured)) %}
-        <button type="button" id="addAllBtn" class="pill-btn" onclick="addAllToArr()" title="Add every watching item this month to {{ 'Radarr' if endpoint.media == 'movie' else 'Sonarr' }}">
+        <button type="button" id="addAllBtn" class="pill-btn" onclick="addAllToArr(event)" title="Add every watching item this month to {{ 'Radarr' if endpoint.media == 'movie' else 'Sonarr' }}">
             <img class="pill-icon" src="/static/icons/{{ 'radarr' if endpoint.media == 'movie' else 'sonarr' }}.png" alt=""> Add all
         </button>
         {% endif %}
@@ -279,7 +279,7 @@
                        rendered by renderEncryption() in app.js from /api/admin/
                        encryption — the key is never held by this app, only revealed
                        once for the operator to place in their own environment. #}
-                    <div class="settings-section">🔒 Secret encryption at rest</div>
+                    <div class="settings-section" id="s_enc_heading">🔒 Secret encryption at rest</div>
                     <div class="field" id="s_enc_panel">
                         <p class="hint" id="s_enc_status">Loading…</p>
                         <div class="auth-notice-actions" id="s_enc_actions"></div>
@@ -551,7 +551,7 @@
                 <div class="share-link-box">
                     <input type="text" id="share_url" readonly placeholder="No link yet">
                     <button type="button" class="btn-ghost small" onclick="copyShareUrl()">Copy</button>
-                    <button type="button" class="btn-ghost small" id="share_rotate" onclick="rotateShareToken()" title="Invalidate the old link and issue a new one">↻ Rotate</button>
+                    <button type="button" class="btn-ghost small" id="share_rotate" onclick="rotateShareToken(event)" title="Invalidate the old link and issue a new one">↻ Rotate</button>
                 </div>
             </div>
 

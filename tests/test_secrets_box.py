@@ -160,12 +160,16 @@ class SecretsBoxTests(unittest.TestCase):
             self.assertFalse(secrets_box.is_enabled())
             self.assertEqual(secrets_box.seal("x"), "x")
 
-    def test_plaintext_storage_warning_only_when_secrets_present_and_no_key(self):
-        with _KeyEnv(None):
+    def test_plaintext_storage_warning_reflects_what_the_caller_found_unsealed(self):
+        """Independent of is_enabled(): the caller inspects the real rows for the
+        `enc:v1:` prefix (see app.main._warn_on_key_state), including the window
+        where a key is configured but the backfill hasn't sealed old rows yet —
+        so a key being present must NOT silence this on its own."""
+        self.assertIsNotNone(secrets_box.plaintext_storage_warning(True))
+        self.assertIsNone(secrets_box.plaintext_storage_warning(False))
+        with _KeyEnv(KEY):
             self.assertIsNotNone(secrets_box.plaintext_storage_warning(True))
             self.assertIsNone(secrets_box.plaintext_storage_warning(False))
-        with _KeyEnv(KEY):
-            self.assertIsNone(secrets_box.plaintext_storage_warning(True))
 
 
 # A distinctive value per secret so a leak into the wrong store is unmistakable.

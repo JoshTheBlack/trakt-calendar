@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, db, encryption_flow, secrets_box
+from . import assets, auth, authz, db, encryption_flow, secrets_backfill, secrets_box
 from .auth import AuthLevel
 
 logger = logging.getLogger(__name__)
@@ -86,6 +86,13 @@ async def _status_payload() -> dict:
         "key_present": bool(raw_key),
         "key_valid": secrets_box.is_enabled(),
         "secrets_present": await _secrets_present(),
+        # True when some row is genuinely plaintext right now, independent of
+        # `phase` — a row can be written while the key was missing (a relink
+        # with no key configured, say) and stay unsealed even though the phase
+        # already reads `encrypted` from an earlier backfill. Lets the Settings
+        # panel re-offer the encrypt action instead of a phase flag that, once
+        # set, never gets revisited.
+        "needs_reseal": await secrets_backfill.unsealed_present(),
         "env_var": secrets_box.ENV_VAR,
     }
 
@@ -149,9 +156,23 @@ async def encryption_opt_out():
 @guard.get("/admin/encryption/recovery", AuthLevel.PUBLIC)
 async def recovery_page(request: Request):
     """The lost-key recovery screen. PUBLIC and self-gating on purpose — see the
-    module docstring. When the key is healthy there is nothing to recover, so it
-    steps aside to the calendar."""
-    if encryption_flow.health() != encryption_flow.KEY_MISMATCH:
+    module docstring. Handles both unhealthy states, not just the one the request
+    gate forces every visitor into:
+
+      KEY_MISMATCH — a key is set but wrong. The whole app is gated here already.
+      KEY_MISSING  — no key at all. The app stays usable elsewhere (this state
+        fails open by design), so nothing forces an admin here; the page is
+        still useful when they find their own way to it, most likely because
+        Settings told them to, or because the original key is gone for good and
+        restoring it isn't an option. Offers a freshly generated key for that
+        case — setting it and restarting turns this into an ordinary
+        KEY_MISMATCH, which the door-2 reset below already knows how to clean
+        up.
+
+    When the key is healthy there is nothing to recover, so it steps aside to
+    the calendar."""
+    health = encryption_flow.health()
+    if health not in (encryption_flow.KEY_MISMATCH, encryption_flow.KEY_MISSING):
         return RedirectResponse("/", status_code=303)
     user = await auth.current_user(request)
     if user is None:
@@ -159,11 +180,27 @@ async def recovery_page(request: Request):
     context = {
         "request": request,
         "is_admin": user.is_admin,
+        "health": health,
+        "key_missing": health == encryption_flow.KEY_MISSING,
         "env_var": secrets_box.ENV_VAR,
         "confirm_phrase": RESET_CONFIRM_PHRASE,
         "asset_v": assets.ASSET_VERSION,
     }
     return templates.TemplateResponse(request, "encryption_recovery.html", context)
+
+
+@guard.post("/api/admin/encryption/recovery/generate-key", AuthLevel.ADMIN)
+async def recovery_generate_key():
+    """A freshly generated key for an admin who has lost the original entirely.
+
+    Stateless and side-effect-free — same generate_key() the enable flow's
+    reveal-once step uses — so it is safe to call more than once; nothing is
+    written until the admin saves it to their own environment and restarts.
+    That restart is what turns KEY_MISSING into an ordinary KEY_MISMATCH (the
+    new key does not decrypt the old canary), at which point the reset below
+    is how the admin actually discards what the lost key made unrecoverable.
+    """
+    return JSONResponse({"ok": True, "key": encryption_flow.generate_key()})
 
 
 @guard.post("/api/admin/encryption/recovery/reset", AuthLevel.ADMIN)

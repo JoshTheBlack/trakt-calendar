@@ -42,6 +42,7 @@ from . import encryption_routes
 from . import logos
 from . import plex_auth
 from . import plex_routes
+from . import secrets_backfill
 from . import secrets_box
 from . import seer
 from . import share_links
@@ -66,7 +67,7 @@ from .trakt import (
 
 logger = logging.getLogger(__name__)
 
-VERSION = "1.2.0"  # keep in sync with CHANGELOG.md
+VERSION = "1.1.2"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 COMMIT = os.environ.get("APP_COMMIT", "").strip()
@@ -117,12 +118,7 @@ async def _warn_on_key_state(health: str) -> None:
             "values and loses them for good.",
         )
         return
-    has_secret = await db.fetch_value("SELECT 1 FROM app_secrets LIMIT 1")
-    has_token = await db.fetch_value(
-        "SELECT 1 FROM linked_identities "
-        "WHERE access_token IS NOT NULL OR refresh_token IS NOT NULL LIMIT 1"
-    )
-    warning = secrets_box.plaintext_storage_warning(bool(has_secret or has_token))
+    warning = secrets_box.plaintext_storage_warning(await secrets_backfill.unsealed_present())
     if warning:
         logger.warning(warning)
 

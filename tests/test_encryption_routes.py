@@ -146,6 +146,67 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self.assertEqual(gated.status_code, 503)
         self.assertEqual(gated.json()["reason"], "key_mismatch")
 
+    def test_missing_key_reaches_recovery_page_directly_with_generate_key_door(self):
+        """KEY_MISSING does not gate the whole app (it fails open, by design), so
+        nothing forces an admin here the way a wrong key does — but the page must
+        still work when they find it themselves, offering a way to generate a key
+        they've never had before rather than only "put the original back"."""
+        self._onboard()
+        self._encrypt_under(KEY)
+        _set_key(None)
+        self.assertEqual(asyncio.run(encryption_flow.refresh_health()),
+                         encryption_flow.KEY_MISSING)
+
+        # Ordinary navigation is NOT redirected — the app stays usable.
+        home = self.client.get("/", headers=HTML, follow_redirects=False)
+        self.assertNotEqual(home.status_code, 303)
+
+        # But the recovery page itself renders when visited directly.
+        page = self.client.get(RECOVERY_PATH, headers=HTML)
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("Generate a new key", page.text)
+        # The mismatch door's typed-confirm reset control is not offered here —
+        # there is nothing to reset yet until a (new) key is actually in the
+        # environment. (The JS constant for that phrase is still embedded either
+        # way — it's inert unless the reset button it belongs to also exists.)
+        self.assertNotIn("Discard unrecoverable secrets and reset", page.text)
+
+    def test_generate_key_for_a_missing_key_is_stateless(self):
+        self._onboard()
+        self._encrypt_under(KEY)
+        _set_key(None)
+        asyncio.run(encryption_flow.refresh_health())
+
+        resp = self.client.post("/api/admin/encryption/recovery/generate-key", json={})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        key1 = resp.json()["key"]
+        self.assertTrue(secrets_box.key_is_valid(key1))
+        # Calling it again is harmless and gives a fresh key — nothing is stored
+        # server-side until the admin saves one to their own environment.
+        key2 = self.client.post("/api/admin/encryption/recovery/generate-key", json={}).json()["key"]
+        self.assertNotEqual(key1, key2)
+        self.assertEqual(asyncio.run(encryption_flow.get_phase()), encryption_flow.PHASE_ENCRYPTED)
+
+    def test_setting_the_generated_key_and_restarting_lands_on_the_ordinary_mismatch_door(self):
+        """The point of the generated key: once it's saved and the app restarts,
+        KEY_MISSING becomes an ordinary KEY_MISMATCH, and the door-2 reset that
+        already exists for that state is what actually cleans up from there."""
+        self._onboard()
+        self._encrypt_under(KEY)
+        _set_key(None)
+        new_key = self.client.post("/api/admin/encryption/recovery/generate-key", json={}).json()["key"]
+
+        _set_key(new_key)  # "restart" with the freshly generated key saved
+        self.assertEqual(asyncio.run(encryption_flow.refresh_health()),
+                         encryption_flow.KEY_MISMATCH)
+        page = self.client.get(RECOVERY_PATH, headers=HTML)
+        self.assertIn(RESET_CONFIRM_PHRASE, page.text)
+
+        reset = self.client.post("/api/admin/encryption/recovery/reset",
+                                 json={"confirm": RESET_CONFIRM_PHRASE})
+        self.assertEqual(reset.status_code, 200, reset.text)
+        self.assertEqual(encryption_flow.health(), encryption_flow.HEALTHY)
+
     def test_recovery_reset_requires_the_typed_phrase(self):
         self._onboard()
         self._encrypt_under(KEY)

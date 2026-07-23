@@ -15,6 +15,16 @@
 <div class="auth-shell">
   <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
   <div class="auth-card">
+    {% if key_missing %}
+    <h1>Encrypted secrets are unreadable</h1>
+    <p class="auth-sub">
+      <code>{{ env_var }}</code> is not set, but the stored secrets are sealed under a
+      key. Every encrypted value &mdash; the Trakt, Sonarr, Radarr, Seerr and TMDB
+      credentials, and each account&rsquo;s linked tokens &mdash; is unreadable until
+      this is resolved. Nothing is lost yet: the app keeps running elsewhere and the
+      encrypted values are intact, waiting for the right key to come back.
+    </p>
+    {% else %}
     <h1>Encrypted secrets are locked</h1>
     <p class="auth-sub">
       The <code>{{ env_var }}</code> currently set does not match the key the stored
@@ -23,12 +33,41 @@
       &mdash; is unreadable until this is resolved, so the rest of the app is held
       here until it is.
     </p>
+    {% endif %}
 
     {% if not is_admin %}
     <p class="auth-notice">
       An administrator needs to resolve this from their account. Nothing you can do
       here will help &mdash; ask whoever runs this instance to sign in.
     </p>
+    {% elif key_missing %}
+
+    <div class="recovery-door">
+      <h2>I still have the original key</h2>
+      <p>
+        This is the safe path. Put the original key back in <code>{{ env_var }}</code>
+        and restart the app. Nothing is written &mdash; the encrypted values simply
+        become readable again, this page stops appearing, and nothing needs re-entering.
+      </p>
+    </div>
+
+    <div class="recovery-door recovery-door--danger">
+      <h2>The original key is lost for good</h2>
+      <p>
+        Generate a new key below and save it as <code>{{ env_var }}</code> in your
+        environment, then restart. <strong>This does not recover anything sealed under
+        the lost key</strong> &mdash; after the restart you will be walked through
+        discarding what cannot be recovered (the same "unrecoverable secrets" step
+        below), then you re-enter the API keys in Settings and each user re-links
+        Trakt. Only do this once you are certain the original key is not coming back.
+      </p>
+      <div id="genKeyReveal" hidden></div>
+      <p class="auth-error" id="genKeyError" role="alert"></p>
+      <button class="btn-ghost recovery-reset" id="genKey" type="button">
+        Generate a new key
+      </button>
+    </div>
+
     {% else %}
 
     <div class="recovery-door">
@@ -67,33 +106,84 @@
 {% if is_admin %}
 <script>
 const CONFIRM_PHRASE = {{ confirm_phrase | tojson }};
-const err = document.getElementById('error');
 
-async function runReset() {
-  err.textContent = '';
-  const typed = prompt(
-    'This permanently discards every secret the current key cannot open, and cannot ' +
-    'be undone. Type "' + CONFIRM_PHRASE + '" to confirm:');
-  if (typed === null) return;
-  if (typed.trim().toLowerCase() !== CONFIRM_PHRASE) {
-    err.textContent = 'That did not match — nothing was changed.';
-    return;
+// Present only in the KEY_MISMATCH door — a lost-and-replaced key is already an
+// ordinary reset target, so this button does not exist in the KEY_MISSING case.
+const resetBtn = document.getElementById('reset');
+if (resetBtn) {
+  const err = document.getElementById('error');
+
+  async function runReset() {
+    err.textContent = '';
+    const typed = prompt(
+      'This permanently discards every secret the current key cannot open, and cannot ' +
+      'be undone. Type "' + CONFIRM_PHRASE + '" to confirm:');
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== CONFIRM_PHRASE) {
+      err.textContent = 'That did not match — nothing was changed.';
+      return;
+    }
+    resetBtn.disabled = true;
+    try {
+      const resp = await fetch('/api/admin/encryption/recovery/reset', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({confirm: typed.trim()}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data.ok) { window.location = '/'; return; }
+      err.textContent = data.error || 'The reset could not be completed.';
+    } catch (e) {
+      err.textContent = 'Could not reach the server.';
+    }
+    resetBtn.disabled = false;
   }
-  const btn = document.getElementById('reset');
-  btn.disabled = true;
-  try {
-    const resp = await fetch('/api/admin/encryption/recovery/reset', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({confirm: typed.trim()}),
-    });
-    const data = await resp.json().catch(() => ({}));
-    if (resp.ok && data.ok) { window.location = '/'; return; }
-    err.textContent = data.error || 'The reset could not be completed.';
-  } catch (e) {
-    err.textContent = 'Could not reach the server.';
-  }
-  btn.disabled = false;
+
+  resetBtn.addEventListener('click', runReset);
+}
+
+// Present only in the KEY_MISSING door — generates a key the admin has never
+// had before, for when the original is gone for good. Stateless on the server
+// (nothing is written until the admin saves it to their own environment and
+// restarts), so revealing it more than once is harmless.
+const genKeyBtn = document.getElementById('genKey');
+if (genKeyBtn) {
+  const genErr = document.getElementById('genKeyError');
+  const reveal = document.getElementById('genKeyReveal');
+
+  genKeyBtn.addEventListener('click', async () => {
+    genErr.textContent = '';
+    genKeyBtn.disabled = true;
+    try {
+      const resp = await fetch('/api/admin/encryption/recovery/generate-key', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        genErr.textContent = data.error || 'Could not generate a key.';
+        genKeyBtn.disabled = false;
+        return;
+      }
+      reveal.innerHTML =
+        '<p><strong>Save this key now — it is shown once and never again.</strong></p>' +
+        '<div class="share-link-box"><input type="text" id="genKeyValue" readonly value="' +
+        data.key.replace(/"/g, '&quot;') + '"><button type="button" class="btn-ghost small" ' +
+        'id="genKeyCopy">Copy</button></div>' +
+        '<p>Set it as <code>{{ env_var }}</code> in your environment (env file, Docker ' +
+        '<code>-e</code>, or compose <code>environment:</code>) and restart the app.</p>';
+      reveal.hidden = false;
+      document.getElementById('genKeyCopy').addEventListener('click', () => {
+        const input = document.getElementById('genKeyValue');
+        input.select();
+        try { navigator.clipboard.writeText(input.value); } catch (_) { document.execCommand('copy'); }
+      });
+      genKeyBtn.textContent = 'Generate a different key';
+      genKeyBtn.disabled = false;
+    } catch (e) {
+      genErr.textContent = 'Could not reach the server.';
+      genKeyBtn.disabled = false;
+    }
+  });
 }
 
 // Sign-out is a JSON-only POST like everywhere else, so the plain link is wired up
@@ -107,8 +197,6 @@ document.getElementById('signout').addEventListener('click', async (e) => {
   } catch (_) { /* fall through to the redirect regardless */ }
   window.location = '/login';
 });
-
-document.getElementById('reset').addEventListener('click', runReset);
 </script>
 {% else %}
 <script>

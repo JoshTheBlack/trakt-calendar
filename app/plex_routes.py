@@ -201,6 +201,13 @@ async def _finish_link(request: Request, settings, identity: auth.ProviderIdenti
         return _error(ALREADY_LINKED, 409)
     except auth.AccountUnavailable:
         return _error(auth.HANDSHAKE_REJECTED, 403)
+    except auth.IdentityWritesBlocked:
+        return _error(
+            "Stored secrets are encrypted, but the key is currently missing or wrong, "
+            "so linking is refused rather than writing a fresh token in the clear. An "
+            "administrator needs to restore ENCRYPTION_KEY before linking can continue.",
+            409, reason="key_unhealthy",
+        )
     response = JSONResponse({"ok": True, "redirect": "/me"})
     auth.clear_handshake_cookie(response, settings, request)
     return response

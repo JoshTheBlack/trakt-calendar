@@ -36,6 +36,34 @@ def _needs_sealing(value: str | None) -> bool:
     return value is not None and not value.startswith(secrets_box.PREFIX)
 
 
+async def unsealed_present() -> bool:
+    """Whether at least one app_secrets or linked_identities row is genuinely
+    plaintext right now — checked against the rows themselves, not against
+    whether a key happens to be configured.
+
+    Those two questions are not the same: a key can be set without every row
+    being sealed under it yet (the backfill runs on confirmation, not the
+    instant a key appears), and a row written while the key was absent stays
+    plaintext until something seals it — including a row that OVERWRITES a
+    previously-sealed one via a write path with no guard of its own. This is
+    the shared check behind the startup warning and the Settings panel's
+    "still needs sealing" state; both want the same real answer.
+    """
+    like_prefix = secrets_box.PREFIX + "%"
+    unsealed_secret = await db.fetch_value(
+        "SELECT 1 FROM app_secrets WHERE value NOT LIKE ? LIMIT 1", (like_prefix,)
+    )
+    if unsealed_secret:
+        return True
+    unsealed_token = await db.fetch_value(
+        "SELECT 1 FROM linked_identities WHERE "
+        "(access_token IS NOT NULL AND access_token NOT LIKE ?) OR "
+        "(refresh_token IS NOT NULL AND refresh_token NOT LIKE ?) LIMIT 1",
+        (like_prefix, like_prefix),
+    )
+    return bool(unsealed_token)
+
+
 async def seal_plaintext_in_place() -> dict[str, int]:
     """Seal every plaintext secret and per-user token under the configured key.
 

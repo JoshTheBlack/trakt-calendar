@@ -357,6 +357,30 @@ body.hide-not-watching .card.not-watching { display: none; }
 .btn-ghost.small { padding: 7px 12px; font-size: 0.78rem; align-self: flex-start; }
 .settings-section { font-weight: 700; color: var(--gold-soft); font-size: 0.92rem; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--card-border); }
 .settings-section .hint { font-weight: 400; color: var(--text-faint); font-size: 0.72rem; }
+/* The at-rest encryption panel's own heading swaps color with its real state,
+   rather than reading "Secret encryption at rest" unconditionally whether or
+   not anything is actually encrypted. */
+.settings-section.enc-plain { color: var(--crimson); font-weight: 800; }
+.settings-section.enc-encrypted { color: #22c55e; }
+
+.btn-primary.small { padding: 7px 14px; font-size: 0.78rem; }
+
+/* Inline confirm (nav.js confirmInline): replaces native confirm() dialogs. A
+   small popover anchored under the triggering button via JS, independent of
+   that button's own layout. */
+.inline-confirm {
+    /* Above .modal-overlay (10000): the settings modal is the most common place
+       this appears, and a popover pinned behind it would be invisible there. */
+    position: fixed; z-index: 10002; max-width: 280px;
+    background: var(--bg-panel); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 10px 12px; box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+    opacity: 0; transform: translateY(-6px); pointer-events: none;
+    transition: opacity .16s ease, transform .16s ease;
+}
+.inline-confirm.show { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.inline-confirm .hint { display: block; margin-bottom: 8px; color: var(--text-dim); }
+.inline-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.inline-confirm.danger .btn-primary { background: linear-gradient(90deg, var(--crimson), #8a2331); }
 
 .auth-box { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: -4px; }
 .auth-box .hint { flex-basis: 100%; }

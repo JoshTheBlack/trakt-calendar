@@ -503,6 +503,33 @@ class LinkOutcomeTests(TraktOAuthTestCase):
         self.callback(self.start("/auth/trakt/link"))
         self.assertEqual(self.client.get("/api/distrakt/months").status_code, 200)
 
+    def test_a_fresh_link_is_refused_while_encryption_is_unhealthy(self):
+        user = self.make_user("linker", calendar_approved=True)
+        self.sign_in_as(user)
+        with patch("app.encryption_flow.secret_writes_blocked", return_value=True):
+            resp = self.callback(self.start("/auth/trakt/link"))
+        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(self.identities(), [])
+
+    def test_relinking_is_refused_while_encryption_is_unhealthy(self):
+        """A relink overwrites the row's tokens outright (see _refresh_identity)
+        — the same overwrite save_settings() already refuses for app secrets
+        while the key is missing or wrong, and for the same reason: with no
+        working key, sealing is a pass-through, so the fresh tokens would land
+        as plaintext over ciphertext the original key could still recover."""
+        user = self.make_user("linker", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/trakt/link"))
+        original_access = self.identities()[0]["access_token"]
+
+        with patch("app.encryption_flow.secret_writes_blocked", return_value=True):
+            resp = self.callback(self.start("/auth/trakt/link"),
+                                 token=_Token(access="access-2", refresh="refresh-2"))
+        self.assertEqual(resp.status_code, 409)
+        rows = self.identities()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["access_token"], original_access)
+
 
 class IdentityKeyTests(TraktOAuthTestCase):
     def test_the_identity_is_keyed_on_the_numeric_id_not_the_display_name(self):

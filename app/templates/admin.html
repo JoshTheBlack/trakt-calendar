@@ -215,11 +215,12 @@ document.querySelectorAll('[data-action="copy-invite"]').forEach(btn => {
 });
 
 document.querySelectorAll('[data-action="revoke-invite"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    if (!confirm('Revoke this invite? Anyone holding the link will no longer be able to use it.')) return;
-    const {resp, data} = await postJSON('/api/admin/invites/' + btn.dataset.invite + '/revoke', {});
-    if (resp.ok && data.ok) { window.location.reload(); return; }
-    setMsg('inviteMsg', data.error || 'Could not revoke that invite.', false);
+  btn.addEventListener('click', () => {
+    confirmInline(btn, 'Revoke this invite? Anyone holding the link will no longer be able to use it.', async () => {
+      const {resp, data} = await postJSON('/api/admin/invites/' + btn.dataset.invite + '/revoke', {});
+      if (resp.ok && data.ok) { window.location.reload(); return; }
+      setMsg('inviteMsg', data.error || 'Could not revoke that invite.', false);
+    }, {danger: true});
   });
 });
 
@@ -237,11 +238,12 @@ document.querySelectorAll('[data-action="view-redemptions"]').forEach(btn => {
 });
 
 document.querySelectorAll('[data-action="release"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    if (!confirm('Release "' + btn.dataset.value + '"? It becomes claimable again by anyone, including on any link already shared under it.')) return;
-    const {resp, data} = await postJSON('/api/admin/retired/release', {kind: btn.dataset.kind, value: btn.dataset.value});
-    if (resp.ok && data.ok) { window.location.reload(); return; }
-    setMsg('retiredMsg', data.error || 'Could not release that identifier.', false);
+  btn.addEventListener('click', () => {
+    confirmInline(btn, 'Release "' + btn.dataset.value + '"? It becomes claimable again by anyone, including on any link already shared under it.', async () => {
+      const {resp, data} = await postJSON('/api/admin/retired/release', {kind: btn.dataset.kind, value: btn.dataset.value});
+      if (resp.ok && data.ok) { window.location.reload(); return; }
+      setMsg('retiredMsg', data.error || 'Could not release that identifier.', false);
+    }, {danger: true});
   });
 });
 
@@ -256,22 +258,28 @@ document.querySelectorAll('[data-action="approval"]').forEach(btn => {
 });
 
 document.querySelectorAll('[data-action="admin"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     const promoting = btn.dataset.value === 'true';
-    if (!promoting && !confirm('Remove administrator access from this account?')) return;
-    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/admin', {is_admin: promoting});
-    if (resp.ok && data.ok) { window.location.reload(); return; }
-    setMsg('usersMsg', data.error || 'Could not change admin status.', false);
+    const apply = async () => {
+      const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/admin', {is_admin: promoting});
+      if (resp.ok && data.ok) { window.location.reload(); return; }
+      setMsg('usersMsg', data.error || 'Could not change admin status.', false);
+    };
+    if (promoting) { apply(); return; }
+    confirmInline(btn, 'Remove administrator access from this account?', apply, {danger: true});
   });
 });
 
 document.querySelectorAll('[data-action="disabled"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     const disabling = btn.dataset.value === 'true';
-    if (disabling && !confirm('Disable this account? It will be signed out everywhere and unable to sign back in until re-enabled.')) return;
-    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/disabled', {disabled: disabling});
-    if (resp.ok && data.ok) { window.location.reload(); return; }
-    setMsg('usersMsg', data.error || 'Could not change that account\'s status.', false);
+    const apply = async () => {
+      const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/disabled', {disabled: disabling});
+      if (resp.ok && data.ok) { window.location.reload(); return; }
+      setMsg('usersMsg', data.error || 'Could not change that account\'s status.', false);
+    };
+    if (!disabling) { apply(); return; }
+    confirmInline(btn, 'Disable this account? It will be signed out everywhere and unable to sign back in until re-enabled.', apply, {danger: true});
   });
 });
 
@@ -296,39 +304,50 @@ document.querySelectorAll('[data-action="password"]').forEach(btn => {
 });
 
 document.querySelectorAll('[data-action="revoke-sessions"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    if (!confirm('Log this account out everywhere?')) return;
-    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/sessions/revoke-all', {});
-    if (resp.ok && data.ok) { setMsg('usersMsg', 'Signed out ' + data.revoked + ' session(s).', true); return; }
-    setMsg('usersMsg', data.error || 'Could not revoke sessions.', false);
+  btn.addEventListener('click', () => {
+    confirmInline(btn, 'Log this account out everywhere?', async () => {
+      const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/sessions/revoke-all', {});
+      if (resp.ok && data.ok) { setMsg('usersMsg', 'Signed out ' + data.revoked + ' session(s).', true); return; }
+      setMsg('usersMsg', data.error || 'Could not revoke sessions.', false);
+    }, {danger: true});
   });
 });
 
 document.querySelectorAll('[data-action="unlink"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    if (!confirm('Unlink ' + btn.dataset.provider + ' from this account?')) return;
-    let {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider});
-    if (!resp.ok && data.orphan_warning) {
-      if (!confirm(data.error + '\n\nUnlink anyway?')) return;
-      ({resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider, force: true}));
-    }
-    if (resp.ok && data.ok) {
-      // Unlinked locally regardless; the warning is about the authorization
-      // still standing on the provider's side, which only its owner can clear.
-      if (data.warning) alert(data.warning);
-      window.location.reload();
-      return;
-    }
-    setMsg('usersMsg', data.error || 'Could not unlink that account.', false);
+  btn.addEventListener('click', () => {
+    confirmInline(btn, 'Unlink ' + btn.dataset.provider + ' from this account?', async () => {
+      let {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider});
+      if (!resp.ok && data.orphan_warning) {
+        confirmInline(btn, data.error + ' Unlink anyway?', async () => {
+          ({resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/identities/unlink', {provider: btn.dataset.provider, force: true}));
+          if (resp.ok && data.ok) {
+            if (data.warning) alert(data.warning);
+            window.location.reload();
+            return;
+          }
+          setMsg('usersMsg', data.error || 'Could not unlink that account.', false);
+        }, {danger: true});
+        return;
+      }
+      if (resp.ok && data.ok) {
+        // Unlinked locally regardless; the warning is about the authorization
+        // still standing on the provider's side, which only its owner can clear.
+        if (data.warning) alert(data.warning);
+        window.location.reload();
+        return;
+      }
+      setMsg('usersMsg', data.error || 'Could not unlink that account.', false);
+    }, {danger: true});
   });
 });
 
 document.querySelectorAll('[data-action="wipe"]').forEach(btn => {
-  btn.addEventListener('click', async () => {
-    if (!confirm('Wipe this account\'s calendar and distrakt data and disable it? The account, its identities, and its username stay intact — this can be undone by re-enabling it.')) return;
-    const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/wipe', {});
-    if (resp.ok && data.ok) { window.location.reload(); return; }
-    setMsg('usersMsg', data.error || 'Could not wipe that account.', false);
+  btn.addEventListener('click', () => {
+    confirmInline(btn, 'Wipe this account\'s calendar and distrakt data and disable it? The account, its identities, and its username stay intact — this can be undone by re-enabling it.', async () => {
+      const {resp, data} = await postJSON('/api/admin/users/' + btn.dataset.user + '/wipe', {});
+      if (resp.ok && data.ok) { window.location.reload(); return; }
+      setMsg('usersMsg', data.error || 'Could not wipe that account.', false);
+    }, {danger: true});
   });
 });
 

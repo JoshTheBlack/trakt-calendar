@@ -279,6 +279,23 @@ Non-interactive environments (CI, scripted deployments) can skip the UI entirely
 both `ENCRYPTION_KEY` and `ENCRYPT_SECRETS=1`; the app seals everything in place at startup,
 the same conversion the Settings button runs.
 
+### Setting `ENCRYPTION_KEY` for local (non-Docker) runs
+
+Docker deployments set it as a real environment variable (`-e`, compose `environment:`),
+which already survives restarts. Running via `python run.py` instead, a shell-profile
+export doesn't survive a reboot and an IDE's own env picker is IDE-specific — so `run.py`
+loads a `.env` file from the project root on startup (via `python-dotenv`) before anything
+reads the environment. Copy `.env.example` to `.env` and fill in the key:
+
+```bash
+cp .env.example .env
+# then edit .env and set ENCRYPTION_KEY=<your key>
+```
+
+`.env` is gitignored. A real environment variable, if one is already set, always wins over
+the file. This only applies to `python run.py` — the Docker image's entrypoint runs
+Hypercorn directly and never reads `.env`.
+
 ## Requirements
 
 - Python 3.11+ (3.12 recommended)

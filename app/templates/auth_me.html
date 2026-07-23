@@ -177,9 +177,13 @@ if (plexConnect) {
 }
 
 document.querySelectorAll('[data-unlink]').forEach(btn => {
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     const provider = btn.dataset.unlink;
-    if (!confirm('Unlink your ' + provider + ' account from this login?')) return;
+    confirmInline(btn, 'Unlink your ' + provider + ' account from this login?', () => doUnlink(btn, provider), {danger: true});
+  });
+});
+
+async function doUnlink(btn, provider) {
     btn.disabled = true;
     const err = document.getElementById('linkError');
     err.textContent = '';
@@ -202,8 +206,7 @@ document.querySelectorAll('[data-unlink]').forEach(btn => {
       err.textContent = 'Could not reach the server.';
     }
     btn.disabled = false;
-  });
-});
+}
 
 // Both credential forms post JSON and report into one message line. A success
 // reloads, because either one changes what this page should be showing.
