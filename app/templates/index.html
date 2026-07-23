@@ -366,11 +366,34 @@
                         </select>
                     </div>
                 </div>
-                {# The genre / country / network filters used to live here. They
-                   are per-viewer, so they moved to the Filters panel that every
-                   signed-in account can reach — these fields wrote the app-wide
-                   seed, which meant they changed nothing about the admin's own
-                   calendar and gave everyone else no way to filter at all. #}
+                <div class="settings-section">🚧 Content floor <span class="hint">(instance-wide, applied before caching)</span></div>
+                <p class="hint"><strong>These pre-filter the shared calendar cache at fetch time, so they
+                    remove content for EVERY user</strong> — on top of whatever each person sets in their
+                    own 🔎 Filters. A show excluded here never enters the cache at all, so no per-account
+                    filter can bring it back. Use this to trim genres/countries nobody on this instance
+                    will ever watch, or to keep certain content off a shared/family instance. Leave blank
+                    to filter nothing at this layer.</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="s_genres">Genres</label>
+                        <input type="text" id="s_genres" name="genres" spellcheck="false" autocomplete="off"
+                               placeholder="drama, -reality">
+                        <span class="hint">Comma-separated genre slugs; prefix one with <code>-</code> to exclude it.</span>
+                    </div>
+                    <div class="field">
+                        <label for="s_countries">Countries</label>
+                        <input type="text" id="s_countries" name="countries" spellcheck="false" autocomplete="off"
+                               placeholder="us, gb, -jp">
+                        <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code> to exclude.</span>
+                    </div>
+                </div>
+                <div class="field">
+                    <label for="s_networks">Networks</label>
+                    <textarea id="s_networks" name="network_filter" spellcheck="false"
+                              placeholder="HBO, Netflix, BBC One"></textarea>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them.
+                        Blank means every network is cached.</span>
+                </div>
                 <div class="two-col">
                     <div class="field">
                         <label for="s_limit">Pagination limit</label>

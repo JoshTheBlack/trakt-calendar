@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.0] - 2026-07-23
+
+### Security
+- 🔐 **Optional at-rest encryption for stored secrets.** Turn it on from Settings: generate or bring your own key, save it to your environment (never written to disk by this app), confirm it survived a restart, then encrypt every stored credential and linked account's Trakt token in one step. A key that's merely missing degrades gracefully — the app keeps running and treats the sealed values as unset rather than crashing — while a *wrong* key routes an administrator to a dedicated recovery screen with two ways out: restore the original key, or a typed, confirmed reset that clears only what's unrecoverable and keeps linked accounts so they can simply re-link. See the README for the full walkthrough and the loud warning about what losing the key costs you.
+- 🗄️ **Configuration consolidated into the database.** Everything that used to live in `data/settings.json` — credentials, Sonarr/Radarr/Seerr settings, timezone, layout, the works — now lives in `data/app.db`, giving the instance one backup-and-restore unit instead of two. The file shrinks down to the two settings that have to stay hand-editable for lockout recovery (`cookie_secure`, `allow_open_registration`); an existing instance migrates on its first boot with nothing to do by hand.
+
+### Admin interface
+- 📅 **The instance-wide genre/country/network filter is back in Settings → Calendar**, with a clear label: this pre-filters the *shared* calendar cache before anyone's own 🔎 Filters ever see it, so it removes content for every user of the instance, not just whoever set it. It had quietly stopped being reachable from the UI even though it was still doing exactly that.
+
 ## 🏷️ [1.1.1] - 2026-07-22
 
 ### Fixes

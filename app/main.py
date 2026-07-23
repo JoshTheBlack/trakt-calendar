@@ -66,7 +66,7 @@ from .trakt import (
 
 logger = logging.getLogger(__name__)
 
-VERSION = "1.1.1"  # keep in sync with CHANGELOG.md
+VERSION = "1.2.0"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 COMMIT = os.environ.get("APP_COMMIT", "").strip()

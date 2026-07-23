@@ -545,6 +545,9 @@ async function openSettings() {
         // Stored in bytes; shown in MB, because nobody wants to count zeros.
         document.getElementById('s_cachecap').value = Math.round((s.api_cache_max_bytes ?? 1073741824) / MB);
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
+        document.getElementById('s_genres').value = s.genres || '';
+        document.getElementById('s_countries').value = s.countries || '';
+        document.getElementById('s_networks').value = (s.network_filter || []).join(', ');
         // Sonarr / Radarr
         document.getElementById('s_sonarr_url').value = s.sonarr_url || '';
         ensureOption(document.getElementById('s_sonarr_qp'), s.sonarr_quality_profile_id, 'Profile #' + s.sonarr_quality_profile_id);
@@ -822,6 +825,9 @@ async function saveSettings(event) {
         calendar_cache_ttl_minutes: parseInt(document.getElementById('s_calcache').value, 10) || 10,
         api_cache_max_bytes: (parseInt(document.getElementById('s_cachecap').value, 10) || 1024) * MB,
         hide_not_watching: document.getElementById('s_hide').checked,
+        genres: document.getElementById('s_genres').value,
+        countries: document.getElementById('s_countries').value,
+        network_filter: document.getElementById('s_networks').value,
         sonarr_url: document.getElementById('s_sonarr_url').value.trim(),
         sonarr_quality_profile_id: parseInt(document.getElementById('s_sonarr_qp').value, 10) || 0,
         sonarr_root_folder: document.getElementById('s_sonarr_rf').value,

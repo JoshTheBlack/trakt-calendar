@@ -23,9 +23,7 @@ scratch_data/
 .claude/settings.local.json
 
 # Build/design notes (personal, not part of the release)
-BUILD_PLAN.txt
-BUILD_SECURITY.txt
-BUILD_OG_IMAGE.txt
+BUILD_*.txt
 FEATURE_SIMKL.txt
 PLANNING.md
 

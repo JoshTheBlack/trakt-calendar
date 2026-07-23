@@ -175,26 +175,30 @@ Then set `public_base_url` to `https://shows.example.com` in Settings and leave
 
 ## Configuration
 
-All configuration is done in the **⚙️ Settings** panel and saved to
-`data/settings.json` (git-ignored). Available options:
+Configuration is done in the **⚙️ Settings** panel. Almost everything lives in the SQLite
+database (`data/app.db`) — credentials in an encryptable secrets store, everything else in
+a plain settings store — so `data/settings.json` (git-ignored) is no longer the source of
+truth for most of it. See [At-rest encryption](#at-rest-encryption-of-stored-secrets) below
+for why it's split that way and what's still in the file.
 
 | Setting | What it does |
 |---|---|
 | **Trakt Client ID / Access Token** | Your Trakt API credentials |
 | **Timezone** | Air times are converted to this zone (grouped IANA dropdown) |
 | **Default endpoint** | Which calendar to show by default |
-| **Genres / Countries / Networks** | Filter which premieres appear |
 | **Pagination limit** | Max items fetched per request |
 | **Detail cache (minutes)** | How long cast/episode/trailer lookups are cached (`0` disables) |
 | **Sonarr / Radarr** | Instance URL, API key, quality profile, and root folder for the add-to-library buttons (click "Load profiles & folders" to populate the dropdowns) |
 | **Seerr** | Instance URL + API key to enable the request button (works with the Overseerr/Jellyseerr lineage) |
 | **Public base URL** | The origin this instance is reached on — see [Serving over HTTPS](#serving-over-https) |
 | **Trusted proxy addresses** | Whose `X-Forwarded-For` to believe — see [Serving over HTTPS](#serving-over-https) |
+| **Genres / Countries / Networks** (Calendar section) | The instance's **content floor** — see below. Not the same thing as your own 🔎 Filters. |
 
 Two settings are deliberately file-only, because a wrong value in the UI could lock the
 operator out of the UI that would fix it. Edit `data/settings.json` and restart:
 `cookie_secure` (set for you at onboarding — see above) and `allow_open_registration`
-(default `false`; when `true`, anyone can register without an invite).
+(default `false`; when `true`, anyone can register without an invite). Nothing else lives
+in that file — see [At-rest encryption](#at-rest-encryption-of-stored-secrets).
 
 The endpoint, layout, and hide-not-watching controls also live in the header for quick
 switching, and every choice persists. Marking something "not watching" is a decision about
@@ -212,6 +216,69 @@ as Trakt spells them. **New accounts start with nothing filtered.**
 > but this app filters the cached response itself rather than asking Trakt to, so the
 > Filters panel works on any account.
 
+### The content floor — Settings > Calendar > Genres / Countries / Networks
+
+These three fields look like the per-account 🔎 Filters above, but they are not: they are
+instance-wide, and they filter **before** the shared calendar cache is ever populated, not
+at read time. A show excluded here never enters the cache at all — no per-account filter
+can bring it back, because there's nothing left to filter.
+
+**This removes content for every user of the instance**, on top of whatever each person
+sets in their own Filters. Legitimate uses: trimming genres/countries nobody on the
+instance will ever watch (a smaller, cheaper cache), or keeping certain content off a
+shared/family instance. Leave them blank — the default — to filter nothing at this layer.
+The Settings screen repeats this warning next to the fields; read it before setting them on
+an instance other people use.
+
+## At-rest encryption of stored secrets
+
+By default, credentials (Trakt tokens, Sonarr/Radarr/Seerr/TMDB API keys, and every linked
+account's Trakt token) are stored in the database as plaintext — the same trust boundary
+this app has always had. Turning on encryption seals them with a key that lives **only** in
+your environment, never in the database file, so a leaked `app.db` (a backup, a volume
+snapshot, a stray file read) does not hand over live credentials.
+
+**What it defends against:** the database file leaving the host. **What it does not defend
+against:** full host compromise — if an attacker can read the process environment, they get
+the key too. That's inherent to any single-host design that doesn't rely on an external
+KMS/Vault, which would be overkill here.
+
+### Enabling it
+
+From **⚙️ Settings**, the encryption panel walks through two stages:
+
+1. **Get a key.** Generate one in the UI, or bring your own with:
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+   **The key is shown once.** Copy it into your environment as `ENCRYPTION_KEY` — an `.env`
+   file, `docker run -e ENCRYPTION_KEY=...`, or a compose `environment:` block — and restart
+   the app. Nothing is encrypted yet at this point.
+2. **Verify and encrypt.** After the restart, come back to Settings and confirm the key
+   survived the reboot. Once verified, encrypting is one click: every stored secret and
+   every linked account's Trakt token is sealed in place.
+
+You can opt out at either step, and turn encryption on later from the same panel — opting
+out doesn't lose anything, it just leaves things as plaintext until you change your mind.
+
+> **⚠️ Losing `ENCRYPTION_KEY` after enabling makes every sealed secret and linked token
+> unrecoverable.** The app fails open, not silently broken: it treats sealed values it can't
+> read as unset rather than crashing, so it stays usable, but the Trakt/Sonarr/Radarr/Seerr
+> credentials have to be re-entered and every user has to re-link Trakt. **Do not re-save
+> credentials or re-link while the key is missing** — that overwrites the still-recoverable
+> ciphertext with a fresh plaintext value sealed under nothing. If a *different* key ends up
+> in the environment (not merely missing), the app detects the mismatch at startup and
+> routes an administrator to a dedicated recovery screen instead of failing request by
+> request, with two options: restore the original key (nothing is touched), or run a typed,
+> confirmed reset that blanks only the unrecoverable values, keeps linked accounts so they
+> can simply re-link, and reseals under the new key. **Back up `ENCRYPTION_KEY` somewhere
+> durable outside the app the moment you save it** — a password manager or secrets vault,
+> not a note next to the database backup.
+
+Non-interactive environments (CI, scripted deployments) can skip the UI entirely by setting
+both `ENCRYPTION_KEY` and `ENCRYPT_SECRETS=1`; the app seals everything in place at startup,
+the same conversion the Settings button runs.
+
 ## Requirements
 
 - Python 3.11+ (3.12 recommended)
@@ -222,8 +289,13 @@ as Trakt spells them. **New accounts start with nothing filtered.**
 ```
 app/
   main.py           FastAPI app + calendar/tracker routes
-  config.py         Settings model + persistence (data/settings.json)
+  config.py         Settings model + persistence (secrets/globals in data/app.db, two
+                     recovery fields in data/settings.json)
   db.py             SQLite connection policy + schema migrations (data/app.db)
+  secrets_box.py    At-rest encryption primitive (seal/open, key from ENCRYPTION_KEY)
+  secrets_backfill.py  Seal-in-place conversion shared by the enable flow and Settings
+  encryption_flow.py   Enable/verify/encrypt lifecycle, key-health canary, lost-key recovery
+  encryption_routes.py Admin encryption endpoints + the recovery screen
   auth.py           Passwords, sessions, identities, invites, access levels
   authz.py          Route authorization: declare-or-denied, CSRF/origin rules
   auth_routes.py    Onboarding, register, sign in/out, account page
