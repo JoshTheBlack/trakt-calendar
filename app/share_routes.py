@@ -211,9 +211,24 @@ async def _render(request: Request, share_row) -> Response:
     ]
     as_of_label = datetime.fromtimestamp(as_of, tz=tz).strftime("%Y-%m-%d %H:%M %Z") if as_of else None
 
+    # Open Graph tags for link unfurlers (Discord/Slack/etc.). Both URLs are
+    # absolute and built only from the configured public_base_url — never the
+    # request Host (§1.16b) — since an unauthenticated crawler resolves relative
+    # paths unreliably and a spoofed Host must not become the advertised origin.
+    # Absent a configured base there is nothing safe to advertise, so the tags
+    # are simply omitted and the link falls back to a bare text preview.
+    base = _public_base(settings)
+    og_image = f"{base}/static/images/tvbanner.png" if base else None
+    og_url = None
+    if base:
+        urls = share_links.share_urls(share_row, share_row["owner_username"], base)
+        og_url = urls.get(share_row["preferred_kind"]) or next((u for u in urls.values() if u), None)
+
     context = {
         "request": request,
         "owner_username": share_row["owner_username"],
+        "og_image": og_image,
+        "og_url": og_url,
         "year": year,
         "month": month,
         "month_label": _calendar.month_name[month],

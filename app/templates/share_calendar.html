@@ -4,6 +4,25 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ owner_username or "Shared calendar" }} &ndash; {{ month_label }}</title>
+
+    {# Open Graph / link-preview tags. og:url and og:image are absolute, set only
+       when the instance has a configured public base URL to build them from. #}
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="New Shows">
+    <meta property="og:title" content="{{ owner_username or 'Shared calendar' }} &ndash; {{ month_label }} {{ year }}">
+    <meta property="og:description" content="Shows I'm watching this month">
+    {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}
+    {% if og_image %}
+    <meta property="og:image" content="{{ og_image }}">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:image" content="{{ og_image }}">
+    {% else %}
+    <meta name="twitter:card" content="summary">
+    {% endif %}
+    <meta name="twitter:title" content="{{ owner_username or 'Shared calendar' }} &ndash; {{ month_label }} {{ year }}">
+    <meta name="twitter:description" content="Shows I'm watching this month">
+    <meta name="theme-color" content="#e8b545">
+
     <link rel="shortcut icon" href="/static/images/favicon.ico">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
