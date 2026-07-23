@@ -1928,7 +1928,11 @@ async def current_user(request: Request) -> CurrentUser | None:
     cached = getattr(request.state, "auth_user", _NO_USER)
     if cached is not _NO_USER:
         return cached  # type: ignore[return-value]
-    settings = load_settings()
+    # Only the cookie policy is needed to read the session, never a credential, so
+    # this skips decrypting the stored secrets. That keeps sign-in and the admin
+    # dependency working even when a stored secret is sealed under a key the current
+    # one cannot open — the state whose only fix is the admin recovery screen.
+    settings = load_settings(open_secrets=False)
     user = await validate_session(read_session_cookie(request, settings))
     request.state.auth_user = user
     return user

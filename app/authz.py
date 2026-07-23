@@ -59,7 +59,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import BaseRoute, Match
 
-from . import auth, db
+from . import auth, db, encryption_flow
 from .auth import DEPENDENCY_FOR_LEVEL, AuthError, AuthLevel
 from .config import Settings, load_settings
 
@@ -374,7 +374,11 @@ def _install_request_shape_guard(app: FastAPI) -> None:
         content_type = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
         if content_type != "application/json":
             return _deny(415, "json_only", "This endpoint accepts application/json only.")
-        settings = load_settings()
+        # Origin admission needs only the configured base URL and the request Host,
+        # never a credential, so secrets are left sealed. That keeps this guard from
+        # raising on a mutating request while a secret is sealed under a wrong key —
+        # the recovery-screen POST has to get through here to fix exactly that.
+        settings = load_settings(open_secrets=False)
         if reason := cross_origin_reason(request, settings):
             return _deny(403, "cross_origin", reason)
         return await call_next(request)
@@ -391,6 +395,37 @@ def _install_first_run_gate(app: FastAPI) -> None:
         if _wants_html(request):
             return RedirectResponse("/onboarding", status_code=303)
         return _deny(401, "setup_required", "This instance has not been set up yet.")
+
+
+# Reachable while the encryption key is wrong, when everything else is gated to the
+# recovery screen: the recovery page and its API, sign-in (so an admin whose session
+# lapsed can get back in), the health probe, and static assets. The recovery page
+# resolves the viewer itself, so it is reachable signed-out to send them to /login.
+KEY_MISMATCH_PATHS = ("/healthz", "/login", "/logout")
+KEY_MISMATCH_PREFIXES = ("/static/", "/admin/encryption/", "/api/admin/encryption/")
+
+
+def _install_key_mismatch_gate(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def key_mismatch_gate(request: Request, call_next):
+        # Ordinary loads decrypt stored secrets, which RAISE while a secret is sealed
+        # under a key the current one cannot open — so once that state is derived at
+        # startup, every request but the recovery ones is steered here instead of
+        # letting each load 500 in turn. A browser is redirected to the screen; a
+        # script gets a status it can act on.
+        if encryption_flow.health() != encryption_flow.KEY_MISMATCH:
+            return await call_next(request)
+        path = request.url.path
+        if path in KEY_MISMATCH_PATHS or path.startswith(KEY_MISMATCH_PREFIXES):
+            return await call_next(request)
+        if _wants_html(request):
+            from .encryption_routes import RECOVERY_PATH
+            return RedirectResponse(RECOVERY_PATH, status_code=303)
+        return _deny(
+            503, "key_mismatch",
+            "The encryption key does not match the stored secrets. An administrator "
+            "must resolve this from the recovery screen.",
+        )
 
 
 def _install_deny_by_default(app: FastAPI) -> None:
@@ -449,13 +484,17 @@ def install(app: FastAPI) -> None:
     the outermost — so this reads bottom-up. The intended order a request meets
     them in is:
 
-      1. request shape: a mutating request must be JSON and same-origin. First,
-         so a malformed cross-site submission is rejected on its shape alone,
-         before anything looks at cookies or the database.
-      2. first-run: until an account exists, everything but setup is refused.
-      3. deny-by-default: a route with no declaration never reaches its handler.
+      1. key-mismatch: while a stored secret is sealed under a key that cannot open
+         it, every request but sign-in and the recovery screen is steered to
+         recovery. First, so it runs before any middleware that decrypts a secret.
+      2. request shape: a mutating request must be JSON and same-origin, so a
+         malformed cross-site submission is rejected on its shape alone, before
+         anything looks at cookies or the database.
+      3. first-run: until an account exists, everything but setup is refused.
+      4. deny-by-default: a route with no declaration never reaches its handler.
     """
     _install_deny_by_default(app)
     _install_first_run_gate(app)
     _install_request_shape_guard(app)
+    _install_key_mismatch_gate(app)
     _install_auth_error_handler(app)

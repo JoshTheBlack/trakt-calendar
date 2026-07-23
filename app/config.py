@@ -359,15 +359,24 @@ def _write_settings_file(data: dict) -> None:
     os.replace(tmp, SETTINGS_FILE)
 
 
-def load_settings() -> Settings:
+def load_settings(open_secrets: bool = True) -> Settings:
     """Assemble one Settings object from its three homes: the two recovery fields
     from settings.json, the non-secret globals from app_settings, and the secrets
     from app_secrets. Everything downstream still sees a fully-populated Settings;
     only where each field persists has changed.
+
+    `open_secrets=False` skips decrypting the stored secrets entirely, leaving those
+    fields at their empty defaults. The session/cookie and origin checks in the auth
+    layer need only the globals and recovery fields, never a credential, so they load
+    this way — which also means authentication keeps working when a stored secret is
+    sealed under a key the current one cannot open (that decrypt would otherwise raise
+    SealedButWrongKey), so an administrator can still reach the recovery screen.
     """
     _ensure_data_dir()
     file_data = _read_settings_file()
     globals_doc, stored_secrets = _read_db_config()
+    if not open_secrets:
+        stored_secrets = {}
 
     if not file_data and not globals_doc and not stored_secrets:
         # Nothing persisted anywhere: first run. Seed from the legacy config.php
@@ -428,12 +437,21 @@ def save_settings(settings: Settings) -> None:
     the destinations moved.
     """
     _ensure_data_dir()
-    from . import db
+    from . import db, encryption_flow
 
     data = settings.to_dict()
     globals_doc = {name: data[name] for name in sorted(global_field_names())}
     secrets = {name: data.get(name, "") for name in SECRET_FIELDS}
     recovery = {name: data[name] for name in sorted(RECOVERY_FIELDS)}
+
+    # While the key is missing or wrong, sealing a secret would write plaintext over
+    # ciphertext the original key could still recover (no key) or bury an unreadable
+    # value under a second key's ciphertext (wrong key). The globals and the recovery
+    # file are never sealed, so those still persist; the secret rows are left exactly
+    # as they are. Callers that must not silently drop a credential (the admin Save)
+    # check this first and refuse loudly, routing to recovery — this is the last-line
+    # guard for every other save path.
+    write_secrets = not encryption_flow.secret_writes_blocked()
 
     def _persist(conn) -> None:
         conn.execute(
@@ -441,6 +459,8 @@ def save_settings(settings: Settings) -> None:
             "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
             (json.dumps(globals_doc),),
         )
+        if not write_secrets:
+            return
         for name, value in secrets.items():
             if value:
                 # Sealed before it lands in the row when a key is configured, and

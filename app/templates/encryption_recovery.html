@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Encryption recovery &ndash; Trakt New Shows</title>
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
+</head>
+<body class="auth-page">
+<div class="auth-shell">
+  <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
+  <div class="auth-card">
+    <h1>Encrypted secrets are locked</h1>
+    <p class="auth-sub">
+      The <code>{{ env_var }}</code> currently set does not match the key the stored
+      secrets were encrypted with. Every encrypted value &mdash; the Trakt, Sonarr,
+      Radarr, Seerr and TMDB credentials, and each account&rsquo;s linked tokens
+      &mdash; is unreadable until this is resolved, so the rest of the app is held
+      here until it is.
+    </p>
+
+    {% if not is_admin %}
+    <p class="auth-notice">
+      An administrator needs to resolve this from their account. Nothing you can do
+      here will help &mdash; ask whoever runs this instance to sign in.
+    </p>
+    {% else %}
+
+    <div class="recovery-door">
+      <h2>I still have the original key</h2>
+      <p>
+        This is the safe path, and the usual cause is a typo or the wrong container.
+        Put the original key back in <code>{{ env_var }}</code> and restart. Nothing
+        is written &mdash; the encrypted values simply become readable again and the
+        app returns to normal.
+      </p>
+    </div>
+
+    <div class="recovery-door recovery-door--danger">
+      <h2>The original key is lost</h2>
+      <p>
+        Only if the original key is truly gone. This <strong>permanently discards</strong>
+        every value the current key cannot open &mdash; you will re-enter the API keys
+        in Settings, and each user will re-link Trakt. Accounts and their other data
+        are kept; only the unreadable tokens are cleared. Values that DO open under the
+        current key are left untouched.
+      </p>
+      <p class="auth-error" id="error" role="alert"></p>
+      <button class="btn-primary recovery-reset" id="reset" type="button">
+        Discard unrecoverable secrets and reset
+      </button>
+    </div>
+
+    {% endif %}
+
+    <p class="auth-sub recovery-signout">
+      <a href="/logout" id="signout">Sign out</a>
+    </p>
+  </div>
+</div>
+
+{% if is_admin %}
+<script>
+const CONFIRM_PHRASE = {{ confirm_phrase | tojson }};
+const err = document.getElementById('error');
+
+async function runReset() {
+  err.textContent = '';
+  const typed = prompt(
+    'This permanently discards every secret the current key cannot open, and cannot ' +
+    'be undone. Type "' + CONFIRM_PHRASE + '" to confirm:');
+  if (typed === null) return;
+  if (typed.trim().toLowerCase() !== CONFIRM_PHRASE) {
+    err.textContent = 'That did not match — nothing was changed.';
+    return;
+  }
+  const btn = document.getElementById('reset');
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/admin/encryption/recovery/reset', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({confirm: typed.trim()}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) { window.location = '/'; return; }
+    err.textContent = data.error || 'The reset could not be completed.';
+  } catch (e) {
+    err.textContent = 'Could not reach the server.';
+  }
+  btn.disabled = false;
+}
+
+// Sign-out is a JSON-only POST like everywhere else, so the plain link is wired up
+// to fire it rather than navigating to a GET that does not exist.
+document.getElementById('signout').addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    await fetch('/logout', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    });
+  } catch (_) { /* fall through to the redirect regardless */ }
+  window.location = '/login';
+});
+
+document.getElementById('reset').addEventListener('click', runReset);
+</script>
+{% else %}
+<script>
+document.getElementById('signout').addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    await fetch('/logout', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    });
+  } catch (_) { /* fall through */ }
+  window.location = '/login';
+});
+</script>
+{% endif %}
+</body>
+</html>

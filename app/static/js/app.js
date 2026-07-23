@@ -554,7 +554,153 @@ async function openSettings() {
         ensureOption(document.getElementById('s_radarr_rf'), s.radarr_root_folder, s.radarr_root_folder);
         document.getElementById('s_seer_url').value = s.seer_url || '';
     } catch (e) { console.error(e); }
+    loadEncryptionState();
     document.getElementById('settingsModal').classList.add('open');
+}
+
+// ---- At-rest encryption panel (admin, Server tab) ----
+// The key never touches this app beyond being revealed once for the operator to
+// copy into their own environment; every transition is a call to
+// /api/admin/encryption, and the panel just reflects the state it reports back.
+function encAddButton(row, label, handler, ghost) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn-ghost small' + (ghost ? '' : ' btn-primary-inline');
+    btn.textContent = label;
+    btn.addEventListener('click', handler);
+    row.appendChild(btn);
+}
+
+function renderEncryption(s) {
+    const status = document.getElementById('s_enc_status');
+    const actions = document.getElementById('s_enc_actions');
+    const reveal = document.getElementById('s_enc_reveal');
+    const err = document.getElementById('s_enc_error');
+    actions.innerHTML = '';
+    reveal.hidden = true; reveal.innerHTML = '';
+    err.hidden = true; err.textContent = '';
+    const env = s.env_var || 'ENCRYPTION_KEY';
+
+    if (s.health === 'key_missing') {
+        status.innerHTML = '⚠️ Secrets are encrypted, but <code>' + esc(env) + '</code> is not set — ' +
+            'they are unreadable but intact. Restore the key and restart. Do <strong>not</strong> ' +
+            're-save credentials or re-link while it is missing: that overwrites the encrypted values.';
+        return;
+    }
+    if (s.phase === 'encrypted') {
+        status.textContent = '🔒 Stored secrets are encrypted at rest.';
+        return;
+    }
+    if (s.key_valid) {
+        status.innerHTML = 'A valid key is set in <code>' + esc(env) + '</code>. Encrypt the stored ' +
+            'secrets now — no restart needed.';
+        encAddButton(actions, 'Encrypt secrets now', encEncryptNow);
+        if (s.phase !== 'pending_encrypt') encAddButton(actions, 'Not now', encOptOut, true);
+        return;
+    }
+    if (s.phase === 'pending_key' || s.phase === 'pending_encrypt') {
+        status.innerHTML = 'Waiting for the key. Set <code>' + esc(env) + '</code> in your environment ' +
+            '(env, Docker, or compose) and restart the app, then check again.';
+        encAddButton(actions, '↻ Check for the key', encVerify);
+        encAddButton(actions, 'Not now', encOptOut, true);
+        return;
+    }
+    // phase 'none' or 'opted_out' with no key yet — the first offer.
+    status.innerHTML = 'Encrypt the stored credentials and linked tokens so a leaked database ' +
+        'file (a backup or snapshot) does not hand them over. The key lives in your environment, ' +
+        'never in the database. <strong>You must save the key and never lose it</strong> — losing it ' +
+        'means re-linking Trakt and re-entering every API key.';
+    encAddButton(actions, 'Generate a key for me', () => encEnable(true));
+    encAddButton(actions, 'I’ll set my own key', () => encEnable(false));
+    if (s.phase === 'none') encAddButton(actions, 'Not now', encOptOut, true);
+}
+
+async function loadEncryptionState() {
+    const panel = document.getElementById('s_enc_panel');
+    if (!panel) return;  // non-admin page has no encryption panel
+    try {
+        const res = await fetch('/api/admin/encryption', { cache: 'no-store' });
+        const s = await res.json();
+        if (!s.ok) { document.getElementById('s_enc_status').textContent = 'Unavailable.'; return; }
+        renderEncryption(s);
+    } catch (e) { console.error(e); }
+}
+
+function encError(message) {
+    const err = document.getElementById('s_enc_error');
+    err.textContent = message || 'Something went wrong.';
+    err.hidden = false;
+}
+
+async function encPost(path, body) {
+    const res = await fetch(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok && data.ok, data };
+}
+
+async function encEnable(generate) {
+    const { ok, data } = await encPost('/api/admin/encryption/enable', { generate });
+    if (!ok) { encError(data.error); return; }
+    if (data.restart_required) { encShowReveal(data.key, generate); return; }
+    loadEncryptionState();  // a valid key was already present — straight to "encrypt now"
+}
+
+function encShowReveal(key, generated) {
+    const env = 'ENCRYPTION_KEY';
+    const reveal = document.getElementById('s_enc_reveal');
+    document.getElementById('s_enc_actions').innerHTML = '';
+    let inner = '';
+    if (generated) {
+        inner += '<p class="hint"><strong>Save this key now — it is shown once and never again.</strong> ' +
+            'If you lose it, the encrypted secrets are unrecoverable.</p>' +
+            '<div class="share-link-box"><input type="text" id="s_enc_key" readonly value="' + esc(key) + '">' +
+            '<button type="button" class="btn-ghost small" onclick="encCopyKey()">Copy</button></div>';
+    } else {
+        inner += '<p class="hint">Generate a key with:</p>' +
+            '<div class="share-link-box"><input type="text" readonly value="python -c &quot;from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())&quot;"></div>';
+    }
+    inner += '<p class="hint">Set it as <code>' + env + '</code> in your environment (env file, ' +
+        'Docker <code>-e</code>, or compose <code>environment:</code>) and restart the app. Then:</p>';
+    reveal.innerHTML = inner;
+    encAddButton(document.getElementById('s_enc_actions'), '↻ I’ve set the key and restarted — check', encVerify);
+    encAddButton(document.getElementById('s_enc_actions'), 'Not now', encOptOut, true);
+    reveal.hidden = false;
+}
+
+function encCopyKey() {
+    const input = document.getElementById('s_enc_key');
+    if (!input) return;
+    input.select();
+    try { navigator.clipboard.writeText(input.value); } catch (_) { document.execCommand('copy'); }
+    toast('Key copied — store it somewhere safe', true);
+}
+
+async function encVerify() {
+    const { ok, data } = await encPost('/api/admin/encryption/verify', {});
+    if (!ok) { encError(data.error); return; }
+    if (!data.detected) {
+        encError('No valid key found in the environment yet. Set ENCRYPTION_KEY and restart, then try again.');
+        return;
+    }
+    encEncryptNow();
+}
+
+async function encEncryptNow() {
+    if (!confirm('Encrypt every stored secret and linked token now? Make sure you have saved the key first.')) return;
+    const { ok, data } = await encPost('/api/admin/encryption/encrypt', {});
+    if (!ok) { encError(data.error); return; }
+    toast('Secrets encrypted at rest', true);
+    loadEncryptionState();
+}
+
+async function encOptOut() {
+    const { ok, data } = await encPost('/api/admin/encryption/opt-out', {});
+    if (!ok) { encError(data.error); return; }
+    loadEncryptionState();
 }
 
 // Keep a saved <select> value selectable even before options are loaded from Sonarr/Radarr.

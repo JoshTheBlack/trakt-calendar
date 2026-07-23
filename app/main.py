@@ -37,9 +37,12 @@ from . import calendar_state
 from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
+from . import encryption_flow
+from . import encryption_routes
 from . import logos
 from . import plex_auth
 from . import plex_routes
+from . import secrets_box
 from . import seer
 from . import share_links
 from . import share_routes
@@ -48,7 +51,7 @@ from . import trakt_routes
 from . import watch_history
 from .auth import AuthLevel
 from .perftrace import span
-from .config import Settings, apply_update, load_settings, public_base_url_error, save_settings
+from .config import SECRET_FIELDS, Settings, apply_update, load_settings, public_base_url_error, save_settings
 from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
 from .trakt import (
@@ -90,6 +93,38 @@ async def refresh_integration_health() -> None:
     for kind in ("sonarr", "radarr"):
         INTEGRATION_HEALTH[kind] = await arr.check_health(kind, settings)
     INTEGRATION_HEALTH["seer"] = await seer.check_health(settings)
+
+
+async def _warn_on_key_state(health: str) -> None:
+    """One loud, actionable startup line for each unhealthy key state.
+
+    The missing-key warning is worded as strongly as it is on purpose: the sealed
+    values are intact and come back the instant the key is restored, but a well-meaning
+    re-link or credential re-save overwrites them for good, so the one thing the
+    operator must NOT do is exactly the thing that looks like the fix."""
+    if health == encryption_flow.KEY_MISMATCH:
+        logger.error(
+            "ENCRYPTION_KEY does not match the stored secrets — the app is gated to the "
+            "admin recovery screen. Restore the original key to get everything back, or "
+            "run the recovery reset to discard the unrecoverable values.",
+        )
+        return
+    if health == encryption_flow.KEY_MISSING:
+        logger.error(
+            "ENCRYPTION_KEY is not set but stored secrets are sealed. They are UNREADABLE "
+            "but INTACT — restore ENCRYPTION_KEY to get them back. Do NOT re-link Trakt or "
+            "re-save API keys while the key is missing: that overwrites the encrypted "
+            "values and loses them for good.",
+        )
+        return
+    has_secret = await db.fetch_value("SELECT 1 FROM app_secrets LIMIT 1")
+    has_token = await db.fetch_value(
+        "SELECT 1 FROM linked_identities "
+        "WHERE access_token IS NOT NULL OR refresh_token IS NOT NULL LIMIT 1"
+    )
+    warning = secrets_box.plaintext_storage_warning(bool(has_secret or has_token))
+    if warning:
+        logger.warning(warning)
 
 
 # Cached "what's already in the library" id sets (TVDB for Sonarr, TMDB for Radarr/Seerr).
@@ -188,7 +223,19 @@ async def lifespan(_app: FastAPI):
     # Loud, once, at boot: a route nobody declared is being refused to every
     # caller, and the operator should hear about it here rather than from a user.
     authz.log_undeclared_routes(_app)
-    await refresh_integration_health()
+    # Turn encryption on non-interactively when the escape-hatch env var is set with
+    # a valid key, then derive the key-health once so the request gate can steer an
+    # administrator to recovery on a wrong key BEFORE any ordinary load hits a sealed
+    # secret and raises. Both happen before the integration health check below, which
+    # reads real secrets and would raise on a wrong key.
+    try:
+        await encryption_flow.run_env_escape_hatch()
+    except Exception:
+        logger.warning("Non-interactive encryption enable failed at startup", exc_info=True)
+    health = await encryption_flow.refresh_health()
+    await _warn_on_key_state(health)
+    if health != encryption_flow.KEY_MISMATCH:
+        await refresh_integration_health()
     task = asyncio.create_task(_heartbeat_loop())
     try:
         yield
@@ -210,6 +257,7 @@ app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
 app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
+app.include_router(encryption_routes.router)
 app.include_router(share_routes.router)
 
 # Every route below is registered through this, which requires an access level
@@ -849,6 +897,26 @@ async def post_settings(request: Request):
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
     if not isinstance(data, dict):
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    # A credential save while the key is missing or wrong would seal a fresh value
+    # over ciphertext the original key could still recover. Refuse it loudly and send
+    # the admin to recovery, rather than let it silently overwrite. A save that only
+    # touches non-secret settings is fine — those are never sealed — so this checks
+    # for a real secret change (a new value or an explicit clear), not a blank field.
+    changes_secret = any(
+        name in data and (data[name] is None or str(data[name]).strip())
+        for name in SECRET_FIELDS
+    )
+    if changes_secret and encryption_flow.secret_writes_blocked():
+        return JSONResponse({
+            "ok": False,
+            "reason": "key_unhealthy",
+            "error": (
+                "Encryption is unhealthy, so saving a credential is blocked to avoid "
+                "overwriting a value the correct key could still recover. Restore the "
+                "original ENCRYPTION_KEY, or run the recovery reset first."
+            ),
+            "recovery_url": encryption_routes.RECOVERY_PATH,
+        }, status_code=409)
     settings = apply_update(load_settings(), data)
     # Rejected on save rather than on use: a base URL with a path or a trailing
     # slash builds a redirect URI that no longer matches the one registered on

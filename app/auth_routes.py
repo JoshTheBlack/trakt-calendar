@@ -447,7 +447,10 @@ async def login(request: Request):
     data = await _json_body(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
-    settings = load_settings()
+    # Sign-in reads only the cookie policy and the proxy list, never a credential,
+    # so it loads without decrypting secrets — an admin must be able to sign in and
+    # reach recovery even while a stored secret is sealed under the wrong key.
+    settings = load_settings(open_secrets=False)
     ip = auth.client_ip(request, settings)
     username_key = username.lower()
 
@@ -519,7 +522,7 @@ async def logout(request: Request):
     # Signing someone out is a state change, so it is held to the same JSON-only
     # rule as every other mutating endpoint. The body itself is ignored.
     await _json_body(request)
-    settings = load_settings()
+    settings = load_settings(open_secrets=False)
     session_id = auth.read_session_cookie(request, settings)
     if session_id:
         await auth.revoke_session(session_id)

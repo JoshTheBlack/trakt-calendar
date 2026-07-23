@@ -273,6 +273,19 @@
                         </select>
                         <span class="hint" id="s_cookie_hint" data-base="The session cookie's Secure flag. &quot;Always&quot; is right for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself sees plain HTTP.">The session cookie's Secure flag. "Always" is right for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself sees plain HTTP.</span>
                     </div>
+
+                    {# At-rest encryption for the stored credentials and per-user
+                       tokens. The whole flow is driven by app/encryption_routes and
+                       rendered by renderEncryption() in app.js from /api/admin/
+                       encryption — the key is never held by this app, only revealed
+                       once for the operator to place in their own environment. #}
+                    <div class="settings-section">🔒 Secret encryption at rest</div>
+                    <div class="field" id="s_enc_panel">
+                        <p class="hint" id="s_enc_status">Loading…</p>
+                        <div class="auth-notice-actions" id="s_enc_actions"></div>
+                        <div id="s_enc_reveal" hidden></div>
+                        <p class="hint err" id="s_enc_error" hidden></p>
+                    </div>
                 </div>
 
                 <div class="tab-panel" data-tab-panel="trakt" role="tabpanel" hidden>
