@@ -193,6 +193,8 @@ async def _render(request: Request, share_row) -> Response:
         items, as_of = await calendar_cache.read_month(
             endpoint, settings, tz=tz, year=year, month=month,
             genres=owner_prefs["genres"], countries=owner_prefs["countries"],
+            show_certifications=owner_prefs["show_certifications"],
+            movie_certifications=owner_prefs["movie_certifications"],
             network_filter=network_filter, allow_fetch=False,
         )
 

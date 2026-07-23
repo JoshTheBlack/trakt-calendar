@@ -370,17 +370,24 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
 
 
 def _filters_active(prefs: dict) -> bool:
-    return bool(prefs["genres"] or prefs["countries"] or prefs["network_filter"])
+    return bool(
+        prefs["genres"] or prefs["countries"] or prefs["network_filter"]
+        or prefs["show_certifications"] or prefs["movie_certifications"]
+    )
 
 
 def _filters_summary(prefs: dict) -> str:
     """"genre, country" — which dimensions are narrowing this calendar, for the
     header button's tooltip. Names the dimensions rather than the values, which
-    can run to dozens of networks and would not fit."""
+    can run to dozens of networks and would not fit. Show and movie
+    certifications share one "certification" label — the endpoint decides which
+    of the two specs is actually in play, but the tooltip is naming a dimension,
+    not a value, so it does not need to distinguish them."""
     named = [
         label for label, value in (
             ("genre", prefs["genres"]),
             ("country", prefs["countries"]),
+            ("certification", prefs["show_certifications"] or prefs["movie_certifications"]),
             ("network", prefs["network_filter"]),
         ) if value
     ]
@@ -418,6 +425,8 @@ async def index(request: Request):
             items, _as_of = await calendar_cache.read_month(
                 endpoint, settings, tz=tz, year=year, month=month,
                 genres=prefs["genres"], countries=prefs["countries"],
+                show_certifications=prefs["show_certifications"],
+                movie_certifications=prefs["movie_certifications"],
                 network_filter=prefs["network_filter"] or None,
             )
         except TraktError as exc:
@@ -713,6 +722,10 @@ async def post_me_prefs(request: Request):
         updates["genres"] = _filter_spec(data["genres"])
     if "countries" in data:
         updates["countries"] = _filter_spec(data["countries"])
+    if "show_certifications" in data:
+        updates["show_certifications"] = _filter_spec(data["show_certifications"])
+    if "movie_certifications" in data:
+        updates["movie_certifications"] = _filter_spec(data["movie_certifications"])
     if "network_filter" in data:
         updates["network_filter"] = _network_list(data["network_filter"])
     if not updates:

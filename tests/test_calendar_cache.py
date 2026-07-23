@@ -4,11 +4,13 @@ app/calendar_filter).
 Covers: window alignment is stable across viewers (independent of "today"); the
 viewer-dependent month boundary (an item at 02:00 UTC on the 1st lands in the
 previous month for a UTC-8 viewer and the current month for a UTC+2 viewer); the
-pruner keeps every field the normalizer reads; a window fetch sends no
-genres/countries and no pagination headers; TTL freshness; the size cap evicts
+pruner keeps every field the normalizer and the filters read; a window fetch
+sends no genres/countries and no pagination headers; the instance-wide content
+floor (genres/countries/certifications) excludes a show from the cached window
+itself, not just from a later read; TTL freshness; the size cap evicts
 least-recently-stored first; and the GOLDEN FIXTURE proving the read-time
-genre/country predicate reproduces Trakt's own server-side filtering under both
-spec styles.
+genre/country/certification predicate reproduces Trakt's own server-side
+filtering under both spec styles.
 
 No network — the Trakt fetch is patched. TRAKT_DATA_DIR points at a temp dir
 (set BEFORE importing app modules).
@@ -122,6 +124,7 @@ class PruneTests(unittest.TestCase):
             "title": "Rich Show", "year": 2026, "network": "HBO", "country": "us",
             "language": "en", "runtime": 50, "status": "returning series", "rating": 8.456,
             "genres": ["drama", "game-show"], "overview": "An overview.",
+            "certification": "TV-14",
             "ids": {"slug": "rich-show", "trakt": 123, "tvdb": 456, "tmdb": 789,
                     "imdb": "tt42", "unused": "x"},
             "images": {"poster": ["img.tmdb.example/poster.jpg"],
@@ -146,6 +149,12 @@ class PruneTests(unittest.TestCase):
         self.assertNotIn("logo", pruned["show"]["images"])
         self.assertNotIn("imdb", pruned["show"]["ids"])
         self.assertNotIn("unused_field", pruned["show"])
+
+    def test_pruner_keeps_certification(self):
+        """Needed for the per-user and instance-floor certification filters to
+        have anything to read once an entry comes back out of the cache."""
+        pruned = calendar_cache.prune_entry(self.RICH, "show")
+        self.assertEqual(pruned["show"]["certification"], "TV-14")
 
     def test_pruner_drops_an_entry_with_no_media(self):
         self.assertIsNone(calendar_cache.prune_entry({"first_aired": "2026-01-01T00:00:00Z"}, "show"))
@@ -176,6 +185,70 @@ class FetchShapeTests(CacheTestCase):
             with self.assertLogs("app.calendar_cache", level="WARNING") as logged:
                 await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
+
+
+class InstanceFloorTests(CacheTestCase):
+    """The content floor (README.md's "Genres / Countries / Networks" section)
+    promises a HARD, pre-cache exclusion: a show it excludes should never enter
+    api_cache at all, so no per-account filter (or lack of one) can bring it
+    back. Proving that means asserting on fetch_window_raw's OWN return value —
+    what gets stored — not on a post-hoc read_month() filter, which would pass
+    even if fetch_window_raw cached everything unfiltered."""
+
+    async def test_a_genre_excluded_by_settings_never_survives_the_fetch(self):
+        self.settings.genres = "-anime"
+        kept = _entry("kept-drama", "2026-07-06T12:00:00Z", genres=["drama"])
+        excluded = _entry("excluded-anime", "2026-07-06T12:00:00Z", genres=["anime"])
+        client = _CaptureClient([kept, excluded])
+        with patch("app.trakt.shared_client", return_value=client):
+            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+        slugs = {e["show"]["ids"]["slug"] for e in entries}
+        self.assertEqual(slugs, {"kept-drama"})
+
+    async def test_a_certification_excluded_by_settings_never_survives_the_fetch(self):
+        self.settings.show_certifications = "-tv-ma"
+        kept = _entry("kept-tv14", "2026-07-06T12:00:00Z")
+        kept["show"]["certification"] = "TV-14"
+        excluded = _entry("excluded-tvma", "2026-07-06T12:00:00Z")
+        excluded["show"]["certification"] = "TV-MA"
+        client = _CaptureClient([kept, excluded])
+        with patch("app.trakt.shared_client", return_value=client):
+            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+        slugs = {e["show"]["ids"]["slug"] for e in entries}
+        self.assertEqual(slugs, {"kept-tv14"})
+
+    async def test_the_movie_certification_floor_reads_the_movie_field_not_the_show_one(self):
+        movies = get_endpoint("movies")
+        self.settings.movie_certifications = "-r"
+        self.settings.show_certifications = "-tv-ma"  # must not leak into movie filtering
+        kept = {"released": "2026-07-06", "movie": {
+            "title": "Kept", "certification": "PG", "ids": {"slug": "kept-pg", "trakt": 1}}}
+        excluded = {"released": "2026-07-06", "movie": {
+            "title": "Excluded", "certification": "R", "ids": {"slug": "excluded-r", "trakt": 2}}}
+        client = _CaptureClient([kept, excluded])
+        with patch("app.trakt.shared_client", return_value=client):
+            entries = await calendar_cache.fetch_window_raw(movies, self.settings, date(2026, 7, 6))
+        slugs = {e["movie"]["ids"]["slug"] for e in entries}
+        self.assertEqual(slugs, {"kept-pg"})
+
+    async def test_floor_excluded_shows_stay_excluded_once_the_window_is_stored(self):
+        """The end-to-end promise: a floor-excluded show is absent from the
+        CACHED window a later read_month() call sees, not merely filtered out on
+        the way to a template."""
+        self.settings.genres = "-anime"
+        kept = _entry("kept-drama", "2026-07-06T12:00:00Z", genres=["drama"])
+        excluded = _entry("excluded-anime", "2026-07-06T12:00:00Z", genres=["anime"])
+        client = _CaptureClient([kept, excluded])
+        with patch("app.trakt.shared_client", return_value=client):
+            items, _ = await calendar_cache.read_month(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=1000)
+        ids = {i["id"] for i in items}
+        self.assertIn("kept-drama", ids)
+        self.assertNotIn("excluded-anime", ids)
+
+        cached, _ = await calendar_cache.read_cached_window(SHOWS.key, date(2026, 7, 6))
+        cached_slugs = {e["show"]["ids"]["slug"] for e in cached}
+        self.assertEqual(cached_slugs, {"kept-drama"})
 
 
 class WindowOverrunTests(CacheTestCase):
@@ -443,6 +516,34 @@ class GoldenFilterTests(unittest.TestCase):
             set(self.fixture["expected_include"]),
         )
 
+    def test_show_certification_exclude(self):
+        kept = calendar_filter.filter_entries(
+            self.fixture["cert_entries"], "show", "", "", self.fixture["cert_exclude_spec"])
+        self.assertEqual(
+            {e["show"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_cert_exclude"]))
+
+    def test_show_certification_include(self):
+        kept = calendar_filter.filter_entries(
+            self.fixture["cert_entries"], "show", "", "", self.fixture["cert_include_spec"])
+        self.assertEqual(
+            {e["show"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_cert_include"]))
+
+    def test_movie_certification_exclude(self):
+        """Movies use the MPA vocabulary, a different set of tokens from the
+        shows' TV-* one, but read from the same `certification` key."""
+        kept = calendar_filter.filter_entries(
+            self.fixture["movie_cert_entries"], self.fixture["movie_media_key"], "", "",
+            self.fixture["movie_cert_exclude_spec"])
+        self.assertEqual(
+            {e["movie"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_movie_cert_exclude"]))
+
+    def test_movie_certification_include(self):
+        kept = calendar_filter.filter_entries(
+            self.fixture["movie_cert_entries"], self.fixture["movie_media_key"], "", "",
+            self.fixture["movie_cert_include_spec"])
+        self.assertEqual(
+            {e["movie"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_movie_cert_include"]))
+
 
 class FilterEdgeCaseTests(unittest.TestCase):
     """The live sample barely covered empty genres / empty country, so pin them
@@ -450,18 +551,29 @@ class FilterEdgeCaseTests(unittest.TestCase):
     def test_empty_genres_kept_by_exclude_only_dropped_by_include(self):
         no_genres = {"genres": [], "country": "us"}
         g_inc, g_exc = calendar_filter.parse_spec("-anime,-music")
-        self.assertTrue(calendar_filter.keep_media(no_genres, g_inc, g_exc, set(), set()))
+        self.assertTrue(calendar_filter.keep_media(no_genres, g_inc, g_exc, set(), set(), set(), set()))
         # A genre INCLUDE spec has something to be a member of; an item with no
         # genres is a member of nothing, so it drops.
         gi_inc, gi_exc = calendar_filter.parse_spec("drama,comedy")
-        self.assertFalse(calendar_filter.keep_media(no_genres, gi_inc, gi_exc, set(), set()))
+        self.assertFalse(calendar_filter.keep_media(no_genres, gi_inc, gi_exc, set(), set(), set(), set()))
 
     def test_missing_country_kept_by_exclude_dropped_by_allowlist(self):
         no_country = {"genres": ["drama"], "country": ""}
         c_inc, c_exc = calendar_filter.parse_spec("-kr")
-        self.assertTrue(calendar_filter.keep_media(no_country, set(), set(), c_inc, c_exc))
+        self.assertTrue(calendar_filter.keep_media(no_country, set(), set(), c_inc, c_exc, set(), set()))
         ai_inc, ai_exc = calendar_filter.parse_spec("us,gb,jp")
-        self.assertFalse(calendar_filter.keep_media(no_country, set(), set(), ai_inc, ai_exc))
+        self.assertFalse(calendar_filter.keep_media(no_country, set(), set(), ai_inc, ai_exc, set(), set()))
+
+    def test_missing_certification_kept_by_exclude_dropped_by_allowlist(self):
+        """Certification follows the country precedent, not the genre one: it is
+        a single scalar, so a missing value is membership in nothing."""
+        no_cert = {"genres": ["drama"], "country": "us"}
+        cert_inc, cert_exc = calendar_filter.parse_spec("-tv-ma")
+        self.assertTrue(
+            calendar_filter.keep_media(no_cert, set(), set(), set(), set(), cert_inc, cert_exc))
+        ci_inc, ci_exc = calendar_filter.parse_spec("tv-pg,tv-14")
+        self.assertFalse(
+            calendar_filter.keep_media(no_cert, set(), set(), set(), set(), ci_inc, ci_exc))
 
     def test_no_spec_is_a_pass_through(self):
         entries = [{"show": {"genres": ["anime"], "country": "kr"}}]

@@ -263,9 +263,11 @@ class ViewerFilterTests(CalendarRouteTestCase):
         drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
         drama["show"]["genres"] = ["drama"]
         drama["show"]["network"] = "HBO"
+        drama["show"]["certification"] = "TV-14"
         comedy = _entry("the-comedy", "The Comedy", "2026-07-16T20:00:00Z")
         comedy["show"]["genres"] = ["comedy"]
         comedy["show"]["network"] = "Netflix"
+        comedy["show"]["certification"] = "TV-MA"
         patcher = patch("app.calendar_cache.fetch_window_raw",
                         AsyncMock(return_value=[drama, comedy]))
         patcher.start()
@@ -277,7 +279,28 @@ class ViewerFilterTests(CalendarRouteTestCase):
         prefs = asyncio.run(auth.get_user_prefs(self.user1))
         self.assertEqual(prefs["genres"], "")
         self.assertEqual(prefs["countries"], "")
+        self.assertEqual(prefs["show_certifications"], "")
+        self.assertEqual(prefs["movie_certifications"], "")
         self.assertEqual(prefs["network_filter"], [])
+
+    def test_a_viewer_can_filter_shows_by_certification(self):
+        """A per-user certification exclude behaves exactly like the existing
+        genre/country filters: one viewer's calendar narrows, the other's does
+        not, from the same cached window."""
+        self.sign_in_as(self.user1)
+        resp = self.client.post("/api/me/prefs", json={"show_certifications": "-tv-ma"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        prefs = self.client.get("/api/me/prefs").json()["prefs"]
+        self.assertEqual(prefs["show_certifications"], "-tv-ma")
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page)
+        self.assertNotIn("The Comedy", page)
+
+        # The second viewer set nothing and still sees everything.
+        self.sign_in_as(self.user2)
+        page2 = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page2)
+        self.assertIn("The Comedy", page2)
 
     def test_each_viewer_filters_the_same_cached_month_their_own_way(self):
         self.sign_in_as(self.user1)

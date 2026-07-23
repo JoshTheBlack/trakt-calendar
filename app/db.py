@@ -826,6 +826,16 @@ def MIGRATION_11(conn: sqlite3.Connection) -> None:
     )
 
 
+# Migration 12 — per-user certification filter, alongside the existing
+# genres/countries columns. Two columns, not one: shows and movies use
+# different rating vocabularies (TV Parental Guidelines vs. the MPA film
+# ratings), so a show's rating and a movie's rating are never comparable
+# values and must never share a spec string.
+MIGRATION_12 = """
+ALTER TABLE user_prefs ADD COLUMN show_certifications TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN movie_certifications TEXT NOT NULL DEFAULT '';
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -841,6 +851,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (9, MIGRATION_9),
     (10, MIGRATION_10),
     (11, MIGRATION_11),
+    (12, MIGRATION_12),
 ]
 
 

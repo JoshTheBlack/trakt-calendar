@@ -1,5 +1,5 @@
 {
-  "_comment": "Golden regression fixture for the read-time genre/country filter (app/calendar_filter.py). A representative unfiltered calendar window (raw genre slugs + country, the only fields the filter reads) plus the item set Trakt's OWN server-side filter returned for the SAME window under each of the two spec styles the app produces. The expected sets are hand-derived from Trakt's documented filter semantics — which were verified item-for-item against the live API — NOT computed by the predicate under test, so this stays a genuine regression guard against the predicate silently drifting. Entries deliberately cover hyphenated genre slugs, the anime-vs-animation distinction, empty genres, missing country, multi-genre exclude hits, and allowlist misses.",
+  "_comment": "Golden regression fixture for the read-time genre/country/certification filter (app/calendar_filter.py). A representative unfiltered calendar window (raw genre slugs + country, the only fields the filter reads) plus the item set Trakt's OWN server-side filter returned for the SAME window under each of the two spec styles the app produces. The expected sets are hand-derived from Trakt's documented filter semantics — which were verified item-for-item against the live API — NOT computed by the predicate under test, so this stays a genuine regression guard against the predicate silently drifting. Entries deliberately cover hyphenated genre slugs, the anime-vs-animation distinction, empty genres, missing country, multi-genre exclude hits, and allowlist misses. The cert_* and movie_cert_* blocks are a second, independent fixture proving certification follows the country precedent (a scalar, missing on roughly a third of shows) rather than the genre one, and that show and movie vocabularies are read from the same JSON key without mixing.",
   "media_key": "show",
   "exclude_spec": {"genres": "-anime,-home-and-garden,-music,-talk-show", "countries": "-kr"},
   "include_spec": {
@@ -33,5 +33,27 @@
   ],
   "expected_include": [
     "e01-drama-us", "e06-drama-kr", "e12-comedy-jp", "e14-nogenre-us", "e18-drama-comedy-gb"
-  ]
+  ],
+  "cert_exclude_spec": "-tv-ma",
+  "cert_include_spec": "tv-pg,tv-14",
+  "cert_entries": [
+    {"show": {"ids": {"slug": "c01-tvma"}, "certification": "TV-MA"}},
+    {"show": {"ids": {"slug": "c02-tvpg"}, "certification": "TV-PG"}},
+    {"show": {"ids": {"slug": "c03-tv14"}, "certification": "TV-14"}},
+    {"show": {"ids": {"slug": "c04-null-cert"}, "certification": null}},
+    {"show": {"ids": {"slug": "c05-missing-cert"}}}
+  ],
+  "expected_cert_exclude": ["c02-tvpg", "c03-tv14", "c04-null-cert", "c05-missing-cert"],
+  "expected_cert_include": ["c02-tvpg", "c03-tv14"],
+  "movie_media_key": "movie",
+  "movie_cert_exclude_spec": "-r",
+  "movie_cert_include_spec": "pg,pg-13",
+  "movie_cert_entries": [
+    {"movie": {"ids": {"slug": "m01-r"}, "certification": "R"}},
+    {"movie": {"ids": {"slug": "m02-pg"}, "certification": "PG"}},
+    {"movie": {"ids": {"slug": "m03-pg13"}, "certification": "PG-13"}},
+    {"movie": {"ids": {"slug": "m04-null-cert"}, "certification": null}}
+  ],
+  "expected_movie_cert_exclude": ["m02-pg", "m03-pg13", "m04-null-cert"],
+  "expected_movie_cert_include": ["m02-pg", "m03-pg13"]
 }
