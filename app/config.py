@@ -16,6 +16,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import secrets_box
+
 DATA_DIR = Path(os.environ.get("TRAKT_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
@@ -365,9 +367,9 @@ def load_settings() -> Settings:
     """
     _ensure_data_dir()
     file_data = _read_settings_file()
-    globals_doc, secrets = _read_db_config()
+    globals_doc, stored_secrets = _read_db_config()
 
-    if not file_data and not globals_doc and not secrets:
+    if not file_data and not globals_doc and not stored_secrets:
         # Nothing persisted anywhere: first run. Seed from the legacy config.php
         # values via env exactly as before. Not written back here — the first
         # explicit save persists it.
@@ -375,6 +377,25 @@ def load_settings() -> Settings:
             trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
             trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
         )
+
+    # Decrypt the stored secrets here so every downstream reader (trakt.py, arr.py,
+    # seer.py, the token refresh in main.py) sees plaintext through the ordinary
+    # Settings fields and knows nothing about sealing. A sealed value with no key
+    # opens to None: drop it so the field reads as UNSET rather than shipping
+    # `enc:v1:...` to a provider — the ciphertext stays intact in the row and comes
+    # back when the key is restored. A wrong key raises out of open_() (fail loud),
+    # which is deliberately not caught here. `degraded` records that a sealed value
+    # could not be read, so the automatic file-reduction below is skipped: rewriting
+    # secrets while a real value reads as blank would overwrite it for good.
+    secrets: dict[str, str] = {}
+    degraded = False
+    for name, stored in stored_secrets.items():
+        plain = secrets_box.open_(stored)
+        if plain is None:
+            if stored.startswith(secrets_box.PREFIX):
+                degraded = True
+            continue
+        secrets[name] = plain
 
     # The DB is the home for globals and secrets; the file contributes the recovery
     # fields. A value present in the file wins, so an operator can still change any
@@ -385,13 +406,15 @@ def load_settings() -> Settings:
     settings = Settings.from_dict(merged)
 
     file_has_db_owned_keys = any(key not in RECOVERY_FIELDS for key in file_data)
-    if file_has_db_owned_keys:
+    if file_has_db_owned_keys and not degraded:
         from . import db
         # Only reduce the file when we own the write path (not inside a caller's
         # transaction), so the DB copy is committed before the file is shrunk — a
         # rolled-back transaction must never strand a value that has already been
         # removed from the file. If we are inside one, skip it; the next plain
-        # load reduces the file safely.
+        # load reduces the file safely. Skipped entirely while `degraded`, because
+        # re-saving would seal the blanked-out secrets and destroy the values the
+        # restored key could still recover.
         if not db.connection().in_transaction:
             save_settings(settings)
 
@@ -420,10 +443,13 @@ def save_settings(settings: Settings) -> None:
         )
         for name, value in secrets.items():
             if value:
+                # Sealed before it lands in the row when a key is configured, and
+                # stored verbatim when not — the plaintext value is what decides
+                # store-vs-delete, so a cleared credential still leaves no row.
                 conn.execute(
                     "INSERT INTO app_secrets (name, value) VALUES (?, ?) "
                     "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
-                    (name, value),
+                    (name, secrets_box.seal(value)),
                 )
             else:
                 # An unset secret is absence of a row, so `secrets_set` and storage

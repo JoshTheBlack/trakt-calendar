@@ -33,7 +33,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import auth, authz, db, trakt_auth
+from . import auth, authz, db, secrets_box, trakt_auth
 from .auth import AuthLevel
 from .auth_routes import INVALID_CREDENTIALS, INVALID_INVITE, TRAKT_RECONNECT_NOTICE
 from .config import Settings, load_settings
@@ -413,7 +413,10 @@ async def stored_access_token(user_id: int) -> str | None:
         "SELECT access_token FROM linked_identities WHERE user_id = ? AND provider = ?",
         (user_id, PROVIDER),
     )
-    return (row["access_token"] if row else None) or None
+    # Opened at this point of use — the row stores it sealed — so the revoke call
+    # posts the real token to Trakt rather than `enc:v1:...`.
+    token = secrets_box.open_(row["access_token"]) if row else None
+    return token or None
 
 
 async def revoke_token_value(token: str | None, settings: Settings | None = None) -> str | None:
@@ -461,21 +464,28 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
     )
     if row is None:
         return None
+    # Both tokens are stored sealed; open them here, at the point they are used.
+    # With no key set they pass through unchanged; a sealed value whose key is
+    # missing opens to None, so the row degrades to "no usable token" (fail open)
+    # and — because the refresh guard below then short-circuits — nothing is
+    # written back over the intact ciphertext. A wrong key raises out of open_().
+    access_token = secrets_box.open_(row["access_token"])
     expires_at = row["token_expires_at"]
     if not expires_at or time.time() < int(expires_at) - 60:
-        return row["access_token"]
-    if not (row["refresh_token"] and cfg.trakt_client_id and cfg.trakt_client_secret):
-        return row["access_token"]
+        return access_token
+    refresh_token = secrets_box.open_(row["refresh_token"])
+    if not (refresh_token and cfg.trakt_client_id and cfg.trakt_client_secret):
+        return access_token
     if not await auth.claim_identity_refresh(int(row["id"])):
-        return row["access_token"]
+        return access_token
     try:
         token = await trakt_auth.refresh_access_token(
-            cfg.trakt_client_id, cfg.trakt_client_secret, row["refresh_token"],
+            cfg.trakt_client_id, cfg.trakt_client_secret, refresh_token,
         )
     except httpx.HTTPError as exc:
         logger.warning("Trakt token refresh failed for a linked account: %s", exc)
         await auth.release_identity_refresh(int(row["id"]))
-        return row["access_token"]
+        return access_token
     await auth.store_identity_tokens(
         int(row["id"]),
         access_token=token.get("access_token"),

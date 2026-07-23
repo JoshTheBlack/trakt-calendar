@@ -26,7 +26,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response
 
-from . import db
+from . import db, secrets_box
 from .config import TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings
 
 logger = logging.getLogger(__name__)
@@ -278,12 +278,17 @@ def insert_linked_identity(
     type, and the column has to hold whichever each one actually issues.
     """
     ts = db.now() if now is None else now
+    # The token pair is sealed at rest when a key is configured (a pass-through
+    # otherwise); it is opened again at the point it is used to call a provider, in
+    # app/trakt_routes.py. seal(None) stays None, so an identity that carries no
+    # token (e.g. a Plex link) writes NULLs exactly as before.
     cur = conn.execute(
         "INSERT INTO linked_identities (user_id, provider, provider_user_id, display_name, "
         "access_token, refresh_token, token_expires_at, created_at, last_login_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (user_id, provider, str(provider_user_id), display_name, access_token,
-         refresh_token, token_expires_at, ts, ts),
+        (user_id, provider, str(provider_user_id), display_name,
+         secrets_box.seal(access_token), secrets_box.seal(refresh_token),
+         token_expires_at, ts, ts),
     )
     return int(cur.lastrowid)
 
@@ -1162,8 +1167,8 @@ def _refresh_identity(
     conn.execute(
         "UPDATE linked_identities SET display_name = ?, access_token = ?, refresh_token = ?, "
         "token_expires_at = ?, refreshing_until = NULL, last_login_at = ? WHERE id = ?",
-        (identity.display_name, identity.access_token, identity.refresh_token,
-         identity.token_expires_at, ts, identity_id),
+        (identity.display_name, secrets_box.seal(identity.access_token),
+         secrets_box.seal(identity.refresh_token), identity.token_expires_at, ts, identity_id),
     )
 
 
@@ -1362,11 +1367,13 @@ async def store_identity_tokens(
     refresh_token: str | None,
     token_expires_at: int | None,
 ) -> None:
-    """Persist a renewed token pair and release the refresh lease."""
+    """Persist a renewed token pair and release the refresh lease. The pair is
+    sealed at rest when a key is configured, matching the other identity writers."""
     await db.execute(
         "UPDATE linked_identities SET access_token = ?, refresh_token = ?, "
         "token_expires_at = ?, refreshing_until = NULL WHERE id = ?",
-        (access_token, refresh_token, token_expires_at, identity_id),
+        (secrets_box.seal(access_token), secrets_box.seal(refresh_token),
+         token_expires_at, identity_id),
     )
 
 
