@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, calendar_cache, calendar_state, db  # noqa: E402
+from app import auth, calendar_cache, calendar_state, db, trakt  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -415,6 +415,51 @@ class TimezonePickerTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 400)
         user_row = asyncio.run(auth.get_user(self.user_id))
         self.assertEqual(user_row["timezone"], "Europe/Athens")
+
+
+# ---------------------------------------------------------------------------
+# partial-data degradation: a window Trakt can't supply warns rather than fails
+# ---------------------------------------------------------------------------
+
+class PartialDataBannerTests(CalendarRouteTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("partial_viewer")
+        self.sign_in_as(self.user_id)
+
+    def test_a_failed_window_renders_the_month_with_a_distinct_warning_banner(self):
+        """One window failing drops that window's days but still renders the
+        rest, under an amber warning banner — not the red error banner and not
+        the whole-page error path."""
+        good_window = calendar_cache.window_start(date(2026, 7, 8))
+        boom_window = calendar_cache.window_start(date(2026, 7, 20))
+
+        async def fake(endpoint, settings, start):
+            if start == boom_window:
+                raise trakt.TraktError("Trakt unreachable", 503)
+            if start == good_window:
+                return [_entry("show-good", "Good Show", "2026-07-08T20:00:00Z")]
+            return []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            resp = self.client.get("/?year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Good Show", resp.text)
+        self.assertIn("warning-banner", resp.text)
+        self.assertIn("showing what we have", resp.text)
+        self.assertNotIn("error-banner", resp.text)
+
+    def test_every_window_failing_shows_the_error_banner_not_the_warning(self):
+        """No window loaded and nothing cached: there is nothing to show, so the
+        month falls to the hard error banner, not the partial warning."""
+        async def fake(endpoint, settings, start):
+            raise trakt.TraktError("Trakt unreachable", 503)
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            resp = self.client.get("/?year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("error-banner", resp.text)
+        self.assertNotIn("warning-banner", resp.text)
 
 
 if __name__ == "__main__":  # pragma: no cover

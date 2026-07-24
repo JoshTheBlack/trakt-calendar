@@ -14,7 +14,6 @@ import os
 import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
-from itertools import groupby
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -456,31 +455,36 @@ async def index(request: Request):
     month = _valid_month(request.query_params.get("month"), today.month)
     tz = _resolve_viewer_tz(user, settings)
 
-    items: list[dict] = []
+    grouped: list[dict] = []
+    total = 0
+    partial = False
     error: str | None = None
     if not settings.configured:
         error = "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
     else:
         try:
-            # The whole month is fetched and filtered before any HTML is sent, so
-            # this span is the server-side "time to first byte" for the calendar —
-            # dominated by the sequential per-window Trakt fetch on a cold cache.
+            # The whole month is fetched, filtered, and grouped before any HTML is
+            # sent, so this span is the server-side "time to first byte" for the
+            # calendar — dominated by the per-window Trakt fetch on a cold cache
+            # (now concurrent across the windows, not one await at a time).
+            days = calendar.monthrange(year, month)[1]
             with span("calendar.read_month", endpoint=endpoint.key, ym=f"{year}-{month:02d}") as sp:
-                items, _as_of = await calendar_cache.read_month(
-                    endpoint, settings, tz=tz, year=year, month=month,
+                grouped, meta = await calendar_cache.assemble_range(
+                    endpoint, settings, tz=tz,
+                    start_date=date(year, month, 1), end_date=date(year, month, days),
                     genres=prefs["genres"], countries=prefs["countries"],
                     show_certifications=prefs["show_certifications"],
                     movie_certifications=prefs["movie_certifications"],
                     network_filter=prefs["network_filter"] or None,
                 )
-                sp.set(items=len(items))
+                sp.set(items=meta["total"])
+            total = meta["total"]
+            # A window Trakt couldn't supply is skipped rather than failing the
+            # whole month; flag it so the page can say the month is incomplete
+            # instead of silently showing a short one.
+            partial = meta["partial"]
         except TraktError as exc:
             error = str(exc)
-
-    grouped = [
-        {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
-        for day, rows in groupby(items, key=lambda i: i["air_date"])
-    ]
 
     # Per-user view preferences (card style, day packing, hide-not-watching) —
     # distinct from `settings`, which stays the app-wide defaults new accounts
@@ -509,8 +513,11 @@ async def index(request: Request):
         "month_label": calendar.month_name[month],
         "nav": _nav(year, month),
         "grouped": grouped,
-        "total": len(items),
+        "total": total,
         "error": error,
+        # A non-fatal warning distinct from `error`: the month rendered, but at
+        # least one window's data couldn't be loaded, so it may be missing days.
+        "partial": partial,
         "generated": datetime.now().strftime("%H:%M"),
         # Sonarr/Radarr/Seerr writes land in the operator's own shared libraries
         # and Seerr's requests all carry one app-wide API key, so they are an
@@ -533,7 +540,7 @@ async def index(request: Request):
     # eagerly when the response is built), so this span is the cost of turning the
     # whole month into HTML — the other half of the server's blocking time before
     # the browser gets anything, and it grows with the card count.
-    with span("calendar.render", cards=len(items)):
+    with span("calendar.render", cards=total):
         response = templates.TemplateResponse(request, "index.html", context)
     return response
 

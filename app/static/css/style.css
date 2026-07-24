@@ -333,6 +333,9 @@ body.hide-not-watching .card.not-watching { display: none; }
 .empty-state { text-align: center; padding: 100px 20px; color: var(--text-faint); }
 .empty-state .emoji { font-size: 3rem; margin-bottom: 14px; }
 .error-banner { margin: 28px 6vw 0 6vw; padding: 16px 20px; border-radius: 12px; background: rgba(224,56,77,0.1); border: 1px solid rgba(224,56,77,0.5); color: var(--gold-soft); font-size: 0.9rem; }
+/* A non-fatal degradation, amber rather than the error banner's red: the month
+   rendered but a window's data was missing, so it may be short a few days. */
+.warning-banner { margin: 28px 6vw 0 6vw; padding: 16px 20px; border-radius: 12px; background: rgba(232,181,69,0.1); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft); font-size: 0.9rem; }
 
 /* ---- Footer ---- */
 .footer-divider { border: 0; border-top: 1px solid var(--card-border); margin: 56px 6vw 0 6vw; }
