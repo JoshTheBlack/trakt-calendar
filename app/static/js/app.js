@@ -550,6 +550,8 @@ async function openSettings() {
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
         document.getElementById('s_genres').value = s.genres || '';
         document.getElementById('s_countries').value = s.countries || '';
+        setCertPicker(document.getElementById('s_show_certifications'), s.show_certifications || '');
+        setCertPicker(document.getElementById('s_movie_certifications'), s.movie_certifications || '');
         document.getElementById('s_networks').value = (s.network_filter || []).join(', ');
         // Sonarr / Radarr
         document.getElementById('s_sonarr_url').value = s.sonarr_url || '';
@@ -811,6 +813,81 @@ function closeSettings() {
 // signed in, and /api/settings is admin-only. The filters are applied at read
 // time against one shared calendar cache, so each account can filter the same
 // cached month its own way.
+// ---- Certification chip pickers (Content floor settings + Filters modal) ----
+// The two certification dimensions draw from a small, frozen external
+// vocabulary (US TV Parental Guidelines and the MPA film ratings), so unlike
+// the free-text genre/country fields they get click-to-pick chips. Each chip
+// cycles through three states, and the set serializes to the same comma-joined
+// "-token" spec calendar_filter.parse_spec already reads on the server — so the
+// backend never has to know a picker produced the string. The same component
+// backs both the instance-floor copy and the per-user Filters copy; only the
+// vocabulary (declared per-picker in data-vocab) differs.
+const CERT_CHIP_STATES = ['', 'include', 'exclude'];
+
+function setChipState(chip, state) {
+    chip.dataset.state = state;
+    chip.classList.toggle('on-include', state === 'include');
+    chip.classList.toggle('on-exclude', state === 'exclude');
+}
+
+// Build a picker's chips once from its data-vocab. Idempotent so opening a modal
+// repeatedly never re-adds chips; the modal open just resets their states.
+function buildCertPicker(picker) {
+    if (picker.dataset.built) return;
+    (picker.dataset.vocab || '').split(',').map(t => t.trim()).filter(Boolean).forEach(token => {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'cert-chip';
+        chip.dataset.token = token;
+        chip.textContent = token;
+        setChipState(chip, '');
+        chip.addEventListener('click', () => {
+            const next = (CERT_CHIP_STATES.indexOf(chip.dataset.state) + 1) % CERT_CHIP_STATES.length;
+            setChipState(chip, CERT_CHIP_STATES[next]);
+        });
+        picker.appendChild(chip);
+    });
+    picker.dataset.built = '1';
+}
+
+// Serialize chip states into a `TV-14, -TV-MA` spec string.
+function readCertPicker(picker) {
+    const parts = [];
+    picker.querySelectorAll('.cert-chip').forEach(chip => {
+        if (chip.dataset.state === 'include') parts.push(chip.dataset.token);
+        else if (chip.dataset.state === 'exclude') parts.push('-' + chip.dataset.token);
+    });
+    return parts.join(', ');
+}
+
+// Apply a stored spec back onto the chips. Tokens are matched case-insensitively
+// (the server lowercases on parse) and any token outside this picker's fixed
+// vocabulary is ignored — the picker only ever surfaces the known ratings.
+function setCertPicker(picker, spec) {
+    buildCertPicker(picker);
+    const include = new Set(), exclude = new Set();
+    (spec || '').split(',').forEach(raw => {
+        const token = raw.trim().toLowerCase();
+        if (!token) return;
+        if (token.startsWith('-')) { const bare = token.slice(1).trim(); if (bare) exclude.add(bare); }
+        else include.add(token);
+    });
+    picker.querySelectorAll('.cert-chip').forEach(chip => {
+        const t = chip.dataset.token.toLowerCase();
+        setChipState(chip, exclude.has(t) ? 'exclude' : include.has(t) ? 'include' : '');
+    });
+}
+
+function clearCertPicker(picker) {
+    picker.querySelectorAll('.cert-chip').forEach(chip => setChipState(chip, ''));
+}
+
+// Build every picker up front so a modal opened before its fetch resolves (or
+// with no stored value) still shows the full, interactive chip row.
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.chip-picker').forEach(buildCertPicker);
+});
+
 async function openFilters() {
     try {
         const res = await fetch('/api/me/prefs', { cache: 'no-store' });
@@ -818,6 +895,8 @@ async function openFilters() {
         const p = d.prefs || {};
         document.getElementById('f_genres').value = p.genres || '';
         document.getElementById('f_countries').value = p.countries || '';
+        setCertPicker(document.getElementById('f_show_certifications'), p.show_certifications || '');
+        setCertPicker(document.getElementById('f_movie_certifications'), p.movie_certifications || '');
         document.getElementById('f_networks').value = (p.network_filter || []).join(', ');
     } catch (e) {
         console.error(e);
@@ -836,6 +915,9 @@ function clearFilters() {
     ['f_genres', 'f_countries', 'f_networks'].forEach(id => {
         document.getElementById(id).value = '';
     });
+    ['f_show_certifications', 'f_movie_certifications'].forEach(id => {
+        clearCertPicker(document.getElementById(id));
+    });
 }
 
 async function saveFilters(event) {
@@ -843,6 +925,8 @@ async function saveFilters(event) {
     const payload = {
         genres: document.getElementById('f_genres').value,
         countries: document.getElementById('f_countries').value,
+        show_certifications: readCertPicker(document.getElementById('f_show_certifications')),
+        movie_certifications: readCertPicker(document.getElementById('f_movie_certifications')),
         network_filter: document.getElementById('f_networks').value
     };
     try {
@@ -883,6 +967,8 @@ async function saveSettings(event) {
         hide_not_watching: document.getElementById('s_hide').checked,
         genres: document.getElementById('s_genres').value,
         countries: document.getElementById('s_countries').value,
+        show_certifications: readCertPicker(document.getElementById('s_show_certifications')),
+        movie_certifications: readCertPicker(document.getElementById('s_movie_certifications')),
         network_filter: document.getElementById('s_networks').value,
         sonarr_url: document.getElementById('s_sonarr_url').value.trim(),
         sonarr_quality_profile_id: parseInt(document.getElementById('s_sonarr_qp').value, 10) || 0,
@@ -1462,6 +1548,7 @@ function renderDetails(d, poster, media, season) {
     if (d.network) chips.push(`<span class="chip network">📡 ${esc(d.network)}</span>`);
     if (d.runtime) chips.push(`<span class="chip">⏱️ ${esc(d.runtime)}m</span>`);
     if (d.rating) chips.push(`<span class="chip country">⭐ ${esc(d.rating)}</span>`);
+    if (d.certification) chips.push(`<span class="chip cert" data-cert="${esc(d.certification)}">${esc(d.certification)}</span>`);
     (d.genres || []).forEach(g => chips.push(`<span class="chip">${esc(g)}</span>`));
 
     let html = `

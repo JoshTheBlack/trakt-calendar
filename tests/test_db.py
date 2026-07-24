@@ -73,6 +73,25 @@ class MigrationTests(DbTestCase):
         # Re-running must not have duplicated the single version row.
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM schema_version"), 1)
 
+    async def test_migration_12_adds_certification_columns_to_user_prefs(self):
+        """A fresh install gets the columns via CREATE TABLE; an upgrading one
+        gets them via the ALTER TABLE migration. Both must default to '' so an
+        existing row with no opinion on certification keeps behaving as
+        unfiltered, the same way genres/countries already do."""
+        now = db.now()
+        await db.execute(
+            "INSERT INTO users (username, created_at, updated_at) VALUES ('cert-user', ?, ?)",
+            (now, now))
+        user_id = await db.fetch_value("SELECT id FROM users WHERE username = 'cert-user'")
+        await db.execute(
+            "INSERT INTO user_prefs (user_id, endpoint, card_style, day_packing) "
+            "VALUES (?, 'shows/new', 'vertical', 'stacked')", (user_id,))
+        row = await db.fetch_one(
+            "SELECT show_certifications, movie_certifications FROM user_prefs WHERE user_id = ?",
+            (user_id,))
+        self.assertEqual(row["show_certifications"], "")
+        self.assertEqual(row["movie_certifications"], "")
+
     async def test_only_one_bootstrap_account_can_exist(self):
         """The database half of the first-run race guard."""
         now = db.now()

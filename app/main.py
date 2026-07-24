@@ -67,7 +67,21 @@ from .trakt import (
 
 logger = logging.getLogger(__name__)
 
-VERSION = "1.1.2"  # keep in sync with CHANGELOG.md
+# Configured here (not only in run.py) so `hypercorn app.main:app` — what the
+# Docker image's CMD runs directly, bypassing run.py entirely — gets the same
+# app.* diagnostics and Trakt-call tracing as the dev runner, instead of
+# Python's silent WARNING-only default. LOG_LEVEL controls the app's own
+# loggers (including "app.perf", which every outbound Trakt call logs a line
+# to at DEBUG — see app/trakt.py, app/calendar_cache.py, app/trakt_auth.py);
+# third-party libraries stay at WARNING regardless, since their own DEBUG
+# output is rarely what anyone actually wants. basicConfig() only attaches a
+# handler if the root logger doesn't already have one, so when run.py has
+# already called it (the dev path) this is a no-op and run.py's config wins;
+# in Docker, where nothing else calls it, this is the only config that fires.
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
+VERSION = "1.1.3"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 COMMIT = os.environ.get("APP_COMMIT", "").strip()
@@ -370,17 +384,24 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
 
 
 def _filters_active(prefs: dict) -> bool:
-    return bool(prefs["genres"] or prefs["countries"] or prefs["network_filter"])
+    return bool(
+        prefs["genres"] or prefs["countries"] or prefs["network_filter"]
+        or prefs["show_certifications"] or prefs["movie_certifications"]
+    )
 
 
 def _filters_summary(prefs: dict) -> str:
     """"genre, country" — which dimensions are narrowing this calendar, for the
     header button's tooltip. Names the dimensions rather than the values, which
-    can run to dozens of networks and would not fit."""
+    can run to dozens of networks and would not fit. Show and movie
+    certifications share one "certification" label — the endpoint decides which
+    of the two specs is actually in play, but the tooltip is naming a dimension,
+    not a value, so it does not need to distinguish them."""
     named = [
         label for label, value in (
             ("genre", prefs["genres"]),
             ("country", prefs["countries"]),
+            ("certification", prefs["show_certifications"] or prefs["movie_certifications"]),
             ("network", prefs["network_filter"]),
         ) if value
     ]
@@ -418,6 +439,8 @@ async def index(request: Request):
             items, _as_of = await calendar_cache.read_month(
                 endpoint, settings, tz=tz, year=year, month=month,
                 genres=prefs["genres"], countries=prefs["countries"],
+                show_certifications=prefs["show_certifications"],
+                movie_certifications=prefs["movie_certifications"],
                 network_filter=prefs["network_filter"] or None,
             )
         except TraktError as exc:
@@ -713,6 +736,10 @@ async def post_me_prefs(request: Request):
         updates["genres"] = _filter_spec(data["genres"])
     if "countries" in data:
         updates["countries"] = _filter_spec(data["countries"])
+    if "show_certifications" in data:
+        updates["show_certifications"] = _filter_spec(data["show_certifications"])
+    if "movie_certifications" in data:
+        updates["movie_certifications"] = _filter_spec(data["movie_certifications"])
     if "network_filter" in data:
         updates["network_filter"] = _network_list(data["network_filter"])
     if not updates:

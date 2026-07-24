@@ -122,7 +122,8 @@ class UserTests(AuthTestCase):
         return Settings(endpoint="shows/premieres", card_style="poster",
                         day_packing="packed", hide_not_watching=True,
                         network_filter=["HBO", "Netflix"], genres="-anime",
-                        countries="us,gb", timezone="America/New_York")
+                        countries="us,gb", show_certifications="-tv-ma",
+                        movie_certifications="pg,pg-13", timezone="America/New_York")
 
     async def test_create_user_seeds_layout_prefs_from_settings(self):
         """settings.json's per-user fields are the seed for a new account's
@@ -146,6 +147,8 @@ class UserTests(AuthTestCase):
         prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
         self.assertEqual(prefs["genres"], "")
         self.assertEqual(prefs["countries"], "")
+        self.assertEqual(prefs["show_certifications"], "")
+        self.assertEqual(prefs["movie_certifications"], "")
         self.assertEqual(prefs["network_filter_json"], "[]")
 
     async def test_onboarding_alone_may_inherit_the_operators_filters(self):
@@ -164,6 +167,8 @@ class UserTests(AuthTestCase):
         prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
         self.assertEqual(prefs["genres"], "-anime")
         self.assertEqual(prefs["countries"], "us,gb")
+        self.assertEqual(prefs["show_certifications"], "-tv-ma")
+        self.assertEqual(prefs["movie_certifications"], "pg,pg-13")
         self.assertEqual(prefs["network_filter_json"], '["HBO", "Netflix"]')
 
     async def test_lookup_is_case_insensitive(self):

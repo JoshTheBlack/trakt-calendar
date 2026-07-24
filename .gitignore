@@ -23,8 +23,7 @@ scratch_data/
 .claude/settings.local.json
 
 # Build/design notes (personal, not part of the release)
-BUILD_*.txt
-FEATURE_SIMKL.txt
+Plans/
 PLANNING.md
 
 # OS / editor junk

@@ -266,6 +266,19 @@ body.hide-not-watching .card.not-watching { display: none; }
 .chip.country { color: var(--gold-soft); border-color: rgba(232,181,69,0.3); }
 .chip.lang { color: #b98be0; border-color: rgba(185,139,224,0.3); }
 .chip.day { color: #6fd3a1; border-color: rgba(111,211,161,0.3); }
+/* Color-coded by severity tier rather than the app's usual muted chip palette —
+   a rating reads fastest by color, the way the MPAA/TV cards themselves train
+   people to scan for it. TV ratings map onto the same tier as their nearest
+   MPAA equivalent (TV-Y/TV-Y7/TV-G ~ G, TV-PG ~ PG, TV-14 ~ PG-13, TV-MA ~ R)
+   so the two vocabularies read as one consistent scale. NC-17 joins R as the
+   only tier stricter than it. Unrated (NR) and anything unrecognized fall back
+   to the neutral black/white card look below. */
+.chip.cert { background: #000; color: #fff; border-color: #000; font-weight: 800; letter-spacing: 0.02em; }
+.chip.cert[data-cert="G"], .chip.cert[data-cert="TV-Y"], .chip.cert[data-cert="TV-Y7"],
+.chip.cert[data-cert="TV-G"] { background: var(--green); color: #06210f; border-color: var(--green); }
+.chip.cert[data-cert="PG"], .chip.cert[data-cert="TV-PG"] { background: var(--accent-blue); color: #071726; border-color: var(--accent-blue); }
+.chip.cert[data-cert="PG-13"], .chip.cert[data-cert="TV-14"] { background: var(--gold); color: #2b1c02; border-color: var(--gold); }
+.chip.cert[data-cert="R"], .chip.cert[data-cert="NC-17"], .chip.cert[data-cert="TV-MA"] { background: var(--crimson); color: #fff; border-color: var(--crimson); }
 
 /* Description is capped to a uniform height and scrolls on hover (no truncation). */
 .overview { color: var(--text-dim); font-size: 0.82rem; line-height: 1.45; flex: 1; max-height: 7.4em; overflow: hidden; }
@@ -350,6 +363,22 @@ body.hide-not-watching .card.not-watching { display: none; }
 .field.checkbox { flex-direction: row; align-items: center; gap: 10px; }
 .field.checkbox input { width: 18px; height: 18px; accent-color: var(--gold); }
 .field.checkbox label { font-weight: 400; }
+/* Certification chip pickers (Content floor + Filters). The vocabulary is a
+   small frozen external standard, so these replace free-text entry: each chip
+   cycles grey (ignored) -> green (keep only these) -> red (exclude these), the
+   three states calendar_filter reads back as an include token, a `-` exclude
+   token, or absence. */
+.chip-picker { display: flex; flex-wrap: wrap; gap: 8px; }
+.cert-chip {
+    cursor: pointer; user-select: none; line-height: 1;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--card-border); color: var(--text-dim);
+    padding: 6px 12px; border-radius: 999px; font-size: 0.8rem; font-weight: 600; font-family: inherit;
+    transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.cert-chip:hover { border-color: var(--text-dim); }
+.cert-chip.on-include { color: var(--green); border-color: rgba(34,197,94,0.55); background: rgba(34,197,94,0.12); }
+.cert-chip.on-exclude { color: var(--crimson); border-color: rgba(224,56,77,0.55); background: rgba(224,56,77,0.12); text-decoration: line-through; }
+.cert-chip.on-exclude::before { content: '\2212'; margin-right: 2px; }
 .modal-foot { padding: 18px 24px; border-top: 1px solid var(--card-border); display: flex; justify-content: flex-end; gap: 12px; }
 .btn-primary { cursor: pointer; background: linear-gradient(90deg, var(--gold), var(--crimson)); color: #0a0c10; border: none; padding: 10px 22px; border-radius: 8px; font-weight: 700; font-family: inherit; font-size: 0.88rem; }
 .btn-primary:hover { filter: brightness(1.08); }

@@ -14,10 +14,14 @@ locked by live measurement against the real Trakt API:
     great deal the app never touches; pruning is the single biggest size lever
     and also stops the cache growing when Trakt adds fields.
 
-  - NO FILTERING AT FETCH TIME. `genres` and `countries` are no longer sent to
-    Trakt; the window holds the complete worldwide result, and all filtering —
-    genres, countries, networks — happens at read time, per viewer, against the
-    cached blob (see app/calendar_filter.py).
+  - `genres`/`countries`/`show_certifications`/`movie_certifications` ARE NO
+    LONGER SENT TO TRAKT AS QUERY PARAMS, but they DO apply once, at fetch
+    time, as the instance-wide content floor: an item any of those four
+    Settings fields excludes is filtered out of the raw response before it is
+    ever pruned and stored, so it never reaches api_cache at all (see
+    app/calendar_filter.py). Every OTHER filter dimension — a signed-in
+    viewer's own genre/country/certification/network choices — is a separate,
+    read-time layer applied per viewer against that same floored cache.
 
   - NO PAGINATION HEADERS. Trakt's calendar endpoints ignore them and return the
     whole window in one response (verified live); a warning is logged if a
@@ -41,6 +45,7 @@ from __future__ import annotations
 import calendar as _calendar
 import json
 import logging
+import time as _time
 import zlib
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -51,6 +56,10 @@ from .cache import COMPRESS_LEVEL
 from .endpoints import Endpoint
 
 logger = logging.getLogger(__name__)
+# Same "app.perf" logger app/trakt.py's _cached_get already uses for its own
+# netGET/cacheHIT lines — one DEBUG channel for every outbound Trakt call,
+# regardless of which module made it. Enable it with LOG_LEVEL=DEBUG.
+_perf = logging.getLogger("app.perf")
 
 WINDOW_DAYS = 7
 
@@ -170,11 +179,12 @@ def cache_key(endpoint_key: str, start: date) -> str:
 
 # The immutable ids the normalizer emits (slug, trakt, tvdb, tmdb).
 _MEDIA_ID_KEYS = ("slug", "trakt", "tvdb", "tmdb")
-# Every scalar the normalizer or the genre/country filter reads off the media
-# object. `genres` and `country` feed the filter; the rest are display fields.
+# Every scalar the normalizer or the genre/country/certification filter reads
+# off the media object. `genres`, `country`, and `certification` feed the
+# filter; the rest are display fields.
 _MEDIA_KEYS = (
     "title", "year", "network", "country", "language", "runtime",
-    "status", "rating", "genres", "overview",
+    "status", "rating", "genres", "overview", "certification",
 )
 _EPISODE_KEYS = ("season", "number", "title")
 
@@ -225,10 +235,11 @@ def _decompress(blob) -> list[dict]:
 
 
 async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[dict]:
-    """Fetch one 7-day window from Trakt, UNFILTERED, PRUNED, and TRIMMED to the
-    window's own 7 days.
+    """Fetch one 7-day window from Trakt, floor-filtered, PRUNED, and TRIMMED to
+    the window's own 7 days.
 
-    No `genres`/`countries` query params (all filtering is read-time now) and no
+    No `genres`/`countries` query params (Trakt's server-side filtering is gone;
+    see filter_entries below for why it is reproduced here instead) and no
     pagination headers (calendar endpoints ignore them and return the whole
     window in one response). Logs a warning if Trakt ever starts paginating.
 
@@ -241,7 +252,10 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
         f"{trakt.API_BASE}/calendars/all/{endpoint.path}/{start.isoformat()}/{WINDOW_DAYS}"
         f"?{urlencode({'extended': 'full,images'})}"
     )
+    t0 = _time.perf_counter()
     resp = await trakt.shared_client().get(url, headers=trakt._headers(settings, paginate=False))
+    _perf.debug("netGET    calendar/%s/%s -> %s  %.0fms", endpoint.key, start.isoformat(),
+                resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:
         raise trakt.TraktError(
             "Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401,
@@ -262,6 +276,17 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
         raise trakt.TraktError("Trakt API returned an unreadable response.")
     if not isinstance(raw, list):
         return []
+    # The instance-wide content floor: an operator who excludes a genre,
+    # country, or certification here means it never enters the shared cache for
+    # ANY viewer, not just their own — applied on the raw entries, before
+    # pruning, the same way trakt.py's uncached fetch path already reproduces
+    # Trakt's old server-side genre/country filtering (see calendar_filter.py).
+    certifications = (
+        settings.show_certifications if endpoint.media == "show" else settings.movie_certifications
+    )
+    raw = calendar_filter.filter_entries(
+        raw, endpoint.media, settings.genres, settings.countries, certifications,
+    )
     pruned: list[dict] = []
     overrun = 0
     for entry in raw:
@@ -367,18 +392,24 @@ def _month_utc_range(tz: ZoneInfo, year: int, month: int) -> tuple[date, date]:
 
 
 async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, month: int,
-                     genres: str = "", countries: str = "", network_filter=None,
+                     genres: str = "", countries: str = "",
+                     show_certifications: str = "", movie_certifications: str = "",
+                     network_filter=None,
                      allow_fetch: bool = True, now: int | None = None) -> tuple[list[dict], int | None]:
     """Produce one viewer's normalized, filtered, month-trimmed calendar items.
 
     The read path in order: figure the UTC window range covering the viewer's
     local month ±1 day; load each aligned window (fetching+caching, or cache-only
-    on a share page); apply the per-user genre/country filter to the RAW entries
-    (before normalization, on the raw slugs); normalize the survivors into the
-    viewer's tz; trim to the viewer's LOCAL month; apply the network filter; sort
-    by air time. Returns (items, as_of) where as_of is the oldest contributing
-    window's cached_at — the "data as of" timestamp for a share page — or None
-    when nothing was cached and nothing fetched.
+    on a share page); apply the per-user genre/country/certification filter to
+    the RAW entries (before normalization, on the raw slugs); normalize the
+    survivors into the viewer's tz; trim to the viewer's LOCAL month; apply the
+    network filter; sort by air time. Returns (items, as_of) where as_of is the
+    oldest contributing window's cached_at — the "data as of" timestamp for a
+    share page — or None when nothing was cached and nothing fetched.
+
+    `show_certifications`/`movie_certifications` are two separate specs (the two
+    vocabularies don't overlap); the one matching `endpoint.media` is the one
+    that applies to this endpoint's entries.
 
     The not-watching overlay and the hide/card/day-packing view preferences are
     the caller's to apply: those are per-request view concerns, not part of the
@@ -401,7 +432,8 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
     # until their TTL expired. It is a no-op once every window has been refetched.
     entries = dedupe_entries(entries, endpoint.media)
 
-    kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries)
+    certifications = show_certifications if endpoint.media == "show" else movie_certifications
+    kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries, certifications)
 
     items: list[dict] = []
     for entry in kept:

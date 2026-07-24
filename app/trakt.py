@@ -75,7 +75,10 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     # Calendar endpoints ignore pagination headers and return the whole range in
     # one response (verified live), so they are not sent here; a warning fires if
     # Trakt ever starts paginating.
+    t0 = _time.perf_counter()
     resp = await shared_client().get(url, headers=_headers(settings, paginate=False))
+    _perf.debug("netGET    calendar/%s/%s..%s -> %s  %.0fms", endpoint.key, start_date, end_date,
+                resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:
         raise TraktError("Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401)
     if resp.status_code != 200:
@@ -163,6 +166,7 @@ def normalize(entry: dict, endpoint: Endpoint, tz: ZoneInfo) -> dict | None:
         "status": media.get("status") or "",
         "rating": round(float(media["rating"]), 1) if media.get("rating") else None,
         "genres": [g.replace("-", " ").title() for g in (media.get("genres") or [])],
+        "certification": (media.get("certification") or "").upper(),
         "overview": overview,
         "poster": _poster(media),
         "air_date": dt.strftime("%Y-%m-%d"),
@@ -356,6 +360,7 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "runtime": info.get("runtime"),
         "genres": [g.replace("-", " ").title() for g in (info.get("genres") or [])],
         "rating": round(float(info["rating"]), 1) if info.get("rating") else None,
+        "certification": (info.get("certification") or "").upper(),
         "trailer": info.get("trailer") or "",
         "homepage": info.get("homepage") or "",
         "season": season,
@@ -588,11 +593,14 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
         if start_at:
             params["start_at"] = start_at
         url = f"{API_BASE}/users/me/history?{urlencode(params)}"
+        t0 = _time.perf_counter()
         try:
             resp = await client.get(url, headers=_headers(settings, paginate=False))
         except httpx.HTTPError as exc:
             logger.warning("fetch_history: request failed: %s", exc)
             break
+        _perf.debug("netGET    users/me/history?page=%s -> %s  %.0fms", page,
+                    resp.status_code, (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
             logger.warning("fetch_history: HTTP %s: %s", resp.status_code, resp.text[:200])
             break

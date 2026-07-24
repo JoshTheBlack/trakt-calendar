@@ -31,13 +31,15 @@ TRUSTED_PROXY_IPS_DEFAULT = "127.0.0.1/32"
 def _seed_trusted_proxy_ips() -> str:
     return os.environ.get("TRUSTED_PROXY_IPS", TRUSTED_PROXY_IPS_DEFAULT).strip() or TRUSTED_PROXY_IPS_DEFAULT
 
-# NO default genre/country filter. The original PHP script shipped one operator's
-# taste as the default — nine excluded genres and a 35-country allowlist — which
-# silently removed shows a new install had never been asked about, and read as
-# the calendar simply not carrying them. An empty spec filters nothing; the
-# Filters panel is where anyone who wants a filter says so.
+# NO default genre/country/certification filter. The original PHP script shipped
+# one operator's taste as the default — nine excluded genres and a 35-country
+# allowlist — which silently removed shows a new install had never been asked
+# about, and read as the calendar simply not carrying them. An empty spec
+# filters nothing; the Filters panel is where anyone who wants a filter says so.
 DEFAULT_GENRES = ""
 DEFAULT_COUNTRIES = ""
+DEFAULT_SHOW_CERTIFICATIONS = ""
+DEFAULT_MOVIE_CERTIFICATIONS = ""
 
 # Credentials. These are WRITE-ONLY over the API: they are never sent back to a
 # client, only a flag saying whether each one has a value. Everything here is
@@ -79,6 +81,11 @@ class Settings:
     endpoint: str = "shows/new"
     genres: str = DEFAULT_GENRES
     countries: str = DEFAULT_COUNTRIES
+    # The instance-wide certification floor, split by media type because shows
+    # and movies use different rating vocabularies (TV Parental Guidelines vs.
+    # the MPA film ratings) — see calendar_filter.py.
+    show_certifications: str = DEFAULT_SHOW_CERTIFICATIONS
+    movie_certifications: str = DEFAULT_MOVIE_CERTIFICATIONS
     network_filter: list[str] = field(default_factory=list)
     pagination_limit: int = 300
     hide_not_watching: bool = False

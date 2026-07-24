@@ -161,25 +161,28 @@ def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings,
     Those settings.json fields are a SEED, not a live source: once this row
     exists, editing settings.json affects new users only, never this one.
 
-    The genre/country/network FILTERS are excluded from that seed unless
-    `seed_filters` is set, and only the first-run onboarding sets it. A filter
-    removes shows from someone's calendar without ever telling them a filter
-    exists, so it is not something to inherit from an instance's configuration —
-    a new account starts seeing everything and narrows it down itself. Onboarding
-    is the one exception, because there the settings are the operator's own from
-    before this instance had accounts, and their calendar has to keep rendering
-    as it did.
+    The genre/country/certification/network FILTERS are excluded from that seed
+    unless `seed_filters` is set, and only the first-run onboarding sets it. A
+    filter removes shows from someone's calendar without ever telling them a
+    filter exists, so it is not something to inherit from an instance's
+    configuration — a new account starts seeing everything and narrows it down
+    itself. Onboarding is the one exception, because there the settings are the
+    operator's own from before this instance had accounts, and their calendar
+    has to keep rendering as it did.
     """
     conn.execute(
         "INSERT INTO user_prefs (user_id, endpoint, card_style, day_packing, "
-        "hide_not_watching, network_filter_json, genres, countries) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "hide_not_watching, network_filter_json, genres, countries, "
+        "show_certifications, movie_certifications) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id, settings.endpoint, settings.card_style, settings.day_packing,
             int(bool(settings.hide_not_watching)),
             json.dumps(list(settings.network_filter or [])) if seed_filters else "[]",
             (settings.genres or "") if seed_filters else "",
             (settings.countries or "") if seed_filters else "",
+            (settings.show_certifications or "") if seed_filters else "",
+            (settings.movie_certifications or "") if seed_filters else "",
         ),
     )
 
@@ -191,13 +194,15 @@ async def get_user_prefs(user_id: int) -> dict:
     fallback here is cheap and keeps this a total function)."""
     row = await db.fetch_one(
         "SELECT endpoint, card_style, day_packing, hide_not_watching, "
-        "network_filter_json, genres, countries FROM user_prefs WHERE user_id = ?",
+        "network_filter_json, genres, countries, show_certifications, "
+        "movie_certifications FROM user_prefs WHERE user_id = ?",
         (user_id,),
     )
     if row is None:
         return {
             "endpoint": None, "card_style": None, "day_packing": None,
             "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
+            "show_certifications": "", "movie_certifications": "",
         }
     return {
         "endpoint": row["endpoint"],
@@ -207,6 +212,8 @@ async def get_user_prefs(user_id: int) -> dict:
         "network_filter": json.loads(row["network_filter_json"] or "[]"),
         "genres": row["genres"] or "",
         "countries": row["countries"] or "",
+        "show_certifications": row["show_certifications"] or "",
+        "movie_certifications": row["movie_certifications"] or "",
     }
 
 
@@ -216,6 +223,7 @@ async def get_user_prefs(user_id: int) -> dict:
 _USER_PREF_FIELDS = frozenset({
     "endpoint", "card_style", "day_packing", "hide_not_watching",
     "network_filter", "genres", "countries",
+    "show_certifications", "movie_certifications",
 })
 
 

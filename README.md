@@ -192,7 +192,7 @@ for why it's split that way and what's still in the file.
 | **Seerr** | Instance URL + API key to enable the request button (works with the Overseerr/Jellyseerr lineage) |
 | **Public base URL** | The origin this instance is reached on — see [Serving over HTTPS](#serving-over-https) |
 | **Trusted proxy addresses** | Whose `X-Forwarded-For` to believe — see [Serving over HTTPS](#serving-over-https) |
-| **Genres / Countries / Networks** (Calendar section) | The instance's **content floor** — see below. Not the same thing as your own 🔎 Filters. |
+| **Genres / Countries / Certifications / Networks** (Calendar section) | The instance's **content floor** — see below. Not the same thing as your own 🔎 Filters. |
 
 Two settings are deliberately file-only, because a wrong value in the UI could lock the
 operator out of the UI that would fix it. Edit `data/settings.json` and restart:
@@ -205,30 +205,41 @@ switching, and every choice persists. Marking something "not watching" is a deci
 the **show**, not about the card you clicked: it applies on every calendar view, in every
 month, and on your public share page, until you turn it back on.
 
-**🔎 Filters** in the header narrows your calendar by genre, country, and network. The
-button reads **🔎 Filtered** and stays lit while anything is being held back. Filters
-belong to your account, not to the instance — two people read the same cached month and
-each see it filtered their own way. Genres and countries are comma-separated, and a
+**🔎 Filters** in the header narrows your calendar by genre, country, certification, and
+network. The button reads **🔎 Filtered** and stays lit while anything is being held back.
+Filters belong to your account, not to the instance — two people read the same cached month
+and each see it filtered their own way. Genres and countries are comma-separated, and a
 leading `-` excludes instead of including (`drama, -reality`); networks are matched exactly
-as Trakt spells them. **New accounts start with nothing filtered.**
+as Trakt spells them. Certifications (US TV Parental Guidelines for shows, MPA ratings for
+movies) are set with a click-to-cycle chip picker instead of free text — there's no open
+vocabulary to type, just a fixed, small list of real-world rating labels. **New accounts
+start with nothing filtered.**
 
 > Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering),
 > but this app filters the cached response itself rather than asking Trakt to, so the
 > Filters panel works on any account.
 
-### The content floor — Settings > Calendar > Genres / Countries / Networks
+### The content floor — Settings > Calendar > Genres / Countries / Certifications / Networks
 
-These three fields look like the per-account 🔎 Filters above, but they are not: they are
+These fields look like the per-account 🔎 Filters above, but they are not: they are
 instance-wide, and they filter **before** the shared calendar cache is ever populated, not
 at read time. A show excluded here never enters the cache at all — no per-account filter
-can bring it back, because there's nothing left to filter.
+can bring it back, because there's nothing left to filter. Anything else in the app that
+reads calendar data reads it through this same shared cache, so a floor-excluded show can
+never surface anywhere, for anyone, regardless of what that reader's own Filters allow.
 
 **This removes content for every user of the instance**, on top of whatever each person
 sets in their own Filters. Legitimate uses: trimming genres/countries nobody on the
 instance will ever watch (a smaller, cheaper cache), or keeping certain content off a
-shared/family instance. Leave them blank — the default — to filter nothing at this layer.
-The Settings screen repeats this warning next to the fields; read it before setting them on
-an instance other people use.
+shared/family instance — Certifications is the one built specifically for that: two small,
+fixed vocabularies (US TV Parental Guidelines / MPA film ratings), set with the same
+click-to-cycle chip picker as the per-account Filters. Leave the fields blank — the default
+— to filter nothing at this layer. The Settings screen repeats this warning next to the
+fields; read it before setting them on an instance other people use.
+
+Changing the floor doesn't take effect instantly: a window already cached keeps serving
+until its TTL lapses (`calendar_cache_ttl_minutes`, 10 minutes by default) and gets
+refetched — not worth a dedicated invalidation sweep for a 10-minute window.
 
 ## At-rest encryption of stored secrets
 

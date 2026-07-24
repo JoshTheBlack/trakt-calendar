@@ -42,11 +42,19 @@ refresh — the caller MUST persist the new one, the old one stops working).
 """
 from __future__ import annotations
 
+import logging
+import time as _time
 from urllib.parse import urlencode
 
 import httpx
 
 from .trakt import API_BASE
+
+# Same "app.perf" DEBUG channel app/trakt.py's _cached_get and
+# app/calendar_cache.py's fetch_window_raw log their own outbound calls to —
+# one place to watch every Trakt request, OAuth included. Never logs a body:
+# these calls carry client_secret/tokens, so only the path and outcome go out.
+_perf = logging.getLogger("app.perf")
 
 DEVICE_CODE_URL = f"{API_BASE}/oauth/device/code"
 DEVICE_TOKEN_URL = f"{API_BASE}/oauth/device/token"
@@ -100,6 +108,7 @@ async def exchange_code(
     redirected: Trakt checks that the exchange comes from the same registered
     application the authorization was issued to, and rejects a mismatch.
     """
+    t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(TOKEN_URL, json={
             "code": code,
@@ -108,6 +117,8 @@ async def exchange_code(
             "redirect_uri": redirect_uri(public_base_url),
             "grant_type": "authorization_code",
         })
+    _perf.debug("netPOST   oauth/token (code) -> %s  %.0fms", resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
     return resp.json()
 
@@ -137,6 +148,7 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     caller decides whether that is fatal.
     """
     try:
+        t0 = _time.perf_counter()
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(
                 ACCOUNT_URL,
@@ -146,6 +158,8 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
                     "trakt-api-key": client_id,
                 },
             )
+        _perf.debug("netGET    %s -> %s  %.0fms", ACCOUNT_PATH, resp.status_code,
+                    (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
             raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned HTTP {resp.status_code}.")
         payload = resp.json()
@@ -179,8 +193,11 @@ class DeviceDenied(Exception):
 async def request_device_code(client_id: str) -> dict:
     """Start a device-auth session. Returns the raw Trakt payload (device_code,
     user_code, verification_url, expires_in, interval)."""
+    t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(DEVICE_CODE_URL, json={"client_id": client_id})
+    _perf.debug("netPOST   oauth/device/code -> %s  %.0fms", resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
     return resp.json()
 
@@ -192,12 +209,15 @@ async def poll_device_token(client_id: str, client_secret: str, device_code: str
     for every other documented status (400/404/409/410/418/429) so the caller
     can distinguish "still waiting" from "give up and restart".
     """
+    t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(DEVICE_TOKEN_URL, json={
             "code": device_code,
             "client_id": client_id,
             "client_secret": client_secret,
         })
+    _perf.debug("netPOST   oauth/device/token -> %s  %.0fms", resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 200:
         return resp.json()
     if resp.status_code == 400:
@@ -218,6 +238,7 @@ async def poll_device_token(client_id: str, client_secret: str, device_code: str
 
 async def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> dict:
     """Exchange a refresh_token for a new access_token + refresh_token pair."""
+    t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(TOKEN_URL, json={
             "refresh_token": refresh_token,
@@ -225,6 +246,8 @@ async def refresh_access_token(client_id: str, client_secret: str, refresh_token
             "client_secret": client_secret,
             "grant_type": "refresh_token",
         })
+    _perf.debug("netPOST   oauth/token (refresh) -> %s  %.0fms", resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
     return resp.json()
 
@@ -239,10 +262,13 @@ async def revoke_token(client_id: str, client_secret: str, access_token: str) ->
     the only one who can finish the job on trakt.tv, and they can only do that if
     they are told.
     """
+    t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(REVOKE_URL, json={
             "token": access_token,
             "client_id": client_id,
             "client_secret": client_secret,
         })
+    _perf.debug("netPOST   oauth/revoke -> %s  %.0fms", resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()

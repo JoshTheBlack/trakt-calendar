@@ -4,6 +4,11 @@ Usage:
     python run.py               # http://localhost:8000 with auto-reload
 Environment:
     HOST (default 0.0.0.0), PORT (default 8000), RELOAD (default 1)
+    LOG_LEVEL (default INFO) — set to DEBUG to see every outbound Trakt API
+        call (the "app.perf" logger's netGET/netPOST/cacheHIT lines from
+        app/trakt.py, app/calendar_cache.py, and app/trakt_auth.py), plus
+        per-request timing spans elsewhere in the app. Also honored by the
+        Docker image (app/main.py applies the same setting either way).
 """
 import logging
 import os
@@ -20,13 +25,16 @@ load_dotenv()
 import hypercorn.asyncio
 from hypercorn.config import Config
 
-# Quiet third-party libs (WARNING) but surface our own app.* INFO diagnostics
-# (e.g. the distrakt X/Y watch-count summary). Runs on import, so it applies to
-# both `python run.py` and `hypercorn run:app`.
+# Quiet third-party libs (WARNING) but surface our own app.* diagnostics at
+# LOG_LEVEL (default INFO; set DEBUG for per-Trakt-call tracing — see the
+# module docstring). Fires before `from app.main import app` below, which
+# reruns the identical setup (see app/main.py) — a no-op here since
+# basicConfig() only attaches a handler once, so this call is the one that
+# actually wins for the dev runner.
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logging.getLogger("app").setLevel(logging.INFO)
+logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 # Quiet hypercorn's per-request access log (the "GET /api/... 200" lines) — set to
-# DEBUG to bring them back. App INFO diagnostics stay visible.
+# DEBUG to bring them back. App diagnostics above are unaffected by this one.
 logging.getLogger("hypercorn.access").setLevel(logging.WARNING)
 
 from app.main import app

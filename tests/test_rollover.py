@@ -21,6 +21,7 @@ import os
 import sys
 import tempfile
 import unittest
+from dataclasses import replace as dataclasses_replace
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,10 +32,11 @@ os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import calendar_state, db, distrakt  # noqa: E402
+from app import auth, calendar_state, db, distrakt  # noqa: E402
 
 TMP = Path(_TMP_DATA)
-SETTINGS = SimpleNamespace(configured=True, network_emojis={}, default_network_emoji=":tv:")
+SETTINGS = SimpleNamespace(configured=True, network_emojis={}, default_network_emoji=":tv:",
+                           timezone="UTC")
 
 
 def _detail(total, watched_hint=None, cadence="Mon", premiere="7/6", finale=None,
@@ -78,6 +80,37 @@ def _cal_item(tid, season, title, network="Net"):
             "season": season, "network": network}
 
 
+def _raw_entry(tid, season, title, *, first_aired, certification=None, network="Net"):
+    """A calendar entry in the shape calendar_cache.fetch_window_raw returns:
+    pruned, un-normalized, still carrying whatever real filter_entries reads
+    (certification included) so mocking at this layer exercises the real
+    per-user filter inside calendar_cache.read_month rather than a test double
+    standing in for it."""
+    return {
+        "show": {
+            "title": title, "network": network, "certification": certification,
+            "ids": {"slug": f"slug-{tid}", "trakt": tid},
+        },
+        "first_aired": first_aired,
+        "episode": {"season": season, "number": 1, "title": "Pilot"},
+    }
+
+
+async def _seed_user_prefs(user_id: int, **overrides) -> None:
+    """A minimal user_prefs row for tests that need a real (non-default) per-user
+    filter, seeded the same way onboarding seeds one (auth.insert_user_prefs)."""
+    fields = dict(
+        endpoint="shows/new", card_style="poster", day_packing="auto",
+        hide_not_watching=False, network_filter=[], genres="", countries="",
+        show_certifications="", movie_certifications="",
+    )
+    fields.update(overrides)
+    prefs_settings = SimpleNamespace(**fields)
+    await db.transaction(lambda conn: auth.insert_user_prefs(
+        conn, user_id, prefs_settings, seed_filters=True,
+    ))
+
+
 async def _make_user(username: str) -> int:
     now = db.now()
     result = await db.execute(
@@ -115,16 +148,16 @@ class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
 class RolloverTests(RolloverTestCase):
     async def test_first_month_init_from_scratch(self):
         """No prior month: seed premieres (new/returning) + in-progress history."""
-        async def fake_calendar(endpoint, settings, year, month):
+        async def fake_read_month(endpoint, settings, **kw):
             if endpoint.key == "shows/new":
-                return [_cal_item(201, 1, "New One")]
-            return [_cal_item(201, 1, "New One"), _cal_item(301, 2, "Returner")]
+                return [_cal_item(201, 1, "New One")], None
+            return [_cal_item(201, 1, "New One"), _cal_item(301, 2, "Returner")], None
 
         async def fake_progress(settings, since_days=60):
             return [{"trakt_id": 401, "season": 1, "watched": 3,
                      "slug": "slug-401", "title": "Backlog", "network": "Net"}]
 
-        with patch("app.trakt.fetch_calendar", side_effect=fake_calendar), \
+        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
              patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
@@ -135,8 +168,8 @@ class RolloverTests(RolloverTestCase):
 
     async def test_not_watching_premiere_excluded(self):
         """A premiere toggled not-watching BEFORE commit is simply excluded."""
-        async def fake_calendar(endpoint, settings, year, month):
-            return [_cal_item(201, 1, "New One"), _cal_item(202, 1, "Skip Me")]
+        async def fake_read_month(endpoint, settings, **kw):
+            return [_cal_item(201, 1, "New One"), _cal_item(202, 1, "Skip Me")], None
 
         async def fake_progress(settings, since_days=60):
             return []
@@ -144,7 +177,7 @@ class RolloverTests(RolloverTestCase):
         # not-watching stores the calendar card id = slug (preferred) or trakt id.
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-202")
 
-        with patch("app.trakt.fetch_calendar", side_effect=fake_calendar), \
+        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
              patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
@@ -161,13 +194,13 @@ class RolloverTests(RolloverTestCase):
         await distrakt.set_abandoned(self.user_id, "2026-07", 103, 1, True,
                                      abandoned_form="`Gone S01 (0/6)`")
 
-        async def fake_calendar(endpoint, settings, year, month):
-            return [_cal_item(201, 1, "Aug New")]
+        async def fake_read_month(endpoint, settings, **kw):
+            return [_cal_item(201, 1, "Aug New")], None
 
         async def fake_progress(settings, since_days=60):
             return []
 
-        with patch("app.trakt.fetch_calendar", side_effect=fake_calendar), \
+        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
              patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
@@ -199,7 +232,7 @@ class RolloverTests(RolloverTestCase):
         doc = await distrakt.load_month(self.user_id, "2026-05")
         doc["closed"] = True
         await distrakt.save_month(self.user_id, doc)
-        with patch("app.trakt.fetch_calendar", new=AsyncMock()) as cal, \
+        with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
              patch("app.trakt.fetch_watched_progress", new=AsyncMock()) as prog:
             out = await distrakt.ensure_month(self.user_id, 2026, 5, SETTINGS)
         self.assertTrue(out["closed"])
@@ -217,7 +250,7 @@ class RolloverTests(RolloverTestCase):
                                 {"trakt_id": 700, "season": 1, "title": "Seed", "slug": "slug-700"})
         # July is earlier than the only tracked month (Aug) -> blocked.
         self.assertTrue(await distrakt.is_backfill_blocked(self.user_id, "2026-07"))
-        with patch("app.trakt.fetch_calendar", new=AsyncMock()) as cal, \
+        with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
              patch("app.trakt.fetch_watched_progress", new=AsyncMock()) as prog:
             out = await distrakt.ensure_month(self.user_id, 2026, 7, SETTINGS)
         self.assertEqual(out["shows"], [])
@@ -231,13 +264,13 @@ class RolloverTests(RolloverTestCase):
             "trakt_id": 101, "season": 1, "title": "Active",
             "network": "Net", "slug": "slug-101"})
 
-        async def fake_calendar(endpoint, settings, year, month):
-            return []  # no August premieres in this scenario
+        async def fake_read_month(endpoint, settings, **kw):
+            return [], None  # no August premieres in this scenario
 
         async def fake_progress(settings, since_days=60):
             return []
 
-        with patch("app.trakt.fetch_calendar", side_effect=fake_calendar), \
+        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
              patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
@@ -252,12 +285,12 @@ class RolloverTests(RolloverTestCase):
         await distrakt.add_show(self.user_id, "2026-08",
                                 {"trakt_id": 201, "season": 1, "title": "Already", "slug": "slug-201"})
 
-        async def fake_calendar(endpoint, settings, year, month):
-            return [_cal_item(201, 1, "Already"), _cal_item(202, 1, "Fresh"), _cal_item(203, 1, "Skip")]
+        async def fake_read_month(endpoint, settings, **kw):
+            return [_cal_item(201, 1, "Already"), _cal_item(202, 1, "Fresh"), _cal_item(203, 1, "Skip")], None
 
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-203")
 
-        with patch("app.trakt.fetch_calendar", side_effect=fake_calendar):
+        with patch("app.calendar_cache.read_month", side_effect=fake_read_month):
             await distrakt.import_premieres(self.user_id, "2026-08", SETTINGS)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
@@ -273,6 +306,84 @@ class RolloverTests(RolloverTestCase):
         self.assertFalse(await distrakt.remove_show(self.user_id, "2026-06", 55, 1))  # already gone
         doc = await distrakt.load_month(self.user_id, "2026-06")
         self.assertEqual({(s["trakt_id"], s["season"]) for s in doc["shows"]}, {(66, 2)})
+
+
+class _Resp:
+    """A minimal stand-in for the httpx response fetch_window_raw reads."""
+    def __init__(self, data):
+        self._data = data
+        self.status_code = 200
+        self.headers: dict = {}
+
+    def json(self):
+        return self._data
+
+
+class _FixedClient:
+    """Replies with the same canned window body to every request, regardless of
+    the window's date range — fetch_window_raw's own in_window trim (see
+    app/calendar_cache.py) is what actually decides which entries survive for
+    which window, so this only needs to hand back the full candidate set."""
+    def __init__(self, entries):
+        self.entries = entries
+
+    async def get(self, url, headers=None):
+        return _Resp(self.entries)
+
+
+class DistraktImportFilterTests(RolloverTestCase):
+    """distrakt's premiere import reads through the shared calendar cache, so it
+    must honor both the instance-wide content floor (Step 1, applied at
+    fetch time, before anything is cached) and the importing user's own
+    genre/country/certification prefs (applied at read time, same as their
+    main calendar) — not just import everything the floor happens to allow."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from app.config import Settings
+        self.settings = Settings(trakt_client_id="cid", trakt_access_token="tok", timezone="UTC")
+
+    async def _open_month(self, month_key: str) -> None:
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc(month_key))
+
+    async def test_own_certification_filter_excludes_a_show_from_import(self):
+        """The importing user's own show_certifications spec keeps a matching
+        show out of their roster, even though the instance floor allows it."""
+        entries = [
+            _raw_entry(201, 1, "Mature One", first_aired="2026-08-05T20:00:00.000Z",
+                      certification="TV-MA"),
+            _raw_entry(202, 1, "General One", first_aired="2026-08-12T20:00:00.000Z",
+                      certification="TV-G"),
+        ]
+        await _seed_user_prefs(self.user_id, show_certifications="-tv-ma")
+        await self._open_month("2026-08")
+
+        with patch("app.trakt.shared_client", return_value=_FixedClient(entries)):
+            await distrakt.import_premieres(self.user_id, "2026-08", self.settings)
+
+        doc = await distrakt.load_month(self.user_id, "2026-08")
+        self.assertEqual(await self._keys(doc), {(202, 1)})
+
+    async def test_instance_floor_excludes_a_show_regardless_of_user_filters(self):
+        """A show the instance-wide floor excludes never reaches the shared
+        cache, so it stays out of import even for a user with NO personal
+        filter of their own — the floor isn't something import has to
+        re-check, it's structurally already gone by the time import reads."""
+        floored_settings = dataclasses_replace(self.settings, show_certifications="-tv-ma")
+        entries = [
+            _raw_entry(201, 1, "Mature One", first_aired="2026-08-05T20:00:00.000Z",
+                      certification="TV-MA"),
+            _raw_entry(202, 1, "General One", first_aired="2026-08-12T20:00:00.000Z",
+                      certification="TV-G"),
+        ]
+        # No per-user filter set at all — the floor alone must do the work.
+        await self._open_month("2026-08")
+
+        with patch("app.trakt.shared_client", return_value=_FixedClient(entries)):
+            await distrakt.import_premieres(self.user_id, "2026-08", floored_settings)
+
+        doc = await distrakt.load_month(self.user_id, "2026-08")
+        self.assertEqual(await self._keys(doc), {(202, 1)})
 
 
 class PerUserIsolationTests(RolloverTestCase):
@@ -315,15 +426,15 @@ class PerUserIsolationTests(RolloverTestCase):
     async def test_not_watching_overlay_is_per_user(self):
         """One user's calendar not-watching mark must not drop a premiere from
         anyone else's roster."""
-        async def fake_calendar(endpoint, settings, year, month):
-            return [_cal_item(201, 1, "Shared Premiere")]
+        async def fake_read_month(endpoint, settings, **kw):
+            return [_cal_item(201, 1, "Shared Premiere")], None
 
         async def fake_progress(settings, since_days=60):
             return []
 
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-201")
 
-        with patch("app.trakt.fetch_calendar", side_effect=fake_calendar), \
+        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
              patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
             mine = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
@@ -340,14 +451,14 @@ class PerUserIsolationTests(RolloverTestCase):
                 "trakt_id": 101, "season": 1, "title": "Active",
                 "network": "Net", "slug": "slug-101"})
 
-        async def fake_calendar(endpoint, settings, year, month):
-            return []
+        async def fake_read_month(endpoint, settings, **kw):
+            return [], None
 
         async def fake_progress(settings, since_days=60):
             return []
 
         patches = (
-            patch("app.trakt.fetch_calendar", side_effect=fake_calendar),
+            patch("app.calendar_cache.read_month", side_effect=fake_read_month),
             patch("app.trakt.fetch_watched_progress", side_effect=fake_progress),
             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail),
             patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline),
