@@ -2,7 +2,7 @@
 
 Fetches a month of calendar items for the selected endpoint and normalizes the
 (differently-shaped) show/movie responses into one uniform `Item` dict the
-template can render regardless of endpoint (requirement D).
+template can render regardless of endpoint.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _headers(settings: Settings, paginate: bool = True) -> dict:
     into a PAGINATED, show-level response (100/page) that DROPS the nested
     seasons[]/episodes[] breakdown we count — which manifested as every watched
     count coming back 0. Non-paginated, it returns the full watched library WITH
-    seasons in one call (BUILD_PLAN §2b's "ONE call")."""
+    seasons in one call."""
     headers = {
         "Authorization": f"Bearer {settings.trakt_access_token}",
         "trakt-api-version": "2",
@@ -103,7 +103,8 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     items = [normalize(entry, endpoint, tz) for entry in raw]
     items = [i for i in items if i and start_date <= i["air_date"] <= end_date]
 
-    # Network filter (requirement C: configurable) — case-sensitive match Trakt naming.
+    # Network filter: an operator-configured allow-list, matched case-sensitively
+    # against Trakt's own network naming.
     if settings.network_filter:
         allow = set(settings.network_filter)
         items = [i for i in items if i["network"] in allow]
@@ -186,7 +187,7 @@ def normalize(entry: dict, endpoint: Endpoint, tz: ZoneInfo) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2: per-show detail lookups (cast, episodes) for the tile chip + modal.
+# Per-show detail lookups (cast, episodes) for the tile chip + modal.
 # ---------------------------------------------------------------------------
 
 def _headshot(person: dict) -> str | None:
@@ -291,7 +292,7 @@ def _summarize_season(episodes: list[dict], tz: ZoneInfo) -> dict:
 
 
 async def fetch_tile_info(settings: Settings, media: str, trakt_id: str, season: int | None) -> dict:
-    """Compact season info for a tile (requirement F). Movies have no seasons."""
+    """Compact season info for a tile. Movies have no seasons."""
     if media == "movie" or season is None:
         return {"episode_count": None, "first_aired": None, "last_aired": None, "next_aired": None}
     tz = ZoneInfo(settings.timezone)
@@ -303,7 +304,7 @@ async def fetch_tile_info(settings: Settings, media: str, trakt_id: str, season:
 
 async def fetch_details(settings: Settings, media: str, trakt_id: str, season: int | None,
                         cache_only: bool = False) -> dict:
-    """Full detail payload for the modal (requirement G): overview, cast, episode list.
+    """Full detail payload for the modal: overview, cast, episode list.
 
     `cache_only=True` serves purely from cache and never calls Trakt — the mode a
     public share page uses so a visitor's click reuses what the owner's own views
@@ -370,11 +371,11 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
 
 
 # ---------------------------------------------------------------------------
-# Phase 3: distrakt (hidden tracker) data layer — search, watched counts, and
-# season cadence/date derivation (BUILD_PLAN §2–§4). Shows only.
+# distrakt (hidden tracker) data layer — search, watched counts, and season
+# cadence/date derivation. Shows only.
 # ---------------------------------------------------------------------------
 
-# Season calls get a SHORT TTL (§3): totals grow over time, so a day-old total is
+# Season calls get a SHORT TTL: totals grow over time, so a day-old total is
 # fine, but we don't want to hold a season's episode list for the 12h detail TTL.
 SEASON_CACHE_TTL_SECONDS = 24 * 60 * 60
 
@@ -393,16 +394,16 @@ def _parse_air_date(first_aired, tz: ZoneInfo) -> date | None:
 
 
 def _md(d: date | None) -> str | None:
-    """Format a date as 'M/D' with no leading zeros (§4). None stays None so the
+    """Format a date as 'M/D' with no leading zeros. None stays None so the
     renderer can decide to show '?/?' for an unknown date."""
     return f"{d.month}/{d.day}" if d else None
 
 
 def _derive_season(episodes: list[dict], tz: ZoneInfo, now: datetime | None = None) -> dict:
-    """Pure derivation of the §4 cadence/date fields from a season's raw episode
+    """Pure derivation of the cadence/date fields from a season's raw episode
     list. No I/O — unit-tested directly.
 
-    Rules (§3/§4):
+    Rules:
       total (y)  = every episode Trakt currently reports (dated or not).
       premiere   = first KNOWN air date.
       finale     = last KNOWN air date, but ONLY once the season is fully
@@ -420,7 +421,8 @@ def _derive_season(episodes: list[dict], tz: ZoneInfo, now: datetime | None = No
     fully_scheduled = total > 0 and len(known) == total
 
     premiere_date = known[0] if known else None
-    # Finale is only meaningful when nothing is left unscheduled (§4 "?/?" tail).
+    # Finale is only meaningful when nothing is left unscheduled; an unscheduled
+    # tail leaves it unknown so the renderer shows a "?/?" date.
     finale_date = known[-1] if (fully_scheduled and known) else None
 
     if not known:
@@ -483,7 +485,7 @@ async def aclose_shared_client() -> None:
 async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: bool = False,
                               client: httpx.AsyncClient | None = None) -> dict:
     """One /shows/{id}/seasons/{season}?extended=full call (short TTL) reduced to
-    the §4 fields: total (y), cadence, premiere, finale, started/finished. Pass a
+    the fields: total (y), cadence, premiere, finale, started/finished. Pass a
     shared `client` when batching (else a throwaway one is created)."""
     tz = ZoneInfo(settings.timezone)
     c = client or shared_client()
@@ -498,7 +500,7 @@ async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: 
 
 async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, int], int]:
     """Per-season watched-episode counts (the live `x`), keyed {(trakt_id, season):
-    completed} — via ONE /shows/{id}/progress/watched call per UNIQUE show (§2b).
+    completed} — via ONE /shows/{id}/progress/watched call per UNIQUE show.
 
     Why not the aggregate /sync/watched/shows? An audit showed it returning
     show-level rows (plays + show, capped ~100/page) WITHOUT the seasons[]/
@@ -508,8 +510,8 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
 
     Never cached — both because `x` is live and because a progress record belongs
     to whoever's token asked for it, and the cache is keyed by URL alone. One
-    shared httpx client pools the fan-out (backlog 1b). Errored/absent shows just
-    contribute no keys (that show renders 0)."""
+    shared httpx client pools the fan-out. Errored/absent shows just contribute
+    no keys (that show renders 0)."""
     unique = sorted({int(t) for t in trakt_ids if t is not None})
     if not unique:
         return {}
@@ -635,7 +637,7 @@ def _parse_watched_ts(value) -> datetime | None:
 
 async def fetch_watched_progress(settings: Settings, since_days: int | None = 60) -> list[dict]:
     """Recently-active seasons from watch HISTORY (/users/me/history), as
-    [{trakt_id, tmdb, season, watched, slug, title, network}] (§6 rollover step d).
+    [{trakt_id, tmdb, season, watched, slug, title, network}].
 
     Uses the history event log rather than /sync/watched/shows — that aggregate
     returns show-level rows WITHOUT seasons for some accounts (the same bug that
@@ -677,16 +679,14 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     """/shows/{id}/seasons?extended=full -> [{season, episode_count}] for
     seasons Trakt has actually populated with episodes (skips season 0/
     specials and any season with zero KNOWN episodes at all). Powers the
-    add-show flow's season picker (§2e); NOT in BUILD_PLAN's §7 module map —
-    a small data-layer addition Chat 3 needed.
+    add-show flow's season picker.
 
     Filters on `episode_count` (Trakt's total planned/known episode count for
     the season), NOT `aired_episodes`. A season that hasn't premiered yet has
     aired_episodes=0 but a real episode_count once Trakt has announced it —
     filtering on aired_episodes wrongly hid every not-yet-aired season from
-    the picker, which is exactly the New Shows / Returning bucket's case (§4:
-    "New Shows (S01, not yet started airing)"). Fixed post-Chat-4 once manual
-    add-show on an unaired season turned out to be broken."""
+    the picker, which is exactly a season 1 that has not started airing yet.
+    Fixed once manual add-show on an unaired season turned out to be broken."""
     results = await _cached_get(
         shared_client(), settings, f"shows/{trakt_id}/seasons", {"extended": "full"}, raise_errors=True,
     )
@@ -704,7 +704,7 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
 
 async def search_shows(settings: Settings, query: str) -> list[dict]:
     """/search/show?query=... -> compact [{trakt_id, slug, title, year, network}]
-    for the add-show flow (§2e). Empty query returns []."""
+    for the add-show flow. Empty query returns []."""
     q = (query or "").strip()
     if not q:
         return []
