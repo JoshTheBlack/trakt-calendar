@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -274,6 +275,23 @@ async def _import_legacy_calendar_state(user_id: int) -> None:
 # registration
 # ---------------------------------------------------------------------------
 
+def _public_base(settings) -> str:
+    return (settings.public_base_url or "").rstrip("/")
+
+
+def _og_context(settings, path: str) -> dict:
+    """Open Graph tags for link unfurlers (Discord/Slack/etc.), built only from
+    the configured public_base_url — never the request Host (§1.16b) — since an
+    unauthenticated crawler resolves relative paths unreliably and a spoofed
+    Host must not become the advertised origin. Absent a configured base
+    there's nothing safe to advertise, so both tags come back empty and the
+    templates fall back to a bare text preview."""
+    base = _public_base(settings)
+    if not base:
+        return {"og_url": None, "og_image": None}
+    return {"og_url": f"{base}{path}", "og_image": f"{base}/static/images/tvbanner.png"}
+
+
 @guard.get("/register", AuthLevel.PUBLIC)
 async def register_page(request: Request):
     """The registration form, or the "invalid invite" page when one is required
@@ -287,6 +305,7 @@ async def register_page(request: Request):
         if not auth.invite_is_usable(invite):
             return templates.TemplateResponse(request, "auth_invite_invalid.html", {
                 "request": request,
+                **_og_context(settings, "/register"),
             })
     return templates.TemplateResponse(request, "auth_register.html", {
         "request": request,
@@ -295,6 +314,7 @@ async def register_page(request: Request):
         # in a cookie or the redirect URL, so registering that way is gated
         # exactly as tightly as registering with a password.
         "trakt_login_configured": settings.trakt_login_configured,
+        **_og_context(settings, f"/register?invite={quote(token)}" if token else "/register"),
     })
 
 
@@ -419,6 +439,7 @@ async def login_page(request: Request):
         # password. Onboarding resolves this correctly on its own, so reaching
         # here means the deployment moved or settings.json was edited by hand.
         "cookie_is_secure": auth.use_secure_cookie(settings, request),
+        **_og_context(settings, "/login"),
     })
 
 
