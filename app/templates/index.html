@@ -9,34 +9,56 @@
     <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+    {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
+       navigation swaps the whole <body> in place. A <script src> living inside
+       that swapped region would be re-fetched and re-executed on every nav —
+       re-declaring every top-level const and double-binding every listener.
+       In <head> they load exactly once and survive the swaps. #}
+    <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
+    <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
+    <script src="/static/js/app.js?v={{ asset_v }}" defer></script>
 </head>
-<body data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}" class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}">
+{# Body classes are per-account view prefs (card style, packing, hide) that don't
+   change across a month/endpoint nav, so they can safely ride the persistent
+   <body> element that an innerHTML swap leaves in place. The per-PAGE context
+   (month/year/endpoint/total) DOES change per nav, so it lives on #pageData
+   below — inside the swapped region — where the new page's values replace it. #}
+<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}">
+<div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
 
 <header class="hero">
     <div class="hero-lead">
         <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
         <div class="month-nav">
-            <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
+            <a class="month-nav-btn prev" hx-boost="true" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
             </a>
             <a class="month-title-link" href="/pick?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
                 <h1>{{ month_label }} {{ year }}</h1>
             </a>
-            <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
+            <a class="month-nav-btn next" hx-boost="true" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
                 <img src="/static/images/arrow-right.png" alt="Next month">
             </a>
         </div>
     </div>
 
     <div class="hero-controls">
-        <div class="control" title="{{ endpoint.description }}">
+        {# A boosted GET form so switching the calendar is an AJAX body-swap (CSS
+           and JS stay resident, no re-flash) with htmx managing history the same
+           way the month arrows do. Hidden month/year hold the current position;
+           the select carries the endpoint. With no htmx it degrades to a plain
+           GET form submit, and the query it builds (?endpoint=&month=&year=) is
+           exactly what the calendar route already reads. #}
+        <form class="control" action="/" method="get" hx-boost="true" title="{{ endpoint.description }}">
+            <input type="hidden" name="month" value="{{ month }}">
+            <input type="hidden" name="year" value="{{ year }}">
             <label for="endpointSelect">📡</label>
-            <select id="endpointSelect" onchange="switchEndpoint(this.value)">
+            <select id="endpointSelect" name="endpoint" onchange="this.form.requestSubmit()">
                 {% for ep in endpoints %}
                 <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                 {% endfor %}
             </select>
-        </div>
+        </form>
         <div class="control">
             <label for="cardStyleSelect">🎬</label>
             <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
@@ -671,7 +693,5 @@
     // hand gets you a refusal rather than a tracker.
     window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
 </script>
-<script src="/static/js/nav.js?v={{ asset_v }}"></script>
-<script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>
 </html>

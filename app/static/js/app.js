@@ -1,28 +1,32 @@
-// ---- Page context (from <body> data-* attributes) ----
+// ---- Page context ----
+// A boosted navigation (hx-boost on the month arrows and the calendar switcher)
+// swaps the <body>'s children in place WITHOUT reloading this script, so the
+// page context can't be captured once into consts at load time — the values
+// would go stale on the first nav. It lives on #pageData, which sits INSIDE the
+// swapped region, and is re-read on every (re)init. Body classes (card style,
+// packing, hide-not-watching) stay on the persistent <body> element instead,
+// because those are per-account view prefs that don't change across a nav.
 const BODY = document.body;
-const MONTH = BODY.dataset.month;
-const YEAR = BODY.dataset.year;
-const ENDPOINT = BODY.dataset.endpoint;
-const currentTotalShows = parseInt(BODY.dataset.total, 10) || 0;
-const currentTotal = currentTotalShows;
-const STATE_URL = `/api/state?month=${MONTH}&year=${YEAR}&endpoint=${encodeURIComponent(ENDPOINT)}`;
 
 // The cache size cap is stored in bytes and edited in megabytes.
 const MB = 1024 * 1024;
+
+let MONTH, YEAR, ENDPOINT, currentTotalShows, currentTotal, STATE_URL;
+
+function readPageContext() {
+    const d = (document.getElementById('pageData') || document.body).dataset;
+    MONTH = d.month;
+    YEAR = d.year;
+    ENDPOINT = d.endpoint;
+    currentTotalShows = parseInt(d.total, 10) || 0;
+    currentTotal = currentTotalShows;
+    STATE_URL = `/api/state?month=${MONTH}&year=${YEAR}&endpoint=${encodeURIComponent(ENDPOINT)}`;
+}
 
 let notWatching = new Set();
 let historyLog = [];
 let lastKnownStats = { total: null, watching: null, notWatching: null };
 let currentShowIds = [];
-
-// ---- Endpoint switching ----
-function switchEndpoint(key) {
-    const params = new URLSearchParams(window.location.search);
-    params.set('endpoint', key);
-    params.set('month', MONTH);
-    params.set('year', YEAR);
-    window.location.search = params.toString();
-}
 
 // ---- Layout controls: card style + day packing ----
 // Applied instantly via <body> classes (pure CSS), then persisted to settings.
@@ -60,8 +64,6 @@ async function setLayout(key, value) {
         });
     } catch (e) { console.error(e); }
 }
-
-document.addEventListener('DOMContentLoaded', updateCols);
 
 // Poster-only wall: if a card is too close to the right edge, open its hover panel
 // to the LEFT so it never runs off-screen (and so it can't flicker-wrap).
@@ -202,13 +204,19 @@ function toast(message, ok) {
 }
 
 // The add/request buttons and the health state behind them only exist for an
-// administrator, so nobody else polls for them.
-document.addEventListener('DOMContentLoaded', () => {
+// administrator, so nobody else polls for them. Re-run on each (re)init so cards
+// swapped in by a boosted nav get their in-library / reachability marks; the 60s
+// poll is armed only once, since a boosted nav must not stack a second interval.
+let arrPollArmed = false;
+function initArrIntegrations() {
     if (!window.IS_ADMIN) return;
     refreshArrStatus();
     refreshLibrary();
-    setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
-});
+    if (!arrPollArmed) {
+        arrPollArmed = true;
+        setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
+    }
+}
 
 // ---- Hide / show not-watching ----
 async function toggleHideNotWatching() {
@@ -299,9 +307,21 @@ function setSyncStatus(ok, message) {
     if (!ok) toast('⚠️ ' + (message || 'Storage error') + ' — changes may not be saved.', false);
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
+// Loads this view's saved state (not-watching marks, history, the is-new
+// baseline) and paints it. Runs on first load and again after every boosted nav,
+// since a nav lands a fresh month/endpoint with its own state. The monotonic
+// token guards the race a boosted nav introduces: a slow load for the page the
+// user just left must not apply — or re-commit its baseline — on top of a newer
+// one, so only the most recent init's response is allowed through.
+let viewGeneration = 0;
+async function loadAndApplyState() {
+    const gen = ++viewGeneration;
+    // A new view carries no remembered stat values, so the first paint after a
+    // nav doesn't animate a phantom "change" against the previous month's counts.
+    lastKnownStats = { total: null, watching: null, notWatching: null };
     try {
         const state = await loadState();
+        if (gen !== viewGeneration) return;  // superseded by a newer navigation
         notWatching = new Set(state.notWatching || []);
         historyLog = state.history || [];
         setSyncStatus(true);
@@ -352,11 +372,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         updateStats();
         await saveViewBaseline();
     } catch (e) {
+        if (gen !== viewGeneration) return;
         console.error(e);
         setSyncStatus(false, 'Load failed');
         updateStats();
     }
-});
+}
 
 function getRelativeDayLabel(dateStr) {
     if (!dateStr) return 'Today';
@@ -883,10 +904,12 @@ function clearCertPicker(picker) {
 }
 
 // Build every picker up front so a modal opened before its fetch resolves (or
-// with no stored value) still shows the full, interactive chip row.
-document.addEventListener('DOMContentLoaded', () => {
+// with no stored value) still shows the full, interactive chip row. buildCertPicker
+// is idempotent per element, so re-running it after a boosted swap only builds the
+// freshly-inserted pickers.
+function initCertPickers() {
     document.querySelectorAll('.chip-picker').forEach(buildCertPicker);
-});
+}
 
 async function openFilters() {
     try {
@@ -1457,19 +1480,24 @@ async function enrichSeasonInfo(card) {
     } catch (e) { /* non-fatal */ }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+// One observer per view: a boosted nav brings a whole new set of cards, so the
+// previous month's observer is disconnected before a fresh one watches the new
+// cards (otherwise it lingers, holding detached nodes).
+let seasonObserver = null;
+function initSeasonInfo() {
     const cards = document.querySelectorAll('.card[data-season]:not([data-season=""])');
     if (!('IntersectionObserver' in window)) {
         cards.forEach(enrichSeasonInfo);
         return;
     }
-    const io = new IntersectionObserver((entries, obs) => {
+    if (seasonObserver) seasonObserver.disconnect();
+    seasonObserver = new IntersectionObserver((entries, obs) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) { enrichSeasonInfo(entry.target); obs.unobserve(entry.target); }
         });
     }, { rootMargin: '200px' });
-    cards.forEach(c => io.observe(c));
-});
+    cards.forEach(c => seasonObserver.observe(c));
+}
 
 // ---- Details modal ----
 async function openDetails(card, event) {
@@ -1624,14 +1652,15 @@ function revealSecret() {
     location.href = '/distrakt';
 }
 
-// Once revealed, show the Distrakt nav button on the calendar.
-document.addEventListener('DOMContentLoaded', () => {
+// Once revealed, show the Distrakt nav button on the calendar. Re-applied on each
+// (re)init because a boosted nav swaps in a fresh (hidden) nav element.
+function initDistraktNav() {
     if (!window.DISTRAKT_AVAILABLE) return;
     let revealed = false;
     try { revealed = localStorage.getItem('distraktRevealed') === '1'; } catch (e) {}
     const nav = document.getElementById('distraktNav');
     if (revealed && nav) nav.hidden = false;
-});
+}
 
 const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
 let konamiBuffer = [];
@@ -1651,14 +1680,46 @@ const BUILD_TAP_WINDOW_MS = 1500;
 let buildTapCount = 0;
 let buildTapLast = 0;
 
-document.addEventListener('DOMContentLoaded', () => {
+// The version tag is inside the swapped region, so a boosted nav replaces it with
+// a fresh element; the dataset guard keeps a single tap listener per element (the
+// tap counters live at module scope, so a streak survives across a nav).
+function initBuildTap() {
     if (!window.DISTRAKT_AVAILABLE) return;
     const tag = document.querySelector('.version-tag');
-    if (!tag) return;
+    if (!tag || tag.dataset.tapBound) return;
+    tag.dataset.tapBound = '1';
     tag.addEventListener('click', () => {
         const now = Date.now();
         buildTapCount = (now - buildTapLast > BUILD_TAP_WINDOW_MS) ? 1 : buildTapCount + 1;
         buildTapLast = now;
         if (buildTapCount >= BUILD_TAP_TARGET) revealSecret();
     });
-});
+}
+
+// ---- One idempotent page init, run on first load AND after every boosted swap ----
+// hx-boost swaps the <body>'s children in place without re-running this script, so
+// everything that used to hang off its own DOMContentLoaded is gathered here and
+// re-run on htmx:afterSwap as well. Document-level delegated listeners (mouseover,
+// and keydown for Escape and the Konami code) are bound once at load below and
+// survive swaps, so they deliberately stay OUT of this function.
+function initCalendarPage() {
+    readPageContext();
+    initCertPickers();
+    updateCols();
+    initArrIntegrations();
+    initSeasonInfo();
+    initDistraktNav();
+    initBuildTap();
+    loadAndApplyState();  // async; fire-and-forget, guarded by its own generation token
+}
+
+// afterSwap fires only on AJAX swaps, never the initial paint, so the readyState
+// branch owns first load and afterSwap owns every subsequent boosted nav — each
+// runs initCalendarPage exactly once. This script is deferred, so by the time it
+// executes the document is parsed (readyState is past 'loading') and init runs now.
+document.addEventListener('htmx:afterSwap', initCalendarPage);
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCalendarPage);
+} else {
+    initCalendarPage();
+}
