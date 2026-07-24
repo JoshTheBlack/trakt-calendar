@@ -440,13 +440,18 @@ async def index(request: Request):
         error = "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
     else:
         try:
-            items, _as_of = await calendar_cache.read_month(
-                endpoint, settings, tz=tz, year=year, month=month,
-                genres=prefs["genres"], countries=prefs["countries"],
-                show_certifications=prefs["show_certifications"],
-                movie_certifications=prefs["movie_certifications"],
-                network_filter=prefs["network_filter"] or None,
-            )
+            # The whole month is fetched and filtered before any HTML is sent, so
+            # this span is the server-side "time to first byte" for the calendar —
+            # dominated by the sequential per-window Trakt fetch on a cold cache.
+            with span("calendar.read_month", endpoint=endpoint.key, ym=f"{year}-{month:02d}") as sp:
+                items, _as_of = await calendar_cache.read_month(
+                    endpoint, settings, tz=tz, year=year, month=month,
+                    genres=prefs["genres"], countries=prefs["countries"],
+                    show_certifications=prefs["show_certifications"],
+                    movie_certifications=prefs["movie_certifications"],
+                    network_filter=prefs["network_filter"] or None,
+                )
+                sp.set(items=len(items))
         except TraktError as exc:
             error = str(exc)
 
@@ -502,7 +507,13 @@ async def index(request: Request):
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,
     }
-    return templates.TemplateResponse(request, "index.html", context)
+    # Jinja renders every day + card into one document here (Starlette renders
+    # eagerly when the response is built), so this span is the cost of turning the
+    # whole month into HTML — the other half of the server's blocking time before
+    # the browser gets anything, and it grows with the card count.
+    with span("calendar.render", cards=len(items)):
+        response = templates.TemplateResponse(request, "index.html", context)
+    return response
 
 
 @guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)
@@ -1160,8 +1171,8 @@ async def integrations_add(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Distrakt (hidden tracker) API — add-show flow + abandon toggle (CHAT 3) plus
-# the bucketing/rendering endpoint (CHAT 4).
+# Distrakt (hidden tracker) API — the add-show flow and abandon toggle, plus the
+# endpoint that computes the buckets and renders the two copy-paste POST blocks.
 # ---------------------------------------------------------------------------
 
 def _month_key(year: int, month: int) -> str:
@@ -1324,7 +1335,11 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=(doc or {}).get("movies")),
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "rate_limited": True,
+        # Reports the ACTUAL cause: True only when Trakt rate-limited us, False when
+        # it was simply unreachable. The client shows the banner off `notice`
+        # (present only on this degraded payload), not off this flag, so both cases
+        # still surface — this stays accurate metadata rather than a banner trigger.
+        "rate_limited": rate_limited,
         "notice": notice,
     }
 

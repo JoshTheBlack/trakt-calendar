@@ -15,6 +15,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### Internals
 - 🧹 Cleaned up leftover internal-planning references in source comments and docstrings across the project (comment-only, no behavior change).
+- ⏱️ Added debug-level timing spans around the calendar's month fetch and HTML render, so the server-side "time to first byte" for the calendar page can be measured on the `app.perf` channel ahead of upcoming performance work.
 
 ### 🥚
 - When it gathers what it needs for the month, it now follows the same familiar path as everything else—quietly leaving behind whatever you've already turned away.

@@ -250,13 +250,15 @@ function premiereKey(s) {
 }
 const byPremiere = (a, b) => (premiereKey(a) - premiereKey(b)) || byTitle(a, b);
 
-// The server sets rate_limited + a notice when it fell back to last-known totals
-// (Trakt rate-limited or unreachable during a refresh). Surface it persistently
+// The server attaches a `notice` when it fell back to last-known totals (Trakt
+// rate-limited or unreachable during a refresh); it is present ONLY on that
+// degraded payload, so its presence — not the rate_limited flag, which is just
+// metadata on the cause — is what drives the banner. Surface it persistently
 // above the list so the shown numbers aren't mistaken for a fresh, correct read.
 function renderNotice(d) {
     const el = document.getElementById('distraktNotice');
     if (!el) return;
-    if (d && d.rate_limited && d.notice) {
+    if (d && d.notice) {
         el.textContent = '⚠ ' + d.notice;
         el.hidden = false;
     } else {
