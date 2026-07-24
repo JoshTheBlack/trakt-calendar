@@ -1,0 +1,31 @@
+{# The response body of a content request: ONE day, and nothing else. It replaces
+   the placeholder that asked for it (an outerHTML swap), so it must be a day
+   block and no page chrome — no header, no stats, no chip strip, no <html>.
+
+   The success case renders through _day_block.html (and so _card.html), which is
+   what makes a day that arrives late byte-identical to one the shell rendered
+   inline.
+
+   A day with nothing on it renders EMPTY on purpose: the placeholder it replaces
+   simply disappears, which is what an empty day should look like. #}
+{% if error %}
+{# The rest of the month is already on screen and correct, so one day that
+   couldn't be loaded is a gap rather than a broken page. It says which day it is
+   (so the chip strip still lands somewhere meaningful) and offers to try again
+   in place — the button re-requests exactly this day and swaps itself out. #}
+<section class="day-block is-failed" id="day-{{ date }}" data-date="{{ date }}">
+    <div class="day-header">
+        <div class="day-title">📅 {{ label }}</div>
+    </div>
+    <div class="warning-banner">
+        ⚠️ {{ error }} — this day couldn't be loaded.
+        <button class="btn-ghost small" hx-get="{{ retry_url }}"
+                hx-target="closest .day-block" hx-swap="outerHTML">Retry</button>
+    </div>
+</section>
+{% elif group %}
+{% if partial %}
+<div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
+{% endif %}
+{% include "_day_block.html" %}
+{% endif %}

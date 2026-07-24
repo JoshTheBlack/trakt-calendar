@@ -376,6 +376,15 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
 # the assembled read path
 # ---------------------------------------------------------------------------
 
+def day_label(day: date) -> str:
+    """The heading a day's block carries ("Friday, 03 July").
+
+    Shared rather than formatted at each call site: a day that fails to load is
+    still announced by its date, and a placeholder or an error whose heading is
+    spelled differently from the real one reads as a different day."""
+    return day.strftime("%A, %d %B")
+
+
 def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tuple[date, date]:
     """The UTC date range whose aligned windows cover the viewer-LOCAL day span
     [start_date, end_date], padded a day each side.
@@ -505,7 +514,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 
     grouped = [
         {"date": day,
-         "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"),
+         "label": day_label(date.fromisoformat(day)),
          "items": list(rows)}
         for day, rows in groupby(items, key=lambda i: i["air_date"])
     ]

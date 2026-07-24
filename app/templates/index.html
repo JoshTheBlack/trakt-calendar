@@ -203,14 +203,12 @@
         {% for group in grouped %}{% include "_day_block.html" %}
         {% endfor %}
     {% endif %}
-    {# The rest of the month, fetched once this page has painted. `display:
-       contents` on the container so the day blocks it receives take part in
-       <main>'s own layout — a real box here would break the packed view, where
-       <main> lays its day blocks out in a row. #}
-    {% if backfill %}
-    <div id="calendarBackfill" hx-get="/calendar/range?endpoint={{ endpoint.key }}&amp;year={{ year }}&amp;month={{ month }}&amp;start={{ backfill.start }}&amp;end={{ backfill.end }}"
-         hx-trigger="load" hx-swap="innerHTML"></div>
-    {% endif %}
+    {# Every day after the first few is announced but not fetched: it stands in
+       <main> as itself, with its own heading, anchor and reserved height, and
+       pulls in its cards when the viewer reaches it. A day nobody scrolls to
+       costs one placeholder and nothing else. #}
+    {% for group in skeletons %}{% include "_day_skeleton.html" %}
+    {% endfor %}
 </main>
 
 <hr class="footer-divider">

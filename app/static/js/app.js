@@ -47,7 +47,10 @@ function updateCols() {
     // layout doesn't reserve columns for hidden not-watching items.
     const hiding = b.classList.contains('hide-not-watching');
     const sel = hiding ? '.card:not(.not-watching)' : '.card';
-    document.querySelectorAll('.day-block').forEach(block => {
+    // Days whose cards haven't been fetched yet are left alone: counting the cards
+    // a placeholder is holding would answer 0 and shrink it to one column, which is
+    // exactly wrong — the server sized it from the cards that are coming.
+    document.querySelectorAll('.day-block:not(.is-skeleton)').forEach(block => {
         const n = block.querySelectorAll(sel).length;
         block.style.setProperty('--cols', Math.max(1, Math.min(n, cap)));
     });
@@ -428,7 +431,13 @@ function initDayChips() {
 function updateEmptyDays() {
     const hiding = BODY.classList.contains('hide-not-watching');
     document.querySelectorAll('.day-block').forEach(block => {
-        const hide = hiding && !block.querySelector('.card:not(.not-watching)');
+        // A day whose cards haven't arrived yet can't be asked how many of them
+        // are visible, so it answers from the count the server wrote onto it. Left
+        // to the card query it would look empty, collapse, and — being hidden —
+        // never be scrolled into view, so it would never load at all.
+        const hide = hiding && (block.classList.contains('is-skeleton')
+            ? parseInt(block.dataset.visible, 10) === 0
+            : !block.querySelector('.card:not(.not-watching)'));
         block.classList.toggle('is-empty-hidden', hide);
         // A collapsed day is not somewhere to jump to, so its chip stops looking
         // and acting like a destination. Only days actually in the DOM are
@@ -1701,11 +1710,13 @@ function initCalendarPage() {
 }
 
 // ---- Day blocks that arrive after the page has painted ----
-// The shell renders the first few days and fetches the rest, so cards can appear
-// without a navigation. Those cards need three things the shell's own cards got
-// for free, and NOT a re-init: re-reading the page's embedded view data here would
-// throw away a mark the viewer made while the days were still in flight.
+// The shell renders the first few days and each later one fetches itself when it
+// is scrolled to, so cards can appear without a navigation. Those cards need three
+// things the shell's own cards got for free, and NOT a re-init: re-reading the
+// page's embedded view data here would throw away a mark the viewer made while the
+// day was still in flight.
 function applyViewStateTo(root) {
+    if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
     root.querySelectorAll('.card').forEach(card => {
         const id = card.getAttribute('data-id');
         // is-new is the shell's whole-month answer (see newIds).
@@ -1726,11 +1737,14 @@ function applyViewStateTo(root) {
 // runs initCalendarPage exactly once. This script is deferred, so by the time it
 // executes the document is parsed (readyState is past 'loading') and init runs now.
 // A boosted navigation replaces the whole <body> and so needs the full init; a
-// content swap only brings cards, and must NOT re-run it (see applyViewStateTo).
+// content swap only brings one day's cards, and must NOT re-run it (see
+// applyViewStateTo). The event is dispatched on what the swap PRODUCED, which for
+// a day block replacing its own placeholder (an outerHTML swap) is the new
+// section — detail.target is still the placeholder htmx just detached, so it is
+// the wrong thing to look inside.
 document.addEventListener('htmx:afterSwap', (evt) => {
-    const target = (evt.detail && evt.detail.target) || document.body;
-    if (target === document.body) initCalendarPage();
-    else applyViewStateTo(target);
+    if (evt.detail && evt.detail.boosted) initCalendarPage();
+    else applyViewStateTo(evt.target);
 });
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initCalendarPage);

@@ -14,12 +14,14 @@ response path — the gzip-compressed bytes actually sent over the wire (read
 from the response's own Content-Length, not re-compressed here, so it matches
 what a browser would receive).
 
-The calendar page ships a shell plus the first few days and then fetches the
-rest for itself, so each run reports THREE lines: the shell (what the browser
-waits for before it can show anything), the follow-up request for the rest of
-the month, and the total of the two (what the whole month costs end to end).
-The shell line is the one that moved; the total is there so a win at first
-paint can't hide extra work overall.
+The calendar page ships a shell plus the first few days; every later day is a
+placeholder that fetches itself when it is scrolled to. So each run reports
+THREE lines: the shell (what the browser waits for before it can show
+anything), every remaining day fetched one at a time (a viewer who scrolls the
+WHOLE month — the worst case for a per-day design, and the only fair
+comparison against shipping the month in one response), and the total. The
+shell line is the one that moved; the total is there so a win at first paint
+can't hide extra work overall.
 
 This is a fixed yardstick for calendar-loading changes, not a test: run it
 before and after a change to the fetch/assembly/render path and compare the
@@ -114,15 +116,15 @@ def _timed_get(client, url: str) -> dict:
     }
 
 
-def _backfill_url(shell_html: str) -> str | None:
-    """The hx-get the shell asks the browser to make for the rest of the month."""
-    match = re.search(r'id="calendarBackfill"\s+hx-get="([^"]+)"', shell_html)
-    return html.unescape(match.group(1)) if match else None
+def _day_urls(shell_html: str) -> list[str]:
+    """Every per-day content request the shell's placeholders would make, in page
+    order — i.e. what a viewer scrolling from the 1st to the 31st triggers."""
+    return [html.unescape(u) for u in re.findall(r'hx-get="(/calendar/day[^"]+)"', shell_html)]
 
 
 def _report(label: str, m: dict) -> None:
     print(
-        f"{label:>12}  {m['ms']:8.1f} ms  "
+        f"{label:>16}  {m['ms']:8.1f} ms  "
         f"html={m['raw'] / 1024:8.1f} KB  "
         f"wire={m['wire'] / 1024:8.1f} KB  encoding={m['encoding']}"
     )
@@ -161,14 +163,26 @@ def main() -> None:
         for label in ("cold", "warm"):
             shell = _timed_get(client, url)
             _report(f"{label} shell", shell)
-            # The page fetches the rest of the month for itself. Take the URL out of
-            # the shell's own markup rather than rebuilding it, so this measures
-            # exactly what a browser would request — and reports nothing extra if the
-            # shell already shipped the lot.
-            backfill_url = _backfill_url(shell["text"])
-            if backfill_url:
-                rest = _timed_get(client, backfill_url)
-                _report(f"{label} rest", rest)
+            # The page fetches each remaining day for itself as it is reached. Take
+            # the URLs out of the shell's own markup rather than rebuilding them, so
+            # this measures exactly what a browser would request — and reports
+            # nothing extra if the shell already shipped the lot.
+            day_urls = _day_urls(shell["text"])
+            if day_urls:
+                days = [_timed_get(client, day_url) for day_url in day_urls]
+                rest = {
+                    "ms": sum(d["ms"] for d in days),
+                    "raw": sum(d["raw"] for d in days),
+                    "wire": sum(d["wire"] for d in days),
+                    "encoding": days[0]["encoding"],
+                }
+                _report(f"{label} rest ({len(days)})", rest)
+                # The full scroll-through above is the WORST case for a per-day
+                # design and the only case for shipping the month in one piece, so
+                # the average is what actually compares them: a viewer who reaches
+                # n days costs the shell plus n of these.
+                _report(f"{label} per day", {k: v / len(days) if k != "encoding" else v
+                                             for k, v in rest.items()})
                 _report(f"{label} TOTAL", {
                     "ms": shell["ms"] + rest["ms"],
                     "raw": shell["raw"] + rest["raw"],

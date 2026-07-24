@@ -663,21 +663,28 @@ class CalendarMarkupTests(CalendarRouteTestCase):
 
 
 # ---------------------------------------------------------------------------
-# the split: a picker at "/", a shell at "/calendar", content at "/calendar/range"
+# the split: a picker at "/", a shell at "/calendar", content at "/calendar/day"
 # ---------------------------------------------------------------------------
 
 def _day_sections(html: str) -> list[str]:
-    """The dates of the day blocks a response actually rendered."""
+    """The dates of the day blocks a response actually rendered with their cards
+    — placeholders carry a class of their own and are deliberately not counted."""
     return re.findall(r'<section class="day-block" id="day-([\d-]+)"', html)
 
 
-def _backfill_url(html: str) -> str | None:
-    m = re.search(r'id="calendarBackfill"\s+hx-get="([^"]+)"', html)
-    return m.group(1).replace("&amp;", "&") if m else None
+def _placeholder_dates(html: str) -> list[str]:
+    """The dates a response announced but did not render cards for."""
+    return re.findall(r'<section class="day-block is-skeleton[^"]*"\s*\n?\s*id="day-([\d-]+)"', html)
+
+
+def _day_urls(html: str) -> list[str]:
+    """Every per-day content request the page's placeholders would make."""
+    return [u.replace("&amp;", "&") for u in re.findall(r'hx-get="(/calendar/day[^"]+)"', html)]
 
 
 def _section(html: str, day: str) -> str:
-    m = re.search(r'<section class="[^"]*" id="day-%s"[^>]*>' % re.escape(day), html)
+    m = re.search(r'<section class="[^"]*"\s*\n?\s*id="day-%s"[^>]*>' % re.escape(day),
+                  html, re.S)
     return m.group(0) if m else ""
 
 
@@ -687,8 +694,7 @@ class DayLayoutTests(CalendarRouteTestCase):
     rest of the month up the page."""
 
     PAGE = "/calendar?year=2026&month=7&endpoint=shows"
-    RANGE = ("/calendar/range?endpoint=shows&year=2026&month=7"
-             "&start=2026-07-10&end=2026-07-20")
+    DAY = "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-15"
 
     def setUp(self):
         super().setUp()
@@ -734,7 +740,7 @@ class DayLayoutTests(CalendarRouteTestCase):
         self.client.post("/api/me/prefs", json={"hide_not_watching": True})
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                          json={"item_id": "show-0", "not_watching": True})
-        fragment = self.client.get(self.RANGE).text
+        fragment = self.client.get(self.DAY).text
         self.assertIn("--cols: 2", _section(fragment, "2026-07-15"))
         self.assertNotIn("is-empty-hidden", _section(fragment, "2026-07-15"))
 
@@ -784,16 +790,28 @@ class CalendarShellTests(CalendarRouteTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_the_shell_renders_the_first_days_and_asks_for_the_rest_as_one_range(self):
+    def test_the_shell_renders_the_first_days_and_announces_the_rest_one_by_one(self):
         html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
-        self.assertEqual(_day_sections(html),
-                         [f"2026-07-{day:02d}" for day in range(1, main.INITIAL_DAY_BLOCKS + 1)])
-        # The rest is ONE request, starting the day after the last inline block so
-        # no day is fetched twice or missed.
+        inline = [f"2026-07-{day:02d}" for day in range(1, main.INITIAL_DAY_BLOCKS + 1)]
+        later = [f"2026-07-{day:02d}" for day in range(main.INITIAL_DAY_BLOCKS + 1, 11)]
+        self.assertEqual(_day_sections(html), inline)
+        # Every later day stands there as itself and fetches only itself, so no day
+        # is fetched twice, none is missed, and one nobody reaches costs nothing.
+        self.assertEqual(_placeholder_dates(html), later)
         self.assertEqual(
-            _backfill_url(html),
-            "/calendar/range?endpoint=shows&year=2026&month=7"
-            f"&start=2026-07-{main.INITIAL_DAY_BLOCKS + 1:02d}&end=2026-07-31")
+            _day_urls(html),
+            [f"/calendar/day?endpoint=shows&year=2026&month=7&date={day}" for day in later])
+
+    def test_a_placeholder_carries_what_the_page_needs_before_its_cards_exist(self):
+        """Its heading, its anchor, the reserved height, and what this viewer would
+        see of it — the day is a usable part of the page before it has loaded."""
+        html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
+        block = _section(html, "2026-07-10")
+        self.assertIn('data-date="2026-07-10"', block)
+        self.assertIn('data-visible="1"', block)
+        self.assertIn("--skeleton-rows: 1", block)
+        self.assertIn('hx-trigger="intersect once"', block)
+        self.assertIn("Friday, 10 July", html)
 
     def test_the_shell_still_states_the_whole_months_numbers(self):
         """The tiles, the chip strip and the is-new answer are claims about the
@@ -809,17 +827,17 @@ class CalendarShellTests(CalendarRouteTestCase):
                    AsyncMock(return_value=[_entry("solo", "Solo Show", "2026-07-04T20:00:00Z")])):
             html = self.client.get("/calendar?year=2026&month=7").text
         self.assertEqual(_day_sections(html), ["2026-07-04"])
-        self.assertIsNone(_backfill_url(html))
+        self.assertEqual(_day_urls(html), [])
 
 
-class CalendarRangeRouteTests(CalendarRouteTestCase):
-    """The content route: day blocks for a span, and nothing else."""
+class CalendarDayRouteTests(CalendarRouteTestCase):
+    """The content route: ONE day's block, and nothing else."""
 
-    RANGE = "/calendar/range?endpoint=shows&year=2026&month=7&start=2026-07-10&end=2026-07-20"
+    DAY = "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-15"
 
     def setUp(self):
         super().setUp()
-        self.user_id = self._make_user("range_viewer")
+        self.user_id = self._make_user("day_viewer")
         self.sign_in_as(self.user_id)
         self.drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
         self.drama["show"]["genres"] = ["drama"]
@@ -833,19 +851,22 @@ class CalendarRangeRouteTests(CalendarRouteTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_it_returns_the_requested_days_as_bare_day_blocks(self):
-        resp = self.client.get(self.RANGE)
+    def test_it_returns_only_the_requested_day_as_a_bare_day_block(self):
+        resp = self.client.get(self.DAY)
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(_day_sections(resp.text), ["2026-07-15", "2026-07-16"])
+        # Only the 15th: the 2nd and the 16th are in the same cached window and a
+        # route that assembled the month and forgot to trim would ship them too.
+        self.assertEqual(_day_sections(resp.text), ["2026-07-15"])
+        self.assertNotIn("The Comedy", resp.text)
         # A fragment, not a page: nothing the shell already owns comes back with it.
         for chrome in ("<html", "<header", 'id="statsBar"', "day-chips", "calendarViewData"):
             self.assertNotIn(chrome, resp.text)
 
-    def test_a_backfilled_card_is_the_same_markup_as_an_inline_one(self):
+    def test_a_day_that_arrives_late_is_the_same_markup_as_an_inline_one(self):
         """Both render through the one card partial, which is what keeps a day that
         arrived late indistinguishable from one that shipped with the page."""
         inline = self.client.get("/calendar?year=2026&month=7").text
-        fragment = self.client.get(self.RANGE).text
+        fragment = self.client.get(self.DAY).text
         card = re.search(r'(<div class="card[^>]*data-id="the-drama".*?)</div>\s*</div>\s*</section>',
                          fragment, re.S)
         self.assertIsNotNone(card)
@@ -853,25 +874,30 @@ class CalendarRangeRouteTests(CalendarRouteTestCase):
         # items), so the same card markup must appear in both responses.
         self.assertIn(card.group(1)[:400], inline)
 
+    def test_a_day_with_nothing_on_it_renders_nothing(self):
+        """Its placeholder is replaced by the empty response, so the day simply
+        disappears — which is what an empty day should look like."""
+        resp = self.client.get(
+            "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-20")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(_day_sections(resp.text), [])
+        self.assertEqual(resp.text.strip(), "")
+
     def test_it_applies_this_viewers_saved_filters(self):
-        self.client.post("/api/me/prefs", json={"genres": "-comedy"})
-        text = self.client.get(self.RANGE).text
-        self.assertIn("The Drama", text)
-        self.assertNotIn("The Comedy", text)
+        self.client.post("/api/me/prefs", json={"genres": "-drama"})
+        self.assertNotIn("The Drama", self.client.get(self.DAY).text)
 
     def test_the_query_cannot_widen_or_change_the_filters(self):
         """The filters are the viewer's, read from their session. A query
-        parameter naming them would let one link ask for an unfiltered month —
+        parameter naming them would let one link ask for an unfiltered day —
         or for somebody else's view of it."""
-        self.client.post("/api/me/prefs", json={"genres": "-comedy"})
-        text = self.client.get(self.RANGE + "&genres=&countries=&network_filter=").text
-        self.assertNotIn("The Comedy", text)
+        self.client.post("/api/me/prefs", json={"genres": "-drama"})
+        text = self.client.get(self.DAY + "&genres=&countries=&network_filter=").text
+        self.assertNotIn("The Drama", text)
 
     def test_not_watching_is_rendered_by_the_server(self):
         asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
-        text = self.client.get(self.RANGE).text
-        self.assertIn("not-watching", _card_class(text, "the-drama"))
-        self.assertNotIn("not-watching", _card_class(text, "the-comedy"))
+        self.assertIn("not-watching", _card_class(self.client.get(self.DAY).text, "the-drama"))
 
     def test_it_never_marks_is_new_itself(self):
         """is-new is a whole-month diff the shell already made and committed. A
@@ -885,58 +911,68 @@ class CalendarRangeRouteTests(CalendarRouteTestCase):
         shell = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
         self.assertIn("the-drama", _view_data(shell)["newIds"])
         # The fragment is fetched after that commit and marks nothing.
-        fragment = self.client.get(self.RANGE).text
+        fragment = self.client.get(self.DAY).text
         self.assertNotIn("is-new", _card_class(fragment, "the-drama"))
 
-    def test_a_bad_span_is_refused_before_it_reaches_the_cache(self):
-        for bad in ("start=nope&end=2026-07-20",
-                    "start=2026-07-10&end=also-nope",
-                    "start=2026-07-10",  # no end at all
-                    "start=2026-06-10&end=2026-07-20",   # outside the viewed month
-                    "start=2026-07-10&end=2026-08-20",
-                    "start=2026-07-20&end=2026-07-10",   # backwards
-                    "start=2026-07-10T00:00:00&end=2026-07-20",
-                    "start=2026-W28-1&end=2026-07-20"):     # a week date, not YYYY-MM-DD
+    def test_a_bad_date_is_refused_before_it_reaches_the_cache(self):
+        for bad in ("date=nope",
+                    "",                       # no date at all
+                    "date=2026-06-10",        # outside the viewed month
+                    "date=2026-08-10",
+                    "date=2026-07-10T00:00:00",
+                    "date=2026-W28-1"):       # a week date, not YYYY-MM-DD
             with self.subTest(query=bad):
-                resp = self.client.get(f"/calendar/range?endpoint=shows&year=2026&month=7&{bad}")
+                resp = self.client.get(f"/calendar/day?endpoint=shows&year=2026&month=7&{bad}")
                 self.assertEqual(resp.status_code, 400, resp.text)
 
     def test_an_unknown_endpoint_key_falls_back_instead_of_being_used(self):
         resp = self.client.get(
-            "/calendar/range?endpoint=../../etc/passwd&year=2026&month=7"
-            "&start=2026-07-10&end=2026-07-20")
+            "/calendar/day?endpoint=../../etc/passwd&year=2026&month=7&date=2026-07-15")
         self.assertEqual(resp.status_code, 200)
-        self.assertEqual(_day_sections(resp.text), ["2026-07-15", "2026-07-16"])
+        self.assertEqual(_day_sections(resp.text), ["2026-07-15"])
 
-    def test_a_failed_window_says_so_where_the_days_would_have_been(self):
-        """The shell is already on screen with the month's real numbers, so a
-        failed backfill is a missing stretch of days, not a broken page."""
+    def test_a_day_that_fails_says_so_and_offers_to_try_again(self):
+        """The rest of the month is already on screen and correct, so one day that
+        couldn't be loaded is a gap, not a broken page — and it must not sit there
+        looking like it is still loading."""
         async def fake(endpoint, settings, start):
             raise trakt.TraktError("Trakt unreachable", 503)
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
-            resp = self.client.get(self.RANGE)
+            resp = self.client.get(self.DAY)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("warning-banner", resp.text)
         self.assertNotIn("error-banner", resp.text)
+        # Still the same day, still addressable, and the retry asks for exactly it.
+        self.assertIn('id="day-2026-07-15"', resp.text)
+        self.assertIn("Wednesday, 15 July", resp.text)
+        self.assertIn('hx-get="/calendar/day?endpoint=shows&amp;year=2026&amp;month=7'
+                      '&amp;date=2026-07-15"', resp.text)
 
-    def test_one_failed_window_still_returns_the_days_that_loaded(self):
-        boom = calendar_cache.window_start(date(2026, 7, 15))
+    def test_one_failed_window_still_returns_the_items_that_loaded(self):
+        """A day near a window boundary is assembled from two windows, since a
+        viewer-local day can straddle them. One failing leaves a day that is
+        short and says so, rather than a day that is missing."""
+        # 13 July sits at a boundary: its own window plus the one before it.
+        straddling = date(2026, 7, 13)
+        boom = calendar_cache.window_start(date(2026, 7, 6))
+        self.assertNotEqual(calendar_cache.window_start(straddling), boom)
 
         async def fake(endpoint, settings, start):
             if start == boom:
                 raise trakt.TraktError("Trakt unreachable", 503)
-            return [self.comedy]
+            return [_entry("the-late", "The Late", "2026-07-13T20:00:00Z")]
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
-            resp = self.client.get(self.RANGE)
+            resp = self.client.get(
+                "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-13")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("The Comedy", resp.text)
+        self.assertIn("The Late", resp.text)
         self.assertIn("warning-banner", resp.text)
 
     def test_the_route_needs_a_signed_in_calendar_account(self):
         self.client.cookies.clear()
-        resp = self.client.get(self.RANGE, follow_redirects=False)
+        resp = self.client.get(self.DAY, follow_redirects=False)
         self.assertNotEqual(resp.status_code, 200)
 
 

@@ -16,7 +16,9 @@ import time
 from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -433,13 +435,20 @@ def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
     Both are decided from the cards the day contains, which the server knows
     before it writes them. Left to the client they land a frame late, and a day
     header that paints and then vanishes takes the rest of the month up the page
-    with it — the "1 July, then suddenly 2 July" flicker on a hide-mode load."""
+    with it — the "1 July, then suddenly 2 July" flicker on a hide-mode load.
+
+    `rows` and `visible` are the same answer put to a different use: a day that
+    has not been fetched yet is drawn as a placeholder, and it can only reserve
+    the right amount of vertical space (so the scrollbar and the jump-to strip
+    land where the day really is) if it knows how many rows of cards are coming."""
     cap = _COLUMN_CAPS.get(card_style, _COLUMN_CAP_DEFAULT)
     for group in grouped:
         visible = sum(1 for item in group["items"] if item["id"] not in not_watching)
         shown = visible if hide_not_watching else len(group["items"])
         group["cols"] = max(1, min(shown, cap))
         group["collapsed"] = hide_not_watching and visible == 0
+        group["visible"] = visible
+        group["rows"] = ceil(shown / group["cols"]) if shown else 1
 
 
 def _filters_active(prefs: dict) -> bool:
@@ -501,9 +510,10 @@ async def home(request: Request):
 @guard.get("/calendar", AuthLevel.CALENDAR_APPROVED)
 async def calendar_page(request: Request):
     """The calendar SHELL: the header, the stats bar, the jump-to strip, the
-    modals — and the first few days of cards inline. The remaining days arrive in
-    one backfill request against /calendar/range after first paint, so the
-    browser has a usable page long before a whole month of cards exists.
+    modals — and the first few days of cards inline. Every day after those is
+    announced as a placeholder that fetches itself from /calendar/day when the
+    viewer reaches it, so the browser has a usable page long before a whole month
+    of cards exists, and a day nobody scrolls to is never built at all.
 
     The month is still assembled in full here, because the numbers the shell
     states (the tiles, the per-day chip counts, which shows are new) are claims
@@ -594,19 +604,17 @@ async def calendar_page(request: Request):
                       hide_not_watching=prefs["hide_not_watching"],
                       card_style=prefs["card_style"] or settings.card_style)
 
-    # Only the first few days go out with the shell; the rest are one backfill
-    # request, so first paint costs a handful of cards instead of a month of them.
+    # Only the first few days go out with the shell; every day after them is a
+    # placeholder that fetches its own cards when it is scrolled to. So first
+    # paint costs a handful of cards instead of a month of them, and a day nobody
+    # ever scrolls to is never assembled, rendered, or shipped at all.
+    #
     # The split is by DAY BLOCK rather than by date, because a month can open with
     # a run of empty days and "the first five dates" would then ship nothing.
     inline_groups = grouped[:INITIAL_DAY_BLOCKS]
-    backfill = None
-    if len(grouped) > len(inline_groups):
-        # From the day AFTER the last inlined block to the end of the month. Days
-        # with nothing on them produce no block, so an inclusive-exclusive split on
-        # the DATE can neither duplicate a day nor drop one.
-        backfill_start = date.fromisoformat(inline_groups[-1]["date"]) + timedelta(days=1)
-        backfill = {"start": backfill_start.isoformat(),
-                    "end": date(year, month, days).isoformat()}
+    skeleton_groups = grouped[INITIAL_DAY_BLOCKS:]
+    for group in skeleton_groups:
+        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]))
 
     # Per-user view preferences (card style, day packing, hide-not-watching) —
     # distinct from `settings`, which stays the app-wide defaults new accounts
@@ -637,9 +645,9 @@ async def calendar_page(request: Request):
         # The days rendered INLINE. `grouped` (the whole month) is what every
         # number on the page is computed from; this is only what is painted now.
         "grouped": inline_groups,
-        # The span the page fetches for itself once it has painted, or None when
-        # the whole month already fits in the shell.
-        "backfill": backfill,
+        # The days that are announced but not yet fetched: header, chip target and
+        # reserved height now, cards when the viewer reaches them.
+        "skeletons": skeleton_groups,
         "total": total,
         # The stats tiles, the is-new marks, the "since last run" line and the
         # history log are all computed above and rendered with the page, so they
@@ -704,7 +712,7 @@ async def calendar_page(request: Request):
 _YMD = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def _range_bound(value, year: int, month: int) -> date | None:
+def _month_date(value, year: int, month: int) -> date | None:
     """A YYYY-MM-DD query parameter, accepted ONLY if it is exactly that shape and
     falls inside {year, month}. Anything else is None, and the caller refuses the
     request: this value reaches date arithmetic and a cache read, so it is checked
@@ -723,17 +731,30 @@ def _range_bound(value, year: int, month: int) -> date | None:
     return parsed
 
 
-@guard.get("/calendar/range", AuthLevel.CALENDAR_APPROVED)
-async def calendar_range(request: Request):
-    """The day blocks for one span of a month — the content half of the calendar,
-    rendered through the same day-block and card partials the shell uses, so a
-    backfilled day is byte-identical to an inline one.
+def _day_url(endpoint_key: str, day: date) -> str:
+    """The content request for one day. Built in one place because the shell's
+    placeholder and the retry button on a day that failed must ask for exactly the
+    same thing."""
+    return (f"/calendar/day?endpoint={quote(endpoint_key)}"
+            f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+
+
+@guard.get("/calendar/day", AuthLevel.CALENDAR_APPROVED)
+async def calendar_day(request: Request):
+    """ONE day's block — the content half of the calendar, rendered through the
+    same day-block and card partials the shell uses, so a day that arrives this
+    way is byte-identical to one the shell rendered inline.
+
+    Only that day is assembled: the covering window(s) are read and only their
+    entries are normalized, so a month the viewer never scrolls through is never
+    built. A viewer-local day can straddle two UTC windows, which assemble_range
+    already accounts for.
 
     Everything that decides WHAT this viewer may see comes from their session: the
     per-user filters and their not-watching marks are read here, never taken from
     the query, so this cannot be asked for someone else's view or for an
-    unfiltered month. The query only says WHICH span of WHICH calendar, and both
-    are validated before they reach a cache key.
+    unfiltered day. The query only says WHICH day of WHICH calendar, and both are
+    validated before they reach a cache key.
 
     is-new is deliberately NOT computed here. The diff and its baseline commit are
     a whole-month decision the shell already made and wrote; re-reading the
@@ -747,20 +768,27 @@ async def calendar_range(request: Request):
     year = _valid_year(request.query_params.get("year"), today.year)
     month = _valid_month(request.query_params.get("month"), today.month)
     endpoint = _requested_endpoint(request, prefs, settings)
-    start = _range_bound(request.query_params.get("start"), year, month)
-    end = _range_bound(request.query_params.get("end"), year, month)
-    if start is None or end is None or start > end:
-        return JSONResponse({"ok": False, "error": "Invalid range"}, status_code=400)
+    day = _month_date(request.query_params.get("date"), year, month)
+    if day is None:
+        return JSONResponse({"ok": False, "error": "Invalid date"}, status_code=400)
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
 
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
+    context = {
+        "request": request, "not_watching": not_watching,
+        # Empty on purpose: see the docstring — the shell owns the is-new answer.
+        "new_ids": set(),
+        "settings": settings, "is_admin": bool(user and user.is_admin),
+        "date": day.isoformat(), "label": calendar_cache.day_label(day),
+        "retry_url": _day_url(endpoint.key, day),
+        "partial": False,
+    }
     try:
-        with span("calendar.range", endpoint=endpoint.key,
-                  span_days=(end - start).days + 1) as sp:
+        with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
             grouped, meta = await calendar_cache.assemble_range(
-                endpoint, settings, tz=tz, start_date=start, end_date=end,
+                endpoint, settings, tz=tz, start_date=day, end_date=day,
                 genres=prefs["genres"], countries=prefs["countries"],
                 show_certifications=prefs["show_certifications"],
                 movie_certifications=prefs["movie_certifications"],
@@ -775,24 +803,20 @@ async def calendar_range(request: Request):
                           hide_not_watching=prefs["hide_not_watching"],
                           card_style=prefs["card_style"] or settings.card_style)
     except TraktError as exc:
-        # The shell is already on screen with the month's real numbers, so a failed
-        # backfill is a missing stretch of days rather than a broken page: say so
-        # where the days would have been.
+        # The shell is already on screen with the month's real numbers, so one day
+        # failing is a gap in the month, not a broken page. It replaces itself with
+        # a block that says so and offers to try again, rather than sitting there
+        # as a placeholder that looks like it is still loading.
         return templates.TemplateResponse(
-            request, "_day_range.html",
-            {"request": request, "grouped": [], "partial": True, "error": str(exc),
-             "not_watching": not_watching, "new_ids": set(),
-             "settings": settings, "is_admin": bool(user and user.is_admin)},
-        )
+            request, "_day_fragment.html", {**context, "group": None, "error": str(exc)})
 
     return templates.TemplateResponse(
-        request, "_day_range.html",
-        {"request": request, "grouped": grouped, "partial": meta["partial"],
-         "error": None,
-         "not_watching": not_watching,
-         # Empty on purpose: see the docstring — the shell owns the is-new answer.
-         "new_ids": set(),
-         "settings": settings, "is_admin": bool(user and user.is_admin)},
+        request, "_day_fragment.html",
+        # A day with nothing on it groups to nothing; the fragment then renders
+        # empty and the placeholder it replaces simply disappears, which is what an
+        # empty day should look like.
+        {**context, "group": grouped[0] if grouped else None,
+         "error": None, "partial": meta["partial"]},
     )
 
 
