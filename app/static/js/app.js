@@ -27,6 +27,11 @@ function readPageContext() {
 // happened to be holding; these describe the whole month, which is what the
 // stats tiles claim to be about.
 let notWatching = new Set();
+// The ids this load decided were new, computed over the WHOLE month by the page
+// that shipped the shell. Days that arrive afterwards are marked from this one
+// answer: a late request cannot recompute it, because the baseline it would diff
+// against is the one the shell already committed.
+let newIds = new Set();
 let showCounts = {};
 let watchingCount = 0;
 let notWatchingCount = 0;
@@ -308,6 +313,7 @@ function readViewData() {
         }
     }
     notWatching = new Set(data.notWatching || []);
+    newIds = new Set(data.newIds || []);
     showCounts = data.showCounts || {};
     watchingCount = data.watching || 0;
     notWatchingCount = data.notWatchingCount || 0;
@@ -1646,11 +1652,38 @@ function initCalendarPage() {
     updateEmptyDays();
 }
 
+// ---- Day blocks that arrive after the page has painted ----
+// The shell renders the first few days and fetches the rest, so cards can appear
+// without a navigation. Those cards need three things the shell's own cards got
+// for free, and NOT a re-init: re-reading the page's embedded view data here would
+// throw away a mark the viewer made while the days were still in flight.
+function applyViewStateTo(root) {
+    root.querySelectorAll('.card').forEach(card => {
+        const id = card.getAttribute('data-id');
+        // is-new is the shell's whole-month answer (see newIds).
+        if (newIds.has(id)) card.classList.add('is-new');
+        // The server rendered not-watching from what was stored when it built this
+        // block. A toggle made before the block arrived exists only in memory here,
+        // so reconcile against it rather than trusting the markup — otherwise a
+        // show hidden a moment ago comes back visible on the days that loaded late.
+        setCardState(card, notWatching.has(id));
+    });
+    // Column packing is per day block and counts that block's (visible) cards, so
+    // it has to run for blocks that did not exist when the page initialised.
+    updateEmptyDays();
+}
+
 // afterSwap fires only on AJAX swaps, never the initial paint, so the readyState
 // branch owns first load and afterSwap owns every subsequent boosted nav — each
 // runs initCalendarPage exactly once. This script is deferred, so by the time it
 // executes the document is parsed (readyState is past 'loading') and init runs now.
-document.addEventListener('htmx:afterSwap', initCalendarPage);
+// A boosted navigation replaces the whole <body> and so needs the full init; a
+// content swap only brings cards, and must NOT re-run it (see applyViewStateTo).
+document.addEventListener('htmx:afterSwap', (evt) => {
+    const target = (evt.detail && evt.detail.target) || document.body;
+    if (target === document.body) initCalendarPage();
+    else applyViewStateTo(target);
+});
 if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', initCalendarPage);
 } else {

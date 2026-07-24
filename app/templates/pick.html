@@ -81,7 +81,7 @@
 
             <div class="month-grid">
                 {% for m in months %}
-                <a class="month-btn{% if current_month == m.num %} current{% endif %}" href="/?month={{ m.num }}&amp;year={{ year }}&amp;endpoint={{ endpoint.key }}">
+                <a class="month-btn{% if current_month == m.num %} current{% endif %}" href="/calendar?month={{ m.num }}&amp;year={{ year }}&amp;endpoint={{ endpoint.key }}">
                     {{ m.name }}
                     <span class="num">{{ year }}</span>
                 </a>
@@ -89,7 +89,7 @@
             </div>
 
             <div class="pick-foot">
-                <a class="pill-btn" href="/?month={{ today_month }}&amp;year={{ today_year }}&amp;endpoint={{ endpoint.key }}">Go to current month →</a>
+                <a class="pill-btn" href="/calendar?month={{ today_month }}&amp;year={{ today_year }}&amp;endpoint={{ endpoint.key }}">Go to current month →</a>
             </div>
         </div>
     </div>

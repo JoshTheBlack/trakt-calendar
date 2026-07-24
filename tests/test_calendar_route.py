@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, calendar_cache, calendar_state, db, trakt  # noqa: E402
+from app import auth, calendar_cache, calendar_state, db, main, trakt  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -641,6 +641,221 @@ class CalendarMarkupTests(CalendarRouteTestCase):
         # The two drawings are NOT the same: closed keeps its strike line.
         closed = re.search(r'<symbol id="eye-closed".*?</symbol>', html, re.S).group(0)
         self.assertIn('<line x1="2" y1="2" x2="22" y2="22">', closed)
+
+
+# ---------------------------------------------------------------------------
+# the split: a picker at "/", a shell at "/calendar", content at "/calendar/range"
+# ---------------------------------------------------------------------------
+
+def _day_sections(html: str) -> list[str]:
+    """The dates of the day blocks a response actually rendered."""
+    return re.findall(r'<section class="day-block" id="day-([\d-]+)"', html)
+
+
+def _backfill_url(html: str) -> str | None:
+    m = re.search(r'id="calendarBackfill"\s+hx-get="([^"]+)"', html)
+    return m.group(1).replace("&amp;", "&") if m else None
+
+
+class RouteSplitTests(CalendarRouteTestCase):
+    """The one route that was both the front page and the calendar is now two,
+    and the calendar's own content is a third."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("split_viewer"))
+
+    def test_the_root_is_the_month_picker(self):
+        page = self.client.get("/")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("month-btn", page.text)
+        self.assertNotIn('id="statsBar"', page.text)
+
+    def test_an_old_calendar_link_is_forwarded_to_the_calendar(self):
+        """Bookmarks and shared URLs from when "/" served the calendar too must
+        keep working rather than dropping someone on a month picker."""
+        resp = self.client.get("/?month=7&year=2026&endpoint=shows", follow_redirects=False)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], "/calendar?month=7&year=2026&endpoint=shows")
+
+    def test_the_calendar_lives_at_its_own_path(self):
+        with patch("app.calendar_cache.fetch_window_raw", AsyncMock(return_value=[])):
+            page = self.client.get("/calendar?year=2026&month=7")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn('id="statsBar"', page.text)
+        # And the endpoint switcher submits to it, not to the picker.
+        self.assertIn('action="/calendar"', page.text)
+
+
+class CalendarShellTests(CalendarRouteTestCase):
+    """The page ships the first few days and asks for the rest itself."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("shell_viewer"))
+        # One item on each of the month's first ten days: more days than the shell
+        # renders inline, so the split is actually exercised.
+        entries = [_entry(f"show-{day}", f"Show {day}", f"2026-07-{day:02d}T20:00:00Z")
+                   for day in range(1, 11)]
+        patcher = patch("app.calendar_cache.fetch_window_raw",
+                        AsyncMock(return_value=entries))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_shell_renders_the_first_days_and_asks_for_the_rest_as_one_range(self):
+        html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
+        self.assertEqual(_day_sections(html),
+                         [f"2026-07-{day:02d}" for day in range(1, main.INITIAL_DAY_BLOCKS + 1)])
+        # The rest is ONE request, starting the day after the last inline block so
+        # no day is fetched twice or missed.
+        self.assertEqual(
+            _backfill_url(html),
+            "/calendar/range?endpoint=shows&year=2026&month=7"
+            f"&start=2026-07-{main.INITIAL_DAY_BLOCKS + 1:02d}&end=2026-07-31")
+
+    def test_the_shell_still_states_the_whole_months_numbers(self):
+        """The tiles, the chip strip and the is-new answer are claims about the
+        month, so they must not shrink to the days that happen to be rendered."""
+        html = self.client.get("/calendar?year=2026&month=7").text
+        self.assertEqual(_stat(html, "statTotal"), "10")
+        self.assertEqual(len(_view_data(html)["showCounts"]), 10)
+        # A chip for every day that has something on it, including the un-rendered ones.
+        self.assertIn('href="#day-2026-07-10"', html)
+
+    def test_a_month_that_fits_asks_for_nothing(self):
+        with patch("app.calendar_cache.fetch_window_raw",
+                   AsyncMock(return_value=[_entry("solo", "Solo Show", "2026-07-04T20:00:00Z")])):
+            html = self.client.get("/calendar?year=2026&month=7").text
+        self.assertEqual(_day_sections(html), ["2026-07-04"])
+        self.assertIsNone(_backfill_url(html))
+
+
+class CalendarRangeRouteTests(CalendarRouteTestCase):
+    """The content route: day blocks for a span, and nothing else."""
+
+    RANGE = "/calendar/range?endpoint=shows&year=2026&month=7&start=2026-07-10&end=2026-07-20"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("range_viewer")
+        self.sign_in_as(self.user_id)
+        self.drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
+        self.drama["show"]["genres"] = ["drama"]
+        self.comedy = _entry("the-comedy", "The Comedy", "2026-07-16T20:00:00Z")
+        self.comedy["show"]["genres"] = ["comedy"]
+        # Outside the requested span, so a route that read the whole month and
+        # forgot to trim would be caught.
+        self.early = _entry("the-early", "The Early", "2026-07-02T20:00:00Z")
+        patcher = patch("app.calendar_cache.fetch_window_raw",
+                        AsyncMock(return_value=[self.early, self.drama, self.comedy]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_it_returns_the_requested_days_as_bare_day_blocks(self):
+        resp = self.client.get(self.RANGE)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(_day_sections(resp.text), ["2026-07-15", "2026-07-16"])
+        # A fragment, not a page: nothing the shell already owns comes back with it.
+        for chrome in ("<html", "<header", 'id="statsBar"', "day-chips", "calendarViewData"):
+            self.assertNotIn(chrome, resp.text)
+
+    def test_a_backfilled_card_is_the_same_markup_as_an_inline_one(self):
+        """Both render through the one card partial, which is what keeps a day that
+        arrived late indistinguishable from one that shipped with the page."""
+        inline = self.client.get("/calendar?year=2026&month=7").text
+        fragment = self.client.get(self.RANGE).text
+        card = re.search(r'(<div class="card[^>]*data-id="the-drama".*?)</div>\s*</div>\s*</section>',
+                         fragment, re.S)
+        self.assertIsNotNone(card)
+        # The Drama is inline on the full-month shell above (only three days have
+        # items), so the same card markup must appear in both responses.
+        self.assertIn(card.group(1)[:400], inline)
+
+    def test_it_applies_this_viewers_saved_filters(self):
+        self.client.post("/api/me/prefs", json={"genres": "-comedy"})
+        text = self.client.get(self.RANGE).text
+        self.assertIn("The Drama", text)
+        self.assertNotIn("The Comedy", text)
+
+    def test_the_query_cannot_widen_or_change_the_filters(self):
+        """The filters are the viewer's, read from their session. A query
+        parameter naming them would let one link ask for an unfiltered month —
+        or for somebody else's view of it."""
+        self.client.post("/api/me/prefs", json={"genres": "-comedy"})
+        text = self.client.get(self.RANGE + "&genres=&countries=&network_filter=").text
+        self.assertNotIn("The Comedy", text)
+
+    def test_not_watching_is_rendered_by_the_server(self):
+        asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
+        text = self.client.get(self.RANGE).text
+        self.assertIn("not-watching", _card_class(text, "the-drama"))
+        self.assertNotIn("not-watching", _card_class(text, "the-comedy"))
+
+    def test_it_never_marks_is_new_itself(self):
+        """is-new is a whole-month diff the shell already made and committed. A
+        fragment that re-read the baseline would see that commit and mark nothing
+        — so it does not try: the shell hands the ids to the page instead."""
+        # A first look at the month commits a baseline; these shows are genuinely
+        # new relative to a DIFFERENT stored baseline.
+        asyncio.run(calendar_state.set_view_state(
+            self.user_id, "shows", 2026, 7,
+            last_count=1, last_show_ids=["something-else"], history=[]))
+        shell = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
+        self.assertIn("the-drama", _view_data(shell)["newIds"])
+        # The fragment is fetched after that commit and marks nothing.
+        fragment = self.client.get(self.RANGE).text
+        self.assertNotIn("is-new", _card_class(fragment, "the-drama"))
+
+    def test_a_bad_span_is_refused_before_it_reaches_the_cache(self):
+        for bad in ("start=nope&end=2026-07-20",
+                    "start=2026-07-10&end=also-nope",
+                    "start=2026-07-10",  # no end at all
+                    "start=2026-06-10&end=2026-07-20",   # outside the viewed month
+                    "start=2026-07-10&end=2026-08-20",
+                    "start=2026-07-20&end=2026-07-10",   # backwards
+                    "start=2026-07-10T00:00:00&end=2026-07-20",
+                    "start=2026-W28-1&end=2026-07-20"):     # a week date, not YYYY-MM-DD
+            with self.subTest(query=bad):
+                resp = self.client.get(f"/calendar/range?endpoint=shows&year=2026&month=7&{bad}")
+                self.assertEqual(resp.status_code, 400, resp.text)
+
+    def test_an_unknown_endpoint_key_falls_back_instead_of_being_used(self):
+        resp = self.client.get(
+            "/calendar/range?endpoint=../../etc/passwd&year=2026&month=7"
+            "&start=2026-07-10&end=2026-07-20")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(_day_sections(resp.text), ["2026-07-15", "2026-07-16"])
+
+    def test_a_failed_window_says_so_where_the_days_would_have_been(self):
+        """The shell is already on screen with the month's real numbers, so a
+        failed backfill is a missing stretch of days, not a broken page."""
+        async def fake(endpoint, settings, start):
+            raise trakt.TraktError("Trakt unreachable", 503)
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            resp = self.client.get(self.RANGE)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("warning-banner", resp.text)
+        self.assertNotIn("error-banner", resp.text)
+
+    def test_one_failed_window_still_returns_the_days_that_loaded(self):
+        boom = calendar_cache.window_start(date(2026, 7, 15))
+
+        async def fake(endpoint, settings, start):
+            if start == boom:
+                raise trakt.TraktError("Trakt unreachable", 503)
+            return [self.comedy]
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            resp = self.client.get(self.RANGE)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("The Comedy", resp.text)
+        self.assertIn("warning-banner", resp.text)
+
+    def test_the_route_needs_a_signed_in_calendar_account(self):
+        self.client.cookies.clear()
+        resp = self.client.get(self.RANGE, follow_redirects=False)
+        self.assertNotEqual(resp.status_code, 200)
 
 
 if __name__ == "__main__":  # pragma: no cover

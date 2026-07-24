@@ -11,16 +11,17 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import time
 from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -91,6 +92,13 @@ BUILD_LABEL = "dev" if BUILD == "dev" else f"build {BUILD}" + (f" · {COMMIT[:7]
 
 BASE_DIR = Path(__file__).resolve().parent
 HEARTBEAT_SECONDS = 60
+
+# How many of a month's day blocks the calendar page renders inline. The rest are
+# fetched in one request once the page has painted, so a busy month's first
+# response is a few dozen cards instead of a thousand — the document the browser
+# has to parse before it can show anything is what made the page slow, not the
+# cards further down it that nobody has scrolled to yet.
+INITIAL_DAY_BLOCKS = 5
 
 
 # Cache-busting token for every stylesheet and script. Lives in app/assets.py so
@@ -434,25 +442,55 @@ def _filters_summary(prefs: dict) -> str:
     return ", ".join(named)
 
 
+def _requested_endpoint(request: Request, prefs: dict, settings):
+    """The calendar this request is about. Always resolved through get_endpoint,
+    which falls back to the default for anything not in the calendar set, so a
+    made-up key can never reach a cache row or a Trakt URL."""
+    return get_endpoint(
+        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
+    )
+
+
 @guard.get("/", AuthLevel.CALENDAR_APPROVED)
-async def index(request: Request):
+async def home(request: Request):
+    """The month/year picker landing page (as the original front page was).
+
+    A `month` in the query is an old calendar link — a bookmark, a shared URL, or
+    a Discord post from when this one route served both the picker and the
+    calendar. Forward it rather than asking someone to choose the month they
+    already named."""
     settings = load_settings()
     # Already resolved and cached by the dependency that let this request in.
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    year = _valid_year(request.query_params.get("year"), date.today().year)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    if _month_valid(request.query_params.get("month")):
+        month = _valid_month(request.query_params.get("month"), date.today().month)
+        return RedirectResponse(
+            f"/calendar?month={month}&year={year}&endpoint={endpoint.key}", status_code=302)
+    return templates.TemplateResponse(
+        request, "pick.html", _picker_context(request, settings, year, endpoint, user))
+
+
+@guard.get("/calendar", AuthLevel.CALENDAR_APPROVED)
+async def calendar_page(request: Request):
+    """The calendar SHELL: the header, the stats bar, the jump-to strip, the
+    modals — and the first few days of cards inline. The remaining days arrive in
+    one backfill request against /calendar/range after first paint, so the
+    browser has a usable page long before a whole month of cards exists.
+
+    The month is still assembled in full here, because the numbers the shell
+    states (the tiles, the per-day chip counts, which shows are new) are claims
+    about the WHOLE month and would be wrong if they described only the days that
+    happen to be rendered."""
+    settings = load_settings()
     user = await auth.current_user(request)
     is_admin = bool(user and user.is_admin)
     prefs = await auth.get_user_prefs(user.user_id)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
-    endpoint_key = (
-        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
-    )
-    endpoint = get_endpoint(endpoint_key)
-
-    # No month specified -> show the month/year picker landing page (like the original front page).
-    if not _month_valid(request.query_params.get("month")):
-        return templates.TemplateResponse(
-            request, "pick.html", _picker_context(request, settings, year, endpoint, user))
-
+    endpoint = _requested_endpoint(request, prefs, settings)
     month = _valid_month(request.query_params.get("month"), today.month)
     tz = _resolve_viewer_tz(user, settings)
     days = calendar.monthrange(year, month)[1]
@@ -519,6 +557,20 @@ async def index(request: Request):
 
     counts_by_date = {group["date"]: len(group["items"]) for group in grouped}
 
+    # Only the first few days go out with the shell; the rest are one backfill
+    # request, so first paint costs a handful of cards instead of a month of them.
+    # The split is by DAY BLOCK rather than by date, because a month can open with
+    # a run of empty days and "the first five dates" would then ship nothing.
+    inline_groups = grouped[:INITIAL_DAY_BLOCKS]
+    backfill = None
+    if len(grouped) > len(inline_groups):
+        # From the day AFTER the last inlined block to the end of the month. Days
+        # with nothing on them produce no block, so an inclusive-exclusive split on
+        # the DATE can neither duplicate a day nor drop one.
+        backfill_start = date.fromisoformat(inline_groups[-1]["date"]) + timedelta(days=1)
+        backfill = {"start": backfill_start.isoformat(),
+                    "end": date(year, month, days).isoformat()}
+
     # Per-user view preferences (card style, day packing, hide-not-watching) —
     # distinct from `settings`, which stays the app-wide defaults new accounts
     # are seeded from and the admin Settings screen's own values.
@@ -545,7 +597,12 @@ async def index(request: Request):
         "month": month,
         "month_label": calendar.month_name[month],
         "nav": _nav(year, month),
-        "grouped": grouped,
+        # The days rendered INLINE. `grouped` (the whole month) is what every
+        # number on the page is computed from; this is only what is painted now.
+        "grouped": inline_groups,
+        # The span the page fetches for itself once it has painted, or None when
+        # the whole month already fits in the shell.
+        "backfill": backfill,
         "total": total,
         # The stats tiles, the is-new marks, the "since last run" line and the
         # history log are all computed above and rendered with the page, so they
@@ -596,13 +653,102 @@ async def index(request: Request):
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,
     }
-    # Jinja renders every day + card into one document here (Starlette renders
-    # eagerly when the response is built), so this span is the cost of turning the
-    # whole month into HTML — the other half of the server's blocking time before
-    # the browser gets anything, and it grows with the card count.
-    with span("calendar.render", cards=total):
+    # Jinja renders eagerly when the response is built, so this span is the cost of
+    # turning the shell's cards into HTML — the other half of the server's blocking
+    # time before the browser gets anything. It is now bounded by the inline day
+    # count rather than growing with the whole month.
+    with span("calendar.render", cards=sum(len(g["items"]) for g in inline_groups)):
         response = templates.TemplateResponse(request, "index.html", context)
     return response
+
+
+_YMD = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _range_bound(value, year: int, month: int) -> date | None:
+    """A YYYY-MM-DD query parameter, accepted ONLY if it is exactly that shape and
+    falls inside {year, month}. Anything else is None, and the caller refuses the
+    request: this value reaches date arithmetic and a cache read, so it is checked
+    against the month being viewed rather than merely parsed."""
+    # Matched before parsing rather than left to fromisoformat, which also accepts
+    # ISO week dates ("2026-W28-1") — a second spelling of the same day is one more
+    # shape of input reaching a cache key for no benefit.
+    if not isinstance(value, str) or not _YMD.fullmatch(value):
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    if (parsed.year, parsed.month) != (year, month):
+        return None
+    return parsed
+
+
+@guard.get("/calendar/range", AuthLevel.CALENDAR_APPROVED)
+async def calendar_range(request: Request):
+    """The day blocks for one span of a month — the content half of the calendar,
+    rendered through the same day-block and card partials the shell uses, so a
+    backfilled day is byte-identical to an inline one.
+
+    Everything that decides WHAT this viewer may see comes from their session: the
+    per-user filters and their not-watching marks are read here, never taken from
+    the query, so this cannot be asked for someone else's view or for an
+    unfiltered month. The query only says WHICH span of WHICH calendar, and both
+    are validated before they reach a cache key.
+
+    is-new is deliberately NOT computed here. The diff and its baseline commit are
+    a whole-month decision the shell already made and wrote; re-reading the
+    baseline from a fragment would see the shell's own commit and conclude nothing
+    is new. The shell embeds the ids it decided were new and the page marks these
+    cards from that one answer."""
+    settings = load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = date.today()
+    year = _valid_year(request.query_params.get("year"), today.year)
+    month = _valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    start = _range_bound(request.query_params.get("start"), year, month)
+    end = _range_bound(request.query_params.get("end"), year, month)
+    if start is None or end is None or start > end:
+        return JSONResponse({"ok": False, "error": "Invalid range"}, status_code=400)
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+
+    tz = _resolve_viewer_tz(user, settings)
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    try:
+        with span("calendar.range", endpoint=endpoint.key,
+                  span_days=(end - start).days + 1) as sp:
+            grouped, meta = await calendar_cache.assemble_range(
+                endpoint, settings, tz=tz, start_date=start, end_date=end,
+                genres=prefs["genres"], countries=prefs["countries"],
+                show_certifications=prefs["show_certifications"],
+                movie_certifications=prefs["movie_certifications"],
+                network_filter=prefs["network_filter"] or None,
+                not_watching_ids=not_watching,
+            )
+            sp.set(items=meta["total"])
+    except TraktError as exc:
+        # The shell is already on screen with the month's real numbers, so a failed
+        # backfill is a missing stretch of days rather than a broken page: say so
+        # where the days would have been.
+        return templates.TemplateResponse(
+            request, "_day_range.html",
+            {"request": request, "grouped": [], "partial": True, "error": str(exc),
+             "not_watching": not_watching, "new_ids": set(),
+             "settings": settings, "is_admin": bool(user and user.is_admin)},
+        )
+
+    return templates.TemplateResponse(
+        request, "_day_range.html",
+        {"request": request, "grouped": grouped, "partial": meta["partial"],
+         "error": None,
+         "not_watching": not_watching,
+         # Empty on purpose: see the docstring — the shell owns the is-new answer.
+         "new_ids": set(),
+         "settings": settings, "is_admin": bool(user and user.is_admin)},
+    )
 
 
 @guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)

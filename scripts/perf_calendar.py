@@ -14,6 +14,13 @@ response path — the gzip-compressed bytes actually sent over the wire (read
 from the response's own Content-Length, not re-compressed here, so it matches
 what a browser would receive).
 
+The calendar page ships a shell plus the first few days and then fetches the
+rest for itself, so each run reports THREE lines: the shell (what the browser
+waits for before it can show anything), the follow-up request for the rest of
+the month, and the total of the two (what the whole month costs end to end).
+The shell line is the one that moved; the total is there so a win at first
+paint can't hide extra work overall.
+
 This is a fixed yardstick for calendar-loading changes, not a test: run it
 before and after a change to the fetch/assembly/render path and compare the
 printed numbers.
@@ -23,7 +30,9 @@ printed numbers.
 from __future__ import annotations
 
 import asyncio
+import html
 import os
+import re
 import sys
 import tempfile
 import time
@@ -37,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, calendar_cache, db  # noqa: E402
+from app import main as main_module  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -87,6 +97,37 @@ def _make_fetch(by_day: dict[date, list[dict]]):
     return AsyncMock(side_effect=fetch)
 
 
+def _timed_get(client, url: str) -> dict:
+    t0 = time.perf_counter()
+    resp = client.get(url)
+    elapsed_ms = (time.perf_counter() - t0) * 1000.0
+    assert resp.status_code == 200, f"{url} -> {resp.status_code} {resp.text[:500]}"
+    raw_bytes = len(resp.text.encode("utf-8"))
+    return {
+        "ms": elapsed_ms,
+        "raw": raw_bytes,
+        # Read from the response's own Content-Length rather than re-compressed
+        # here, so it is the number a browser would actually receive.
+        "wire": int(resp.headers.get("content-length", raw_bytes)),
+        "encoding": resp.headers.get("content-encoding", "none"),
+        "text": resp.text,
+    }
+
+
+def _backfill_url(shell_html: str) -> str | None:
+    """The hx-get the shell asks the browser to make for the rest of the month."""
+    match = re.search(r'id="calendarBackfill"\s+hx-get="([^"]+)"', shell_html)
+    return html.unescape(match.group(1)) if match else None
+
+
+def _report(label: str, m: dict) -> None:
+    print(
+        f"{label:>12}  {m['ms']:8.1f} ms  "
+        f"html={m['raw'] / 1024:8.1f} KB  "
+        f"wire={m['wire'] / 1024:8.1f} KB  encoding={m['encoding']}"
+    )
+
+
 def main() -> None:
     db.set_db_path(Path(os.environ["TRAKT_DATA_DIR"]) / "perf.db")
     asyncio.run(db.migrate())
@@ -104,23 +145,36 @@ def main() -> None:
 
     client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
     client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
-    url = f"/?year={YEAR}&month={MONTH}&endpoint=shows"
+    url = f"/calendar?year={YEAR}&month={MONTH}&endpoint=shows"
 
     print(f"cards={total_cards} windows~{len(by_day) // 7 + 1}")
 
-    for label in ("cold", "warm"):
-        t0 = time.perf_counter()
-        resp = client.get(url)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        assert resp.status_code == 200, resp.text[:500]
-        raw_bytes = len(resp.text.encode("utf-8"))
-        encoding = resp.headers.get("content-encoding", "none")
-        wire_bytes = int(resp.headers.get("content-length", raw_bytes))
-        print(
-            f"{label:>4}  {elapsed_ms:8.1f} ms  "
-            f"html={raw_bytes / 1024:8.1f} KB  "
-            f"wire={wire_bytes / 1024:8.1f} KB  encoding={encoding}"
-        )
+    # Two passes over the SAME code, so the comparison isn't against numbers from
+    # an older tree: first with the inline day count raised past a month, which is
+    # the whole month in one response, then as the page actually ships.
+    for pass_label, inline_days in (("all-in-one", 366), ("windowed", main_module.INITIAL_DAY_BLOCKS)):
+        main_module.INITIAL_DAY_BLOCKS = inline_days
+        # Empty the window cache so this pass's "cold" is genuinely cold — the
+        # previous pass filled it.
+        asyncio.run(db.execute("DELETE FROM api_cache"))
+        print(f"-- {pass_label} (inline day blocks: {inline_days})")
+        for label in ("cold", "warm"):
+            shell = _timed_get(client, url)
+            _report(f"{label} shell", shell)
+            # The page fetches the rest of the month for itself. Take the URL out of
+            # the shell's own markup rather than rebuilding it, so this measures
+            # exactly what a browser would request — and reports nothing extra if the
+            # shell already shipped the lot.
+            backfill_url = _backfill_url(shell["text"])
+            if backfill_url:
+                rest = _timed_get(client, backfill_url)
+                _report(f"{label} rest", rest)
+                _report(f"{label} TOTAL", {
+                    "ms": shell["ms"] + rest["ms"],
+                    "raw": shell["raw"] + rest["raw"],
+                    "wire": shell["wire"] + rest["wire"],
+                    "encoding": shell["encoding"],
+                })
 
     client.close()
     db.close_thread_connection()

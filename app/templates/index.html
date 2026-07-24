@@ -66,7 +66,7 @@
            the select carries the endpoint. With no htmx it degrades to a plain
            GET form submit, and the query it builds (?endpoint=&month=&year=) is
            exactly what the calendar route already reads. #}
-        <form class="control" action="/" method="get" hx-boost="true" title="{{ endpoint.description }}">
+        <form class="control" action="/calendar" method="get" hx-boost="true" title="{{ endpoint.description }}">
             <input type="hidden" name="month" value="{{ month }}">
             <input type="hidden" name="year" value="{{ year }}">
             <label for="endpointSelect">📡</label>
@@ -195,6 +195,14 @@
     {% else %}
         {% for group in grouped %}{% include "_day_block.html" %}
         {% endfor %}
+    {% endif %}
+    {# The rest of the month, fetched once this page has painted. `display:
+       contents` on the container so the day blocks it receives take part in
+       <main>'s own layout — a real box here would break the packed view, where
+       <main> lays its day blocks out in a row. #}
+    {% if backfill %}
+    <div id="calendarBackfill" hx-get="/calendar/range?endpoint={{ endpoint.key }}&amp;year={{ year }}&amp;month={{ month }}&amp;start={{ backfill.start }}&amp;end={{ backfill.end }}"
+         hx-trigger="load" hx-swap="innerHTML"></div>
     {% endif %}
 </main>
 

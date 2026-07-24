@@ -158,6 +158,12 @@ main { padding: 10px 6vw 0 6vw; }
    its own height via a skeleton, so the estimate only has to hold the
    scrollbar roughly steady for the current full-month render. */
 .day-block { margin-top: 40px; content-visibility: auto; contain-intrinsic-size: 0 900px; }
+/* The container the rest of the month is swapped into. It must not become a box
+   of its own: in the packed layout <main> lays its day blocks out in a flex row,
+   and a wrapper would put every backfilled day inside one row item. `contents`
+   makes its children <main>'s children for layout purposes, so a day that
+   arrived late sits exactly where one rendered up front does. */
+#calendarBackfill { display: contents; }
 .day-header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; border-bottom: 2px solid var(--card-border); padding-bottom: 10px; }
 .day-header .day-title { font-family: 'Bebas Neue', sans-serif; font-size: 1.9rem; color: var(--gold-soft); letter-spacing: 1px; }
 .day-header .day-count { color: var(--text-faint); font-size: 0.9rem; }
