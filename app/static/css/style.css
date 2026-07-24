@@ -150,7 +150,13 @@ main { padding: 10px 6vw 0 6vw; }
 
 /* ---- Day packing: "packed" flows days beside each other, overflowing below ---- */
 body.pack-packed main { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 34px 26px; }
-body.pack-packed .day-block { margin-top: 0; flex: 0 1 auto; min-width: 0; }
+/* Turn the off-screen skip OFF here. content-visibility reserves a placeholder
+   whose WIDTH is 0 (see .day-block's contain-intrinsic-size); that is invisible
+   in the stacked layout where a day is always full width, but in this flex layout
+   a skipped day collapses to zero width and its neighbours scramble across the
+   row until it scrolls in — and the skip's paint containment also clips the
+   poster-only hover panels that overflow a card. Packed days render normally. */
+body.pack-packed .day-block { margin-top: 0; flex: 0 1 auto; min-width: 0; content-visibility: visible; }
 body.pack-packed .grid { grid-template-columns: repeat(var(--cols, 1), var(--card-w)); }
 
 /* ============================================================================
