@@ -1,4 +1,4 @@
-"""FastAPI application (requirement A) — served under Hypercorn.
+"""FastAPI application — served under Hypercorn.
 
 Server-renders the same day-grouped poster grid as the original PHP app, plus a
 JSON API for watch-state and front-end settings.
@@ -563,7 +563,7 @@ def _season_param(value) -> int | None:
 
 @guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)
 async def api_tile(request: Request):
-    """Compact season info for a tile (requirement F)."""
+    """Compact season info for a tile."""
     settings = load_settings()
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
@@ -582,7 +582,7 @@ async def api_tile(request: Request):
 
 @guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)
 async def api_details(request: Request):
-    """Full detail payload for the modal (requirement G)."""
+    """Full detail payload for the modal."""
     settings = load_settings()
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
@@ -766,7 +766,7 @@ async def post_me_prefs(request: Request):
 async def post_me_timezone(request: Request):
     """Persist the viewer's calendar timezone.
 
-    No automatic browser detection (§1.15) — this is reached either by picking a
+    No automatic browser detection — this is reached either by picking a
     zone from the header's dropdown, or by the "use my device timezone" button
     filling in Intl's resolved zone name before the same request fires.
     """
@@ -1287,7 +1287,10 @@ def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
                          readonly: bool = False, link_url: str | None = None) -> dict:
     """Headers-only render for a month with no roster + no Trakt call: an
     unconfigured/uninitialized month (readonly=False) or a never-tracked past
-    month reached by navigating backward (readonly=True, §6 no-backfill)."""
+    month reached by navigating backward (readonly=True). The tracker only
+    ever rolls a month's snapshot forward, never backfills one after the fact,
+    so an old month nobody was tracking at the time stays permanently empty
+    and read-only rather than retroactively populating from Trakt."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
         "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url, month=month_key),
@@ -1365,7 +1368,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         month_key = doc["month"]
 
         if doc.get("closed"):
-            # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
+            # Frozen past month: render straight from the snapshot, no Trakt calls.
             shows = distrakt_store.frozen_shows(doc)
             post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
             post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies"))
@@ -1455,7 +1458,7 @@ async def api_distrakt_month(request: Request):
     """Computed buckets + the two copy-paste POST 1/POST 2 markdown blocks.
 
     OPEN month: live x/y + cadence/dates recomputed (1x /sync/watched/shows + 1x
-    season call per show), auto-refreshed if totals are stale >24h (§3). CLOSED /
+    season call per show), auto-refreshed if totals are stale >24h. CLOSED /
     past month: rendered from the frozen snapshot with NO Trakt calls. Opening an
     uninitialized month lazily rolls it over first (see ensure_month)."""
     user_id = await _distrakt_user_id(request)
@@ -1691,8 +1694,8 @@ async def api_distrakt_search(request: Request):
 
 @guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_seasons(request: Request):
-    """Aired seasons for a show (add-flow season picker) — not in BUILD_PLAN's
-    route list, but required so the browser can call fetch_show_seasons()."""
+    """Aired seasons for a show (add-flow season picker) — required so the
+    browser can call fetch_show_seasons()."""
     settings = await _distrakt_settings(await _distrakt_user_id(request))
     if not settings.configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)

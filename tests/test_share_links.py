@@ -352,7 +352,7 @@ class DeleteRetiresShareIdentifiersTests(ShareTestCase):
         self.assertIsNotNone(err)
 
     def test_wipe_data_does_not_touch_share_links(self):
-        """§6(i): WIPE DATA keeps the account's share links — only DELETE
+        """WIPE DATA keeps the account's share links — only DELETE
         ACCOUNT retires them."""
         owner_id = self._make_user("wiped_owner")
         asyncio.run(share_links.set_custom_slug(owner_id, "wiped-slug"))

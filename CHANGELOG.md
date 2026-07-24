@@ -7,8 +7,18 @@ All notable changes to this project are documented here. Format loosely follows 
 ### Admin interface
 - 🎬 **Certification filtering** (US TV Parental Guidelines for shows, MPA ratings for movies), set with a click-to-cycle chip picker — no free text, since both rating systems are small and fixed. It shows up both as an instance-wide floor (Settings → Calendar) and as your own 🔎 Filters, the same two-layer setup genre/country already has.
 
+### Reliability
+- 🚦 **Trakt rate-limit handling.** Every Trakt call now reads Trakt's own "slow down" signal and backs off and retries automatically, instead of a rate limit silently turning into "this show has no data" on screen with no error and no retry. If retries still run out, an already-loaded view degrades to what it last knew with a note that a refresh will try again, rather than showing wrong numbers or a server error.
+
+### Accounts & access
+- 🔗 **Login, registration, and invite links now unfurl properly when pasted into Discord/Slack/etc.** — they show this app's real preview image and link instead of a blank or generic one.
+
+### Internals
+- 🧹 Cleaned up leftover internal-planning references in source comments and docstrings across the project (comment-only, no behavior change).
+
 ### 🥚
 - When it gathers what it needs for the month, it now follows the same familiar path as everything else—quietly leaving behind whatever you've already turned away.
+- It's learned to pace itself on a big list instead of asking for everything at once — and if it ever gets told to slow down, one entry sits out with a note to try again rather than quietly showing zero.
 
 ## 🏷️ [1.1.2] - 2026-07-23
 

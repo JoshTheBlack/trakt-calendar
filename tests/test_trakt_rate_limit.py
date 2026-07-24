@@ -79,6 +79,21 @@ def _patch_sleep(recorder: RecordingSleep):
     return patch("app.trakt.asyncio.sleep", new=recorder)
 
 
+def _mock_transport_client(*scripted):
+    """A REAL httpx.AsyncClient whose transport returns a scripted sequence of
+    responses — so the sender is exercised through genuine httpx Response/header
+    parsing and the real .get plumbing, with no socket. Each item is a status int,
+    or an (status, headers) tuple to attach a Retry-After."""
+    it = iter(scripted)
+
+    def handler(request):
+        item = next(it)
+        status, headers = item if isinstance(item, tuple) else (item, {})
+        return httpx.Response(status, headers=headers)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
 class SendRetryTests(unittest.IsolatedAsyncioTestCase):
     """The 429 retry/backoff loop in _send."""
 
@@ -281,6 +296,41 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("rate-limiting", payload["notice"])
         self.assertEqual(len(payload["shows"]), 1)  # rendered from the stored record
         self.assertEqual(payload["shows"][0]["total"], 12)  # last-known, not a false 0
+
+
+class MockTransportSendTests(unittest.IsolatedAsyncioTestCase):
+    """The same 429 logic, driven through a REAL httpx.AsyncClient (MockTransport)
+    so genuine Response/header parsing and the .get plumbing are in the loop — a
+    faithfulness layer over the hand-rolled FakeClient, still fully offline."""
+
+    async def test_real_client_honors_retry_after_then_succeeds(self):
+        sleep = RecordingSleep()
+        async with _mock_transport_client((429, {"Retry-After": "2"}), 200) as client:
+            with _patch_sleep(sleep):
+                resp = await trakt._send(client, "GET", trakt.API_BASE + "/x")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(sleep.durations, [2.0])  # header parsed off a real Response
+
+    async def test_real_client_exponential_when_no_retry_after(self):
+        sleep = RecordingSleep()
+        async with _mock_transport_client(429, 429, 200) as client:
+            with _patch_sleep(sleep):
+                resp = await trakt._send(client, "GET", trakt.API_BASE + "/x")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(sleep.durations, [1.0, 2.0])
+
+    async def test_real_client_exhausted_raises_rate_limit(self):
+        sleep = RecordingSleep()
+        async with _mock_transport_client(429, 429, 429) as client:
+            with _patch_sleep(sleep):
+                with self.assertRaises(TraktRateLimitError):
+                    await trakt._send(client, "GET", trakt.API_BASE + "/x")
+        self.assertEqual(sleep.durations, [1.0, 2.0])
+
+    async def test_real_client_non_429_returned_untouched(self):
+        async with _mock_transport_client(404) as client:
+            resp = await trakt._send(client, "GET", trakt.API_BASE + "/x")
+        self.assertEqual(resp.status_code, 404)  # no retry, returned as-is
 
 
 if __name__ == "__main__":

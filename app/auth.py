@@ -551,10 +551,12 @@ async def username_availability_error(username: str) -> str | None:
         return "That username is taken."
     if await identifier_is_retired("username", candidate):
         return "That username is taken."
-    # A username may not shadow another user's custom share slug (§1.10's
-    # cross-namespace rule, checked in the other direction by
-    # share_links.slug_error) — queried directly rather than importing
-    # app.share_links, which itself imports this module.
+    # A username may not shadow another user's custom share slug: both live in
+    # the same public URL namespace (/u/<name>), so letting them collide would
+    # let a later registration silently hijack an earlier share link's path.
+    # share_links.slug_error enforces the same rule in the other direction.
+    # Queried directly rather than importing app.share_links, which itself
+    # imports this module.
     if await db.fetch_one("SELECT 1 FROM share_links WHERE custom_slug = ?", (candidate,)):
         return "That username is taken."
     return None

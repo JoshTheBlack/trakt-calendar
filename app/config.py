@@ -1,4 +1,4 @@
-"""Front-end-editable configuration (requirement C).
+"""Front-end-editable configuration.
 
 Everything that used to be a hardcoded PHP variable is editable from the Settings
 modal in the UI. Persistence is split across three homes, assembled back into one
@@ -89,7 +89,7 @@ class Settings:
     network_filter: list[str] = field(default_factory=list)
     pagination_limit: int = 300
     hide_not_watching: bool = False
-    cache_ttl_minutes: int = 720  # detail/cast/episode cache lifetime (phase 2)
+    cache_ttl_minutes: int = 720  # detail/cast/episode cache lifetime
     # Calendar window cache lifetime. Trakt's calendar endpoints carry no ETag or
     # Last-Modified (verified against the live API), so a window is refreshed on a
     # short TTL rather than a conditional request. Short because premiere dates in

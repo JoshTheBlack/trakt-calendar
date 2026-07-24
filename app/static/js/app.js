@@ -15,7 +15,7 @@ let historyLog = [];
 let lastKnownStats = { total: null, watching: null, notWatching: null };
 let currentShowIds = [];
 
-// ---- Endpoint switching (requirement D) ----
+// ---- Endpoint switching ----
 function switchEndpoint(key) {
     const params = new URLSearchParams(window.location.search);
     params.set('endpoint', key);
@@ -210,7 +210,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
 });
 
-// ---- Hide / show not-watching (requirement E) ----
+// ---- Hide / show not-watching ----
 async function toggleHideNotWatching() {
     const hide = !BODY.classList.contains('hide-not-watching');
     BODY.classList.toggle('hide-not-watching', hide);
@@ -436,7 +436,7 @@ function updateEmptyDays() {
 }
 
 
-// ---- Settings modal (requirement C) ----
+// ---- Settings modal ----
 // Credentials are write-only: the server sends back a flag per secret saying
 // whether one is stored, never the value. So each credential input renders
 // EMPTY, with a placeholder saying whether something is saved, and an empty
@@ -1427,7 +1427,7 @@ async function refreshTraktToken() {
     }
 }
 
-// ---- Season info tile enrichment (requirement F) ----
+// ---- Season info tile enrichment ----
 // Lazily fetch each show's current-season summary as its card scrolls into view,
 // so the initial page render stays fast. Results are cached server-side.
 function esc(s) {
@@ -1471,7 +1471,7 @@ document.addEventListener('DOMContentLoaded', () => {
     cards.forEach(c => io.observe(c));
 });
 
-// ---- Details modal (requirement G) ----
+// ---- Details modal ----
 async function openDetails(card, event) {
     if (event) {
         const interactive = event.target.closest('.watch-toggle, .trakt-btn, a, button');

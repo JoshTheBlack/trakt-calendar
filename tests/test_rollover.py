@@ -333,8 +333,8 @@ class _FixedClient:
 
 class DistraktImportFilterTests(RolloverTestCase):
     """distrakt's premiere import reads through the shared calendar cache, so it
-    must honor both the instance-wide content floor (Step 1, applied at
-    fetch time, before anything is cached) and the importing user's own
+    must honor both the instance-wide content floor (applied at fetch time,
+    before anything is cached) and the importing user's own
     genre/country/certification prefs (applied at read time, same as their
     main calendar) — not just import everything the floor happens to allow."""
 

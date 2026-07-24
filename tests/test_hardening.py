@@ -237,7 +237,7 @@ class AdminSessionScopingTests(HardeningTestCase):
 
 
 class ShareTokenComparisonTests(HardeningTestCase):
-    """§4.1: the one comparison this app makes against a secret is constant-time."""
+    """The one comparison this app makes against a secret is constant-time."""
 
     def test_a_valid_token_still_resolves(self):
         user_id = self.make_user()
@@ -1172,7 +1172,7 @@ class PlexPopupUrlTests(HardeningTestCase):
 
 
 class CacheIsOffTheEventLoopTests(HardeningTestCase):
-    """§1.1a: every database call goes through a worker thread. app/cache was
+    """Every database call goes through a worker thread. app/cache was
     reading and zlib-decompressing ~200 KB blobs inline on the event loop."""
 
     def test_get_and_set_are_coroutines(self):

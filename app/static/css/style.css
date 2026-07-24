@@ -453,13 +453,13 @@ body.hide-not-watching .card.not-watching { display: none; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 520px) { .two-col { grid-template-columns: 1fr; } }
 
-/* ---- Tile season info (requirement F) ---- */
+/* ---- Tile season info ---- */
 .season-info { margin-top: 8px; font-size: 0.72rem; color: var(--text-faint); display: flex; flex-wrap: wrap; gap: 4px 12px; }
 .season-info .si { display: inline-flex; align-items: center; gap: 4px; }
 .season-info .si b { color: var(--text-dim); font-weight: 600; }
 .season-info .si.next b { color: var(--green); }
 
-/* ---- Details modal content (requirement G) ---- */
+/* ---- Details modal content ---- */
 .details-loading { color: var(--text-faint); font-size: 0.9rem; padding: 8px 0; }
 .details-hero { display: flex; gap: 18px; }
 .details-hero img { width: 120px; aspect-ratio: 2/3; object-fit: cover; border-radius: 10px; border: 1px solid var(--card-border); flex-shrink: 0; }

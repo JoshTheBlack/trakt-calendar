@@ -420,7 +420,8 @@ _OWNER_DEFAULT_FIELDS = frozenset({
 
 async def update_owner_defaults(user_id: int, **fields) -> None:
     """Partial update of the owner defaults a share request falls back to when
-    a query param doesn't override them (§7.3's second tier). Mirrors
+    a query param doesn't override them — the second tier of that fallback,
+    behind the query param and ahead of the app-wide default. Mirrors
     auth.update_user_prefs; unknown keys and None values are ignored."""
     await get_or_create(user_id)
     updates = {k: v for k, v in fields.items() if k in _OWNER_DEFAULT_FIELDS and v is not None}
@@ -460,8 +461,9 @@ _RESOLVE_SELECT = (
 async def resolve_by_token(token: str):
     """Resolve /s/<token>. The index lookup finds the row; the compare_digest
     below repeats the equality in constant time, so the one comparison this app
-    makes against a secret is not a byte-at-a-time one (§4.1). Usernames and
-    slugs are public identifiers and need no such treatment."""
+    makes against a secret is not a byte-at-a-time one that would let a timing
+    attack guess the token. Usernames and slugs are public identifiers and need
+    no such treatment."""
     if not token:
         return None
     row = await db.fetch_one(

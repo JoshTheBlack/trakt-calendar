@@ -486,7 +486,7 @@ CREATE TABLE share_links (
     preferred_kind      TEXT    NOT NULL DEFAULT 'token'
                             CHECK (preferred_kind IN ('token', 'username', 'slug')),
     -- The token form defaults on so a brand-new share panel already has a
-    -- working link; the human-readable forms are opt-in (§1.10).
+    -- working link; the human-readable forms are opt-in.
     enabled_token       INTEGER NOT NULL DEFAULT 1,
     enabled_username    INTEGER NOT NULL DEFAULT 0,
     enabled_slug        INTEGER NOT NULL DEFAULT 0,
@@ -671,8 +671,8 @@ ALTER TABLE retired_identifiers ADD COLUMN user_id INTEGER REFERENCES users(id) 
 # It was app-wide in settings.json, which made every tracker user edit the same
 # map: importing a roster on one account registered dozens of networks into the
 # operator's, and one person's emoji choices rendered in everybody's Discord
-# posts. The tracker is per-user in every other respect (§1.13), and this is the
-# last piece of it that was not.
+# posts. The tracker is per-user in every other respect (roster, watch state,
+# view preferences), and this is the last piece of it that was not.
 #
 # Nothing seeds a new account's map — it starts empty and fills in from that
 # user's own roster. But an instance upgrading from the app-wide version has a

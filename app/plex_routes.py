@@ -12,13 +12,14 @@ Three entry points, no callback:
 
 Plex has no redirect/callback the way Trakt does — the popup approves the PIN
 entirely on plex.tv's own page, and this app only ever learns about it by
-asking. That makes the poll endpoint the place all of §4.2's callback-binding
-concerns land instead: it is reachable by anyone, repeatedly, for as long as a
-handshake stays unconsumed, so every poll re-checks the same handshake-cookie
-and session binding a one-shot callback would check once. The handshake
-cookie is checked BEFORE the row is even looked up, exactly like Trakt's
-callback, so a request for a PIN this browser didn't start costs one cookie
-comparison and never reaches plex.tv or the database.
+asking. That makes the poll endpoint the place all the callback-binding
+concerns a one-shot OAuth callback would normally carry land instead: it is
+reachable by anyone, repeatedly, for as long as a handshake stays unconsumed,
+so every poll re-checks the same handshake-cookie and session binding a
+one-shot callback would check once. The handshake cookie is checked BEFORE
+the row is even looked up, exactly like Trakt's callback, so a request for a
+PIN this browser didn't start costs one cookie comparison and never reaches
+plex.tv or the database.
 
 The row itself is only ever CONSUMED once — at the poll that finds the PIN
 already approved — via the same auth.consume_handshake() every other poll

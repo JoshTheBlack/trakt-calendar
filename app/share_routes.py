@@ -187,9 +187,10 @@ async def _render(request: Request, share_row) -> Response:
     items: list[dict] = []
     as_of: int | None = None
     if settings.configured:
-        # allow_fetch=False is the whole point (§1.9): a public visitor is
-        # served whatever is already cached, even stale, even nothing, and
-        # never triggers a Trakt call.
+        # allow_fetch=False is the whole point of a public share page: a
+        # visitor is served whatever is already cached, even stale, even
+        # nothing, and never triggers a Trakt call that would spend the
+        # owner's rate-limit budget on an anonymous request.
         items, as_of = await calendar_cache.read_month(
             endpoint, settings, tz=tz, year=year, month=month,
             genres=owner_prefs["genres"], countries=owner_prefs["countries"],
@@ -215,10 +216,10 @@ async def _render(request: Request, share_row) -> Response:
 
     # Open Graph tags for link unfurlers (Discord/Slack/etc.). Both URLs are
     # absolute and built only from the configured public_base_url — never the
-    # request Host (§1.16b) — since an unauthenticated crawler resolves relative
-    # paths unreliably and a spoofed Host must not become the advertised origin.
-    # Absent a configured base there is nothing safe to advertise, so the tags
-    # are simply omitted and the link falls back to a bare text preview.
+    # request Host — since an unauthenticated crawler resolves relative paths
+    # unreliably and a spoofed Host header must not become the advertised
+    # origin. Absent a configured base there is nothing safe to advertise, so
+    # the tags are simply omitted and the link falls back to a bare text preview.
     base = _public_base(settings)
     og_image = f"{base}/static/images/tvbanner.png" if base else None
     og_url = None
@@ -296,8 +297,9 @@ async def share_by_slug(request: Request, slug: str):
 # ---------------------------------------------------------------------------
 # details for a card on a public page — same modal content as the calendar
 # ---------------------------------------------------------------------------
-# CACHE-ONLY, so §1.9 holds: this never calls Trakt. The owner's own calendar
-# views already fetch and cache each show's detail (cast, trailer, episodes);
+# CACHE-ONLY, same as the calendar view above: this never calls Trakt. The
+# owner's own calendar views already fetch and cache each show's detail (cast,
+# trailer, episodes);
 # this serves that cache back to visitors. A show the owner has not viewed comes
 # back with empty fields and the modal renders around them — no public request
 # ever spends the owner's rate limit. Rate-limited per IP like every other share
@@ -353,7 +355,8 @@ def _share_payload(row, username: str | None, settings) -> dict:
     return {
         "ok": True,
         # Every URL below is None without a configured base — there is no
-        # request-derived fallback (§1.16b), so the panel needs to say why the
+        # request-derived fallback (the request Host isn't trustworthy enough
+        # to advertise as the public origin), so the panel needs to say why the
         # link boxes are empty rather than just rendering them blank.
         "base_url_missing": not bool(base),
         "token": row["token"],

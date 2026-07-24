@@ -1,4 +1,4 @@
-"""Registry of the switchable Trakt calendar endpoints (requirement D).
+"""Registry of the switchable Trakt calendar endpoints.
 
 Each endpoint knows how to build its Trakt API path and which media key its
 response items carry ("show" or "movie"), so the normalizer can adapt.

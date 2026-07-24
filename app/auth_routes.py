@@ -281,9 +281,9 @@ def _public_base(settings) -> str:
 
 def _og_context(settings, path: str) -> dict:
     """Open Graph tags for link unfurlers (Discord/Slack/etc.), built only from
-    the configured public_base_url — never the request Host (§1.16b) — since an
+    the configured public_base_url — never the request Host — since an
     unauthenticated crawler resolves relative paths unreliably and a spoofed
-    Host must not become the advertised origin. Absent a configured base
+    Host header must not become the advertised origin. Absent a configured base
     there's nothing safe to advertise, so both tags come back empty and the
     templates fall back to a bare text preview."""
     base = _public_base(settings)
@@ -337,9 +337,12 @@ async def register(request: Request):
     username, a validation failure — is recorded as a failed attempt against
     this IP, the same as a login failure, so a script trying tokens or
     usernames in a loop eventually gets throttled. A taken username is still
-    revealed in the response (§4.4's one accepted enumeration exception,
-    unrelated to invites); an unusable invite never is — every cause looks
-    identical from here.
+    revealed in the response — usernames are already public (they appear in
+    share URLs and Discord posts), so confirming one is registered leaks
+    nothing new, and the alternative (a generic error) would just make normal
+    "oops, taken" collisions confusing to fix. An unusable invite never is —
+    invite tokens are secret, so every cause of a bad one looks identical from
+    here.
     """
     settings = load_settings()
     ip = auth.client_ip(request, settings)
@@ -454,10 +457,10 @@ async def login(request: Request):
     dummy verify for exactly that reason: a lockout that resolved faster than a
     real check would itself be the oracle this is built to close.
 
-    Failed attempts are counted per username AND per IP independently (§1.18),
-    so one attacker can't lock out every account by spraying one IP, and one
-    victim IP can't be used to spray many usernames without tripping its own
-    limit first.
+    Failed attempts are counted per username AND per IP independently, so one
+    attacker can't lock out every account by spraying one IP, and one victim
+    IP can't be used to spray many usernames without tripping its own limit
+    first.
 
     A LOCKED-OUT ATTEMPT IS NOT COUNTED. It still burns a full dummy verify, so
     it costs the same and reveals nothing, but recording it would let a retry

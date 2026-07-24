@@ -583,8 +583,10 @@ class IdentityKeyingTests(PlexAuthTestCase):
 
 
 class ProviderButtonTests(PlexAuthTestCase):
-    """§7.6 has its own gate for distrakt; this is just making sure chat C's
-    disabled placeholder is actually gone."""
+    """The login page used to render Plex as a disabled "Off" placeholder like
+    Trakt's own unconfigured state; this just confirms it now renders as a
+    working, clickable button instead (distrakt access has its own separate
+    gate and isn't this test's concern)."""
 
     def test_the_login_page_offers_a_working_plex_button(self):
         resp = self.client.get("/login")

@@ -1,12 +1,13 @@
 // Distrakt page logic: add-show flow, bucketed month show list, abandon toggle,
-// the network->emoji map editor (CHAT 3), and the bucketed list + POST 1/POST 2
-// copy blocks sourced from GET /api/distrakt/month (CHAT 4).
+// the network->emoji map editor, and the bucketed list + POST 1/POST 2
+// copy blocks sourced from GET /api/distrakt/month.
 
 function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-// Same toast() as app.js (kept local — distrakt.js is deliberately standalone, per BUILD_PLAN §7).
+// Same toast() as app.js (kept local — distrakt.js is deliberately standalone, loading
+// on only its own page rather than pulling in app.js's calendar-page logic).
 function toast(message, ok) {
     let host = document.getElementById('toastHost');
     if (!host) { host = document.createElement('div'); host.id = 'toastHost'; document.body.appendChild(host); }
@@ -50,8 +51,9 @@ let networkTmdb = {};     // network name -> a tmdb id (from the roster), for lo
 
 function applyMonthResponse(d) {
     monthData = d;
-    // A frozen past month (d.closed) and a never-tracked past month (d.readonly,
-    // blocked by §6 no-backfill) are both read-only — hide the add/edit controls.
+    // A frozen past month (d.closed) and a never-tracked past month (d.readonly —
+    // the tracker only rolls forward and never backfills a month nobody was
+    // tracking at the time) are both read-only — hide the add/edit controls.
     monthClosed = !!d.closed || !!d.readonly;
     // Build network -> tmdb from the roster so the emoji-map logos can generate/regen.
     networkTmdb = {};
@@ -77,7 +79,7 @@ async function loadMonthData() {
     }
 }
 
-// Force a fresh totals refresh (§3): POST /api/distrakt/refresh bypasses the 24h
+// Force a fresh totals refresh: POST /api/distrakt/refresh bypasses the 24h
 // season cache and re-stamps totals_refreshed_at. Past/closed months are frozen,
 // so the server simply returns the snapshot unchanged.
 async function refreshMonth() {
@@ -144,7 +146,7 @@ async function deleteShow(traktId, season, event) {
 
 // Read-only months hide the add/edit affordances and show a banner (abandon
 // buttons are also omitted per-row, see showRow). `kind` picks the message:
-// 'frozen' = a closed snapshot, 'untracked' = a never-tracked past month (§6).
+// 'frozen' = a closed snapshot, 'untracked' = a never-tracked past month.
 function applyReadonlyState(readonly, kind) {
     const toolbar = document.querySelector('.distrakt-actions');
     if (toolbar) toolbar.style.visibility = readonly ? 'hidden' : '';

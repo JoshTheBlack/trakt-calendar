@@ -176,7 +176,7 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
 }
 .distrakt-default-emoji { max-width: 160px; margin: 14px 0; }
 
-/* CHAT 5 — month-nav + frozen (past-month) banner */
+/* Month-nav + frozen (past-month) banner */
 /* Sits inside .hero-lead beside the wordmark, exactly like the calendar's own
    month nav — so `justify-self` (a grid property) no longer applies. */
 .distrakt-nav { display: flex; align-items: center; gap: 8px; }

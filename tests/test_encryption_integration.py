@@ -180,7 +180,7 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
         save_settings(Settings(trakt_client_id="client-id", trakt_access_token="op-token"))
         self._calendar_call_uses("op-token")
 
-        # Stage 1: choose to enable, get a generated key, restart-required.
+        # First phase: choose to enable, get a generated key, restart-required.
         result = asyncio.run(encryption_flow.begin_enable(generate=True))
         self.assertTrue(result["restart_required"])
         key = result["key"]
@@ -191,7 +191,7 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
         self.assertTrue(asyncio.run(encryption_flow.verify_key()))
         self.assertEqual(asyncio.run(encryption_flow.get_phase()), encryption_flow.PHASE_PENDING_ENCRYPT)
 
-        # Stage 2: encrypt in place.
+        # Second phase: encrypt in place.
         asyncio.run(encryption_flow.encrypt_now())
         self.assertEqual(asyncio.run(encryption_flow.get_phase()), encryption_flow.PHASE_ENCRYPTED)
         raw = asyncio.run(db.fetch_value(

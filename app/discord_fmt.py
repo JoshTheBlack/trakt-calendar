@@ -1,4 +1,4 @@
-"""Bucketing state machine + POST 1/POST 2 markdown renderer (BUILD_PLAN §4).
+"""Bucketing state machine + POST 1/POST 2 markdown renderer.
 
 Pure, offline functions — no I/O, no Trakt calls, no persistence. Callers
 (app/main.py) merge each show's stored record (app/distrakt.py, identity +
@@ -14,13 +14,18 @@ LIVE SHOW SHAPE (one dict per show+season, used throughout this module):
   premiere (str "M/D" | None), finale (str "M/D" | None),
   started_airing (bool), finished_airing (bool).
 
-Exact literal formats below are verified against a hand-provided July sample
-(not in BUILD_PLAN.txt — pasted directly into the CHAT 4 conversation); see
-"CHAT 4 — AS IMPLEMENTED" for the parts of §4 the sample clarified or corrected.
+Exact literal formats below are verified against a hand-provided sample of a
+real month's posts, since Discord markdown spacing/punctuation is easy to get
+subtly wrong from a written spec alone and the sample is what people actually
+compare a generated post against. Where the sample disagreed with or went
+beyond an earlier written description (e.g. which leading articles get ignored
+when sorting — see `_sort_title`), the sample wins: it is the more concrete,
+harder-to-misread source of truth.
 """
 from __future__ import annotations
 
-# Keepup groups Sun..Sat (§4); only weekdays with at least one show get a header.
+# Keepup groups shows by air weekday, Sun..Sat; only weekdays with at least one
+# show get a header, so a quiet Tuesday doesn't leave an empty section in the post.
 _WEEKDAY_ORDER = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
 
@@ -30,10 +35,10 @@ _LEADING_ARTICLES = ("the ", "a ", "an ")
 def _sort_title(title) -> str:
     """Alphabetical sort key ignoring a leading article (case-insensitive).
 
-    §4's text only says "ignoring a leading 'The'", but the hand-provided July
-    sample sorts "A Good Girl's Guide to Murder" under G (between "The Four
-    Seasons" and "Half Man") — i.e. leading "A"/"An" are ignored too, standard
-    title-alphabetization style, not just "The"."""
+    Ignores "The"/"A"/"An", not just "The" — standard title-alphabetization
+    style. Confirmed against a real sample post, which sorts "A Good Girl's
+    Guide to Murder" under G (between "The Four Seasons" and "Half Man"),
+    i.e. the leading "A" is stripped there too."""
     t = (title or "").strip()
     low = t.lower()
     for article in _LEADING_ARTICLES:
@@ -103,7 +108,7 @@ def premiered_in_month(show: dict, month_number: int) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Bucketing state machine (§4 lifecycle)
+# Bucketing state machine
 # ---------------------------------------------------------------------------
 
 def bucket_of(rec: dict, live: dict) -> str:
@@ -136,7 +141,7 @@ def bucket_of(rec: dict, live: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Per-bucket line renderers (exact inline forms, §4)
+# Per-bucket line renderers (exact inline forms, verified against a real sample post)
 # ---------------------------------------------------------------------------
 
 def _new_returning_line(show: dict, emoji_map: dict, default_emoji: str) -> str:
@@ -181,16 +186,16 @@ def _completed_line(show: dict, emoji_map: dict, default_emoji: str) -> str:
 
 
 def freeze_form(show: dict) -> str:
-    """The backtick-wrapped inline form to snapshot at abandon-time (§4/§5): the
-    show's current bucket-appropriate counts form, minus any premiere/finale
+    """The backtick-wrapped inline form to snapshot at abandon-time: the show's
+    current bucket-appropriate counts form, minus any premiere/finale
     dates — "(x/y, CAD)" if it hasn't started airing yet, else "(x/y)", else
     (fully watched) just the title+season with no counts.
 
     Deliberately does not call bucket_of / look at `abandoned` — this freezes
     what the state WOULD be right now, independent of the toggle being applied.
     Reused both by app/main.py's abandon endpoint (to freeze `abandoned_form`)
-    and by `_abandoned_line` below as the fallback for pre-Chat-4 abandoned
-    records where `abandoned_form` is still None.
+    and by `_abandoned_line` below as the fallback for abandoned records
+    written before `abandoned_form` existed, where it is still None.
     """
     title = show.get("title", "")
     season_tag = _season_tag(show.get("season"))
@@ -219,7 +224,9 @@ def _abandoned_line(show: dict, emoji_map: dict, default_emoji: str) -> str:
 def _section(header: str, lines: list[str]) -> str:
     """Mandatory sections (New/Returning/Cleanup/Keepup) always render their
     header, even with zero lines; only Completed/Abandoned are conditionally
-    omitted entirely by the caller (§4: "omitting empty optional sections")."""
+    omitted entirely by the caller when they have nothing in them, since
+    unlike the mandatory sections an empty Completed/Abandoned isn't itself
+    informative to a reader of the post."""
     return header + ("\n" + "\n".join(lines) if lines else "")
 
 

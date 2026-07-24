@@ -1,14 +1,15 @@
-"""Unit tests for app/discord_fmt.py (BUILD_PLAN Chat 4).
+"""Unit tests for app/discord_fmt.py.
 
 Pure/offline — no network, no persistence. The render_post1/render_post2 tests
-hand-verify against a July sample pasted directly into the CHAT 4 conversation
-(not stored in BUILD_PLAN.txt), with two corrections applied per §3/§4:
+hand-verify against a real sample month's posts, with two corrections applied:
   - the sample's old "(x/?)" totals are superseded — real totals are invented
     here for the three shows that had them (TRINITY, President Curtis,
-    Last Week Tonight), since §3 mandates a live numeric total, never "?".
-  - "Young Sherlock (1/8)" (no season tag) is the seasonless edge case called
-    out in BUILD_PLAN §7 as explicitly out of scope for this chat; it is
-    rendered here with "S01" like every other show, per this chat's guardrails.
+    Last Week Tonight), since discord_fmt always renders a live numeric total,
+    never "?".
+  - "Young Sherlock (1/8)" (no season tag) is a seasonless edge case the sample
+    doesn't otherwise exercise; it is rendered here with "S01" like every other
+    show, matching discord_fmt's normal behavior rather than carrying the
+    sample's omission forward.
 
 Run from the repo root:
     ./.venv/Scripts/python.exe -m unittest discover -s tests -v
