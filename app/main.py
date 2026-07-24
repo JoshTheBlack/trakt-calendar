@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import admin_routes
 from . import arr
@@ -259,12 +260,33 @@ async def lifespan(_app: FastAPI):
         await _trakt.aclose_shared_client()
 
 
+# Every load carries app.js/style.css/fonts plus (mostly) whatever asset_v was
+# minted at the last deploy; a short max-age still saves a full refetch within a
+# session without risking the "forgot to bump asset_v" staleness a long/immutable
+# one would cause. ETags (StaticFiles' own default) still catch a change within
+# that window.
+_STATIC_CACHE_HEADERS = {"Cache-Control": "max-age=600"}
+
+
+class _CachedStaticFiles(StaticFiles):
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers.update(_STATIC_CACHE_HEADERS)
+        return response
+
+
 # The interactive API docs are off: they are a complete, unauthenticated
 # inventory of every endpoint in the app, and nothing here is a public API that
 # anyone consumes from a schema.
 app = FastAPI(title="Trakt New Shows", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+# Added before authz.install() below, so it nests INSIDE the authz middleware
+# stack (Starlette's registration order is reversed — see authz.install's own
+# docstring) and compresses the actual route responses, including the
+# multi-megabyte calendar HTML. authz's own short-circuit responses (redirects,
+# 403s) are tiny, so shipping those uncompressed costs nothing.
+app.add_middleware(GZipMiddleware)
+app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 app.include_router(auth_routes.router)

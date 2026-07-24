@@ -4,6 +4,22 @@
     --text-dim: #9aa2b1; --text-faint: #5c6478; --accent-blue: #4fa3e0;
     --green: #22c55e;
 }
+/* Self-hosted so the calendar's first paint doesn't wait on a third-party
+   render-blocking font fetch (fonts.googleapis.com/fonts.gstatic.com — both
+   faces are OFL, fine to vendor). font-display: swap paints with the fallback
+   immediately and swaps once the face loads, rather than blocking on it. */
+@font-face {
+    font-family: 'Bebas Neue'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url('/static/fonts/bebas-neue-v16-latin-400.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url('/static/fonts/inter-v20-latin-400.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Inter'; font-style: normal; font-weight: 700; font-display: swap;
+    src: url('/static/fonts/inter-v20-latin-700.woff2') format('woff2');
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
     background: radial-gradient(circle at 15% 0%, rgba(232,181,69,0.08), transparent 40%),
@@ -121,7 +137,12 @@ body { --card-w: 220px; }
 body.card-horizontal { --card-w: 420px; }
 
 main { padding: 10px 6vw 0 6vw; }
-.day-block { margin-top: 40px; }
+/* Skips layout/paint for day-blocks scrolled off-screen, so a full month costs
+   about what a couple of visible days do. contain-intrinsic-size is a single
+   rough estimate rather than one computed per day: a lazy-loaded day reserves
+   its own height via a skeleton, so the estimate only has to hold the
+   scrollbar roughly steady for the current full-month render. */
+.day-block { margin-top: 40px; content-visibility: auto; contain-intrinsic-size: 0 900px; }
 .day-header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; border-bottom: 2px solid var(--card-border); padding-bottom: 10px; }
 .day-header .day-title { font-family: 'Bebas Neue', sans-serif; font-size: 1.9rem; color: var(--gold-soft); letter-spacing: 1px; }
 .day-header .day-count { color: var(--text-faint); font-size: 0.9rem; }
