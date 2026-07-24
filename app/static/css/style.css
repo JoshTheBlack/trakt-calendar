@@ -128,8 +128,23 @@ header.hero {
 }
 .stat-pop { animation: statPop 0.55s cubic-bezier(.36,.07,.19,.97); }
 .delta-msg { font-size: 0.7rem; color: #a1a1aa; margin-top: 2px; display: block; }
+/* The direction of the change, decided server-side and carried as a class so the
+   line arrives coloured rather than being tinted by script after paint. */
+.delta-msg.up { color: #34d399; }
+.delta-msg.down { color: #f87171; }
+.delta-msg.same { color: #a1a1aa; }
 .stats-divider { border: 0; border-top: 1px solid #242a38; margin: 6px 0; }
 .history-log { margin-top: 8px; font-size: 0.65rem; color: #888; border-top: 1px solid #242a38; padding-top: 5px; }
+.history-row { display: flex; justify-content: space-between; }
+
+/* ---- Jump-to day strip ---- */
+/* Pinned under the header so a long month can be navigated without scrolling
+   through it. A day with no items has no section to scroll to, so its chip is a
+   greyed <span> rather than a link. */
+.day-chips { position: sticky; top: 0; z-index: 9980; display: flex; flex-wrap: wrap; gap: 4px; padding: 8px 16px; margin: 0 auto; background: rgba(12,14,20,0.92); border-bottom: 1px solid var(--card-border); backdrop-filter: blur(6px); }
+.day-chip { min-width: 26px; text-align: center; padding: 3px 6px; border-radius: 7px; border: 1px solid var(--card-border); font-size: 0.72rem; line-height: 1.2; color: var(--gold-soft); text-decoration: none; transition: all .15s ease; }
+a.day-chip:hover { background: rgba(232,181,69,0.9); color: #12151c; border-color: var(--gold); }
+.day-chip.empty { color: #4b5261; border-color: #232734; }
 
 /* ---- Grid / cards ---- */
 /* --card-w drives column width; overridden per card style below. */
@@ -277,6 +292,13 @@ body.hide-not-watching .card.not-watching { display: none; }
 
 .watch-toggle { position: absolute; top: 48px; right: 10px; z-index: 6; width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.18); background: rgba(10,12,16,0.78); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .18s ease; padding: 0; }
 .watch-toggle:hover { transform: scale(1.14); background: rgba(232,181,69,0.9); }
+/* Which eye shows follows from the card's own class, so a card rendered
+   not-watching by the server already has the struck-through eye at first paint
+   and the toggle is a single class flip rather than two inline style writes. */
+.watch-toggle .icon-closed, .card.not-watching .watch-toggle .icon-open { display: none; }
+.card.not-watching .watch-toggle .icon-closed { display: block; }
+/* The <symbol> definitions the cards' <use> elements point at: markup only. */
+.svg-symbols { position: absolute; width: 0; height: 0; overflow: hidden; }
 
 .card-body { padding: 14px 16px 16px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1; transition: opacity .22s ease; }
 .title-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }

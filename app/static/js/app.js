@@ -11,7 +11,7 @@ const BODY = document.body;
 // The cache size cap is stored in bytes and edited in megabytes.
 const MB = 1024 * 1024;
 
-let MONTH, YEAR, ENDPOINT, currentTotalShows, currentTotal, STATE_URL;
+let MONTH, YEAR, ENDPOINT, currentTotalShows, STATE_URL;
 
 function readPageContext() {
     const d = (document.getElementById('pageData') || document.body).dataset;
@@ -19,14 +19,18 @@ function readPageContext() {
     YEAR = d.year;
     ENDPOINT = d.endpoint;
     currentTotalShows = parseInt(d.total, 10) || 0;
-    currentTotal = currentTotalShows;
     STATE_URL = `/api/state?month=${MONTH}&year=${YEAR}&endpoint=${encodeURIComponent(ENDPOINT)}`;
 }
 
+// The view's own numbers, read from the JSON the server embeds rather than
+// counted off the DOM. Counting cards only ever described the cards the page
+// happened to be holding; these describe the whole month, which is what the
+// stats tiles claim to be about.
 let notWatching = new Set();
-let historyLog = [];
+let showCounts = {};
+let watchingCount = 0;
+let notWatchingCount = 0;
 let lastKnownStats = { total: null, watching: null, notWatching: null };
-let currentShowIds = [];
 
 // ---- Layout controls: card style + day packing ----
 // Applied instantly via <body> classes (pure CSS), then persisted to settings.
@@ -271,12 +275,6 @@ function useDeviceTimezone() {
 // change-detection baseline (last_count/last_show_ids/history) is written
 // separately, once per load. Neither is a read-modify-write of the whole
 // document, so two open tabs can't lose each other's marks.
-async function loadState() {
-    const res = await fetch(STATE_URL, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to load state: ' + res.status);
-    return res.json();
-}
-
 async function saveNotWatchingDelta(itemId, isNotWatching) {
     const res = await fetch(STATE_URL, {
         method: 'POST',
@@ -287,115 +285,42 @@ async function saveNotWatchingDelta(itemId, isNotWatching) {
     return res.json();
 }
 
-async function saveViewBaseline() {
-    const res = await fetch(STATE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            last_count: currentTotalShows,
-            last_show_ids: currentShowIds,
-            history: historyLog
-        })
-    });
-    if (!res.ok) throw new Error('Failed to save state: ' + res.status);
-    return res.json();
-}
-
 // Storage persistence is silent on success; only a FAILURE is surfaced (a toast),
-// so a broken save/load doesn't lose your not-watching marks without warning.
+// so a broken save doesn't lose your not-watching marks without warning.
 function setSyncStatus(ok, message) {
     if (!ok) toast('⚠️ ' + (message || 'Storage error') + ' — changes may not be saved.', false);
 }
 
-// Loads this view's saved state (not-watching marks, history, the is-new
-// baseline) and paints it. Runs on first load and again after every boosted nav,
-// since a nav lands a fresh month/endpoint with its own state. The monotonic
-// token guards the race a boosted nav introduces: a slow load for the page the
-// user just left must not apply — or re-commit its baseline — on top of a newer
-// one, so only the most recent init's response is allowed through.
-let viewGeneration = 0;
-async function loadAndApplyState() {
-    const gen = ++viewGeneration;
-    // A new view carries no remembered stat values, so the first paint after a
-    // nav doesn't animate a phantom "change" against the previous month's counts.
-    lastKnownStats = { total: null, watching: null, notWatching: null };
-    try {
-        const state = await loadState();
-        if (gen !== viewGeneration) return;  // superseded by a newer navigation
-        notWatching = new Set(state.notWatching || []);
-        historyLog = state.history || [];
-        setSyncStatus(true);
-
-        const now = new Date();
-        const ts = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-        const todayKey = now.toISOString().slice(0, 10);
-
-        if (historyLog.length === 0 || historyLog[historyLog.length - 1].count !== currentTotal) {
-            historyLog.push({ time: ts, count: currentTotal, date: todayKey });
-            if (historyLog.length > 3) historyLog.shift();
+// The month's counts, this viewer's marks and the ids this load called new are
+// all computed server-side and shipped with the page, so there is nothing to
+// fetch on load and nothing to re-mark after paint. This reads those numbers
+// back so a toggle can keep the tiles honest without asking the DOM how many
+// cards it currently holds — a question whose answer stops being the month's
+// answer as soon as the page renders anything less than all of it.
+function readViewData() {
+    let data = {};
+    const el = document.getElementById('calendarViewData');
+    if (el) {
+        try {
+            data = JSON.parse(el.textContent) || {};
+        } catch (e) {
+            console.error(e);
         }
-
-        document.getElementById('historyLog').innerHTML = '<strong>History:</strong>' +
-            [...historyLog].reverse().map(i => `<div style="display:flex; justify-content:space-between;"><span>${getRelativeDayLabel(i.date)} ${i.time}</span><span>${i.count} items</span></div>`).join('');
-
-        document.querySelectorAll('.card').forEach(card => {
-            setCardState(card, notWatching.has(card.getAttribute('data-id')));
-        });
-
-        currentShowIds = Array.from(document.querySelectorAll('.card')).map(c => c.getAttribute('data-id'));
-
-        if (Array.isArray(state.lastShowIds)) {
-            const previousShowIds = new Set(state.lastShowIds);
-            document.querySelectorAll('.card').forEach(card => {
-                const id = card.getAttribute('data-id');
-                if (id && !previousShowIds.has(id)) card.classList.add('is-new');
-            });
-        }
-
-        const previousCount = state.lastCount;
-        const deltaMsgElement = document.getElementById('deltaMsg');
-        if (previousCount !== null && previousCount !== undefined) {
-            if (currentTotalShows > previousCount) {
-                deltaMsgElement.textContent = `📈 (+${currentTotalShows - previousCount} since last run)`;
-                deltaMsgElement.style.color = '#34d399';
-            } else if (currentTotalShows < previousCount) {
-                deltaMsgElement.textContent = `📉 (-${previousCount - currentTotalShows} since last run)`;
-                deltaMsgElement.style.color = '#f87171';
-            } else {
-                deltaMsgElement.textContent = `✅ Perfect Match`;
-                deltaMsgElement.style.color = '#a1a1aa';
-            }
-        } else {
-            deltaMsgElement.textContent = `(Initial Tracking)`;
-        }
-
-        updateStats();
-        await saveViewBaseline();
-    } catch (e) {
-        if (gen !== viewGeneration) return;
-        console.error(e);
-        setSyncStatus(false, 'Load failed');
-        updateStats();
     }
+    notWatching = new Set(data.notWatching || []);
+    showCounts = data.showCounts || {};
+    watchingCount = data.watching || 0;
+    notWatchingCount = data.notWatchingCount || 0;
+    // The tiles are already painted with exactly these values, so remember them
+    // as the starting point: the pop animation is for changes the viewer makes,
+    // not for the numbers the page arrived with.
+    lastKnownStats = { total: currentTotalShows, watching: watchingCount, notWatching: notWatchingCount };
 }
 
-function getRelativeDayLabel(dateStr) {
-    if (!dateStr) return 'Today';
-    const today = new Date();
-    const todayKey = today.toISOString().slice(0, 10);
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayKey = yesterday.toISOString().slice(0, 10);
-    if (dateStr === todayKey) return 'Today';
-    if (dateStr === yesterdayKey) return 'Yesterday';
-    return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-}
-
+// One class flip: which eye the toggle shows is a CSS consequence of it, so the
+// server can render a card already in either state without this having run.
 function setCardState(card, isNotWatching) {
     card.classList.toggle('not-watching', isNotWatching);
-    const btn = card.querySelector('.watch-toggle');
-    btn.querySelector('.icon-open').style.display = isNotWatching ? 'none' : 'block';
-    btn.querySelector('.icon-closed').style.display = isNotWatching ? 'block' : 'none';
 }
 
 // Every card on the page for one show. On All Episodes that is a dozen rows
@@ -413,6 +338,13 @@ async function toggleWatch(btn, event) {
     const isNotWatching = !card.classList.contains('not-watching');
     cardsForShow(id).forEach(c => setCardState(c, isNotWatching));
     if (isNotWatching) notWatching.add(id); else notWatching.delete(id);
+    // A show can air on a dozen days of one month, and the mark applies to all of
+    // them. Move the tiles by the month's count for this show rather than by the
+    // cards on screen, which is the same number today and won't be once days
+    // arrive separately.
+    const cards = showCounts[id] || 0;
+    notWatchingCount += isNotWatching ? cards : -cards;
+    watchingCount -= isNotWatching ? cards : -cards;
     updateStats();
     try {
         await saveNotWatchingDelta(id, isNotWatching);
@@ -430,8 +362,8 @@ function popStat(el) {
 
 function updateStats() {
     const total = currentTotalShows;
-    const actualNotWatching = document.querySelectorAll('.card.not-watching').length;
-    const actualWatching = total - actualNotWatching;
+    const actualNotWatching = notWatchingCount;
+    const actualWatching = watchingCount;
     const totalEl = document.getElementById('statTotal');
     const watchingEl = document.getElementById('statWatching');
     const notWatchingEl = document.getElementById('statNotWatching');
@@ -1710,7 +1642,8 @@ function initCalendarPage() {
     initSeasonInfo();
     initDistraktNav();
     initBuildTap();
-    loadAndApplyState();  // async; fire-and-forget, guarded by its own generation token
+    readViewData();
+    updateEmptyDays();
 }
 
 // afterSwap fires only on AJAX swaps, never the initial paint, so the readyState

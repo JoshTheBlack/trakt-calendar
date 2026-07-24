@@ -516,7 +516,10 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         "total": len(items),
         "watching": len(items) - not_watching_count,
         "not_watching": not_watching_count,
-        "show_ids": [i["id"] for i in items],
+        # De-duped, first-airing order: one show airing a dozen times in a month
+        # is one show as far as "which of these is new since last time" goes, and
+        # this list is stored per user per view.
+        "show_ids": list(dict.fromkeys(i["id"] for i in items)),
         "as_of": as_of,
         "partial": partial,
     }

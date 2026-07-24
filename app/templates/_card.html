@@ -1,0 +1,64 @@
+{# One calendar card. The ONLY place card markup lives, so the full page and any
+   fragment that returns days render byte-identical cards.
+
+   Context it reads, all supplied by whoever renders it: `item` (one normalized
+   entry), `not_watching` and `new_ids` (sets, tested by membership rather than
+   queried per card), `is_admin` and `settings` (which action buttons exist).
+
+   The not-watching and is-new classes are decided HERE, on the server. They used
+   to be added by the client after /api/state resolved, which meant hidden items
+   painted and then popped out and the badges arrived a frame late. #}
+<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.trakt_id }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.tvdb if item.tvdb is not none else '' }}" data-tmdb="{{ item.tmdb if item.tmdb is not none else '' }}" onclick="openDetails(this, event)">
+    <div class="poster-wrap">
+        <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
+        <div class="new-badge">✨ NEW</div>
+        {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
+        {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
+        {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
+        {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.tmdb if item.tmdb is not none else '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
+        {# Both eyes reference the <symbol>s defined once per page instead of
+           repeating ~800 bytes of path data on every card; which one shows is a
+           CSS consequence of the card's not-watching class. #}
+        <button type="button" class="watch-toggle" onclick="toggleWatch(this, event)" title="Toggle watching">
+            <svg class="icon-open" width="16" height="16" aria-hidden="true"><use href="#eye-open"></use></svg>
+            <svg class="icon-closed" width="16" height="16" aria-hidden="true"><use href="#eye-closed"></use></svg>
+        </button>
+        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
+    </div>
+    <div class="card-body">
+        <div class="title-row">
+            <div class="show-title">{{ item.title }}</div>
+            {% if item.year %}<div class="show-year">{{ item.year }}</div>{% endif %}
+        </div>
+        <div class="meta-row">
+            {% if item.certification %}<span class="chip cert" data-cert="{{ item.certification }}">{{ item.certification }}</span>{% endif %}
+            {% if item.country %}<span class="chip country">🌍 {{ item.country }}</span>{% endif %}
+            {% if item.language %}<span class="chip lang">🗣️ {{ item.language }}</span>{% endif %}
+            <span class="chip day">📆 {{ item.day_of_week }}</span>
+            {% for g in item.genres %}<span class="chip">{{ g }}</span>{% endfor %}
+        </div>
+        {% if item.overview %}<div class="overview">{{ item.overview }}</div>{% endif %}
+        <div class="premiere-info">
+            <span class="date">{{ item.air_display }}</span>
+            <span class="time">{{ item.air_time }}</span>
+        </div>
+        {% if item.media != 'movie' and item.season is not none %}
+        <div class="season-info" data-role="season-info" hidden></div>
+        {% endif %}
+        <div class="links-row">
+            <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
+                <img src="/static/images/traktlogo.png" alt="Trakt">
+            </a>
+            {% if is_admin %}
+            {% if item.media == 'movie' and settings.radarr_configured %}
+            <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>
+            {% elif item.media != 'movie' and settings.sonarr_configured %}
+            <button type="button" class="arr-btn sonarr" data-arr="sonarr" onclick="addToArr(this, event)" title="Add to Sonarr"><img src="/static/icons/sonarr.png" alt=""><span>Sonarr</span></button>
+            {% endif %}
+            {% if settings.seer_configured %}
+            <button type="button" class="arr-btn seer" data-arr="seer" onclick="addToArr(this, event)" title="Request on Seerr"><img src="/static/icons/seer.png" alt=""><span>Seerr</span></button>
+            {% endif %}
+            {% endif %}
+        </div>
+    </div>
+</div>

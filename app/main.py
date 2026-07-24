@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -454,10 +455,22 @@ async def index(request: Request):
 
     month = _valid_month(request.query_params.get("month"), today.month)
     tz = _resolve_viewer_tz(user, settings)
+    days = calendar.monthrange(year, month)[1]
+
+    # This viewer's marks, read ONCE and handed to the assembly so the cards come
+    # out of the template already carrying the class. The client used to add it
+    # after the page had painted, which is what made hidden items visibly pop out.
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
 
     grouped: list[dict] = []
     total = 0
+    watching = 0
+    not_watching_count = 0
     partial = False
+    new_ids: set[str] = set()
+    delta = {"text": "", "kind": "none"}
+    history: list[dict] = []
+    show_counts: dict[str, int] = {}
     error: str | None = None
     if not settings.configured:
         error = "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
@@ -467,7 +480,6 @@ async def index(request: Request):
             # sent, so this span is the server-side "time to first byte" for the
             # calendar — dominated by the per-window Trakt fetch on a cold cache
             # (now concurrent across the windows, not one await at a time).
-            days = calendar.monthrange(year, month)[1]
             with span("calendar.read_month", endpoint=endpoint.key, ym=f"{year}-{month:02d}") as sp:
                 grouped, meta = await calendar_cache.assemble_range(
                     endpoint, settings, tz=tz,
@@ -476,15 +488,36 @@ async def index(request: Request):
                     show_certifications=prefs["show_certifications"],
                     movie_certifications=prefs["movie_certifications"],
                     network_filter=prefs["network_filter"] or None,
+                    not_watching_ids=not_watching,
                 )
                 sp.set(items=meta["total"])
             total = meta["total"]
+            watching = meta["watching"]
+            not_watching_count = meta["not_watching"]
             # A window Trakt couldn't supply is skipped rather than failing the
             # whole month; flag it so the page can say the month is incomplete
             # instead of silently showing a short one.
             partial = meta["partial"]
+            # How many cards each show has this month. The stats tiles need it to
+            # keep counting correctly when one toggle flips a show that airs on a
+            # dozen days — without asking the DOM, which only ever knows about the
+            # cards it currently holds.
+            show_counts = Counter(item["id"] for group in grouped for item in group["items"])
+            # The is-new diff and its baseline commit belong to whoever produced
+            # the cards, over the SERVER's full id list. Skipped on the error
+            # paths below: committing an empty month as the baseline would make
+            # the whole month look new the next time it loads properly.
+            view_state = await calendar_state.resolve_view(
+                user.user_id, endpoint.key, year, month,
+                show_ids=meta["show_ids"], total=total, now=datetime.now(tz),
+            )
+            new_ids = view_state["new_ids"]
+            delta = view_state["delta"]
+            history = view_state["history"]
         except TraktError as exc:
             error = str(exc)
+
+    counts_by_date = {group["date"]: len(group["items"]) for group in grouped}
 
     # Per-user view preferences (card style, day packing, hide-not-watching) —
     # distinct from `settings`, which stays the app-wide defaults new accounts
@@ -514,6 +547,33 @@ async def index(request: Request):
         "nav": _nav(year, month),
         "grouped": grouped,
         "total": total,
+        # The stats tiles, the is-new marks, the "since last run" line and the
+        # history log are all computed above and rendered with the page, so they
+        # are right at first paint and stay right when only part of a month is on
+        # screen. The card partial reads these two sets by membership.
+        "not_watching": not_watching,
+        "new_ids": new_ids,
+        "stats": {"total": total, "watching": watching, "not_watching": not_watching_count},
+        "delta": delta,
+        "history": history,
+        # The same numbers again as data rather than markup, so the client can
+        # keep the tiles honest through a toggle (and so a per-day render can mark
+        # is-new from the whole month's answer instead of recomputing it).
+        "view_data": {
+            "newIds": sorted(new_ids),
+            "showCounts": dict(show_counts),
+            "notWatching": sorted(nw for nw in not_watching if nw in show_counts),
+            "watching": watching,
+            "notWatchingCount": not_watching_count,
+        },
+        # One chip per day of the month for the jump-to strip; days with nothing
+        # on them have no section to scroll to, so they render inert.
+        "day_chips": [
+            {"day": day,
+             "date": f"{year}-{month:02d}-{day:02d}",
+             "count": counts_by_date.get(f"{year}-{month:02d}-{day:02d}", 0)}
+            for day in range(1, days + 1)
+        ],
         "error": error,
         # A non-fatal warning distinct from `error`: the month rendered, but at
         # least one window's data couldn't be loaded, so it may be missing days.

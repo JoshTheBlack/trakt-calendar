@@ -18,6 +18,7 @@ Run: ./.venv/Scripts/python.exe -m unittest tests.test_calendar_route -v
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -460,6 +461,186 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("error-banner", resp.text)
         self.assertNotIn("warning-banner", resp.text)
+
+
+# ---------------------------------------------------------------------------
+# the view logic the server now owns: counts, is-new, the committed baseline
+# ---------------------------------------------------------------------------
+
+def _card_class(html: str, item_id: str) -> str:
+    m = re.search(r'<div class="([^"]*)" data-id="%s"' % re.escape(item_id), html)
+    return m.group(1) if m else ""
+
+
+def _view_data(html: str) -> dict:
+    """The JSON the page embeds for the client — the counts and the is-new set
+    as DATA, not only as classes."""
+    m = re.search(r'<script id="calendarViewData" type="application/json">(.*?)</script>',
+                  html, re.S)
+    return json.loads(m.group(1)) if m else {}
+
+
+def _stat(html: str, element_id: str) -> str:
+    m = re.search(r'id="%s">([^<]*)<' % element_id, html)
+    return m.group(1) if m else ""
+
+
+class ServerRenderedViewTests(CalendarRouteTestCase):
+    """The tile counts, the is-new marks and the change-detection baseline used
+    to be computed in the browser from the cards it was holding. They are the
+    server's now, so they are right at first paint and stay right however much of
+    a month is actually on screen."""
+
+    ENDPOINT = "shows"
+    PAGE = "/?year=2026&month=7&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("view_logic_viewer")
+        self.sign_in_as(self.user_id)
+        # show-a airs twice this month, which is what separates "shows" from
+        # "cards": one mark on it moves two items' worth of the tiles.
+        entries = [
+            _entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
+            _entry("show-b", "Show B", "2026-07-16T20:00:00Z"),
+            _entry("show-a", "Show A", "2026-07-17T20:00:00Z"),
+            _entry("show-c", "Show C", "2026-07-20T20:00:00Z"),
+        ]
+        patcher = patch("app.calendar_cache.fetch_window_raw",
+                        AsyncMock(return_value=entries))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _seed_baseline(self, *, last_show_ids, last_count):
+        asyncio.run(calendar_state.set_view_state(
+            self.user_id, self.ENDPOINT, 2026, 7,
+            last_count=last_count, last_show_ids=last_show_ids, history=[]))
+
+    def _stored_baseline(self) -> dict:
+        return asyncio.run(calendar_state.load_view_state(
+            self.user_id, self.ENDPOINT, 2026, 7))
+
+    def test_the_stat_tiles_carry_the_whole_months_counts(self):
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": "show-a", "not_watching": True})
+        html = self.client.get(self.PAGE).text
+        # Four airings, two of them the marked show's.
+        self.assertEqual(_stat(html, "statTotal"), "4")
+        self.assertEqual(_stat(html, "statWatching"), "2")
+        self.assertEqual(_stat(html, "statNotWatching"), "2")
+        data = _view_data(html)
+        self.assertEqual(data["watching"], 2)
+        self.assertEqual(data["notWatchingCount"], 2)
+        # And the per-show card counts the client needs to move those numbers
+        # through a toggle without counting the cards it happens to hold.
+        self.assertEqual(data["showCounts"], {"show-a": 2, "show-b": 1, "show-c": 1})
+
+    def test_a_marked_show_is_rendered_not_watching_rather_than_marked_after_paint(self):
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": "show-a", "not_watching": True})
+        html = self.client.get(self.PAGE).text
+        self.assertIn("not-watching", _card_class(html, "show-a"))
+        self.assertNotIn("not-watching", _card_class(html, "show-b"))
+        self.assertEqual(_view_data(html)["notWatching"], ["show-a"])
+
+    def test_a_first_look_at_a_month_marks_nothing_new(self):
+        """No stored baseline means this view has never been seen — which is not
+        the same as every show in it having just appeared."""
+        html = self.client.get(self.PAGE).text
+        for item_id in ("show-a", "show-b", "show-c"):
+            self.assertNotIn("is-new", _card_class(html, item_id), item_id)
+        self.assertEqual(_view_data(html)["newIds"], [])
+        self.assertIn("(Initial Tracking)", html)
+
+    def test_only_shows_missing_from_the_stored_baseline_come_back_new(self):
+        self._seed_baseline(last_show_ids=["show-a"], last_count=1)
+        html = self.client.get(self.PAGE).text
+        self.assertNotIn("is-new", _card_class(html, "show-a"))
+        self.assertIn("is-new", _card_class(html, "show-b"))
+        self.assertIn("is-new", _card_class(html, "show-c"))
+        self.assertEqual(_view_data(html)["newIds"], ["show-b", "show-c"])
+
+    def test_the_render_commits_the_servers_full_id_list_as_the_next_baseline(self):
+        """The committed list has to be the month's, not a page's: anything it
+        leaves out reads as new on the next visit."""
+        self.client.get(self.PAGE)
+        stored = self._stored_baseline()
+        self.assertEqual(stored["last_show_ids"], ["show-a", "show-b", "show-c"])
+        self.assertEqual(stored["last_count"], 4)
+        # Committed, so a second load of an unchanged month finds nothing new.
+        second = self.client.get(self.PAGE).text
+        self.assertEqual(_view_data(second)["newIds"], [])
+        self.assertIn("Perfect Match", second)
+
+    def test_a_month_that_could_not_be_loaded_leaves_the_baseline_alone(self):
+        """Committing an empty month over a real baseline would make the whole
+        month look new the next time it loads properly."""
+        self._seed_baseline(last_show_ids=["show-a", "show-b", "show-c"], last_count=4)
+
+        async def boom(endpoint, settings, start):
+            raise trakt.TraktError("Trakt unreachable", 503)
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=boom):
+            resp = self.client.get(self.PAGE)
+        self.assertIn("error-banner", resp.text)
+        stored = self._stored_baseline()
+        self.assertEqual(stored["last_show_ids"], ["show-a", "show-b", "show-c"])
+        self.assertEqual(stored["last_count"], 4)
+
+    def test_the_delta_line_reports_the_change_since_the_last_run(self):
+        self._seed_baseline(last_show_ids=["show-a"], last_count=1)
+        html = self.client.get(self.PAGE).text
+        self.assertIn("(+3 since last run)", html)
+        self.assertIn('class="delta-msg up"', html)
+
+    def test_the_history_log_is_rendered_with_the_page(self):
+        html = self.client.get(self.PAGE).text
+        self.assertIn("History:", html)
+        self.assertIn("4 items", html)
+
+
+class CalendarMarkupTests(CalendarRouteTestCase):
+    """The day/card partials and the two page-level affordances they enable."""
+
+    PAGE = "/?year=2026&month=7&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("markup_viewer")
+        self.sign_in_as(self.user_id)
+        entries = [
+            _entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
+            _entry("show-b", "Show B", "2026-07-16T20:00:00Z"),
+        ]
+        patcher = patch("app.calendar_cache.fetch_window_raw",
+                        AsyncMock(return_value=entries))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_each_day_is_an_addressable_section(self):
+        html = self.client.get(self.PAGE).text
+        self.assertIn('id="day-2026-07-15"', html)
+        self.assertIn('id="day-2026-07-16"', html)
+
+    def test_the_jump_to_strip_links_days_with_items_and_greys_the_rest(self):
+        html = self.client.get(self.PAGE).text
+        self.assertIn('<a class="day-chip" href="#day-2026-07-15"', html)
+        # 1 July has nothing on it, so there is no section to send anyone to.
+        self.assertIn('<span class="day-chip empty"', html)
+        self.assertNotIn('href="#day-2026-07-01"', html)
+        # One chip per day of the month, links and inert ones together.
+        self.assertEqual(len(re.findall(r'class="day-chip[ "]', html)), 31)
+
+    def test_the_eye_icons_are_defined_once_and_referenced_per_card(self):
+        html = self.client.get(self.PAGE).text
+        self.assertEqual(html.count('<symbol id="eye-open"'), 1)
+        self.assertEqual(html.count('<symbol id="eye-closed"'), 1)
+        # Two cards, each referencing both symbols rather than repeating them.
+        self.assertEqual(html.count('href="#eye-open"'), 2)
+        self.assertEqual(html.count('href="#eye-closed"'), 2)
+        # The two drawings are NOT the same: closed keeps its strike line.
+        closed = re.search(r'<symbol id="eye-closed".*?</symbol>', html, re.S).group(0)
+        self.assertIn('<line x1="2" y1="2" x2="22" y2="22">', closed)
 
 
 if __name__ == "__main__":  # pragma: no cover

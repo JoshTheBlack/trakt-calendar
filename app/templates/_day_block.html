@@ -1,0 +1,14 @@
+{# One day's section: the dated header and that day's cards. Rendered from
+   `group` ({date, label, items}) plus whatever _card.html needs.
+
+   The id is what the jump-to strip scrolls to, so it has to exist for the day
+   whether or not its cards are on screen yet. #}
+<section class="day-block" id="day-{{ group.date }}" data-date="{{ group.date }}">
+    <div class="day-header">
+        <div class="day-title">📅 {{ group.label }}</div>
+        <div class="day-count">{{ group['items']|length }} item{{ '' if group['items']|length == 1 else 's' }}</div>
+    </div>
+    <div class="grid">
+        {% for item in group['items'] %}{% include "_card.html" %}{% endfor %}
+    </div>
+</section>
