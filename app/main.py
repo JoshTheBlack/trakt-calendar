@@ -417,6 +417,31 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
+# How many columns a packed day's grid may grow to, per card style: the poster
+# wall is compact, "poster beside" cards are wide. Mirrored by updateCols() in
+# app.js, which re-runs this per day after a toggle changes what is visible.
+_COLUMN_CAPS = {"poster": 6, "horizontal": 2}
+_COLUMN_CAP_DEFAULT = 5
+
+
+def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
+                      hide_not_watching: bool, card_style: str) -> None:
+    """Annotate each day with the two presentation facts the client used to work
+    out only AFTER the page had painted: how many columns that day's grid needs,
+    and whether the day collapses entirely because everything on it is hidden.
+
+    Both are decided from the cards the day contains, which the server knows
+    before it writes them. Left to the client they land a frame late, and a day
+    header that paints and then vanishes takes the rest of the month up the page
+    with it — the "1 July, then suddenly 2 July" flicker on a hide-mode load."""
+    cap = _COLUMN_CAPS.get(card_style, _COLUMN_CAP_DEFAULT)
+    for group in grouped:
+        visible = sum(1 for item in group["items"] if item["id"] not in not_watching)
+        shown = visible if hide_not_watching else len(group["items"])
+        group["cols"] = max(1, min(shown, cap))
+        group["collapsed"] = hide_not_watching and visible == 0
+
+
 def _filters_active(prefs: dict) -> bool:
     return bool(
         prefs["genres"] or prefs["countries"] or prefs["network_filter"]
@@ -556,6 +581,18 @@ async def calendar_page(request: Request):
             error = str(exc)
 
     counts_by_date = {group["date"]: len(group["items"]) for group in grouped}
+    # What each day will actually SHOW this viewer. With hide-not-watching on, a
+    # day whose every item is marked renders nothing at all, so its chip must not
+    # offer to scroll somewhere blank. app.js keeps this in step when the viewer
+    # toggles hiding or marks a show without reloading.
+    shown_by_date = {
+        group["date"]: sum(1 for item in group["items"] if item["id"] not in not_watching)
+        for group in grouped
+    } if prefs["hide_not_watching"] else counts_by_date
+
+    _apply_day_layout(grouped, not_watching=not_watching,
+                      hide_not_watching=prefs["hide_not_watching"],
+                      card_style=prefs["card_style"] or settings.card_style)
 
     # Only the first few days go out with the shell; the rest are one backfill
     # request, so first paint costs a handful of cards instead of a month of them.
@@ -623,12 +660,14 @@ async def calendar_page(request: Request):
             "watching": watching,
             "notWatchingCount": not_watching_count,
         },
-        # One chip per day of the month for the jump-to strip; days with nothing
-        # on them have no section to scroll to, so they render inert.
+        # One chip per day of the month for the jump-to strip. `count` is what the
+        # day holds; `shown` is what this viewer will see of it, and a day showing
+        # nothing has no section to scroll to, so its chip renders inert.
         "day_chips": [
             {"day": day,
              "date": f"{year}-{month:02d}-{day:02d}",
-             "count": counts_by_date.get(f"{year}-{month:02d}-{day:02d}", 0)}
+             "count": counts_by_date.get(f"{year}-{month:02d}-{day:02d}", 0),
+             "shown": shown_by_date.get(f"{year}-{month:02d}-{day:02d}", 0)}
             for day in range(1, days + 1)
         ],
         "error": error,
@@ -729,6 +768,12 @@ async def calendar_range(request: Request):
                 not_watching_ids=not_watching,
             )
             sp.set(items=meta["total"])
+        # Same per-day presentation the shell's own blocks were rendered with, so a
+        # day that arrives late is laid out correctly on arrival rather than being
+        # re-packed (and, in hide mode, collapsed) a frame after it appears.
+        _apply_day_layout(grouped, not_watching=not_watching,
+                          hide_not_watching=prefs["hide_not_watching"],
+                          card_style=prefs["card_style"] or settings.card_style)
     except TraktError as exc:
         # The shell is already on screen with the month's real numbers, so a failed
         # backfill is a missing stretch of days rather than a broken page: say so

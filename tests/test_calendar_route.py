@@ -624,12 +624,31 @@ class CalendarMarkupTests(CalendarRouteTestCase):
 
     def test_the_jump_to_strip_links_days_with_items_and_greys_the_rest(self):
         html = self.client.get(self.PAGE).text
-        self.assertIn('<a class="day-chip" href="#day-2026-07-15"', html)
+        self.assertIn('<a class="day-chip" data-date="2026-07-15" href="#day-2026-07-15"', html)
         # 1 July has nothing on it, so there is no section to send anyone to.
         self.assertIn('<span class="day-chip empty"', html)
         self.assertNotIn('href="#day-2026-07-01"', html)
         # One chip per day of the month, links and inert ones together.
         self.assertEqual(len(re.findall(r'class="day-chip[ "]', html)), 31)
+        # The hover band that brings the strip back has to be the strip's
+        # immediately preceding sibling for the CSS reveal to select it.
+        self.assertIn('<div class="day-chips-peek" aria-hidden="true"></div>\n<nav class="day-chips"', html)
+
+    def test_a_day_showing_nothing_to_this_viewer_gets_an_inert_chip(self):
+        """With hiding on, a day whose every item is marked renders no cards at
+        all — so its chip must not offer to scroll to it. The day still has
+        items, so this is not the same as the empty-day case."""
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": "show-a", "not_watching": True})
+        html = self.client.get(self.PAGE).text
+        # 15 July is show-a's only day and show-a is hidden; 16 July still shows.
+        self.assertIn('<span class="day-chip empty" data-date="2026-07-15"', html)
+        self.assertIn('<a class="day-chip" data-date="2026-07-16"', html)
+        # Showing everything again makes it a destination once more.
+        self.client.post("/api/me/prefs", json={"hide_not_watching": False})
+        shown = self.client.get(self.PAGE).text
+        self.assertIn('<a class="day-chip" data-date="2026-07-15"', shown)
 
     def test_the_eye_icons_are_defined_once_and_referenced_per_card(self):
         html = self.client.get(self.PAGE).text
@@ -655,6 +674,69 @@ def _day_sections(html: str) -> list[str]:
 def _backfill_url(html: str) -> str | None:
     m = re.search(r'id="calendarBackfill"\s+hx-get="([^"]+)"', html)
     return m.group(1).replace("&amp;", "&") if m else None
+
+
+def _section(html: str, day: str) -> str:
+    m = re.search(r'<section class="[^"]*" id="day-%s"[^>]*>' % re.escape(day), html)
+    return m.group(0) if m else ""
+
+
+class DayLayoutTests(CalendarRouteTestCase):
+    """A day arrives laid out. Working its width — and whether it shows at all —
+    out on the client meant the header painted and then vanished, jumping the
+    rest of the month up the page."""
+
+    PAGE = "/calendar?year=2026&month=7&endpoint=shows"
+    RANGE = ("/calendar/range?endpoint=shows&year=2026&month=7"
+             "&start=2026-07-10&end=2026-07-20")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("layout_viewer")
+        self.sign_in_as(self.user_id)
+        entries = [_entry(f"show-{n}", f"Show {n}", "2026-07-15T20:00:00Z") for n in range(3)]
+        entries.append(_entry("solo", "Solo", "2026-07-16T20:00:00Z"))
+        patcher = patch("app.calendar_cache.fetch_window_raw",
+                        AsyncMock(return_value=entries))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_each_day_ships_its_own_column_count(self):
+        html = self.client.get(self.PAGE).text
+        self.assertIn("--cols: 3", _section(html, "2026-07-15"))
+        self.assertIn("--cols: 1", _section(html, "2026-07-16"))
+
+    def test_the_column_count_is_capped_by_the_card_style(self):
+        """"Poster beside" cards are wide, so a day never grows past two columns
+        however many cards it holds."""
+        self.client.post("/api/me/prefs", json={"card_style": "horizontal"})
+        self.assertIn("--cols: 2", _section(self.client.get(self.PAGE).text, "2026-07-15"))
+
+    def test_hiding_sizes_a_day_to_what_is_actually_visible(self):
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        for show in ("show-0", "show-1"):
+            self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                             json={"item_id": show, "not_watching": True})
+        self.assertIn("--cols: 1", _section(self.client.get(self.PAGE).text, "2026-07-15"))
+
+    def test_a_day_with_nothing_left_to_show_arrives_collapsed(self):
+        """Every item on 15 July marked, hiding on: the day renders no cards, so
+        it must not paint its header first and collapse afterwards."""
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        for show in ("show-0", "show-1", "show-2"):
+            self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                             json={"item_id": show, "not_watching": True})
+        html = self.client.get(self.PAGE).text
+        self.assertIn("is-empty-hidden", _section(html, "2026-07-15"))
+        self.assertNotIn("is-empty-hidden", _section(html, "2026-07-16"))
+
+    def test_a_day_that_arrives_late_is_laid_out_the_same_way(self):
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": "show-0", "not_watching": True})
+        fragment = self.client.get(self.RANGE).text
+        self.assertIn("--cols: 2", _section(fragment, "2026-07-15"))
+        self.assertNotIn("is-empty-hidden", _section(fragment, "2026-07-15"))
 
 
 class RouteSplitTests(CalendarRouteTestCase):

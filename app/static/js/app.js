@@ -383,6 +383,46 @@ function updateStats() {
     updateEmptyDays();
 }
 
+// ---- Jump-to strip: pinned under the header, tucked behind it once scrolled ----
+// The strip sticks below the sticky header, so it needs the header's real height
+// — it wraps to a second row when narrow — published as --header-h for the CSS to
+// pin against. It also needs to know when it WOULD have pinned: from that point
+// on it is tucked up behind the header, and the hover band (a CSS ::before on the
+// strip) is what brings it back. Listeners are bound once, so a boosted nav can't
+// stack them; the measuring re-runs on every init because a nav lands a fresh
+// header and a fresh strip.
+let dayChipsBound = false;
+function syncDayChips() {
+    const header = document.querySelector('header.hero');
+    const strip = document.querySelector('.day-chips');
+    if (!header || !strip) return;
+    const headerH = header.offsetHeight;
+    document.body.style.setProperty('--header-h', headerH + 'px');
+    // Where the strip's slot in the document currently sits on screen. Measured
+    // from the element AFTER it, never from the strip itself: a stuck sticky
+    // element's own offsetTop/rect track the stuck position, so comparing it
+    // against the scroll offset gives a difference that never changes and the
+    // tuck would never fire. The neighbour is ordinary in-flow content, and the
+    // strip keeps its slot whether stuck or tucked (sticky and transforms both
+    // leave layout alone), so this reads the same either way.
+    const after = strip.nextElementSibling;
+    const naturalTop = after
+        ? after.getBoundingClientRect().top - strip.offsetHeight
+        : strip.offsetTop - window.scrollY;
+    // A pixel of slack: at rest the strip sits exactly on the header's edge, and
+    // sub-pixel layout would otherwise flap the class on and off.
+    document.body.classList.toggle('chips-tucked', naturalTop < headerH - 1);
+}
+
+function initDayChips() {
+    if (!dayChipsBound) {
+        dayChipsBound = true;
+        window.addEventListener('scroll', syncDayChips, { passive: true });
+        window.addEventListener('resize', syncDayChips, { passive: true });
+    }
+    syncDayChips();
+}
+
 // In "Hiding" mode, collapse any day whose items are all not-watching (so nothing
 // would render under its header). In "Showing all" mode every day is shown.
 function updateEmptyDays() {
@@ -390,6 +430,13 @@ function updateEmptyDays() {
     document.querySelectorAll('.day-block').forEach(block => {
         const hide = hiding && !block.querySelector('.card:not(.not-watching)');
         block.classList.toggle('is-empty-hidden', hide);
+        // A collapsed day is not somewhere to jump to, so its chip stops looking
+        // and acting like a destination. Only days actually in the DOM are
+        // touched: a chip for a day whose block hasn't loaded yet is still a
+        // perfectly good target, and greying it would be a lie.
+        const chip = block.dataset.date &&
+            document.querySelector(`.day-chip[data-date="${CSS.escape(block.dataset.date)}"]`);
+        if (chip) chip.classList.toggle('unreachable', hide);
     });
     updateCols();  // re-pack columns for the now-visible card counts
 }
@@ -1650,6 +1697,7 @@ function initCalendarPage() {
     initBuildTap();
     readViewData();
     updateEmptyDays();
+    initDayChips();
 }
 
 // ---- Day blocks that arrive after the page has painted ----

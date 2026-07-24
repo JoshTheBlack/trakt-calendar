@@ -169,12 +169,19 @@
 </div>
 
 {# Jump-to strip: one chip per day of the month, pinned under the header. A day
-   with nothing on it has no section to scroll to, so its chip is inert rather
-   than a link that goes nowhere. #}
+   this viewer will see nothing of — empty, or entirely not-watching while hiding
+   is on — has no section to scroll to, so its chip is inert rather than a link
+   that goes nowhere. data-date is how app.js re-greys one when a toggle empties
+   its day without a reload. #}
+{# The band that brings the strip back once it has tucked away. A SIBLING of the
+   strip rather than something inside it, because the tucked strip is transformed
+   and a transformed element becomes the containing block for its fixed-position
+   descendants — a catcher inside it would slide off-screen along with it. #}
+<div class="day-chips-peek" aria-hidden="true"></div>
 <nav class="day-chips" aria-label="Jump to a day">
     {% for chip in day_chips %}
-    {% if chip.count %}<a class="day-chip" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
-    {% else %}<span class="day-chip empty" title="Nothing on this day">{{ chip.day }}</span>{% endif %}
+    {% if chip.shown %}<a class="day-chip" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
+    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="{% if chip.count %}Nothing shown on this day{% else %}Nothing on this day{% endif %}">{{ chip.day }}</span>{% endif %}
     {% endfor %}
 </nav>
 
