@@ -75,7 +75,10 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     # Calendar endpoints ignore pagination headers and return the whole range in
     # one response (verified live), so they are not sent here; a warning fires if
     # Trakt ever starts paginating.
+    t0 = _time.perf_counter()
     resp = await shared_client().get(url, headers=_headers(settings, paginate=False))
+    _perf.debug("netGET    calendar/%s/%s..%s -> %s  %.0fms", endpoint.key, start_date, end_date,
+                resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:
         raise TraktError("Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401)
     if resp.status_code != 200:
@@ -590,11 +593,14 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
         if start_at:
             params["start_at"] = start_at
         url = f"{API_BASE}/users/me/history?{urlencode(params)}"
+        t0 = _time.perf_counter()
         try:
             resp = await client.get(url, headers=_headers(settings, paginate=False))
         except httpx.HTTPError as exc:
             logger.warning("fetch_history: request failed: %s", exc)
             break
+        _perf.debug("netGET    users/me/history?page=%s -> %s  %.0fms", page,
+                    resp.status_code, (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
             logger.warning("fetch_history: HTTP %s: %s", resp.status_code, resp.text[:200])
             break

@@ -45,6 +45,7 @@ from __future__ import annotations
 import calendar as _calendar
 import json
 import logging
+import time as _time
 import zlib
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -55,6 +56,10 @@ from .cache import COMPRESS_LEVEL
 from .endpoints import Endpoint
 
 logger = logging.getLogger(__name__)
+# Same "app.perf" logger app/trakt.py's _cached_get already uses for its own
+# netGET/cacheHIT lines — one DEBUG channel for every outbound Trakt call,
+# regardless of which module made it. Enable it with LOG_LEVEL=DEBUG.
+_perf = logging.getLogger("app.perf")
 
 WINDOW_DAYS = 7
 
@@ -247,7 +252,10 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
         f"{trakt.API_BASE}/calendars/all/{endpoint.path}/{start.isoformat()}/{WINDOW_DAYS}"
         f"?{urlencode({'extended': 'full,images'})}"
     )
+    t0 = _time.perf_counter()
     resp = await trakt.shared_client().get(url, headers=trakt._headers(settings, paginate=False))
+    _perf.debug("netGET    calendar/%s/%s -> %s  %.0fms", endpoint.key, start.isoformat(),
+                resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:
         raise trakt.TraktError(
             "Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401,

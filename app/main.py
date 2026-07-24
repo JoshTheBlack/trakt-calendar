@@ -67,6 +67,20 @@ from .trakt import (
 
 logger = logging.getLogger(__name__)
 
+# Configured here (not only in run.py) so `hypercorn app.main:app` — what the
+# Docker image's CMD runs directly, bypassing run.py entirely — gets the same
+# app.* diagnostics and Trakt-call tracing as the dev runner, instead of
+# Python's silent WARNING-only default. LOG_LEVEL controls the app's own
+# loggers (including "app.perf", which every outbound Trakt call logs a line
+# to at DEBUG — see app/trakt.py, app/calendar_cache.py, app/trakt_auth.py);
+# third-party libraries stay at WARNING regardless, since their own DEBUG
+# output is rarely what anyone actually wants. basicConfig() only attaches a
+# handler if the root logger doesn't already have one, so when run.py has
+# already called it (the dev path) this is a no-op and run.py's config wins;
+# in Docker, where nothing else calls it, this is the only config that fires.
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
 VERSION = "1.1.3"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
