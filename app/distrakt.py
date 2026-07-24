@@ -551,14 +551,38 @@ def _calendar_record(item: dict) -> dict:
     }
 
 
-async def _premiere_records(settings, year: int, month: int) -> list[dict]:
+async def _premiere_records(user_id: int, settings, year: int, month: int) -> list[dict]:
     """This month's calendar premieres split by rule: shows/new -> New (S01);
-    shows/premieres minus shows/new -> Returning (S02+)."""
+    shows/premieres minus shows/new -> Returning (S02+).
+
+    Reads through the shared calendar cache (calendar_cache.read_month) rather
+    than issuing a separate live Trakt call, so import stops duplicating a
+    fetch the main calendar already made. Passing the importing user's own
+    genre/country/show_certifications prefs into that read applies the same
+    filters that already keep those shows off their calendar, so import can't
+    hand back something they've personally filtered out and never got a chance
+    to mark not-watching (it never appeared for them to mark in the first
+    place). The instance-wide content floor still applies underneath this for
+    free — it is enforced where the cache is populated, before any reader,
+    including this one, ever sees the excluded show.
+    """
+    from zoneinfo import ZoneInfo
+
+    from . import auth, calendar_cache
     from .endpoints import get_endpoint
-    from .trakt import fetch_calendar
-    new_items, prem_items = await asyncio.gather(
-        fetch_calendar(get_endpoint("shows/new"), settings, year, month),
-        fetch_calendar(get_endpoint("shows/premieres"), settings, year, month),
+    prefs = await auth.get_user_prefs(user_id)
+    tz = ZoneInfo(settings.timezone)
+    (new_items, _), (prem_items, _) = await asyncio.gather(
+        calendar_cache.read_month(
+            get_endpoint("shows/new"), settings, tz=tz, year=year, month=month,
+            genres=prefs["genres"], countries=prefs["countries"],
+            show_certifications=prefs["show_certifications"],
+        ),
+        calendar_cache.read_month(
+            get_endpoint("shows/premieres"), settings, tz=tz, year=year, month=month,
+            genres=prefs["genres"], countries=prefs["countries"],
+            show_certifications=prefs["show_certifications"],
+        ),
     )
     out: list[dict] = []
     new_keys: set[tuple[int, int]] = set()
@@ -578,12 +602,12 @@ async def _premiere_records(settings, year: int, month: int) -> list[dict]:
     return out
 
 
-async def _add_premieres(doc: dict, present: set[tuple[int, int]], settings,
+async def _add_premieres(doc: dict, present: set[tuple[int, int]], user_id: int, settings,
                          year: int, month: int, nw_ids: set[str]) -> int:
     """Append this month's premieres to `doc` (skip existing + not-watching).
     Mutates `doc['shows']`/`present`; returns the number added."""
     added = 0
-    for rec in await _premiere_records(settings, year, month):
+    for rec in await _premiere_records(user_id, settings, year, month):
         key = (int(rec["trakt_id"]), int(rec["season"]))
         if key in present or _matches_not_watching(rec, nw_ids):
             continue
@@ -603,7 +627,7 @@ async def import_premieres(user_id: int, month_key: str, settings) -> dict | Non
     year, month = int(month_key[:4]), int(month_key[5:7])
     present = {(int(s["trakt_id"]), int(s["season"])) for s in doc.get("shows") or []}
     nw_ids = await calendar_state.not_watching_ids(user_id)
-    if await _add_premieres(doc, present, settings, year, month, nw_ids):
+    if await _add_premieres(doc, present, user_id, settings, year, month, nw_ids):
         await save_month(user_id, doc)
     return doc
 
@@ -729,7 +753,7 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
     # (c) This month's premieres, minus not-watching (excluded before commit).
     nw_ids = await calendar_state.not_watching_ids(user_id)
-    await _add_premieres(doc, present, settings, int(year), int(month), nw_ids)
+    await _add_premieres(doc, present, user_id, settings, int(year), int(month), nw_ids)
 
     # (d) In-progress-but-unfinished shows from recent history.
     for rec in await _history_records(settings, present):

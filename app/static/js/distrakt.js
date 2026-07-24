@@ -369,6 +369,7 @@ function renderDistraktDetails(d) {
     if (d.network) chips.push(`<span class="chip network">📡 ${esc(d.network)}</span>`);
     if (d.runtime) chips.push(`<span class="chip">⏱️ ${esc(d.runtime)}m</span>`);
     if (d.rating) chips.push(`<span class="chip country">⭐ ${esc(d.rating)}</span>`);
+    if (d.certification) chips.push(`<span class="chip cert" data-cert="${esc(d.certification)}">${esc(d.certification)}</span>`);
     (d.genres || []).forEach(g => chips.push(`<span class="chip">${esc(g)}</span>`));
 
     // No poster here: the tracker identifies shows by network logo, and this
