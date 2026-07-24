@@ -37,6 +37,15 @@
 
 .distrakt-empty { color: var(--text-faint); padding: 14px 4px; }
 
+/* Shown when the server degraded the month to last-known totals (Trakt
+   rate-limited or unreachable); a warning tint so the stale data reads as such. */
+.distrakt-notice {
+    color: var(--danger, #e0736b);
+    border: 1px solid var(--danger, #e0736b); border-radius: 8px;
+    background: rgba(224,115,107,0.08);
+    padding: 8px 12px; margin-bottom: 10px; font-size: 0.85rem;
+}
+
 .distrakt-show-list { display: flex; flex-direction: column; gap: 5px; }
 .distrakt-bucket-head {
     font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.5px; font-size: 1rem;
@@ -52,6 +61,10 @@
     border: 1px solid var(--card-border); border-radius: 8px; background: rgba(255,255,255,0.02);
 }
 .distrakt-show-row.abandoned { opacity: 0.5; }
+/* A show whose totals couldn't be refreshed this pass: dim it and tint the
+   "unavailable — refresh to retry" note so its last-known counts aren't trusted. */
+.distrakt-show-row.unavailable { opacity: 0.6; }
+.distrakt-show-row.unavailable .distrakt-dates { color: var(--danger, #e0736b); font-style: italic; }
 .distrakt-badge {
     flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center;
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;

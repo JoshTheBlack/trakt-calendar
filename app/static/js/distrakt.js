@@ -57,6 +57,7 @@ function applyMonthResponse(d) {
     networkTmdb = {};
     (d.shows || []).forEach(s => { if (s.network && s.tmdb) networkTmdb[s.network] = s.tmdb; });
     applyReadonlyState(monthClosed, d.closed ? 'frozen' : (d.readonly ? 'untracked' : ''));
+    renderNotice(d);
     renderShowList(d.shows || []);
     renderCopyBlocks(d.post1 || '', d.post2 || '');
     if (emojiEntries.length) renderEmojiRows();  // refresh emoji-row logos now we have tmdb
@@ -247,6 +248,21 @@ function premiereKey(s) {
 }
 const byPremiere = (a, b) => (premiereKey(a) - premiereKey(b)) || byTitle(a, b);
 
+// The server sets rate_limited + a notice when it fell back to last-known totals
+// (Trakt rate-limited or unreachable during a refresh). Surface it persistently
+// above the list so the shown numbers aren't mistaken for a fresh, correct read.
+function renderNotice(d) {
+    const el = document.getElementById('distraktNotice');
+    if (!el) return;
+    if (d && d.rate_limited && d.notice) {
+        el.textContent = '⚠ ' + d.notice;
+        el.hidden = false;
+    } else {
+        el.textContent = '';
+        el.hidden = true;
+    }
+}
+
 function renderShowList(shows) {
     const host = document.getElementById('distraktShowList');
     if (!shows.length) {
@@ -284,12 +300,15 @@ function renderShowList(shows) {
 
 function showRow(s) {
     const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
-    const counts = isNewRet ? `${s.watched}/${s.total}${s.cadence ? ', ' + s.cadence : ''}`
+    let counts = isNewRet ? `${s.watched}/${s.total}${s.cadence ? ', ' + s.cadence : ''}`
         : (s.bucket === 'completed') ? '' : `${s.watched}/${s.total}`;
     // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;
     else if (s.bucket === 'keepup') dates = s.finale || '?/?';
+    // Server couldn't refresh THIS show's totals (rate-limited/unreachable): don't
+    // present its last-known numbers as a fresh read — blank them and flag it.
+    if (s.unavailable) { counts = ''; dates = 'unavailable — refresh to retry'; }
     const actions = monthClosed ? '' : `
             <button type="button" class="btn-ghost small" onclick="toggleAbandon(${s.trakt_id}, ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>
             <button type="button" class="btn-ghost small danger" onclick="deleteShow(${s.trakt_id}, ${s.season}, event)" title="Remove from tracker">✕</button>`;
@@ -300,7 +319,7 @@ function showRow(s) {
         ? `<img class="distrakt-logo" src="/api/network-logo?name=${encodeURIComponent(net)}&tmdb=${s.tmdb || ''}" alt="" data-emoji="${esc(emojiFor(net))}" onerror="onLogoError(this)">`
         : esc(emojiFor(net));
     return `
-        <div class="distrakt-show-row${s.abandoned ? ' abandoned' : ''}" title="${esc(net)}"
+        <div class="distrakt-show-row${s.abandoned ? ' abandoned' : ''}${s.unavailable ? ' unavailable' : ''}" title="${esc(net)}"
              data-trakt-id="${s.trakt_id}" data-season="${s.season}" data-title="${esc(s.title)}"
              onclick="openDistraktDetails(this, event)">
             <span class="distrakt-badge">${badge}</span>

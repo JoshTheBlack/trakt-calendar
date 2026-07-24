@@ -56,7 +56,7 @@ class _RecordingClient:
         self.body = body if body is not None else []
         self.authorizations: list[str] = []
 
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, timeout=None):
         self.authorizations.append((headers or {}).get("Authorization", ""))
 
         class _Resp:

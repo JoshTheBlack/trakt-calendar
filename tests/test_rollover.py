@@ -327,7 +327,7 @@ class _FixedClient:
     def __init__(self, entries):
         self.entries = entries
 
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, timeout=None):
         return _Resp(self.entries)
 
 

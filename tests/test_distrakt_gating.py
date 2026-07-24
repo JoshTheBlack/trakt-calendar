@@ -88,7 +88,7 @@ class RecordingClient:
         self.authorizations: list[str] = []
         self.urls: list[str] = []
 
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, timeout=None):
         self.authorizations.append((headers or {}).get("Authorization", ""))
         self.urls.append(url)
         # A shape every caller here tolerates: an empty list reads as "no

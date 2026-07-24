@@ -196,7 +196,7 @@ async def trakt_callback(request: Request):
         account = await trakt_auth.fetch_account(
             settings.trakt_client_id, token.get("access_token") or "",
         )
-    except (httpx.HTTPError, trakt_auth.AccountLookupError) as exc:
+    except (httpx.HTTPError, trakt_auth.TraktRateLimitError, trakt_auth.AccountLookupError) as exc:
         # Deliberately vague to the visitor and specific in the log: the
         # exception text can carry the request URL, and that carries the code.
         logger.warning("Trakt authorization exchange failed: %s", type(exc).__name__)
@@ -454,7 +454,7 @@ async def revoke_token_value(token: str | None, settings: Settings | None = None
         return REVOKE_FAILED_NOTICE
     try:
         await trakt_auth.revoke_token(cfg.trakt_client_id, cfg.trakt_client_secret, token)
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
         logger.warning("Trakt token revocation failed for a linked account: %s", exc)
         return REVOKE_FAILED_NOTICE
     return None
@@ -498,7 +498,7 @@ async def access_token_for_user(user_id: int, settings: Settings | None = None) 
         token = await trakt_auth.refresh_access_token(
             cfg.trakt_client_id, cfg.trakt_client_secret, refresh_token,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
         logger.warning("Trakt token refresh failed for a linked account: %s", exc)
         await auth.release_identity_refresh(int(row["id"]))
         return access_token

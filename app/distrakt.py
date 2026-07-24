@@ -398,7 +398,8 @@ def _identity_record(src: dict) -> dict:
 
 
 async def compute_live_shows(user_id: int, records: list[dict], settings, fresh: bool = False,
-                             watched_lookup: dict | None = None) -> list[dict]:
+                             watched_lookup: dict | None = None,
+                             allow_degrade: bool = False) -> list[dict]:
     """Merge each stored record with its live Trakt-derived fields into the flat
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
 
@@ -406,7 +407,18 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     (app/watch_history) — the caller may pass a pre-synced `watched_lookup`
     (avoids re-syncing when it also needs the movies from the same state); if
     omitted we sync here. Totals/dates (`y`, cadence, premiere/finale) come from
-    one season call per record; `fresh=True` bypasses the 24h season cache."""
+    one season call per record; `fresh=True` bypasses the 24h season cache.
+
+    `allow_degrade` decides what a per-show season-detail failure does. Off (the
+    default, used by the freeze pass and rollover bucketing) a failure propagates
+    so the caller aborts and retries later — never persisting a rate-limited 0/0 as
+    a permanent frozen total. On (the live open-month view) the season fan-out runs
+    with return_exceptions and a failed show is marked `unavailable` and rendered
+    from its LAST-KNOWN stored fields instead: a 429 on one show must not read as
+    that show genuinely having 0 episodes, and it must not sink the rest of the
+    roster. The shared-prerequisite sync (watched counts) is NOT degraded here —
+    its failure still propagates for the caller's top-level handler, because it
+    can't be pinned on any one show."""
     import logging
 
     from . import discord_fmt, watch_history
@@ -418,11 +430,13 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
 
     async def _season_details():
         # The app-wide shared client for the whole fan-out (no per-call client).
+        # return_exceptions only when degrading: otherwise the first failure must
+        # propagate (see allow_degrade) instead of being captured as a result.
         client = shared_client()
         return await asyncio.gather(*(
             fetch_season_detail(settings, rec["trakt_id"], rec["season"], fresh=fresh, client=client)
             for rec in records
-        ))
+        ), return_exceptions=allow_degrade)
 
     if watched_lookup is None:
         with span("cls.sync+seasons", n=len(records), fresh=fresh):
@@ -436,22 +450,49 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             details = await _season_details()
     shows = []
     matched = 0
+    unavailable = 0
     for rec, detail in zip(records, details):
         key = (int(rec["trakt_id"]), int(rec["season"]))
         if key in watched_lookup:
             matched += 1
-        show = {
-            **rec,
-            "watched": watched_lookup.get(key, 0),
-            "total": detail["total"],
-            "cadence": detail["cadence"],
-            "premiere": detail["premiere"],
-            "finale": detail["finale"],
-            "started_airing": detail["started_airing"],
-            "finished_airing": detail["finished_airing"],
-        }
+        if isinstance(detail, Exception):
+            # allow_degrade path only (else the gather would have raised): this one
+            # show's totals/dates could not be fetched. Render it from its stored
+            # record's last-known fields and flag it so the UI shows "unavailable,
+            # refresh to retry" rather than presenting a fabricated 0/0 as real.
+            unavailable += 1
+            show = {
+                **rec,
+                "watched": watched_lookup.get(key, int(rec.get("watched") or 0)),
+                "total": int(rec.get("total") or 0),
+                "cadence": rec.get("cadence"),
+                "premiere": rec.get("premiere"),
+                "finale": rec.get("finale"),
+                "started_airing": bool(rec.get("started_airing")),
+                "finished_airing": bool(rec.get("finished_airing")),
+                "unavailable": True,
+            }
+        else:
+            show = {
+                **rec,
+                "watched": watched_lookup.get(key, 0),
+                "total": detail["total"],
+                "cadence": detail["cadence"],
+                "premiere": detail["premiere"],
+                "finale": detail["finale"],
+                "started_airing": detail["started_airing"],
+                "finished_airing": detail["finished_airing"],
+                "unavailable": False,
+            }
         show["bucket"] = discord_fmt.bucket_of(show, show)
         shows.append(show)
+
+    if unavailable:
+        logger.warning(
+            "compute_live_shows: %d/%d show(s) rate-limited/unreachable this pass; "
+            "rendered from last-known totals and flagged unavailable.",
+            unavailable, len(records),
+        )
 
     # X/Y diagnostic: distinguishes an EMPTY watched lookup (no progress returned)
     # from a NON-empty lookup that simply doesn't line up with the stored records

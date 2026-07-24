@@ -48,7 +48,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .trakt import API_BASE
+from .trakt import API_BASE, TraktRateLimitError, _send
 
 # Same "app.perf" DEBUG channel app/trakt.py's _cached_get and
 # app/calendar_cache.py's fetch_window_raw log their own outbound calls to —
@@ -110,7 +110,7 @@ async def exchange_code(
     """
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(TOKEN_URL, json={
+        resp = await _send(client, "POST", TOKEN_URL, timeout=15, json={
             "code": code,
             "client_id": client_id,
             "client_secret": client_secret,
@@ -150,8 +150,8 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     try:
         t0 = _time.perf_counter()
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(
-                ACCOUNT_URL,
+            resp = await _send(
+                client, "GET", ACCOUNT_URL, timeout=15,
                 headers={
                     "Authorization": f"Bearer {access_token}",
                     "trakt-api-version": "2",
@@ -163,6 +163,12 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
         if resp.status_code != 200:
             raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned HTTP {resp.status_code}.")
         payload = resp.json()
+    except TraktRateLimitError as exc:
+        # An exhausted-retry 429 is not an httpx error, so it would otherwise slip
+        # past the httpx.HTTPError catch below and surface raw. Fold it into the
+        # same lookup failure the caller already handles — a rate-limited identity
+        # lookup is just another reason the account couldn't be resolved right now.
+        raise AccountLookupError(f"Trakt {ACCOUNT_PATH} was rate-limited: {exc}") from exc
     except httpx.HTTPError as exc:
         raise AccountLookupError(f"Trakt {ACCOUNT_PATH} failed: {exc}") from exc
     except ValueError as exc:
@@ -195,7 +201,7 @@ async def request_device_code(client_id: str) -> dict:
     user_code, verification_url, expires_in, interval)."""
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(DEVICE_CODE_URL, json={"client_id": client_id})
+        resp = await _send(client, "POST", DEVICE_CODE_URL, timeout=15, json={"client_id": client_id})
     _perf.debug("netPOST   oauth/device/code -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
@@ -240,7 +246,7 @@ async def refresh_access_token(client_id: str, client_secret: str, refresh_token
     """Exchange a refresh_token for a new access_token + refresh_token pair."""
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(TOKEN_URL, json={
+        resp = await _send(client, "POST", TOKEN_URL, timeout=15, json={
             "refresh_token": refresh_token,
             "client_id": client_id,
             "client_secret": client_secret,
@@ -264,7 +270,7 @@ async def revoke_token(client_id: str, client_secret: str, access_token: str) ->
     """
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(REVOKE_URL, json={
+        resp = await _send(client, "POST", REVOKE_URL, timeout=15, json={
             "token": access_token,
             "client_id": client_id,
             "client_secret": client_secret,

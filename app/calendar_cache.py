@@ -253,7 +253,7 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
         f"?{urlencode({'extended': 'full,images'})}"
     )
     t0 = _time.perf_counter()
-    resp = await trakt.shared_client().get(url, headers=trakt._headers(settings, paginate=False))
+    resp = await trakt._send(trakt.shared_client(), "GET", url, headers=trakt._headers(settings, paginate=False))
     _perf.debug("netGET    calendar/%s/%s -> %s  %.0fms", endpoint.key, start.isoformat(),
                 resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:

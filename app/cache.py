@@ -78,6 +78,27 @@ async def get(key: str, ttl_seconds: int):
         return None
 
 
+async def get_stale(key: str):
+    """Return the cached value for `key` regardless of age, or None if there's
+    no row at all. For cache_only callers (the public share page): they can
+    never fall through to a live fetch, so a merely-expired row is still far
+    better than blank fields — unlike `get`, this never applies a TTL cutoff.
+    """
+
+    def _work(conn: db.Connection):
+        row = conn.execute(
+            "SELECT payload FROM api_cache WHERE cache_key = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        return _decode(row["payload"])
+
+    try:
+        return await db.run(_work)
+    except (db.DatabaseError, zlib.error, ValueError):
+        return None
+
+
 async def set(key: str, value) -> None:
     """Store `value` for `key`. Written with no per-row TTL: freshness for these
     detail lookups is decided by the ttl passed to get(), so the row is aged out

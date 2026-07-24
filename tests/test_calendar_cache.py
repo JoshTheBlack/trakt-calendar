@@ -61,7 +61,7 @@ class _CaptureClient:
         self.url = None
         self.sent_headers = None
 
-    async def get(self, url, headers=None):
+    async def get(self, url, headers=None, timeout=None):
         self.url = url
         self.sent_headers = headers or {}
         return _Resp(self.body, headers=self.headers)

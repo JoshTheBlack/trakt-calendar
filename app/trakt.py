@@ -34,6 +34,19 @@ class TraktError(Exception):
         self.status = status
 
 
+class TraktRateLimitError(TraktError):
+    """Trakt returned 429 and _send's retry/backoff budget was exhausted.
+
+    A DISTINCT type (not a generic retryable flag) so callers can tell "Trakt is
+    rate-limiting us" apart from every other failure and react deliberately: the
+    distrakt fan-out degrades the one affected show to an explicit "unavailable,
+    try refreshing" state, and a shared-prerequisite hit degrades the whole month
+    to its last-known totals plus a notice — never a fabricated 0/0 rendered as
+    truth, never a hard 500. Subclasses TraktError, so an existing
+    `except TraktError` still catches it (e.g. the calendar read path, which
+    correctly degrades to its stale cached window)."""
+
+
 def _headers(settings: Settings, paginate: bool = True) -> dict:
     """Trakt request headers. `paginate=False` OMITS the X-Pagination-* headers.
 
@@ -76,7 +89,7 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     # one response (verified live), so they are not sent here; a warning fires if
     # Trakt ever starts paginating.
     t0 = _time.perf_counter()
-    resp = await shared_client().get(url, headers=_headers(settings, paginate=False))
+    resp = await _send(shared_client(), "GET", url, headers=_headers(settings, paginate=False))
     _perf.debug("netGET    calendar/%s/%s..%s -> %s  %.0fms", endpoint.key, start_date, end_date,
                 resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:
@@ -217,11 +230,14 @@ async def _cached_get(
     by callers (search, seasons) where a swallowed 401 previously looked identical
     to a genuine "no results" response, making auth failures invisible in the UI.
 
-    `cache_only=True` NEVER makes a network call: it returns the cached value or
-    None. This is what lets a public share page reuse detail data the OWNER's own
-    views already fetched and cached, without a public request ever spending the
-    owner's Trakt rate limit — the read-only-cache half of the calendar cache's
-    allow_fetch=False rule, applied to the detail lookups.
+    `cache_only=True` NEVER makes a network call: it returns the cached value —
+    even if it's past its TTL — or None if there's no row at all. This is what
+    lets a public share page reuse detail data the OWNER's own views already
+    fetched and cached, without a public request ever spending the owner's Trakt
+    rate limit — the read-only-cache half of the calendar cache's
+    allow_fetch=False rule, applied to the detail lookups. Serving stale here
+    mirrors calendar_cache.load_window's `not allow_fetch` bypass: a share visitor
+    can never trigger a refresh, so stale-but-real data beats a blank card.
 
     `private=True` means the RESPONSE DEPENDS ON WHOSE TOKEN ASKED — a watch
     history, a progress record, an activity beacon. The cache is keyed by URL and
@@ -237,17 +253,23 @@ async def _cached_get(
             _perf.debug("cacheHIT  %s", path)  # DEBUG: 1 line/season, noisy on warm loads
             return cached
     if cache_only:
-        # A public share request: never reach for the network, whatever the reason
-        # the cache missed (cold, expired). The caller renders what it got.
-        return None
+        # A public share request: never reach for the network. Fall back to
+        # whatever's cached even past its TTL — stale beats a blank card, and
+        # this caller can never trigger a refresh to fix a hard miss anyway.
+        return await cache.get_stale(url)
     t0 = _time.perf_counter()
     try:
-        resp = await client.get(url, headers=_headers(settings))
+        resp = await _send(client, "GET", url, headers=_headers(settings))
     except httpx.HTTPError as exc:
+        # A transport failure means we never got a real answer from Trakt. Unlike a
+        # 404 or an empty list, that is NOT "Trakt says there's nothing here", so it
+        # must never collapse into the None that callers read as an empty result —
+        # a season would then render a false 0 episodes, a progress record a false
+        # 0 watched. Always raise, regardless of raise_errors. (An exhausted-retry
+        # TraktRateLimitError from _send is not an httpx error and propagates on its
+        # own for the same reason — the affected caller degrades it deliberately.)
         logger.warning("Trakt GET %s failed: %s", path, exc)
-        if raise_errors:
-            raise TraktError(f"Could not reach Trakt: {exc}") from exc
-        return None
+        raise TraktError(f"Could not reach Trakt: {exc}") from exc
     _perf.debug("netGET    %s -> %s  %.0fms%s", path, resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0, " (fresh)" if fresh else " (miss)")
     if resp.status_code != 200:
@@ -482,6 +504,127 @@ async def aclose_shared_client() -> None:
         await client.aclose()
 
 
+# ---------------------------------------------------------------------------
+# The one low-level sender every Trakt data-API call routes through: transport +
+# the 429 retry/backoff loop, and NOTHING else. It deliberately does not
+# interpret any non-429 status — a 200/401/404 comes straight back for the caller
+# to judge, exactly as a bare client.get would — so the SRP split between "get a
+# real answer out of Trakt" and "decide what that answer means" is preserved.
+# ---------------------------------------------------------------------------
+
+# One _send call is bounded two ways, whichever it hits first: a small attempt
+# count AND a wall-clock budget. A user-initiated Refresh must return an answer in
+# a bounded window even when Trakt hands back a large Retry-After (its own docs
+# cite a 254s example from the wild) rather than hang silently. The budget is
+# ELAPSED time — request time PLUS any backoff sleep — not cumulative sleep alone,
+# so three attempts each near the client timeout can't quietly run past it.
+_SEND_MAX_ATTEMPTS = 3
+_SEND_MAX_ELAPSED = 30.0
+
+# Smooth the distrakt Refresh fan-out's opening burst. A large roster fires ~2
+# requests per tracked show all at once; the connection pool caps how many are
+# in flight but not how fast they leave, so hundreds can go out in the same few
+# milliseconds — well over the 1000-per-5-minute average — before any 429 comes
+# back to self-correct. This gate paces that burst without serializing it, sized
+# well under _POOL_LIMIT. The retry/backoff loop is the real defense against the
+# 5-minute window; this just keeps the opening spike from tripping it needlessly.
+# Loop-keyed for the SAME reason shared_client() is: a Semaphore created at import
+# time binds to whatever loop is current then and raises "bound to a different
+# event loop" under the test suite's fresh-loop-per-test isolation.
+_SEND_CONCURRENCY = 4
+_send_sem: dict = {"loop": None, "sem": None}
+
+
+def _rate_limit_semaphore() -> asyncio.Semaphore:
+    """The app-wide outbound-request gate, created lazily on the running loop."""
+    loop = asyncio.get_event_loop()
+    sem = _send_sem["sem"]
+    if sem is None or _send_sem["loop"] is not loop:
+        sem = asyncio.Semaphore(_SEND_CONCURRENCY)
+        _send_sem["sem"] = sem
+        _send_sem["loop"] = loop
+    return sem
+
+
+def _retry_after_seconds(resp: httpx.Response) -> float | None:
+    """Trakt's Retry-After (documented as a plain count of seconds) as a positive
+    float, or None when it is missing, non-numeric, negative, or absurd.
+
+    None means "no usable wait" — the caller falls back to its exponential step
+    rather than sleep(None), a negative sleep, or an hour-long one. Trakt does not
+    use the HTTP-date form on this header, but an upstream security layer (e.g.
+    Cloudflare) can send a 429 shaped differently; a date string just fails the
+    float parse and takes the same fallback."""
+    raw = resp.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        secs = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if secs <= 0 or secs > 86400:
+        return None
+    return secs
+
+
+async def _send(client: httpx.AsyncClient, method: str, url: str, *,
+                headers: dict | None = None, json=None, timeout: float | None = None) -> httpx.Response:
+    """Issue one Trakt request, retrying only on 429 within a bounded budget.
+
+    Returns the httpx.Response for ANY non-429 status untouched, and lets network
+    errors propagate unchanged — interpreting a 401/404/empty body is the caller's
+    job, not this function's. On 429 it honors a numeric Retry-After when present
+    (it wins over the exponential schedule), else backs off exponentially (1s, 2s,
+    4s), retrying up to _SEND_MAX_ATTEMPTS within the _SEND_MAX_ELAPSED wall-clock
+    budget. On exhaustion it raises TraktRateLimitError — never a fabricated
+    response, never a bare None — so an unanswered request can't masquerade as a
+    real one.
+
+    `timeout` lets a caller keep a tighter per-request bound (the OAuth calls pass
+    their own 15s); it is further clamped to the budget remaining so a single hung
+    attempt can't blow the wall-clock cap."""
+    path = url.split("?", 1)[0].replace(API_BASE, "") or url
+    sem = _rate_limit_semaphore()
+    start = _time.monotonic()
+    # Hold the gate across the request AND the backoff sleep, not just the request:
+    # during a 429 storm this makes the fan-out wait its turn instead of every
+    # coroutine re-firing the instant a slot frees and tripping the limit again.
+    async with sem:
+        attempt = 0
+        while True:
+            attempt += 1
+            remaining = _SEND_MAX_ELAPSED - (_time.monotonic() - start)
+            if remaining <= 0:
+                raise TraktRateLimitError(
+                    f"Trakt rate limit not cleared within {_SEND_MAX_ELAPSED:.0f}s for {path}.", 429)
+            attempt_timeout = remaining if timeout is None else min(timeout, remaining)
+            # Dispatch to get/post (the shape every call site used before this
+            # sender existed) rather than client.request, so the per-attempt timeout
+            # bounds the request without changing how the call is issued.
+            method_up = method.upper()
+            if method_up == "GET":
+                resp = await client.get(url, headers=headers, timeout=attempt_timeout)
+            elif method_up == "POST":
+                resp = await client.post(url, headers=headers, json=json, timeout=attempt_timeout)
+            else:
+                resp = await client.request(method, url, headers=headers, json=json, timeout=attempt_timeout)
+            if resp.status_code != 429:
+                return resp
+            if attempt >= _SEND_MAX_ATTEMPTS:
+                raise TraktRateLimitError(
+                    f"Trakt still rate-limiting after {attempt} attempt(s) for {path}.", 429)
+            wait = _retry_after_seconds(resp)
+            if wait is None:
+                wait = float(2 ** (attempt - 1))  # 1s, 2s, 4s — one storm's worth
+            # Don't begin a sleep that would carry elapsed past the budget: stop and
+            # raise now rather than sleeping most of the way in and raising anyway.
+            if (_time.monotonic() - start) + wait > _SEND_MAX_ELAPSED:
+                raise TraktRateLimitError(
+                    f"Trakt Retry-After would exceed the {_SEND_MAX_ELAPSED:.0f}s budget for {path}.", 429)
+            _perf.debug("netRETRY  %s attempt=%d wait=%.1fs (429)", path, attempt, wait)
+            await asyncio.sleep(wait)
+
+
 async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: bool = False,
                               client: httpx.AsyncClient | None = None) -> dict:
     """One /shows/{id}/seasons/{season}?extended=full call (short TTL) reduced to
@@ -597,7 +740,7 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
         url = f"{API_BASE}/users/me/history?{urlencode(params)}"
         t0 = _time.perf_counter()
         try:
-            resp = await client.get(url, headers=_headers(settings, paginate=False))
+            resp = await _send(client, "GET", url, headers=_headers(settings, paginate=False))
         except httpx.HTTPError as exc:
             logger.warning("fetch_history: request failed: %s", exc)
             break

@@ -69,6 +69,9 @@
                 <button type="button" class="btn-ghost small" onclick="refreshMonth()"
                         title="Re-read watch history and season data from Trakt">↻ Refresh</button>
             </div>
+            {# Shown only when the server degraded this month to last-known totals
+               because Trakt rate-limited or was unreachable during a refresh. #}
+            <div id="distraktNotice" class="distrakt-notice" hidden></div>
             <div id="distraktShowList" class="distrakt-show-list">
                 <div class="distrakt-empty">Loading…</div>
             </div>

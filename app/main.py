@@ -57,6 +57,7 @@ from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
 from .trakt import (
     TraktError,
+    TraktRateLimitError,
     fetch_details,
     fetch_season_detail,
     fetch_show_seasons,
@@ -179,7 +180,10 @@ async def _maybe_refresh_trakt_token() -> None:
         token = await trakt_auth.refresh_access_token(
             settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
+        # A rate-limited refresh is not an httpx error; catch it here too so the
+        # background renewal just skips this cycle and tries again next tick rather
+        # than letting the exception escape the heartbeat.
         logger.warning("Trakt token auto-refresh failed: %s", exc)
         return
     await _apply_new_trakt_token(settings, token)
@@ -567,7 +571,12 @@ async def api_tile(request: Request):
     trakt_id = request.query_params.get("id")
     if not trakt_id:
         return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
-    info = await fetch_tile_info(settings, media, trakt_id, _season_param(request.query_params.get("season")))
+    try:
+        info = await fetch_tile_info(settings, media, trakt_id, _season_param(request.query_params.get("season")))
+    except TraktError as exc:
+        # A transport failure (rate-limit or unreachable) now raises rather than
+        # returning a benign empty tile, so a 429 can't render as "no episodes".
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
     return JSONResponse({"ok": True, **info})
 
 
@@ -581,7 +590,10 @@ async def api_details(request: Request):
     trakt_id = request.query_params.get("id")
     if not trakt_id:
         return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
-    details = await fetch_details(settings, media, trakt_id, _season_param(request.query_params.get("season")))
+    try:
+        details = await fetch_details(settings, media, trakt_id, _season_param(request.query_params.get("season")))
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
     return JSONResponse({"ok": True, **details})
 
 
@@ -1063,7 +1075,7 @@ async def auth_refresh():
         token = await trakt_auth.refresh_access_token(
             settings.trakt_client_id, settings.trakt_client_secret, settings.trakt_refresh_token,
         )
-    except httpx.HTTPError as exc:
+    except (httpx.HTTPError, trakt_auth.TraktRateLimitError) as exc:
         return JSONResponse({"ok": False, "error": f"Refresh failed: {exc}"}, status_code=502)
     settings = await _apply_new_trakt_token(settings, token)
     return JSONResponse({"ok": True, "expires_at": settings.trakt_token_expires_at})
@@ -1284,6 +1296,36 @@ def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
     }
 
 
+async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, default_emoji: str,
+                               link_url: str | None, rate_limited: bool) -> dict:
+    """Render a month WITHOUT any Trakt call, from whatever is last persisted — the
+    top-level fallback when a shared refresh prerequisite hit Trakt's rate limit or
+    was unreachable. Stored records already carry each show's last-known
+    watched/total/cadence/dates, so this projects them offline (frozen_shows) and
+    re-buckets, attaching a visible notice so stale-but-real beats a false 0/0 or a
+    500. `rate_limited` only chooses the notice wording; both cases degrade
+    identically and return HTTP 200."""
+    doc = await distrakt_store.load_month(user_id, month_key)
+    shows = distrakt_store.frozen_shows(doc) if doc else []
+    notice = (
+        "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
+        if rate_limited else
+        "Couldn't reach Trakt just now — showing last-known totals. Try refreshing again shortly."
+    )
+    return {
+        "ok": True,
+        "month": month_key,
+        "closed": bool(doc and doc.get("closed")),
+        "readonly": False,
+        "shows": shows,
+        "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
+        "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=(doc or {}).get("movies")),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "rate_limited": True,
+        "notice": notice,
+    }
+
+
 async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
                                   force_fresh: bool = False) -> tuple[dict, int]:
     """Shared body for GET /api/distrakt/month + POST /api/distrakt/refresh, for
@@ -1310,86 +1352,102 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
                 month_key, emojis, default_emoji, readonly=blocked, link_url=link_url,
             ), 200
 
-    with span("payload.ensure_month", month=month_key, force=force_fresh):
-        doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
-    month_key = doc["month"]
+    # Everything below reaches Trakt (rollover init, premiere import, tmdb
+    # backfill, watch-history sync, season totals). A 429 on a SHARED prerequisite
+    # (anything but the per-show season fan-out, which degrades itself) can't be
+    # attributed to one show, so rather than a false 0/0 or a 500 the whole month
+    # falls back to its last-known stored totals plus a notice at HTTP 200 — the
+    # user refreshes again once the window clears. A plain reachability failure
+    # (TraktError) degrades the same way; only the notice wording differs.
+    try:
+        with span("payload.ensure_month", month=month_key, force=force_fresh):
+            doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
+        month_key = doc["month"]
 
-    if doc.get("closed"):
-        # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
-        shows = distrakt_store.frozen_shows(doc)
-        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
-        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies"))
-        return {
-            "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
-            "post1": post1, "post2": post2, "generated_at": datetime.now(timezone.utc).isoformat(),
-        }, 200
+        if doc.get("closed"):
+            # Frozen past month: render straight from the snapshot, no Trakt calls (§3).
+            shows = distrakt_store.frozen_shows(doc)
+            post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
+            post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies"))
+            return {
+                "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
+                "post1": post1, "post2": post2, "generated_at": datetime.now(timezone.utc).isoformat(),
+            }, 200
 
-    committed = distrakt_store.month_committed(month_key, today)
-    # A PREVIEW month (before the 1st) keeps auto-populating from premieres so the
-    # roster tracks the calendar (and un-not-watching re-adds a previously excluded
-    # premiere). A COMMITTED month is stable — premieres only re-import on demand.
-    if not committed and settings.configured:
-        await distrakt_store.import_premieres(user_id, month_key, settings)
-        doc = await distrakt_store.load_month(user_id, month_key) or doc
+        committed = distrakt_store.month_committed(month_key, today)
+        # A PREVIEW month (before the 1st) keeps auto-populating from premieres so the
+        # roster tracks the calendar (and un-not-watching re-adds a previously excluded
+        # premiere). A COMMITTED month is stable — premieres only re-import on demand.
+        if not committed and settings.configured:
+            await distrakt_store.import_premieres(user_id, month_key, settings)
+            doc = await distrakt_store.load_month(user_id, month_key) or doc
 
-    records = doc.get("shows", [])
-    if records and not settings.configured:
-        return {"ok": False, "error": "Not configured"}, 400
-    # Backfill tmdb on records added before we stored it (one-time; self-limiting)
-    # so the network-logo <img> gets a tmdb to generate from on this same load.
-    if records and settings.configured:
-        with span("payload.backfill_tmdb"):
-            doc = await distrakt_store.backfill_tmdb(user_id, month_key, settings) or doc
         records = doc.get("shows", [])
-    # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
-    # stale load re-baseline the whole watch history):
-    #   season_fresh -> bypass the 24h season cache for `y`. Only on explicit
-    #                   Refresh; routine loads let the 24h TTL refresh `y` daily.
-    #   force        -> full watch-history re-baseline. ONLY on explicit Refresh;
-    #                   normal loads rely on the last_activities gate + deltas.
-    season_fresh = force_fresh
+        if records and not settings.configured:
+            return {"ok": False, "error": "Not configured"}, 400
+        # Backfill tmdb on records added before we stored it (one-time; self-limiting)
+        # so the network-logo <img> gets a tmdb to generate from on this same load.
+        if records and settings.configured:
+            with span("payload.backfill_tmdb"):
+                doc = await distrakt_store.backfill_tmdb(user_id, month_key, settings) or doc
+            records = doc.get("shows", [])
+        # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
+        # stale load re-baseline the whole watch history):
+        #   season_fresh -> bypass the 24h season cache for `y`. Only on explicit
+        #                   Refresh; routine loads let the 24h TTL refresh `y` daily.
+        #   force        -> full watch-history re-baseline. ONLY on explicit Refresh;
+        #                   normal loads rely on the last_activities gate + deltas.
+        season_fresh = force_fresh
 
-    # Sync the incremental watch-history cache ONCE (gated by /sync/last_activities).
-    # Reuse it for both watched counts and the month's watched-movies list.
-    watched_lookup: dict = {}
-    movies: list[dict] = []
-    if settings.configured:
-        with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
-            state = await watch_history.sync_and_baseline(
-                settings, user_id, [r["trakt_id"] for r in records], force=force_fresh, today=today,
-            )
-            watched_lookup = watch_history.watched_map(state)
-            mstart, mend = watch_history.month_bounds(month_key)
-            movies = watch_history.movies_in_range(state, mstart, mend)
-            sp.set(watched_keys=len(watched_lookup), movies=len(movies))
+        # Sync the incremental watch-history cache ONCE (gated by /sync/last_activities).
+        # Reuse it for both watched counts and the month's watched-movies list.
+        watched_lookup: dict = {}
+        movies: list[dict] = []
+        if settings.configured:
+            with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
+                state = await watch_history.sync_and_baseline(
+                    settings, user_id, [r["trakt_id"] for r in records], force=force_fresh, today=today,
+                )
+                watched_lookup = watch_history.watched_map(state)
+                mstart, mend = watch_history.month_bounds(month_key)
+                movies = watch_history.movies_in_range(state, mstart, mend)
+                sp.set(watched_keys=len(watched_lookup), movies=len(movies))
 
-    with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
-        shows = await distrakt_store.compute_live_shows(user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup) if records else []
-    shows = await _apply_not_watching(user_id, month_key, shows, committed)
-    if records and season_fresh:
-        await distrakt_store.stamp_refreshed(user_id, month_key)
+        with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
+            # allow_degrade: a per-show season 429 marks THAT show unavailable and
+            # renders the rest, instead of failing the whole roster.
+            shows = await distrakt_store.compute_live_shows(user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup, allow_degrade=True) if records else []
+        shows = await _apply_not_watching(user_id, month_key, shows, committed)
+        if records and season_fresh:
+            await distrakt_store.stamp_refreshed(user_id, month_key)
 
-    # Pre-warm the network-logo cache for the whole roster now that tmdb has been
-    # backfilled, so a show manually added before logos existed doesn't depend on
-    # some OTHER show requesting its network's logo first (see logos.ensure_logos).
-    # Best-effort and self-limiting: a no-op once each network's tile is on disk.
-    if shows and settings.configured:
-        with span("payload.ensure_logos"):
-            await logos.ensure_logos(settings, [(s.get("network"), s.get("tmdb")) for s in shows])
+        # Pre-warm the network-logo cache for the whole roster now that tmdb has been
+        # backfilled, so a show manually added before logos existed doesn't depend on
+        # some OTHER show requesting its network's logo first (see logos.ensure_logos).
+        # Best-effort and self-limiting: a no-op once each network's tile is on disk.
+        if shows and settings.configured:
+            with span("payload.ensure_logos"):
+                await logos.ensure_logos(settings, [(s.get("network"), s.get("tmdb")) for s in shows])
 
-    with span("payload.render"):
-        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
-        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies)
-    return {
-        "ok": True,
-        "month": month_key,
-        "closed": False,
-        "readonly": False,
-        "shows": shows,
-        "post1": post1,
-        "post2": post2,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }, 200
+        with span("payload.render"):
+            post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
+            post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies)
+        return {
+            "ok": True,
+            "month": month_key,
+            "closed": False,
+            "readonly": False,
+            "shows": shows,
+            "post1": post1,
+            "post2": post2,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }, 200
+    except TraktRateLimitError as exc:
+        logger.warning("distrakt month %s degraded to stale (Trakt rate-limited): %s", month_key, exc)
+        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url, rate_limited=True), 200
+    except TraktError as exc:
+        logger.warning("distrakt month %s degraded to stale (Trakt unreachable): %s", month_key, exc)
+        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url, rate_limited=False), 200
 
 
 @guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)
@@ -1518,7 +1576,10 @@ async def api_distrakt_details(request: Request):
     except (TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Invalid trakt_id"}, status_code=400)
 
-    details = await fetch_details(settings, "show", trakt_id, season)
+    try:
+        details = await fetch_details(settings, "show", trakt_id, season)
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
     row = await db.fetch_one(
         "SELECT slug FROM distrakt_shows WHERE user_id = ? AND trakt_id = ? LIMIT 1",
         (user_id, trakt_id_int),
@@ -1735,11 +1796,18 @@ async def api_distrakt_abandon(request: Request):
         )
         settings = await _distrakt_settings(user_id)
         if rec is not None and settings.configured:
-            watched_lookup, detail = await asyncio.gather(
-                fetch_watched_map(settings, [trakt_id]),
-                fetch_season_detail(settings, trakt_id, season),
-            )
-            abandoned_form = discord_fmt.freeze_form(_merge_live_show(rec, watched_lookup, detail))
+            try:
+                watched_lookup, detail = await asyncio.gather(
+                    fetch_watched_map(settings, [trakt_id]),
+                    fetch_season_detail(settings, trakt_id, season),
+                )
+                abandoned_form = discord_fmt.freeze_form(_merge_live_show(rec, watched_lookup, detail))
+            except TraktError:
+                # Rate-limited or unreachable while snapshotting the abandon form:
+                # skip the live freeze and leave abandoned_form=None. The renderer
+                # recomputes a form from the stored record instead. Abandoning is a
+                # user action and must still succeed — it is not a read to fail on.
+                abandoned_form = None
 
     rec = await distrakt_store.set_abandoned(user_id, month_key, trakt_id, season, abandoned,
                                              abandoned_form=abandoned_form)
