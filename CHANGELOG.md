@@ -13,6 +13,14 @@ All notable changes to this project are documented here. Format loosely follows 
 ### Accounts & access
 - 🔗 **Login, registration, and invite links now unfurl properly when pasted into Discord/Slack/etc.** — they show this app's real preview image and link instead of a blank or generic one.
 
+### Calendar performance
+- ⚡ **The calendar shows up immediately instead of after the whole month is ready.** The header, the month's totals, the jump-to strip and the first few days arrive in one fast response; every later day is already there as itself — its date, its heading, and the right amount of space held open — and fills in with its cards as you reach it. A day you never scroll to is never fetched at all, so opening a month to see what's on this week costs a fraction of what it used to. Days that arrive late are indistinguishable from the ones that came with the page: the same layout, your filters and hidden shows already applied, and ✨ NEW marked correctly.
+- 🧭 **Changing month or calendar no longer reloads the page.** The arrows and the calendar picker swap just the content, so the header, your scroll position and everything already loaded stay put, and the back button still works.
+- 🩹 **One day failing is now a gap, not the end of the month.** If Trakt can't be reached for part of a month, that day says so and offers a Retry that reloads just that day. Previously one failure took out every remaining day at once.
+- ⚠️ **A month that only partly loaded says so**, with a banner, instead of quietly looking like a quiet month.
+- 🔥 **Optional background pre-warming** (Settings → Calendar). Off by default; when on, the app quietly fetches the next couple of months in the background so the first visit of the day is already warm.
+- 🎨 **No more flash of unstyled page on a hard refresh.** The stylesheet was queued behind the fonts, so the page could paint before any of it applied. It's requested first now, the dark background is declared up front so the moment before paint isn't a white flash, and two small things in the header — the logo and an occasional extra link — no longer arrive late and shove the bar sideways. Fonts are also cached properly now, so the text stops re-flowing on every visit.
+
 ### Internals
 - 🧹 Cleaned up leftover internal-planning references in source comments and docstrings across the project (comment-only, no behavior change).
 - ⏱️ Added debug-level timing spans around the calendar's month fetch and HTML render, so the server-side "time to first byte" for the calendar page can be measured on the `app.perf` channel ahead of upcoming performance work.
@@ -20,6 +28,7 @@ All notable changes to this project are documented here. Format loosely follows 
 ### 🥚
 - When it gathers what it needs for the month, it now follows the same familiar path as everything else—quietly leaving behind whatever you've already turned away.
 - It's learned to pace itself on a big list instead of asking for everything at once — and if it ever gets told to slow down, one entry sits out with a note to try again rather than quietly showing zero.
+- For those who've found it, the way back in no longer turns up a moment after the rest — it's simply there as the page draws, instead of appearing late and nudging its neighbours aside.
 
 ## 🏷️ [1.1.2] - 2026-07-23
 

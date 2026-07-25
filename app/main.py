@@ -281,11 +281,22 @@ async def lifespan(_app: FastAPI):
 # that window.
 _STATIC_CACHE_HEADERS = {"Cache-Control": "max-age=600"}
 
+# Fonts are the one exception, and it is safe for a reason that does not hold for
+# anything else under /static: a vendored woff2 cannot change without its FILENAME
+# changing, because the name carries the version (inter-v20-latin-400). So there is
+# no "forgot to bump asset_v" staleness to protect against — a new font is a new
+# URL. At 600s a viewer who opens the calendar twice a day re-downloads ~86 KB both
+# times and watches the text re-flow from the fallback face on each; a year makes
+# that a true-cold-load-only event.
+_FONT_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+
 
 class _CachedStaticFiles(StaticFiles):
-    def file_response(self, *args, **kwargs) -> Response:
-        response = super().file_response(*args, **kwargs)
-        response.headers.update(_STATIC_CACHE_HEADERS)
+    def file_response(self, full_path, *args, **kwargs) -> Response:
+        response = super().file_response(full_path, *args, **kwargs)
+        headers = (_FONT_CACHE_HEADERS if Path(full_path).parent.name == "fonts"
+                   else _STATIC_CACHE_HEADERS)
+        response.headers.update(headers)
         return response
 
 

@@ -2,13 +2,16 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    {# Parsed before first paint, so the gap before the stylesheet applies
+       is the page's own dark rather than the browser's default white. #}
+    <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Pick a Month</title>
     <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
     <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
     <style>
         /* No 100vh now that a header sits above it: the panel centres in what is
            left rather than pushing the page taller than the viewport. */
@@ -38,7 +41,7 @@
        timezone) are deliberately absent — nothing rendered here reacts to them. #}
     <header class="hero">
         <div class="hero-lead">
-            <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+            <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
         </div>
         <div class="hero-controls">
             <div class="control" title="{{ endpoint.description }}">

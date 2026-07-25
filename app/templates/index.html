@@ -2,18 +2,38 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    {# Parsed before first paint, so the gap before the stylesheet applies
+       is the page's own dark rather than the browser's default white. #}
+    <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>New Shows &ndash; {{ month_label }}</title>
     <link rel="shortcut icon" href="/static/images/favicon.ico">
+    {# ORDER MATTERS: the stylesheet is the only resource that gates first paint,
+       so it is requested before the font preloads rather than after them. The
+       three woff2 files are ~86 KB and preload at high priority; ahead of the
+       stylesheet they compete with it for the connection pool on any load where
+       nothing is cached yet, which delays paint instead of just delaying fonts.
+       Preloading them still starts both fetches in the same early batch. #}
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
     <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
     {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
        navigation swaps the whole <body> in place. A <script src> living inside
        that swapped region would be re-fetched and re-executed on every nav —
        re-declaring every top-level const and double-binding every listener.
        In <head> they load exactly once and survive the swaps. #}
+    {# Inline and synchronous, before any body content is parsed, so the header
+       renders once and correctly. The deferred bundle below runs after first
+       paint; deciding this there means the header repaints and shifts sideways.
+       Kept a local-storage read rather than a server-rendered flag on purpose:
+       the response stays identical for every account, so it discloses nothing
+       about which of them have found this. #}
+    <script>
+        try {
+            if (localStorage.getItem('distraktRevealed') === '1') document.documentElement.classList.add('has-distrakt');
+        } catch (e) {}
+    </script>
     <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
     <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
     <script src="/static/js/app.js?v={{ asset_v }}" defer></script>
@@ -45,7 +65,7 @@
 
 <header class="hero">
     <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
         <div class="month-nav">
             <a class="month-nav-btn prev" hx-boost="true" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
@@ -145,7 +165,12 @@
                 <button type="button" onclick="signOut()">🚪 Sign out</button>
             </div>
         </details>
-        <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)" hidden>🧵 Distrakt</a>
+        {# Visibility is decided by the <html> class the head script sets, not by a
+           `hidden` attribute cleared after load: app.js is deferred, so clearing it
+           there lands after first paint and the link pops into the header a beat
+           late, shifting the bar. CSS also beats `hidden` inconsistently for screen
+           readers, so the attribute is gone rather than overridden. #}
+        <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)">🧵 Distrakt</a>
     </div>
 </header>
 

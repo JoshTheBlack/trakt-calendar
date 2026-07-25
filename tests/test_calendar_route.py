@@ -976,5 +976,62 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         self.assertNotEqual(resp.status_code, 200)
 
 
+class HeaderPaintStabilityTests(CalendarRouteTestCase):
+    """The header has to be the same shape in the first paint as it is a second
+    later. Both things below used to land after paint and shove it sideways on a
+    load where the assets were not already cached."""
+
+    PAGE = "/calendar?year=2026&month=7&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("header_viewer")
+        self.sign_in_as(self.user_id)
+        patcher = patch("app.calendar_cache.fetch_window_raw", AsyncMock(return_value=[]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_stylesheet_is_requested_before_the_font_preloads(self):
+        """The stylesheet is the only thing gating first paint. Behind ~86 KB of
+        high-priority font preloads it competes for the connection pool on an
+        uncached load, and the page can paint before any of it applies."""
+        html = self.client.get(self.PAGE).text
+        head = html[:html.index("</head>")]
+        self.assertLess(head.index("/static/css/style.css"),
+                        head.index("/static/fonts/"))
+
+    def test_the_brand_logo_reserves_its_box_in_the_markup(self):
+        """The file is 512x512; with no intrinsic size in the markup the element
+        is zero-wide until it downloads and everything beside it then shifts."""
+        html = self.client.get(self.PAGE).text
+        self.assertRegex(html, r'<img class="brand-logo"[^>]*\swidth="30"[^>]*>')
+        self.assertRegex(html, r'<img class="brand-logo"[^>]*\sheight="30"[^>]*>')
+
+    def test_the_head_decides_the_optional_nav_link_before_the_body_is_parsed(self):
+        """The deciding script must be inline and ahead of the deferred bundle —
+        deferred means after first paint, which is the shift being prevented."""
+        html = self.client.get(self.PAGE).text
+        decide = html.index("classList.add('has-distrakt')")
+        self.assertLess(decide, html.index("/static/js/app.js"))
+        self.assertLess(decide, html.index("<body"))
+
+    def test_the_optional_nav_link_is_not_shown_by_clearing_an_attribute(self):
+        """It is gated by CSS off a class the head script sets. A `hidden` the
+        deferred bundle clears is exactly the late reveal that shifted the bar."""
+        html = self.client.get(self.PAGE).text
+        link = re.search(r'<a id="distraktNav".*?</a>', html, re.S).group(0)
+        self.assertNotIn("hidden", link)
+
+    def test_the_markup_says_nothing_about_who_has_found_it(self):
+        """Deciding this server-side would fix the shift too, and is why it was
+        left in local storage: the response must not differ between an account
+        that has used the easter egg and one that has not."""
+        plain = self.client.get(self.PAGE).text
+        finder = self._make_user("header_finder", distrakt_approved=True)
+        self.sign_in_as(finder)
+        self.assertIn('<a id="distraktNav"', self.client.get(self.PAGE).text)
+        self.assertIn('<a id="distraktNav"', plain)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

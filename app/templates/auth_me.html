@@ -2,14 +2,17 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
+  {# Parsed before first paint, so the gap before the stylesheet applies
+     is the page's own dark rather than the browser's default white. #}
+  <meta name="color-scheme" content="dark">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Account &ndash; Trakt New Shows</title>
   <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
   <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
 </head>
 {# `has-nav` swaps the centred sign-in layout for a header above centred content.
    The signed-out pages (login, register, onboarding) keep the plain .auth-page
@@ -18,7 +21,7 @@
 
 <header class="hero">
     <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
         <h1>Account</h1>
     </div>
     <div class="hero-actions">

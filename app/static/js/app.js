@@ -1648,14 +1648,16 @@ function revealSecret() {
     location.href = '/distrakt';
 }
 
-// Once revealed, show the Distrakt nav button on the calendar. Re-applied on each
-// (re)init because a boosted nav swaps in a fresh (hidden) nav element.
+// Once revealed, show the Distrakt nav button on the calendar. The inline head
+// script already set this class from local storage before first paint, so this is
+// only the in-session path — the reveal happening while the page is open. The
+// class lives on <html>, which a boosted nav does not swap, so a freshly swapped
+// nav element inherits the right visibility with nothing to re-apply.
 function initDistraktNav() {
     if (!window.DISTRAKT_AVAILABLE) return;
     let revealed = false;
     try { revealed = localStorage.getItem('distraktRevealed') === '1'; } catch (e) {}
-    const nav = document.getElementById('distraktNav');
-    if (revealed && nav) nav.hidden = false;
+    if (revealed) document.documentElement.classList.add('has-distrakt');
 }
 
 const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];

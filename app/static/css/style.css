@@ -40,13 +40,18 @@ header.hero {
 .hero-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hero-meta { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
 
-/* Revealed only after the easter egg has been used (see app.js). */
+/* Shared by the header link and the return link on the page it opens. */
 .distrakt-nav-link {
     text-decoration: none; white-space: nowrap;
     padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 0.8rem; color: #fff;
     background: linear-gradient(45deg, #ED1C24, #7C3AED); border: 1px solid rgba(255,255,255,0.16);
 }
 .distrakt-nav-link:hover { filter: brightness(1.12); }
+/* The header link only: shown once the easter egg has been used. The class is set
+   by an inline head script from local storage, so the link is either in the header
+   or absent from the very first paint — never added to it a beat afterwards. */
+#distraktNav { display: none; }
+html.has-distrakt #distraktNav { display: inline-block; }
 
 .hero-lead img.brand-logo { height: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55)); }
 .month-nav { display: flex; align-items: center; gap: 8px; }

@@ -108,6 +108,22 @@ class StaticCacheHeaderTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers.get("cache-control"), "max-age=600")
 
+    def test_fonts_are_cached_for_a_year_instead(self):
+        """A vendored woff2 cannot change without its filename changing — the name
+        carries the version — so the "we will forget to bump asset_v" risk that
+        keeps everything else at 600s does not apply. At 600s the text visibly
+        re-flows from the fallback face on every visit more than 10 minutes apart."""
+        resp = self.client.get("/static/fonts/inter-v20-latin-400.woff2")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("cache-control"),
+                         "public, max-age=31536000, immutable")
+
+    def test_the_long_cache_is_scoped_to_fonts(self):
+        """Images live one directory over and have no version in their names."""
+        resp = self.client.get("/static/images/trakttop.png")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("cache-control"), "max-age=600")
+
     def test_htmx_is_self_hosted(self):
         """htmx ships from /static, not a CDN, so boosted navigation has no
         third-party dependency (consistent with the self-hosted fonts). It also
