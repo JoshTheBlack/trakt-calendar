@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.1.3] - Unreleased
+## 🏷️ [1.1.3] - 2026-07-25
 
 ### Admin interface
 - 🎬 **Certification filtering** (US TV Parental Guidelines for shows, MPA ratings for movies), set with a click-to-cycle chip picker — no free text, since both rating systems are small and fixed. It shows up both as an instance-wide floor (Settings → Calendar) and as your own 🔎 Filters, the same two-layer setup genre/country already has.
