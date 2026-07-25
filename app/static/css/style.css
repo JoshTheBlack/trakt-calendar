@@ -4,6 +4,22 @@
     --text-dim: #9aa2b1; --text-faint: #5c6478; --accent-blue: #4fa3e0;
     --green: #22c55e;
 }
+/* Self-hosted so the calendar's first paint doesn't wait on a third-party
+   render-blocking font fetch (fonts.googleapis.com/fonts.gstatic.com — both
+   faces are OFL, fine to vendor). font-display: swap paints with the fallback
+   immediately and swaps once the face loads, rather than blocking on it. */
+@font-face {
+    font-family: 'Bebas Neue'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url('/static/fonts/bebas-neue-v16-latin-400.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap;
+    src: url('/static/fonts/inter-v20-latin-400.woff2') format('woff2');
+}
+@font-face {
+    font-family: 'Inter'; font-style: normal; font-weight: 700; font-display: swap;
+    src: url('/static/fonts/inter-v20-latin-700.woff2') format('woff2');
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body {
     background: radial-gradient(circle at 15% 0%, rgba(232,181,69,0.08), transparent 40%),
@@ -24,13 +40,18 @@ header.hero {
 .hero-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hero-meta { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
 
-/* Revealed only after the easter egg has been used (see app.js). */
+/* Shared by the header link and the return link on the page it opens. */
 .distrakt-nav-link {
     text-decoration: none; white-space: nowrap;
     padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 0.8rem; color: #fff;
     background: linear-gradient(45deg, #ED1C24, #7C3AED); border: 1px solid rgba(255,255,255,0.16);
 }
 .distrakt-nav-link:hover { filter: brightness(1.12); }
+/* The header link only: shown once the easter egg has been used. The class is set
+   by an inline head script from local storage, so the link is either in the header
+   or absent from the very first paint — never added to it a beat afterwards. */
+#distraktNav { display: none; }
+html.has-distrakt #distraktNav { display: inline-block; }
 
 .hero-lead img.brand-logo { height: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55)); }
 .month-nav { display: flex; align-items: center; gap: 8px; }
@@ -112,8 +133,55 @@ header.hero {
 }
 .stat-pop { animation: statPop 0.55s cubic-bezier(.36,.07,.19,.97); }
 .delta-msg { font-size: 0.7rem; color: #a1a1aa; margin-top: 2px; display: block; }
+/* The direction of the change, decided server-side and carried as a class so the
+   line arrives coloured rather than being tinted by script after paint. */
+.delta-msg.up { color: #34d399; }
+.delta-msg.down { color: #f87171; }
+.delta-msg.same { color: #a1a1aa; }
 .stats-divider { border: 0; border-top: 1px solid #242a38; margin: 6px 0; }
 .history-log { margin-top: 8px; font-size: 0.65rem; color: #888; border-top: 1px solid #242a38; padding-top: 5px; }
+.history-row { display: flex; justify-content: space-between; }
+
+/* ---- Jump-to day strip ---- */
+/* A long month can be navigated without scrolling through it. A day with no
+   items has no section to scroll to, so its chip is a greyed <span> rather than
+   a link.
+
+   Pinned UNDER the sticky header (--header-h, measured in app.js because the
+   header wraps to a second row when narrow) and BEHIND it in z-order. That
+   z-order is what lets the strip hide by sliding up out of sight behind the
+   navbar, rather than riding over the top of it. Scrolling tucks it away; the
+   pointer entering the band just below the header slides it back down. */
+.day-chips { position: sticky; top: var(--header-h, 46px); z-index: 25; display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; padding: 8px 16px; background: rgba(12,14,20,0.92); border-bottom: 1px solid var(--card-border); backdrop-filter: blur(6px); transition: transform .16s ease; }
+/* Far enough up to clear the header at any height. It keeps its sticky slot
+   while tucked, so nothing below it moves. The delay and the slower duration are
+   on the HIDE only (the reveal below cancels both): it snaps in, then waits a
+   full second and drifts out, so drifting across the edge of the trigger doesn't
+   flap it shut and there is time to come back. */
+body.chips-tucked .day-chips { transform: translateY(calc(-100% - var(--header-h, 46px))); pointer-events: none; transition-delay: 1s; transition-duration: .32s; }
+/* The catcher: invisible, live only while tucked, and kept to a band rather than
+   the full strip height so it isn't swallowing clicks on the cards passing under
+   it. It sits BELOW the strip in z-order, which matters — the band occupies the
+   same place the revealed strip lands in, so above it the band would swallow
+   every chip click except the last few pixels. Below it, the arriving strip
+   covers the band and takes both the hover and the clicks. */
+.day-chips-peek { display: none; }
+body.chips-tucked .day-chips-peek { display: block; position: fixed; top: var(--header-h, 46px); left: 0; right: 0; height: 24px; z-index: 24; }
+/* Three ways to hold it open, which together cover everything from the top of the
+   window down past the strip: the header (as a SIBLING selector, so the navbar's
+   own buttons keep their clicks — an overlay there would eat them), the band just
+   under it, and the strip itself once it has arrived. Overshooting upward off the
+   band now lands on the header and keeps it open instead of dismissing it. */
+body.chips-tucked header.hero:hover ~ .day-chips,
+body.chips-tucked .day-chips-peek:hover + .day-chips,
+body.chips-tucked .day-chips:hover { transform: none; pointer-events: auto; transition-delay: 0s; transition-duration: .1s; transition-timing-function: ease-out; }
+@media (prefers-reduced-motion: reduce) { .day-chips { transition: none; } }
+.day-chip { min-width: 26px; text-align: center; padding: 3px 6px; border-radius: 7px; border: 1px solid var(--card-border); font-size: 0.72rem; line-height: 1.2; color: var(--gold-soft); text-decoration: none; transition: all .15s ease; }
+a.day-chip:hover { background: rgba(232,181,69,0.9); color: #12151c; border-color: var(--gold); }
+/* `empty` is the server's answer at render time, `unreachable` app.js's after a
+   toggle collapsed the day. Both mean the same thing to the viewer: there is
+   nothing to scroll to, so the chip is greyed and doesn't take the click. */
+.day-chip.empty, .day-chip.unreachable { color: #4b5261; border-color: #232734; pointer-events: none; }
 
 /* ---- Grid / cards ---- */
 /* --card-w drives column width; overridden per card style below. */
@@ -121,7 +189,42 @@ body { --card-w: 220px; }
 body.card-horizontal { --card-w: 420px; }
 
 main { padding: 10px 6vw 0 6vw; }
-.day-block { margin-top: 40px; }
+/* Skips layout/paint for day-blocks scrolled off-screen, so a full month costs
+   about what a couple of visible days do. contain-intrinsic-size is a single
+   rough estimate rather than one computed per day: a lazy-loaded day reserves
+   its own height via a skeleton, so the estimate only has to hold the
+   scrollbar roughly steady for the current full-month render. */
+/* scroll-margin-top keeps a jumped-to day's header clear of the sticky header and
+   the chip strip above it — without it the anchor lands the day title underneath
+   them and the day looks like it starts at its second row of cards. */
+.day-block { margin-top: 40px; scroll-margin-top: calc(var(--header-h, 46px) + 52px); content-visibility: auto; contain-intrinsic-size: 0 900px; }
+/* An announced-but-not-yet-fetched day. It has nothing to skip, so the off-screen
+   skip is turned off and it reserves its own height instead — a rough one, from
+   the rows of cards the server already knows are coming, which is a far better
+   guess than the single global estimate above. That height is what keeps the
+   scrollbar honest and makes a jump-to chip land on the day the viewer asked for
+   rather than somewhere near it. */
+.day-block.is-skeleton { content-visibility: visible; }
+.day-placeholder {
+    min-height: calc(var(--skeleton-rows, 1) * var(--placeholder-row-h, 430px));
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015));
+}
+/* The cards are a fixed height in the two styles that set one; the vertical card
+   grows with its overview text, so its row height is an average. */
+body.card-poster { --placeholder-row-h: 322px; }
+body.card-horizontal { --placeholder-row-h: 326px; }
+/* Stacked, a day is full width and the placeholder inherits it. Packed, days sit
+   beside each other and take their width from their contents — so a placeholder
+   with no width would stand the day up as a bare header and shove the row around
+   when its cards finally arrive. It claims the width its columns will need. */
+body.pack-packed .day-placeholder { width: calc(var(--cols, 1) * var(--card-w) + (var(--cols, 1) - 1) * 26px); }
+body.card-poster.pack-packed .day-placeholder { width: calc(var(--cols, 1) * var(--card-w) + (var(--cols, 1) - 1) * 22px); }
+/* A day that couldn't be loaded, and the warning a partly-loaded one carries: in
+   the packed layout <main> is a flex row of days, and a message about the month
+   belongs across it rather than squeezed into one day's column. */
+body.pack-packed main > .warning-banner { flex: 1 0 100%; }
+.day-block.is-failed .warning-banner { margin: 0; display: flex; align-items: center; gap: 12px; }
 .day-header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; border-bottom: 2px solid var(--card-border); padding-bottom: 10px; }
 .day-header .day-title { font-family: 'Bebas Neue', sans-serif; font-size: 1.9rem; color: var(--gold-soft); letter-spacing: 1px; }
 .day-header .day-count { color: var(--text-faint); font-size: 0.9rem; }
@@ -129,7 +232,13 @@ main { padding: 10px 6vw 0 6vw; }
 
 /* ---- Day packing: "packed" flows days beside each other, overflowing below ---- */
 body.pack-packed main { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 34px 26px; }
-body.pack-packed .day-block { margin-top: 0; flex: 0 1 auto; min-width: 0; }
+/* Turn the off-screen skip OFF here. content-visibility reserves a placeholder
+   whose WIDTH is 0 (see .day-block's contain-intrinsic-size); that is invisible
+   in the stacked layout where a day is always full width, but in this flex layout
+   a skipped day collapses to zero width and its neighbours scramble across the
+   row until it scrolls in — and the skip's paint containment also clips the
+   poster-only hover panels that overflow a card. Packed days render normally. */
+body.pack-packed .day-block { margin-top: 0; flex: 0 1 auto; min-width: 0; content-visibility: visible; }
 body.pack-packed .grid { grid-template-columns: repeat(var(--cols, 1), var(--card-w)); }
 
 /* ============================================================================
@@ -250,6 +359,13 @@ body.hide-not-watching .card.not-watching { display: none; }
 
 .watch-toggle { position: absolute; top: 48px; right: 10px; z-index: 6; width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.18); background: rgba(10,12,16,0.78); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .18s ease; padding: 0; }
 .watch-toggle:hover { transform: scale(1.14); background: rgba(232,181,69,0.9); }
+/* Which eye shows follows from the card's own class, so a card rendered
+   not-watching by the server already has the struck-through eye at first paint
+   and the toggle is a single class flip rather than two inline style writes. */
+.watch-toggle .icon-closed, .card.not-watching .watch-toggle .icon-open { display: none; }
+.card.not-watching .watch-toggle .icon-closed { display: block; }
+/* The <symbol> definitions the cards' <use> elements point at: markup only. */
+.svg-symbols { position: absolute; width: 0; height: 0; overflow: hidden; }
 
 .card-body { padding: 14px 16px 16px 16px; display: flex; flex-direction: column; gap: 8px; flex: 1; transition: opacity .22s ease; }
 .title-row { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
@@ -312,6 +428,9 @@ body.hide-not-watching .card.not-watching { display: none; }
 .empty-state { text-align: center; padding: 100px 20px; color: var(--text-faint); }
 .empty-state .emoji { font-size: 3rem; margin-bottom: 14px; }
 .error-banner { margin: 28px 6vw 0 6vw; padding: 16px 20px; border-radius: 12px; background: rgba(224,56,77,0.1); border: 1px solid rgba(224,56,77,0.5); color: var(--gold-soft); font-size: 0.9rem; }
+/* A non-fatal degradation, amber rather than the error banner's red: the month
+   rendered but a window's data was missing, so it may be short a few days. */
+.warning-banner { margin: 28px 6vw 0 6vw; padding: 16px 20px; border-radius: 12px; background: rgba(232,181,69,0.1); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft); font-size: 0.9rem; }
 
 /* ---- Footer ---- */
 .footer-divider { border: 0; border-top: 1px solid var(--card-border); margin: 56px 6vw 0 6vw; }

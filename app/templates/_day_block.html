@@ -1,0 +1,21 @@
+{# One day's section: the dated header and that day's cards. Rendered from
+   `group` ({date, label, items}) plus whatever _card.html needs.
+
+   The id is what the jump-to strip scrolls to, so it has to exist for the day
+   whether or not its cards are on screen yet.
+
+   `cols` and `collapsed` come from the route (_apply_day_layout): how wide this
+   day's grid is in the packed layout, and whether the day disappears entirely
+   because hiding is on and everything on it is marked. Both used to be worked out
+   by the client after paint, which is what made a day header appear and then
+   vanish, taking the rest of the month up the page with it. app.js still maintains
+   them from here on, for toggles made without a reload. #}
+<section class="day-block{% if group.collapsed %} is-empty-hidden{% endif %}" id="day-{{ group.date }}" data-date="{{ group.date }}" style="--cols: {{ group.cols | default(1) }}">
+    <div class="day-header">
+        <div class="day-title">📅 {{ group.label }}</div>
+        <div class="day-count">{{ group['items']|length }} item{{ '' if group['items']|length == 1 else 's' }}</div>
+    </div>
+    <div class="grid">
+        {% for item in group['items'] %}{% include "_card.html" %}{% endfor %}
+    </div>
+</section>

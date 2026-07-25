@@ -42,18 +42,20 @@ serves whatever is cached (even stale, even empty) and never touches Trakt.
 """
 from __future__ import annotations
 
+import asyncio
 import calendar as _calendar
 import json
 import logging
 import time as _time
 import zlib
 from datetime import date, datetime, timedelta, timezone
+from itertools import groupby
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from . import calendar_filter, db, trakt
 from .cache import COMPRESS_LEVEL
-from .endpoints import Endpoint
+from .endpoints import ENDPOINTS, Endpoint
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger app/trakt.py's _cached_get already uses for its own
@@ -374,57 +376,118 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
 # the assembled read path
 # ---------------------------------------------------------------------------
 
-def _month_utc_range(tz: ZoneInfo, year: int, month: int) -> tuple[date, date]:
-    """The UTC date range whose windows cover the viewer's LOCAL month ±1 day.
+def day_label(day: date) -> str:
+    """The heading a day's block carries ("Friday, 03 July").
 
-    The month boundary is viewer-dependent — an item at 02:00 UTC on the 1st is
-    the previous month for a UTC-8 viewer and this month for a UTC+2 one — so the
-    range is padded a day each side in the viewer's tz and then expressed in UTC,
-    where the windows live. The final trim back to the exact local month happens
-    after normalization, never in UTC.
+    Shared rather than formatted at each call site: a day that fails to load is
+    still announced by its date, and a placeholder or an error whose heading is
+    spelled differently from the real one reads as a different day."""
+    return day.strftime("%A, %d %B")
+
+
+def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tuple[date, date]:
+    """The UTC date range whose aligned windows cover the viewer-LOCAL day span
+    [start_date, end_date], padded a day each side.
+
+    A local day is viewer-dependent in UTC — an item at 02:00 UTC on the 1st is
+    the previous local day for a UTC-8 viewer and this one for a UTC+2 one, and a
+    single local day can even straddle two UTC windows once the offset is applied
+    — so the span is padded a day each side in the viewer's tz and then expressed
+    in UTC, where the windows live. The final trim back to the exact local span
+    happens after normalization, never in UTC.
     """
-    days = _calendar.monthrange(year, month)[1]
-    local_start = datetime(year, month, 1, tzinfo=tz)
-    local_end = datetime(year, month, days, 23, 59, 59, tzinfo=tz)
+    local_start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=tz)
+    local_end = datetime(end_date.year, end_date.month, end_date.day, 23, 59, 59, tzinfo=tz)
     utc_start = (local_start - timedelta(days=1)).astimezone(timezone.utc).date()
     utc_end = (local_end + timedelta(days=1)).astimezone(timezone.utc).date()
     return utc_start, utc_end
 
 
-async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, month: int,
-                     genres: str = "", countries: str = "",
-                     show_certifications: str = "", movie_certifications: str = "",
-                     network_filter=None,
-                     allow_fetch: bool = True, now: int | None = None) -> tuple[list[dict], int | None]:
-    """Produce one viewer's normalized, filtered, month-trimmed calendar items.
+async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
+                         start_date: date, end_date: date,
+                         genres: str = "", countries: str = "",
+                         show_certifications: str = "", movie_certifications: str = "",
+                         network_filter=None, not_watching_ids: set[str] | None = None,
+                         allow_fetch: bool = True, now: int | None = None,
+                         ) -> tuple[list[dict], dict]:
+    """Assemble one viewer's calendar for the local day span [start_date, end_date].
 
-    The read path in order: figure the UTC window range covering the viewer's
-    local month ±1 day; load each aligned window (fetching+caching, or cache-only
-    on a share page); apply the per-user genre/country/certification filter to
-    the RAW entries (before normalization, on the raw slugs); normalize the
-    survivors into the viewer's tz; trim to the viewer's LOCAL month; apply the
-    network filter; sort by air time. Returns (items, as_of) where as_of is the
-    oldest contributing window's cached_at — the "data as of" timestamp for a
-    share page — or None when nothing was cached and nothing fetched.
+    The single place the cache is turned into view-ready days. It reads ONLY the
+    aligned windows that cover the span — not the whole month — normalizes ONLY
+    those entries into the viewer's tz, trims to [start_date, end_date], groups by
+    local day, and returns (grouped, meta). A whole-month read is just
+    assemble_range(first_of_month, last_of_month); a single day is
+    assemble_range(d, d).
+
+    The read path in order: figure the UTC window range covering the span ±1 day
+    (a viewer-local day can straddle two UTC windows, so the padding matters);
+    load every covering window CONCURRENTLY; apply the per-user
+    genre/country/certification filter to the RAW entries (before normalization,
+    on the raw slugs); normalize the survivors into the viewer's tz; trim to the
+    LOCAL span; apply the network filter; sort by air time; group by local day.
+
+    RESILIENT BUT LOUD on a window Trakt can't supply. The windows load through a
+    single asyncio.gather; a window that raised (nothing cached AND the fetch
+    failed) is skipped so the rest of the span still renders, and meta['partial']
+    is set so the caller can say the data is incomplete. Only a span where EVERY
+    window failed raises TraktError — there is genuinely nothing to show. (A
+    public share read passes allow_fetch=False, where a missing window returns
+    empty rather than raising, so it never trips the partial path.)
 
     `show_certifications`/`movie_certifications` are two separate specs (the two
-    vocabularies don't overlap); the one matching `endpoint.media` is the one
-    that applies to this endpoint's entries.
+    vocabularies don't overlap); the one matching `endpoint.media` applies here.
 
-    The not-watching overlay and the hide/card/day-packing view preferences are
-    the caller's to apply: those are per-request view concerns, not part of the
-    shared data model this returns.
+    `meta` carries: total, watching, not_watching (from not_watching_ids, if
+    given — otherwise every item counts as watching), show_ids (the span's full,
+    de-duped, air-ordered item-id list, which is what is-new diffs against and
+    must never be taken from a partially-rendered DOM), as_of (the oldest
+    contributing window's cached_at, or None), and partial.
+
+    The hide/card/day-packing view preferences remain the caller's to apply:
+    those are per-request view concerns, not part of the data model returned.
     """
-    utc_start, utc_end = _month_utc_range(tz, year, month)
+    utc_start, utc_end = _local_span_utc_range(tz, start_date, end_date)
+    windows = aligned_windows(utc_start, utc_end)
+
+    # gather preserves argument order, so `results` stays in ascending window
+    # order and extending `entries` in that order keeps the windows ordered —
+    # which dedupe_entries below relies on to keep the SAME copy of an
+    # overlapping airing the old sequential loop did (first window wins).
+    # return_exceptions=True both lets a single window fail without aborting the
+    # span and stops a still-running sibling fetch from surfacing as an
+    # "exception was never retrieved" warning.
+    results = await asyncio.gather(
+        *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
+          for start in windows),
+        return_exceptions=True,
+    )
+
     entries: list[dict] = []
     as_of: int | None = None
-    for start in aligned_windows(utc_start, utc_end):
-        window_entries, cached_at = await load_window(
-            endpoint, settings, start, allow_fetch=allow_fetch, now=now,
-        )
+    errored = 0
+    first_error: trakt.TraktError | None = None
+    for result in results:
+        if isinstance(result, trakt.TraktError):
+            # load_window already served a stale copy when it had one, so getting
+            # here means this window had nothing cached AND its fetch failed.
+            errored += 1
+            first_error = first_error or result
+            continue
+        if isinstance(result, BaseException):
+            # An unexpected failure (not a Trakt reachability problem) is a real
+            # bug, not a degraded window — surface it instead of hiding it behind
+            # the partial flag.
+            raise result
+        window_entries, cached_at = result
         entries.extend(window_entries)
         if cached_at is not None:
             as_of = cached_at if as_of is None else min(as_of, cached_at)
+
+    if errored and errored == len(windows):
+        # Every window failed and none had a cached copy: there is no degraded
+        # span to render, so surface it as the caller's hard error.
+        raise first_error
+    partial = errored > 0
 
     # Belt and braces over the trim in fetch_window_raw. That one keeps NEW
     # windows disjoint; this one also covers windows cached BEFORE the trim
@@ -440,12 +503,114 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
         item = trakt.normalize(entry, endpoint, tz)
         if item is None:
             continue
-        air_date = item["air_date"]  # YYYY-MM-DD, already in the viewer's tz
-        if int(air_date[:4]) == year and int(air_date[5:7]) == month:
+        air_day = date.fromisoformat(item["air_date"])  # already in the viewer's tz
+        if start_date <= air_day <= end_date:
             items.append(item)
 
     if network_filter:
         allow = set(network_filter)
         items = [i for i in items if i["network"] in allow]
     items.sort(key=lambda i: i["air_ts"])
-    return items, as_of
+
+    grouped = [
+        {"date": day,
+         "label": day_label(date.fromisoformat(day)),
+         "items": list(rows)}
+        for day, rows in groupby(items, key=lambda i: i["air_date"])
+    ]
+
+    nw = not_watching_ids or set()
+    not_watching_count = sum(1 for i in items if i["id"] in nw)
+    meta = {
+        "total": len(items),
+        "watching": len(items) - not_watching_count,
+        "not_watching": not_watching_count,
+        # De-duped, first-airing order: one show airing a dozen times in a month
+        # is one show as far as "which of these is new since last time" goes, and
+        # this list is stored per user per view.
+        "show_ids": list(dict.fromkeys(i["id"] for i in items)),
+        "as_of": as_of,
+        "partial": partial,
+    }
+    return grouped, meta
+
+
+async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, month: int,
+                     genres: str = "", countries: str = "",
+                     show_certifications: str = "", movie_certifications: str = "",
+                     network_filter=None,
+                     allow_fetch: bool = True, now: int | None = None) -> tuple[list[dict], int | None]:
+    """One viewer's normalized, filtered, month-trimmed calendar items, as a flat
+    (items, as_of) pair — the shape the calendar route, the share pages, and the
+    distrakt import already unpack.
+
+    A thin wrapper over assemble_range for the whole local month (its [1st, last]
+    span): assemble_range owns the window math, the concurrent fetch, and the
+    normalize/trim/group. This keeps the well-worn (items, as_of) return; a caller
+    that also needs the partial-data flag or the per-span counts calls
+    assemble_range directly and reads them off `meta`.
+    """
+    days = _calendar.monthrange(year, month)[1]
+    grouped, meta = await assemble_range(
+        endpoint, settings, tz=tz,
+        start_date=date(year, month, 1), end_date=date(year, month, days),
+        genres=genres, countries=countries,
+        show_certifications=show_certifications, movie_certifications=movie_certifications,
+        network_filter=network_filter, allow_fetch=allow_fetch, now=now,
+    )
+    items = [item for day in grouped for item in day["items"]]
+    return items, meta["as_of"]
+
+
+# ---------------------------------------------------------------------------
+# heartbeat pre-warm
+# ---------------------------------------------------------------------------
+
+PREWARM_DAYS = 60
+
+# In-memory only: resets on restart, which just causes one extra (harmless)
+# warm right after a deploy rather than losing pre-warm state permanently.
+_last_prewarm_at: int | None = None
+
+
+async def prewarm_calendar_cache(settings, *, now: int | None = None) -> None:
+    """Fill the shared window cache ahead of any viewer, GATED behind the
+    calendar_prewarm_enabled setting and the calendar_cache_ttl_minutes floor.
+
+    Below a 24h TTL the pre-warmed windows would expire before a viewer could
+    ever benefit from them, so pre-warming is skipped entirely rather than
+    spending a Trakt call for nothing. Runs at most once per TTL, tracked by an
+    in-memory marker (see _last_prewarm_at).
+
+    Warms at the WINDOW layer via load_window, not assemble_range/read_month:
+    the cached rows are user-independent, so normalizing them for a fake viewer
+    here would be wasted work — a real request normalizes on read. Every
+    calendar endpoint is warmed across the aligned windows covering
+    [now, now + PREWARM_DAYS], the same api_cache the live read path fills.
+    """
+    global _last_prewarm_at
+    if not settings.calendar_prewarm_enabled:
+        return
+    if settings.calendar_cache_ttl_minutes < 1440:
+        return
+    ts = db.now() if now is None else now
+    ttl = _ttl_seconds(settings)
+    if _last_prewarm_at is not None and (ts - _last_prewarm_at) < ttl:
+        return
+    _last_prewarm_at = ts
+
+    today = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+    windows = aligned_windows(today, today + timedelta(days=PREWARM_DAYS))
+    await asyncio.gather(
+        *(load_window(endpoint, settings, start, allow_fetch=True, now=ts)
+          for endpoint in ENDPOINTS.values()
+          for start in windows),
+        return_exceptions=True,
+    )
+    # Visible at normal log level on purpose (not perftrace.span, which is
+    # DEBUG): this spends the instance's Trakt budget on a schedule with no
+    # viewer present, and an operator should be able to see that it ran.
+    _perf.info(
+        "calendar pre-warm: %d endpoint(s) x %d window(s) covering %s..+%dd",
+        len(ENDPOINTS), len(windows), today.isoformat(), PREWARM_DAYS,
+    )

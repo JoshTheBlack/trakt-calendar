@@ -526,6 +526,40 @@ class CacheSettingsWidgetTests(FinishingTestCase):
         self.assertIn("api_cache_max_bytes", payload)
 
 
+class PrewarmSettingWidgetTests(FinishingTestCase):
+    """calendar_prewarm_enabled: the checkbox and its round trip through
+    /api/settings, coerced to a real bool the way hide_not_watching is."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self.admin_id)
+
+    def test_the_settings_screen_renders_the_toggle(self):
+        body = self.client.get("/?month=1&year=2026").text
+        self.assertIn('name="calendar_prewarm_enabled"', body)
+
+    def test_saving_it_persists_as_a_bool(self):
+        resp = self.client.post("/api/settings", json={"calendar_prewarm_enabled": True})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        settings = load_settings()
+        self.assertIs(settings.calendar_prewarm_enabled, True)
+
+        resp = self.client.post("/api/settings", json={"calendar_prewarm_enabled": False})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIs(load_settings().calendar_prewarm_enabled, False)
+
+    def test_a_checkbox_style_string_value_coerces_to_a_bool(self):
+        """A form posts "true"/"false", not a JSON boolean; _as_bool must still
+        turn that into a real bool rather than storing the truthy string."""
+        resp = self.client.post("/api/settings", json={"calendar_prewarm_enabled": "true"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIs(load_settings().calendar_prewarm_enabled, True)
+
+    def test_it_is_readable_back_through_the_settings_endpoint(self):
+        payload = self.client.get("/api/settings").json()
+        self.assertIn("calendar_prewarm_enabled", payload)
+
+
 class SettingsTabsTests(FinishingTestCase):
     """Settings is four tabbed groups in one form."""
 

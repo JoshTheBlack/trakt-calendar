@@ -24,6 +24,7 @@ import json
 import logging
 import re
 import shutil
+from datetime import date, datetime, timedelta
 
 from . import db
 from .config import DATA_DIR
@@ -69,6 +70,26 @@ async def not_watching_ids(user_id: int) -> set[str]:
     return set(await not_watching_list(user_id))
 
 
+async def load_view_state(user_id: int, endpoint: str, year: int, month: int) -> dict:
+    """The change-detection fields for one (endpoint, year, month): the previous
+    visit's item count and show-id list, plus the history log.
+
+    `last_show_ids` is None — not [] — when this view has never been recorded,
+    because "no baseline yet" and "a baseline that happened to be empty" mean
+    opposite things to the is-new diff.
+    """
+    row = await db.fetch_one(
+        "SELECT last_count, last_show_ids_json, history_json FROM calendar_view_state "
+        "WHERE user_id = ? AND endpoint = ? AND year = ? AND month = ?",
+        (user_id, endpoint, int(year), int(month)),
+    )
+    return {
+        "history": json.loads(row["history_json"]) if row and row["history_json"] else [],
+        "last_count": row["last_count"] if row else None,
+        "last_show_ids": json.loads(row["last_show_ids_json"]) if row and row["last_show_ids_json"] else None,
+    }
+
+
 async def load_state(user_id: int, endpoint: str, year: int, month: int) -> dict:
     """What the calendar page needs on load, in the shape app/state.load_state
     returned so the front end is unchanged.
@@ -77,16 +98,12 @@ async def load_state(user_id: int, endpoint: str, year: int, month: int) -> dict
     read for this one (endpoint, year, month).
     """
     not_watching = await not_watching_list(user_id)
-    row = await db.fetch_one(
-        "SELECT last_count, last_show_ids_json, history_json FROM calendar_view_state "
-        "WHERE user_id = ? AND endpoint = ? AND year = ? AND month = ?",
-        (user_id, endpoint, int(year), int(month)),
-    )
+    view = await load_view_state(user_id, endpoint, year, month)
     return {
         "notWatching": not_watching,
-        "history": json.loads(row["history_json"]) if row and row["history_json"] else [],
-        "lastCount": row["last_count"] if row else None,
-        "lastShowIds": json.loads(row["last_show_ids_json"]) if row and row["last_show_ids_json"] else None,
+        "history": view["history"],
+        "lastCount": view["last_count"],
+        "lastShowIds": view["last_show_ids"],
     }
 
 
@@ -142,6 +159,85 @@ async def set_view_state(user_id: int, endpoint: str, year: int, month: int, *,
         )
 
     await db.transaction(_work)
+
+
+# The history log shows the last few loads of a view, so it stays short enough
+# to read at a glance in the corner of the stats bar.
+HISTORY_LIMIT = 3
+
+
+def _relative_day_label(day: str, today: date) -> str:
+    """"Today" / "Yesterday" / "Jul 5" for a history entry's YYYY-MM-DD stamp."""
+    try:
+        when = date.fromisoformat(day)
+    except (TypeError, ValueError):
+        return "Today"
+    if when == today:
+        return "Today"
+    if when == today - timedelta(days=1):
+        return "Yesterday"
+    return f"{when:%b} {when.day}"
+
+
+async def resolve_view(user_id: int, endpoint: str, year: int, month: int, *,
+                       show_ids: list[str], total: int, now: datetime) -> dict:
+    """Diff this load of a view against the last one, then COMMIT it as the new
+    baseline. Returns what the page needs to render: the set of show ids that
+    weren't here last time, the "since last run" delta line, and the history log.
+
+    A read-then-commit, deliberately in one place: whoever produces the cards
+    also decides what counts as new, so the diff can never be run against a
+    baseline a second request already overwrote. `show_ids` must be the SERVER's
+    full list for the view — committing anything narrower (a partially rendered
+    page, one day of a lazily loaded month) would make every id it omits look new
+    on the next visit.
+
+    A view with no stored baseline marks NOTHING new: a month being looked at for
+    the first time is not a month where every show just appeared.
+
+    `now` is the viewer's local time, so the history stamps read as the times
+    they were actually looking at it.
+    """
+    prior = await load_view_state(user_id, endpoint, year, month)
+    last_show_ids = prior["last_show_ids"]
+    new_ids = set(show_ids) - set(last_show_ids) if isinstance(last_show_ids, list) else set()
+
+    history = [dict(entry) for entry in prior["history"] if isinstance(entry, dict)]
+    # One entry per CHANGE, not per load: reloading a view that hasn't moved
+    # would otherwise push the three useful lines out of the log immediately.
+    if not history or history[-1].get("count") != total:
+        history.append({
+            "time": f"{now.hour}:{now.minute:02d}",
+            "count": total,
+            "date": now.date().isoformat(),
+        })
+        history = history[-HISTORY_LIMIT:]
+
+    await set_view_state(user_id, endpoint, year, month,
+                         last_count=total, last_show_ids=list(show_ids), history=history)
+
+    last_count = prior["last_count"]
+    if last_count is None:
+        delta = {"text": "(Initial Tracking)", "kind": "none"}
+    elif total > last_count:
+        delta = {"text": f"📈 (+{total - last_count} since last run)", "kind": "up"}
+    elif total < last_count:
+        delta = {"text": f"📉 (-{last_count - total} since last run)", "kind": "down"}
+    else:
+        delta = {"text": "✅ Perfect Match", "kind": "same"}
+
+    today = now.date()
+    return {
+        "new_ids": new_ids,
+        "delta": delta,
+        # Newest first, which is the order the log is read in.
+        "history": [
+            {"label": _relative_day_label(entry.get("date"), today),
+             "time": entry.get("time", ""),
+             "count": entry.get("count", 0)}
+            for entry in reversed(history)
+        ],
+    }
 
 
 async def save_state(user_id: int, endpoint: str, year: int, month: int, payload: dict) -> None:

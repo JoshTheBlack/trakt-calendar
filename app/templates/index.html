@@ -2,41 +2,100 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    {# Parsed before first paint, so the gap before the stylesheet applies
+       is the page's own dark rather than the browser's default white. #}
+    <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>New Shows &ndash; {{ month_label }}</title>
     <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
+    {# ORDER MATTERS: the stylesheet is the only resource that gates first paint,
+       so it is requested before the font preloads rather than after them. The
+       three woff2 files are ~86 KB and preload at high priority; ahead of the
+       stylesheet they compete with it for the connection pool on any load where
+       nothing is cached yet, which delays paint instead of just delaying fonts.
+       Preloading them still starts both fetches in the same early batch. #}
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+    <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
+    {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
+       navigation swaps the whole <body> in place. A <script src> living inside
+       that swapped region would be re-fetched and re-executed on every nav —
+       re-declaring every top-level const and double-binding every listener.
+       In <head> they load exactly once and survive the swaps. #}
+    {# Inline and synchronous, before any body content is parsed, so the header
+       renders once and correctly. The deferred bundle below runs after first
+       paint; deciding this there means the header repaints and shifts sideways.
+       Kept a local-storage read rather than a server-rendered flag on purpose:
+       the response stays identical for every account, so it discloses nothing
+       about which of them have found this. #}
+    <script>
+        try {
+            if (localStorage.getItem('distraktRevealed') === '1') document.documentElement.classList.add('has-distrakt');
+        } catch (e) {}
+    </script>
+    <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
+    <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
+    <script src="/static/js/app.js?v={{ asset_v }}" defer></script>
 </head>
-<body data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}" class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}">
+{# Body classes are per-account view prefs (card style, packing, hide) that don't
+   change across a month/endpoint nav, so they can safely ride the persistent
+   <body> element that an innerHTML swap leaves in place. The per-PAGE context
+   (month/year/endpoint/total) DOES change per nav, so it lives on #pageData
+   below — inside the swapped region — where the new page's values replace it. #}
+<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}">
+<div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
+{# What the page knows about itself that the client still needs after paint: the
+   month's per-show card counts (so a toggle can move the stat tiles without
+   counting cards it may not be holding), the current split, this viewer's marks,
+   and the ids this load decided were new — as DATA, not only as classes, so a
+   render that ships days separately can mark them from the same one answer. #}
+<script id="calendarViewData" type="application/json">{{ view_data | tojson }}</script>
+
+{# The two eye icons, defined ONCE and referenced by every card's <use>. They are
+   NOT the same drawing: closed is the open eye plus the diagonal strike. #}
+<svg class="svg-symbols" aria-hidden="true" focusable="false" width="0" height="0">
+    <symbol id="eye-open" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle>
+    </symbol>
+    <symbol id="eye-closed" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle><line x1="2" y1="2" x2="22" y2="22"></line>
+    </symbol>
+</svg>
 
 <header class="hero">
     <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
         <div class="month-nav">
-            <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
+            <a class="month-nav-btn prev" hx-boost="true" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
             </a>
             <a class="month-title-link" href="/pick?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
                 <h1>{{ month_label }} {{ year }}</h1>
             </a>
-            <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
+            <a class="month-nav-btn next" hx-boost="true" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
                 <img src="/static/images/arrow-right.png" alt="Next month">
             </a>
         </div>
     </div>
 
     <div class="hero-controls">
-        <div class="control" title="{{ endpoint.description }}">
+        {# A boosted GET form so switching the calendar is an AJAX body-swap (CSS
+           and JS stay resident, no re-flash) with htmx managing history the same
+           way the month arrows do. Hidden month/year hold the current position;
+           the select carries the endpoint. With no htmx it degrades to a plain
+           GET form submit, and the query it builds (?endpoint=&month=&year=) is
+           exactly what the calendar route already reads. #}
+        <form class="control" action="/calendar" method="get" hx-boost="true" title="{{ endpoint.description }}">
+            <input type="hidden" name="month" value="{{ month }}">
+            <input type="hidden" name="year" value="{{ year }}">
             <label for="endpointSelect">📡</label>
-            <select id="endpointSelect" onchange="switchEndpoint(this.value)">
+            <select id="endpointSelect" name="endpoint" onchange="this.form.requestSubmit()">
                 {% for ep in endpoints %}
                 <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                 {% endfor %}
             </select>
-        </div>
+        </form>
         <div class="control">
             <label for="cardStyleSelect">🎬</label>
             <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
@@ -106,23 +165,55 @@
                 <button type="button" onclick="signOut()">🚪 Sign out</button>
             </div>
         </details>
-        <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)" hidden>🧵 Distrakt</a>
+        {# Visibility is decided by the <html> class the head script sets, not by a
+           `hidden` attribute cleared after load: app.js is deferred, so clearing it
+           there lands after first paint and the link pops into the header a beat
+           late, shifting the bar. CSS also beats `hidden` inconsistently for screen
+           readers, so the attribute is gone rather than overridden. #}
+        <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)">🧵 Distrakt</a>
     </div>
 </header>
 
+{# Every number here is the server's, computed over the whole month before the
+   page was sent. The client only moves them when the viewer toggles something. #}
 <div id="statsBar" class="stats-bar">
     <div style="width: 100%;">
-        <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ total }}</strong></div>
-        <span id="deltaMsg" class="delta-msg"></span>
+        <div class="stats-row"><span>📺 Total:</span><strong id="statTotal">{{ stats.total }}</strong></div>
+        <span id="deltaMsg" class="delta-msg {{ delta.kind }}">{{ delta.text }}</span>
     </div>
     <hr class="stats-divider">
-    <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">0</strong></div>
-    <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">0</strong></div>
-    <div id="historyLog" class="history-log"></div>
+    <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">{{ stats.watching }}</strong></div>
+    <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">{{ stats.not_watching }}</strong></div>
+    <div id="historyLog" class="history-log">
+        {% if history %}<strong>History:</strong>
+        {% for entry in history %}
+        <div class="history-row"><span>{{ entry.label }} {{ entry.time }}</span><span>{{ entry.count }} items</span></div>
+        {% endfor %}
+        {% endif %}
+    </div>
 </div>
+
+{# Jump-to strip: one chip per day of the month, pinned under the header. A day
+   this viewer will see nothing of — empty, or entirely not-watching while hiding
+   is on — has no section to scroll to, so its chip is inert rather than a link
+   that goes nowhere. data-date is how app.js re-greys one when a toggle empties
+   its day without a reload. #}
+{# The band that brings the strip back once it has tucked away. A SIBLING of the
+   strip rather than something inside it, because the tucked strip is transformed
+   and a transformed element becomes the containing block for its fixed-position
+   descendants — a catcher inside it would slide off-screen along with it. #}
+<div class="day-chips-peek" aria-hidden="true"></div>
+<nav class="day-chips" aria-label="Jump to a day">
+    {% for chip in day_chips %}
+    {% if chip.shown %}<a class="day-chip" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
+    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="{% if chip.count %}Nothing shown on this day{% else %}Nothing on this day{% endif %}">{{ chip.day }}</span>{% endif %}
+    {% endfor %}
+</nav>
 
 {% if error %}
 <div class="error-banner">⚠️ {{ error }}</div>
+{% elif partial %}
+<div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
 {% endif %}
 
 <main>
@@ -134,70 +225,15 @@
         </div>
         {% endif %}
     {% else %}
-        {% for group in grouped %}
-        <section class="day-block">
-            <div class="day-header">
-                <div class="day-title">📅 {{ group.label }}</div>
-                <div class="day-count">{{ group['items']|length }} item{{ '' if group['items']|length == 1 else 's' }}</div>
-            </div>
-            <div class="grid">
-                {% for item in group['items'] %}
-                <div class="card" data-id="{{ item.id }}" data-trakt-id="{{ item.trakt_id }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.tvdb if item.tvdb is not none else '' }}" data-tmdb="{{ item.tmdb if item.tmdb is not none else '' }}" onclick="openDetails(this, event)">
-                    <div class="poster-wrap">
-                        <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
-                        <div class="new-badge">✨ NEW</div>
-                        {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
-                        {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
-                        {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
-                        {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.tmdb if item.tmdb is not none else '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
-                        <button type="button" class="watch-toggle" onclick="toggleWatch(this, event)" title="Toggle watching">
-                            <svg class="icon-open" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                            <svg class="icon-closed" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none;"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"></path><circle cx="12" cy="12" r="3"></circle><line x1="2" y1="2" x2="22" y2="22"></line></svg>
-                        </button>
-                        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
-                    </div>
-                    <div class="card-body">
-                        <div class="title-row">
-                            <div class="show-title">{{ item.title }}</div>
-                            {% if item.year %}<div class="show-year">{{ item.year }}</div>{% endif %}
-                        </div>
-                        <div class="meta-row">
-                            {% if item.certification %}<span class="chip cert" data-cert="{{ item.certification }}">{{ item.certification }}</span>{% endif %}
-                            {% if item.country %}<span class="chip country">🌍 {{ item.country }}</span>{% endif %}
-                            {% if item.language %}<span class="chip lang">🗣️ {{ item.language }}</span>{% endif %}
-                            <span class="chip day">📆 {{ item.day_of_week }}</span>
-                            {% for g in item.genres %}<span class="chip">{{ g }}</span>{% endfor %}
-                        </div>
-                        {% if item.overview %}<div class="overview">{{ item.overview }}</div>{% endif %}
-                        <div class="premiere-info">
-                            <span class="date">{{ item.air_display }}</span>
-                            <span class="time">{{ item.air_time }}</span>
-                        </div>
-                        {% if item.media != 'movie' and item.season is not none %}
-                        <div class="season-info" data-role="season-info" hidden></div>
-                        {% endif %}
-                        <div class="links-row">
-                            <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
-                                <img src="/static/images/traktlogo.png" alt="Trakt">
-                            </a>
-                            {% if is_admin %}
-                            {% if item.media == 'movie' and settings.radarr_configured %}
-                            <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>
-                            {% elif item.media != 'movie' and settings.sonarr_configured %}
-                            <button type="button" class="arr-btn sonarr" data-arr="sonarr" onclick="addToArr(this, event)" title="Add to Sonarr"><img src="/static/icons/sonarr.png" alt=""><span>Sonarr</span></button>
-                            {% endif %}
-                            {% if settings.seer_configured %}
-                            <button type="button" class="arr-btn seer" data-arr="seer" onclick="addToArr(this, event)" title="Request on Seerr"><img src="/static/icons/seer.png" alt=""><span>Seerr</span></button>
-                            {% endif %}
-                            {% endif %}
-                        </div>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-        </section>
+        {% for group in grouped %}{% include "_day_block.html" %}
         {% endfor %}
     {% endif %}
+    {# Every day after the first few is announced but not fetched: it stands in
+       <main> as itself, with its own heading, anchor and reserved height, and
+       pulls in its cards when the viewer reaches it. A day nobody scrolls to
+       costs one placeholder and nothing else. #}
+    {% for group in skeletons %}{% include "_day_skeleton.html" %}
+    {% endfor %}
 </main>
 
 <hr class="footer-divider">
@@ -437,6 +473,14 @@
                     <input type="checkbox" id="s_hide" name="hide_not_watching">
                     <label for="s_hide">Hide not-watching by default</label>
                 </div>
+                <div class="field checkbox">
+                    <input type="checkbox" id="s_prewarm" name="calendar_prewarm_enabled">
+                    <label for="s_prewarm">Pre-warm calendar cache (background)</label>
+                    <span class="hint">Periodically fetches upcoming calendar windows in the
+                        background so viewers get instant loads. This spends Trakt API calls on
+                        a schedule even when no one is viewing, and only takes effect when the
+                        calendar cache TTL is 24h or higher.</span>
+                </div>
                 </div>
 
                 <div class="tab-panel" data-tab-panel="integrations" role="tabpanel" hidden>
@@ -669,7 +713,5 @@
     // hand gets you a refusal rather than a tracker.
     window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
 </script>
-<script src="/static/js/nav.js?v={{ asset_v }}"></script>
-<script src="/static/js/app.js?v={{ asset_v }}"></script>
 </body>
 </html>

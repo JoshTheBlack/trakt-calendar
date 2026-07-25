@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    {# Parsed before first paint, so the gap before the stylesheet applies
+       is the page's own dark rather than the browser's default white. #}
+    <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Distrakt</title>
     <link rel="shortcut icon" href="/static/images/favicon.ico">
@@ -46,7 +49,7 @@
                 <button type="button" onclick="signOut()">🚪 Sign out</button>
             </div>
         </details>
-        <a class="distrakt-nav-link" href="/?year={{ year }}&amp;month={{ month }}" title="Back to the calendar for this month">📅 Calendar</a>
+        <a class="distrakt-nav-link" href="/calendar?year={{ year }}&amp;month={{ month }}" title="Back to the calendar for this month">📅 Calendar</a>
     </div>
 </header>
 

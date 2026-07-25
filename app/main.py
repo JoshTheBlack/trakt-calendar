@@ -11,19 +11,23 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
-from itertools import groupby
+from datetime import date, datetime, timedelta, timezone
+from math import ceil
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import admin_routes
 from . import arr
@@ -90,6 +94,13 @@ BUILD_LABEL = "dev" if BUILD == "dev" else f"build {BUILD}" + (f" · {COMMIT[:7]
 
 BASE_DIR = Path(__file__).resolve().parent
 HEARTBEAT_SECONDS = 60
+
+# How many of a month's day blocks the calendar page renders inline. The rest are
+# fetched in one request once the page has painted, so a busy month's first
+# response is a few dozen cards instead of a thousand — the document the browser
+# has to parse before it can show anything is what made the page slow, not the
+# cards further down it that nobody has scrolled to yet.
+INITIAL_DAY_BLOCKS = 5
 
 
 # Cache-busting token for every stylesheet and script. Lives in app/assets.py so
@@ -221,6 +232,10 @@ async def _heartbeat_loop() -> None:
             await _sweep_auth_rows()
         except Exception:
             pass
+        try:
+            await calendar_cache.prewarm_calendar_cache(load_settings())
+        except Exception:
+            pass
         await asyncio.sleep(HEARTBEAT_SECONDS)
 
 
@@ -259,12 +274,44 @@ async def lifespan(_app: FastAPI):
         await _trakt.aclose_shared_client()
 
 
+# Every load carries app.js/style.css/fonts plus (mostly) whatever asset_v was
+# minted at the last deploy; a short max-age still saves a full refetch within a
+# session without risking the "forgot to bump asset_v" staleness a long/immutable
+# one would cause. ETags (StaticFiles' own default) still catch a change within
+# that window.
+_STATIC_CACHE_HEADERS = {"Cache-Control": "max-age=600"}
+
+# Fonts are the one exception, and it is safe for a reason that does not hold for
+# anything else under /static: a vendored woff2 cannot change without its FILENAME
+# changing, because the name carries the version (inter-v20-latin-400). So there is
+# no "forgot to bump asset_v" staleness to protect against — a new font is a new
+# URL. At 600s a viewer who opens the calendar twice a day re-downloads ~86 KB both
+# times and watches the text re-flow from the fallback face on each; a year makes
+# that a true-cold-load-only event.
+_FONT_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+
+class _CachedStaticFiles(StaticFiles):
+    def file_response(self, full_path, *args, **kwargs) -> Response:
+        response = super().file_response(full_path, *args, **kwargs)
+        headers = (_FONT_CACHE_HEADERS if Path(full_path).parent.name == "fonts"
+                   else _STATIC_CACHE_HEADERS)
+        response.headers.update(headers)
+        return response
+
+
 # The interactive API docs are off: they are a complete, unauthenticated
 # inventory of every endpoint in the app, and nothing here is a public API that
 # anyone consumes from a schema.
 app = FastAPI(title="Trakt New Shows", lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+# Added before authz.install() below, so it nests INSIDE the authz middleware
+# stack (Starlette's registration order is reversed — see authz.install's own
+# docstring) and compresses the actual route responses, including the
+# multi-megabyte calendar HTML. authz's own short-circuit responses (redirects,
+# 403s) are tiny, so shipping those uncompressed costs nothing.
+app.add_middleware(GZipMiddleware)
+app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 app.include_router(auth_routes.router)
@@ -387,6 +434,38 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
+# How many columns a packed day's grid may grow to, per card style: the poster
+# wall is compact, "poster beside" cards are wide. Mirrored by updateCols() in
+# app.js, which re-runs this per day after a toggle changes what is visible.
+_COLUMN_CAPS = {"poster": 6, "horizontal": 2}
+_COLUMN_CAP_DEFAULT = 5
+
+
+def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
+                      hide_not_watching: bool, card_style: str) -> None:
+    """Annotate each day with the two presentation facts the client used to work
+    out only AFTER the page had painted: how many columns that day's grid needs,
+    and whether the day collapses entirely because everything on it is hidden.
+
+    Both are decided from the cards the day contains, which the server knows
+    before it writes them. Left to the client they land a frame late, and a day
+    header that paints and then vanishes takes the rest of the month up the page
+    with it — the "1 July, then suddenly 2 July" flicker on a hide-mode load.
+
+    `rows` and `visible` are the same answer put to a different use: a day that
+    has not been fetched yet is drawn as a placeholder, and it can only reserve
+    the right amount of vertical space (so the scrollbar and the jump-to strip
+    land where the day really is) if it knows how many rows of cards are coming."""
+    cap = _COLUMN_CAPS.get(card_style, _COLUMN_CAP_DEFAULT)
+    for group in grouped:
+        visible = sum(1 for item in group["items"] if item["id"] not in not_watching)
+        shown = visible if hide_not_watching else len(group["items"])
+        group["cols"] = max(1, min(shown, cap))
+        group["collapsed"] = hide_not_watching and visible == 0
+        group["visible"] = visible
+        group["rows"] = ceil(shown / group["cols"]) if shown else 1
+
+
 def _filters_active(prefs: dict) -> bool:
     return bool(
         prefs["genres"] or prefs["countries"] or prefs["network_filter"]
@@ -412,53 +491,145 @@ def _filters_summary(prefs: dict) -> str:
     return ", ".join(named)
 
 
+def _requested_endpoint(request: Request, prefs: dict, settings):
+    """The calendar this request is about. Always resolved through get_endpoint,
+    which falls back to the default for anything not in the calendar set, so a
+    made-up key can never reach a cache row or a Trakt URL."""
+    return get_endpoint(
+        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
+    )
+
+
 @guard.get("/", AuthLevel.CALENDAR_APPROVED)
-async def index(request: Request):
+async def home(request: Request):
+    """The month/year picker landing page (as the original front page was).
+
+    A `month` in the query is an old calendar link — a bookmark, a shared URL, or
+    a Discord post from when this one route served both the picker and the
+    calendar. Forward it rather than asking someone to choose the month they
+    already named."""
     settings = load_settings()
     # Already resolved and cached by the dependency that let this request in.
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    year = _valid_year(request.query_params.get("year"), date.today().year)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    if _month_valid(request.query_params.get("month")):
+        month = _valid_month(request.query_params.get("month"), date.today().month)
+        return RedirectResponse(
+            f"/calendar?month={month}&year={year}&endpoint={endpoint.key}", status_code=302)
+    return templates.TemplateResponse(
+        request, "pick.html", _picker_context(request, settings, year, endpoint, user))
+
+
+@guard.get("/calendar", AuthLevel.CALENDAR_APPROVED)
+async def calendar_page(request: Request):
+    """The calendar SHELL: the header, the stats bar, the jump-to strip, the
+    modals — and the first few days of cards inline. Every day after those is
+    announced as a placeholder that fetches itself from /calendar/day when the
+    viewer reaches it, so the browser has a usable page long before a whole month
+    of cards exists, and a day nobody scrolls to is never built at all.
+
+    The month is still assembled in full here, because the numbers the shell
+    states (the tiles, the per-day chip counts, which shows are new) are claims
+    about the WHOLE month and would be wrong if they described only the days that
+    happen to be rendered."""
+    settings = load_settings()
     user = await auth.current_user(request)
     is_admin = bool(user and user.is_admin)
     prefs = await auth.get_user_prefs(user.user_id)
     today = date.today()
     year = _valid_year(request.query_params.get("year"), today.year)
-    endpoint_key = (
-        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
-    )
-    endpoint = get_endpoint(endpoint_key)
-
-    # No month specified -> show the month/year picker landing page (like the original front page).
-    if not _month_valid(request.query_params.get("month")):
-        return templates.TemplateResponse(
-            request, "pick.html", _picker_context(request, settings, year, endpoint, user))
-
+    endpoint = _requested_endpoint(request, prefs, settings)
     month = _valid_month(request.query_params.get("month"), today.month)
     tz = _resolve_viewer_tz(user, settings)
+    days = calendar.monthrange(year, month)[1]
 
-    items: list[dict] = []
+    # This viewer's marks, read ONCE and handed to the assembly so the cards come
+    # out of the template already carrying the class. The client used to add it
+    # after the page had painted, which is what made hidden items visibly pop out.
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+
+    grouped: list[dict] = []
+    total = 0
+    watching = 0
+    not_watching_count = 0
+    partial = False
+    new_ids: set[str] = set()
+    delta = {"text": "", "kind": "none"}
+    history: list[dict] = []
+    show_counts: dict[str, int] = {}
     error: str | None = None
     if not settings.configured:
         error = "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
     else:
         try:
-            # The whole month is fetched and filtered before any HTML is sent, so
-            # this span is the server-side "time to first byte" for the calendar —
-            # dominated by the sequential per-window Trakt fetch on a cold cache.
+            # The whole month is fetched, filtered, and grouped before any HTML is
+            # sent, so this span is the server-side "time to first byte" for the
+            # calendar — dominated by the per-window Trakt fetch on a cold cache
+            # (now concurrent across the windows, not one await at a time).
             with span("calendar.read_month", endpoint=endpoint.key, ym=f"{year}-{month:02d}") as sp:
-                items, _as_of = await calendar_cache.read_month(
-                    endpoint, settings, tz=tz, year=year, month=month,
+                grouped, meta = await calendar_cache.assemble_range(
+                    endpoint, settings, tz=tz,
+                    start_date=date(year, month, 1), end_date=date(year, month, days),
                     genres=prefs["genres"], countries=prefs["countries"],
                     show_certifications=prefs["show_certifications"],
                     movie_certifications=prefs["movie_certifications"],
                     network_filter=prefs["network_filter"] or None,
+                    not_watching_ids=not_watching,
                 )
-                sp.set(items=len(items))
+                sp.set(items=meta["total"])
+            total = meta["total"]
+            watching = meta["watching"]
+            not_watching_count = meta["not_watching"]
+            # A window Trakt couldn't supply is skipped rather than failing the
+            # whole month; flag it so the page can say the month is incomplete
+            # instead of silently showing a short one.
+            partial = meta["partial"]
+            # How many cards each show has this month. The stats tiles need it to
+            # keep counting correctly when one toggle flips a show that airs on a
+            # dozen days — without asking the DOM, which only ever knows about the
+            # cards it currently holds.
+            show_counts = Counter(item["id"] for group in grouped for item in group["items"])
+            # The is-new diff and its baseline commit belong to whoever produced
+            # the cards, over the SERVER's full id list. Skipped on the error
+            # paths below: committing an empty month as the baseline would make
+            # the whole month look new the next time it loads properly.
+            view_state = await calendar_state.resolve_view(
+                user.user_id, endpoint.key, year, month,
+                show_ids=meta["show_ids"], total=total, now=datetime.now(tz),
+            )
+            new_ids = view_state["new_ids"]
+            delta = view_state["delta"]
+            history = view_state["history"]
         except TraktError as exc:
             error = str(exc)
 
-    grouped = [
-        {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
-        for day, rows in groupby(items, key=lambda i: i["air_date"])
-    ]
+    counts_by_date = {group["date"]: len(group["items"]) for group in grouped}
+    # What each day will actually SHOW this viewer. With hide-not-watching on, a
+    # day whose every item is marked renders nothing at all, so its chip must not
+    # offer to scroll somewhere blank. app.js keeps this in step when the viewer
+    # toggles hiding or marks a show without reloading.
+    shown_by_date = {
+        group["date"]: sum(1 for item in group["items"] if item["id"] not in not_watching)
+        for group in grouped
+    } if prefs["hide_not_watching"] else counts_by_date
+
+    _apply_day_layout(grouped, not_watching=not_watching,
+                      hide_not_watching=prefs["hide_not_watching"],
+                      card_style=prefs["card_style"] or settings.card_style)
+
+    # Only the first few days go out with the shell; every day after them is a
+    # placeholder that fetches its own cards when it is scrolled to. So first
+    # paint costs a handful of cards instead of a month of them, and a day nobody
+    # ever scrolls to is never assembled, rendered, or shipped at all.
+    #
+    # The split is by DAY BLOCK rather than by date, because a month can open with
+    # a run of empty days and "the first five dates" would then ship nothing.
+    inline_groups = grouped[:INITIAL_DAY_BLOCKS]
+    skeleton_groups = grouped[INITIAL_DAY_BLOCKS:]
+    for group in skeleton_groups:
+        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]))
 
     # Per-user view preferences (card style, day packing, hide-not-watching) —
     # distinct from `settings`, which stays the app-wide defaults new accounts
@@ -486,9 +657,46 @@ async def index(request: Request):
         "month": month,
         "month_label": calendar.month_name[month],
         "nav": _nav(year, month),
-        "grouped": grouped,
-        "total": len(items),
+        # The days rendered INLINE. `grouped` (the whole month) is what every
+        # number on the page is computed from; this is only what is painted now.
+        "grouped": inline_groups,
+        # The days that are announced but not yet fetched: header, chip target and
+        # reserved height now, cards when the viewer reaches them.
+        "skeletons": skeleton_groups,
+        "total": total,
+        # The stats tiles, the is-new marks, the "since last run" line and the
+        # history log are all computed above and rendered with the page, so they
+        # are right at first paint and stay right when only part of a month is on
+        # screen. The card partial reads these two sets by membership.
+        "not_watching": not_watching,
+        "new_ids": new_ids,
+        "stats": {"total": total, "watching": watching, "not_watching": not_watching_count},
+        "delta": delta,
+        "history": history,
+        # The same numbers again as data rather than markup, so the client can
+        # keep the tiles honest through a toggle (and so a per-day render can mark
+        # is-new from the whole month's answer instead of recomputing it).
+        "view_data": {
+            "newIds": sorted(new_ids),
+            "showCounts": dict(show_counts),
+            "notWatching": sorted(nw for nw in not_watching if nw in show_counts),
+            "watching": watching,
+            "notWatchingCount": not_watching_count,
+        },
+        # One chip per day of the month for the jump-to strip. `count` is what the
+        # day holds; `shown` is what this viewer will see of it, and a day showing
+        # nothing has no section to scroll to, so its chip renders inert.
+        "day_chips": [
+            {"day": day,
+             "date": f"{year}-{month:02d}-{day:02d}",
+             "count": counts_by_date.get(f"{year}-{month:02d}-{day:02d}", 0),
+             "shown": shown_by_date.get(f"{year}-{month:02d}-{day:02d}", 0)}
+            for day in range(1, days + 1)
+        ],
         "error": error,
+        # A non-fatal warning distinct from `error`: the month rendered, but at
+        # least one window's data couldn't be loaded, so it may be missing days.
+        "partial": partial,
         "generated": datetime.now().strftime("%H:%M"),
         # Sonarr/Radarr/Seerr writes land in the operator's own shared libraries
         # and Seerr's requests all carry one app-wide API key, so they are an
@@ -507,13 +715,124 @@ async def index(request: Request):
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,
     }
-    # Jinja renders every day + card into one document here (Starlette renders
-    # eagerly when the response is built), so this span is the cost of turning the
-    # whole month into HTML — the other half of the server's blocking time before
-    # the browser gets anything, and it grows with the card count.
-    with span("calendar.render", cards=len(items)):
+    # Jinja renders eagerly when the response is built, so this span is the cost of
+    # turning the shell's cards into HTML — the other half of the server's blocking
+    # time before the browser gets anything. It is now bounded by the inline day
+    # count rather than growing with the whole month.
+    with span("calendar.render", cards=sum(len(g["items"]) for g in inline_groups)):
         response = templates.TemplateResponse(request, "index.html", context)
     return response
+
+
+_YMD = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _month_date(value, year: int, month: int) -> date | None:
+    """A YYYY-MM-DD query parameter, accepted ONLY if it is exactly that shape and
+    falls inside {year, month}. Anything else is None, and the caller refuses the
+    request: this value reaches date arithmetic and a cache read, so it is checked
+    against the month being viewed rather than merely parsed."""
+    # Matched before parsing rather than left to fromisoformat, which also accepts
+    # ISO week dates ("2026-W28-1") — a second spelling of the same day is one more
+    # shape of input reaching a cache key for no benefit.
+    if not isinstance(value, str) or not _YMD.fullmatch(value):
+        return None
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return None
+    if (parsed.year, parsed.month) != (year, month):
+        return None
+    return parsed
+
+
+def _day_url(endpoint_key: str, day: date) -> str:
+    """The content request for one day. Built in one place because the shell's
+    placeholder and the retry button on a day that failed must ask for exactly the
+    same thing."""
+    return (f"/calendar/day?endpoint={quote(endpoint_key)}"
+            f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+
+
+@guard.get("/calendar/day", AuthLevel.CALENDAR_APPROVED)
+async def calendar_day(request: Request):
+    """ONE day's block — the content half of the calendar, rendered through the
+    same day-block and card partials the shell uses, so a day that arrives this
+    way is byte-identical to one the shell rendered inline.
+
+    Only that day is assembled: the covering window(s) are read and only their
+    entries are normalized, so a month the viewer never scrolls through is never
+    built. A viewer-local day can straddle two UTC windows, which assemble_range
+    already accounts for.
+
+    Everything that decides WHAT this viewer may see comes from their session: the
+    per-user filters and their not-watching marks are read here, never taken from
+    the query, so this cannot be asked for someone else's view or for an
+    unfiltered day. The query only says WHICH day of WHICH calendar, and both are
+    validated before they reach a cache key.
+
+    is-new is deliberately NOT computed here. The diff and its baseline commit are
+    a whole-month decision the shell already made and wrote; re-reading the
+    baseline from a fragment would see the shell's own commit and conclude nothing
+    is new. The shell embeds the ids it decided were new and the page marks these
+    cards from that one answer."""
+    settings = load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = date.today()
+    year = _valid_year(request.query_params.get("year"), today.year)
+    month = _valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    day = _month_date(request.query_params.get("date"), year, month)
+    if day is None:
+        return JSONResponse({"ok": False, "error": "Invalid date"}, status_code=400)
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+
+    tz = _resolve_viewer_tz(user, settings)
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    context = {
+        "request": request, "not_watching": not_watching,
+        # Empty on purpose: see the docstring — the shell owns the is-new answer.
+        "new_ids": set(),
+        "settings": settings, "is_admin": bool(user and user.is_admin),
+        "date": day.isoformat(), "label": calendar_cache.day_label(day),
+        "retry_url": _day_url(endpoint.key, day),
+        "partial": False,
+    }
+    try:
+        with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
+            grouped, meta = await calendar_cache.assemble_range(
+                endpoint, settings, tz=tz, start_date=day, end_date=day,
+                genres=prefs["genres"], countries=prefs["countries"],
+                show_certifications=prefs["show_certifications"],
+                movie_certifications=prefs["movie_certifications"],
+                network_filter=prefs["network_filter"] or None,
+                not_watching_ids=not_watching,
+            )
+            sp.set(items=meta["total"])
+        # Same per-day presentation the shell's own blocks were rendered with, so a
+        # day that arrives late is laid out correctly on arrival rather than being
+        # re-packed (and, in hide mode, collapsed) a frame after it appears.
+        _apply_day_layout(grouped, not_watching=not_watching,
+                          hide_not_watching=prefs["hide_not_watching"],
+                          card_style=prefs["card_style"] or settings.card_style)
+    except TraktError as exc:
+        # The shell is already on screen with the month's real numbers, so one day
+        # failing is a gap in the month, not a broken page. It replaces itself with
+        # a block that says so and offers to try again, rather than sitting there
+        # as a placeholder that looks like it is still loading.
+        return templates.TemplateResponse(
+            request, "_day_fragment.html", {**context, "group": None, "error": str(exc)})
+
+    return templates.TemplateResponse(
+        request, "_day_fragment.html",
+        # A day with nothing on it groups to nothing; the fragment then renders
+        # empty and the placeholder it replaces simply disappears, which is what an
+        # empty day should look like.
+        {**context, "group": grouped[0] if grouped else None,
+         "error": None, "partial": meta["partial"]},
+    )
 
 
 @guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)

@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    {# Parsed before first paint, so the gap before the stylesheet applies
+       is the page's own dark rather than the browser's default white. #}
+    <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ owner_username or "Shared calendar" }} &ndash; {{ month_label }}</title>
 
@@ -24,17 +27,17 @@
     <meta name="theme-color" content="#e8b545">
 
     <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/css/style.css">
     <link rel="stylesheet" href="/static/css/share.css">
+    <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
 </head>
 <body class="pack-{{ view.day_packing }} card-{{ view.card_style }}">
 
 <header class="hero">
     <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
         <div class="month-nav">
             <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}{{ query_extra }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">

@@ -24,7 +24,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
@@ -432,6 +432,219 @@ class ReadPathTests(CacheTestCase):
             _, as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=555)
         self.assertEqual(as_of, 555)
+
+
+# ---------------------------------------------------------------------------
+# assemble_range — the per-span primitive read_month is now a wrapper over
+# ---------------------------------------------------------------------------
+
+class AssembleRangeTests(CacheTestCase):
+    """assemble_range reads only the windows covering a span, loads them
+    concurrently, dedupes/normalizes/trims/groups, and reports a partial flag
+    when a window couldn't be loaded. read_month is now a thin wrapper over it."""
+
+    async def test_a_single_day_reads_only_the_windows_covering_it(self):
+        """The whole point of the primitive: a per-day read must not fetch the
+        whole month. A mid-July UTC day sits inside one window (plus, at worst,
+        the ±1-day pad's neighbour), never all of July's five."""
+        seen: list[date] = []
+
+        async def fake(endpoint, settings, start):
+            seen.append(start)
+            return []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=date(2026, 7, 15), end_date=date(2026, 7, 15))
+        self.assertLessEqual(len(seen), 2)
+        self.assertNotIn(calendar_cache.window_start(date(2026, 7, 1)), seen)
+        self.assertNotIn(calendar_cache.window_start(date(2026, 7, 27)), seen)
+
+    async def test_a_local_day_straddling_two_utc_windows_loads_both(self):
+        """A viewer-local day can span two UTC windows once the offset is applied.
+        In UTC+14, local 13 July runs from 10:00 UTC on the 12th (the 6-Jul
+        window) to 09:59 UTC on the 13th (the 13-Jul window), so a one-day read
+        must load BOTH windows to see both airings."""
+        tz = ZoneInfo("Pacific/Kiritimati")  # UTC+14, no DST
+        early_window = calendar_cache.window_start(date(2026, 7, 12))
+        late_window = calendar_cache.window_start(date(2026, 7, 13))
+        self.assertNotEqual(early_window, late_window)  # genuinely two windows
+        before = _entry("before-boundary", "2026-07-12T20:00:00Z")   # 13 Jul 10:00 local
+        after = _entry("after-boundary", "2026-07-13T05:00:00Z")     # 13 Jul 19:00 local
+
+        async def fake(endpoint, settings, start):
+            if start == early_window:
+                return [before]
+            if start == late_window:
+                return [after]
+            return []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=tz,
+                start_date=date(2026, 7, 13), end_date=date(2026, 7, 13))
+        self.assertEqual([g["date"] for g in grouped], ["2026-07-13"])
+        self.assertEqual({i["id"] for i in grouped[0]["items"]},
+                         {"before-boundary", "after-boundary"})
+        self.assertFalse(meta["partial"])
+
+    async def test_overlapping_windows_dedupe_keeping_the_earlier_windows_copy(self):
+        """gather loads the windows concurrently, but the results are stitched
+        back in window order, so an airing two adjacent windows both return is
+        kept from the EARLIER window — the same copy the old sequential read
+        kept. Proves ordering survives the concurrent fetch."""
+        w1 = calendar_cache.window_start(date(2026, 7, 6))
+        w2 = w1 + timedelta(days=7)
+        from_w1 = _entry("dup", "2026-07-15T20:00:00Z", season=3, number=3)
+        from_w1["show"]["title"] = "from the earlier window"
+        from_w2 = _entry("dup", "2026-07-15T20:00:00Z", season=3, number=3)
+        from_w2["show"]["title"] = "from the later window"
+
+        async def fake(endpoint, settings, start):
+            if start == w1:
+                return [from_w1]
+            if start == w2:
+                return [from_w2]
+            return []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
+        items = [i for g in grouped for i in g["items"]]
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["title"], "from the earlier window")
+
+    async def test_a_single_failed_window_renders_the_rest_and_flags_partial(self):
+        """RESILIENT BUT LOUD: one window's fetch failing (nothing cached to fall
+        back on) drops that window but still renders the others, and sets
+        meta['partial'] so the caller can warn."""
+        good_window = calendar_cache.window_start(date(2026, 7, 8))
+        boom_window = calendar_cache.window_start(date(2026, 7, 20))
+        self.assertNotEqual(good_window, boom_window)
+
+        async def fake(endpoint, settings, start):
+            if start == boom_window:
+                raise trakt.TraktError("Trakt unreachable", 503)
+            return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
+        items = [i for g in grouped for i in g["items"]]
+        self.assertEqual({i["id"] for i in items}, {"good"})
+        self.assertTrue(meta["partial"])
+
+    async def test_every_window_failing_raises(self):
+        """A span where nothing loaded and nothing was cached has nothing to
+        show, so it surfaces as a hard error rather than a silent empty month."""
+        async def fake(endpoint, settings, start):
+            raise trakt.TraktError("Trakt unreachable", 503)
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            with self.assertRaises(trakt.TraktError):
+                await calendar_cache.assemble_range(
+                    SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                    start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
+
+    async def test_meta_counts_split_watching_from_not_watching(self):
+        a = _entry("a", "2026-07-08T12:00:00Z")
+        b = _entry("b", "2026-07-09T12:00:00Z")
+        target = calendar_cache.window_start(date(2026, 7, 8))
+
+        async def fake(endpoint, settings, start):
+            return [a, b] if start == target else []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=date(2026, 7, 1), end_date=date(2026, 7, 31),
+                not_watching_ids={"b"})
+        self.assertEqual(meta["total"], 2)
+        self.assertEqual(meta["watching"], 1)
+        self.assertEqual(meta["not_watching"], 1)
+        self.assertEqual(set(meta["show_ids"]), {"a", "b"})
+        self.assertFalse(meta["partial"])  # complete month
+
+    async def test_read_month_serves_partial_data_without_raising(self):
+        """The (items, as_of) wrapper the share and distrakt paths use inherits
+        the resilience: a single failed window no longer aborts the read; only a
+        total failure does."""
+        good_window = calendar_cache.window_start(date(2026, 7, 8))
+        boom_window = calendar_cache.window_start(date(2026, 7, 20))
+
+        async def fake(endpoint, settings, start):
+            if start == boom_window:
+                raise trakt.TraktError("Trakt unreachable", 503)
+            return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
+
+        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+            items, _as_of = await calendar_cache.read_month(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7)
+        self.assertEqual({i["id"] for i in items}, {"good"})
+
+
+# ---------------------------------------------------------------------------
+# heartbeat pre-warm — gated behind calendar_prewarm_enabled + the TTL floor
+# ---------------------------------------------------------------------------
+
+class PrewarmTests(CacheTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        calendar_cache._last_prewarm_at = None
+
+    async def asyncTearDown(self):
+        calendar_cache._last_prewarm_at = None
+        await super().asyncTearDown()
+
+    async def test_disabled_setting_skips_even_with_a_qualifying_ttl(self):
+        self.settings.calendar_prewarm_enabled = False
+        self.settings.calendar_cache_ttl_minutes = 1440
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
+        mocked.assert_not_called()
+
+    async def test_enabled_but_ttl_below_a_day_skips(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1439
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
+        mocked.assert_not_called()
+
+    async def test_enabled_and_ttl_at_the_floor_warms_every_endpoint_and_window(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1440
+        now = 1_753_000_000  # an arbitrary but fixed instant
+        today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], None)
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=now)
+        expected_windows = calendar_cache.aligned_windows(
+            today, today + timedelta(days=calendar_cache.PREWARM_DAYS))
+        self.assertEqual(mocked.call_count, len(ENDPOINTS) * len(expected_windows))
+        called_endpoints = {call.args[0].key for call in mocked.call_args_list}
+        self.assertEqual(called_endpoints, set(ENDPOINTS))
+
+    async def test_runs_at_most_once_per_ttl(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1440  # ttl = 86400 seconds
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], None)
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
+            first_count = mocked.call_count
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000 + 100)
+            self.assertEqual(mocked.call_count, first_count)  # too soon, skipped
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000 + 86400 + 1)
+            self.assertGreater(mocked.call_count, first_count)  # ttl elapsed, runs again
+
+    async def test_a_failed_window_does_not_raise(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1440
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            mocked.side_effect = trakt.TraktError("Trakt unreachable", 503)
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)  # must not raise
 
 
 # ---------------------------------------------------------------------------

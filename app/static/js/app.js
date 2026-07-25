@@ -1,28 +1,41 @@
-// ---- Page context (from <body> data-* attributes) ----
+// ---- Page context ----
+// A boosted navigation (hx-boost on the month arrows and the calendar switcher)
+// swaps the <body>'s children in place WITHOUT reloading this script, so the
+// page context can't be captured once into consts at load time — the values
+// would go stale on the first nav. It lives on #pageData, which sits INSIDE the
+// swapped region, and is re-read on every (re)init. Body classes (card style,
+// packing, hide-not-watching) stay on the persistent <body> element instead,
+// because those are per-account view prefs that don't change across a nav.
 const BODY = document.body;
-const MONTH = BODY.dataset.month;
-const YEAR = BODY.dataset.year;
-const ENDPOINT = BODY.dataset.endpoint;
-const currentTotalShows = parseInt(BODY.dataset.total, 10) || 0;
-const currentTotal = currentTotalShows;
-const STATE_URL = `/api/state?month=${MONTH}&year=${YEAR}&endpoint=${encodeURIComponent(ENDPOINT)}`;
 
 // The cache size cap is stored in bytes and edited in megabytes.
 const MB = 1024 * 1024;
 
-let notWatching = new Set();
-let historyLog = [];
-let lastKnownStats = { total: null, watching: null, notWatching: null };
-let currentShowIds = [];
+let MONTH, YEAR, ENDPOINT, currentTotalShows, STATE_URL;
 
-// ---- Endpoint switching ----
-function switchEndpoint(key) {
-    const params = new URLSearchParams(window.location.search);
-    params.set('endpoint', key);
-    params.set('month', MONTH);
-    params.set('year', YEAR);
-    window.location.search = params.toString();
+function readPageContext() {
+    const d = (document.getElementById('pageData') || document.body).dataset;
+    MONTH = d.month;
+    YEAR = d.year;
+    ENDPOINT = d.endpoint;
+    currentTotalShows = parseInt(d.total, 10) || 0;
+    STATE_URL = `/api/state?month=${MONTH}&year=${YEAR}&endpoint=${encodeURIComponent(ENDPOINT)}`;
 }
+
+// The view's own numbers, read from the JSON the server embeds rather than
+// counted off the DOM. Counting cards only ever described the cards the page
+// happened to be holding; these describe the whole month, which is what the
+// stats tiles claim to be about.
+let notWatching = new Set();
+// The ids this load decided were new, computed over the WHOLE month by the page
+// that shipped the shell. Days that arrive afterwards are marked from this one
+// answer: a late request cannot recompute it, because the baseline it would diff
+// against is the one the shell already committed.
+let newIds = new Set();
+let showCounts = {};
+let watchingCount = 0;
+let notWatchingCount = 0;
+let lastKnownStats = { total: null, watching: null, notWatching: null };
 
 // ---- Layout controls: card style + day packing ----
 // Applied instantly via <body> classes (pure CSS), then persisted to settings.
@@ -34,7 +47,10 @@ function updateCols() {
     // layout doesn't reserve columns for hidden not-watching items.
     const hiding = b.classList.contains('hide-not-watching');
     const sel = hiding ? '.card:not(.not-watching)' : '.card';
-    document.querySelectorAll('.day-block').forEach(block => {
+    // Days whose cards haven't been fetched yet are left alone: counting the cards
+    // a placeholder is holding would answer 0 and shrink it to one column, which is
+    // exactly wrong — the server sized it from the cards that are coming.
+    document.querySelectorAll('.day-block:not(.is-skeleton)').forEach(block => {
         const n = block.querySelectorAll(sel).length;
         block.style.setProperty('--cols', Math.max(1, Math.min(n, cap)));
     });
@@ -60,8 +76,6 @@ async function setLayout(key, value) {
         });
     } catch (e) { console.error(e); }
 }
-
-document.addEventListener('DOMContentLoaded', updateCols);
 
 // Poster-only wall: if a card is too close to the right edge, open its hover panel
 // to the LEFT so it never runs off-screen (and so it can't flicker-wrap).
@@ -202,13 +216,19 @@ function toast(message, ok) {
 }
 
 // The add/request buttons and the health state behind them only exist for an
-// administrator, so nobody else polls for them.
-document.addEventListener('DOMContentLoaded', () => {
+// administrator, so nobody else polls for them. Re-run on each (re)init so cards
+// swapped in by a boosted nav get their in-library / reachability marks; the 60s
+// poll is armed only once, since a boosted nav must not stack a second interval.
+let arrPollArmed = false;
+function initArrIntegrations() {
     if (!window.IS_ADMIN) return;
     refreshArrStatus();
     refreshLibrary();
-    setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
-});
+    if (!arrPollArmed) {
+        arrPollArmed = true;
+        setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
+    }
+}
 
 // ---- Hide / show not-watching ----
 async function toggleHideNotWatching() {
@@ -263,12 +283,6 @@ function useDeviceTimezone() {
 // change-detection baseline (last_count/last_show_ids/history) is written
 // separately, once per load. Neither is a read-modify-write of the whole
 // document, so two open tabs can't lose each other's marks.
-async function loadState() {
-    const res = await fetch(STATE_URL, { method: 'GET', cache: 'no-store' });
-    if (!res.ok) throw new Error('Failed to load state: ' + res.status);
-    return res.json();
-}
-
 async function saveNotWatchingDelta(itemId, isNotWatching) {
     const res = await fetch(STATE_URL, {
         method: 'POST',
@@ -279,102 +293,43 @@ async function saveNotWatchingDelta(itemId, isNotWatching) {
     return res.json();
 }
 
-async function saveViewBaseline() {
-    const res = await fetch(STATE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            last_count: currentTotalShows,
-            last_show_ids: currentShowIds,
-            history: historyLog
-        })
-    });
-    if (!res.ok) throw new Error('Failed to save state: ' + res.status);
-    return res.json();
-}
-
 // Storage persistence is silent on success; only a FAILURE is surfaced (a toast),
-// so a broken save/load doesn't lose your not-watching marks without warning.
+// so a broken save doesn't lose your not-watching marks without warning.
 function setSyncStatus(ok, message) {
     if (!ok) toast('⚠️ ' + (message || 'Storage error') + ' — changes may not be saved.', false);
 }
 
-document.addEventListener('DOMContentLoaded', async () => {
-    try {
-        const state = await loadState();
-        notWatching = new Set(state.notWatching || []);
-        historyLog = state.history || [];
-        setSyncStatus(true);
-
-        const now = new Date();
-        const ts = now.getHours() + ':' + String(now.getMinutes()).padStart(2, '0');
-        const todayKey = now.toISOString().slice(0, 10);
-
-        if (historyLog.length === 0 || historyLog[historyLog.length - 1].count !== currentTotal) {
-            historyLog.push({ time: ts, count: currentTotal, date: todayKey });
-            if (historyLog.length > 3) historyLog.shift();
+// The month's counts, this viewer's marks and the ids this load called new are
+// all computed server-side and shipped with the page, so there is nothing to
+// fetch on load and nothing to re-mark after paint. This reads those numbers
+// back so a toggle can keep the tiles honest without asking the DOM how many
+// cards it currently holds — a question whose answer stops being the month's
+// answer as soon as the page renders anything less than all of it.
+function readViewData() {
+    let data = {};
+    const el = document.getElementById('calendarViewData');
+    if (el) {
+        try {
+            data = JSON.parse(el.textContent) || {};
+        } catch (e) {
+            console.error(e);
         }
-
-        document.getElementById('historyLog').innerHTML = '<strong>History:</strong>' +
-            [...historyLog].reverse().map(i => `<div style="display:flex; justify-content:space-between;"><span>${getRelativeDayLabel(i.date)} ${i.time}</span><span>${i.count} items</span></div>`).join('');
-
-        document.querySelectorAll('.card').forEach(card => {
-            setCardState(card, notWatching.has(card.getAttribute('data-id')));
-        });
-
-        currentShowIds = Array.from(document.querySelectorAll('.card')).map(c => c.getAttribute('data-id'));
-
-        if (Array.isArray(state.lastShowIds)) {
-            const previousShowIds = new Set(state.lastShowIds);
-            document.querySelectorAll('.card').forEach(card => {
-                const id = card.getAttribute('data-id');
-                if (id && !previousShowIds.has(id)) card.classList.add('is-new');
-            });
-        }
-
-        const previousCount = state.lastCount;
-        const deltaMsgElement = document.getElementById('deltaMsg');
-        if (previousCount !== null && previousCount !== undefined) {
-            if (currentTotalShows > previousCount) {
-                deltaMsgElement.textContent = `📈 (+${currentTotalShows - previousCount} since last run)`;
-                deltaMsgElement.style.color = '#34d399';
-            } else if (currentTotalShows < previousCount) {
-                deltaMsgElement.textContent = `📉 (-${previousCount - currentTotalShows} since last run)`;
-                deltaMsgElement.style.color = '#f87171';
-            } else {
-                deltaMsgElement.textContent = `✅ Perfect Match`;
-                deltaMsgElement.style.color = '#a1a1aa';
-            }
-        } else {
-            deltaMsgElement.textContent = `(Initial Tracking)`;
-        }
-
-        updateStats();
-        await saveViewBaseline();
-    } catch (e) {
-        console.error(e);
-        setSyncStatus(false, 'Load failed');
-        updateStats();
     }
-});
-
-function getRelativeDayLabel(dateStr) {
-    if (!dateStr) return 'Today';
-    const today = new Date();
-    const todayKey = today.toISOString().slice(0, 10);
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayKey = yesterday.toISOString().slice(0, 10);
-    if (dateStr === todayKey) return 'Today';
-    if (dateStr === yesterdayKey) return 'Yesterday';
-    return new Date(dateStr + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    notWatching = new Set(data.notWatching || []);
+    newIds = new Set(data.newIds || []);
+    showCounts = data.showCounts || {};
+    watchingCount = data.watching || 0;
+    notWatchingCount = data.notWatchingCount || 0;
+    // The tiles are already painted with exactly these values, so remember them
+    // as the starting point: the pop animation is for changes the viewer makes,
+    // not for the numbers the page arrived with.
+    lastKnownStats = { total: currentTotalShows, watching: watchingCount, notWatching: notWatchingCount };
 }
 
+// One class flip: which eye the toggle shows is a CSS consequence of it, so the
+// server can render a card already in either state without this having run.
 function setCardState(card, isNotWatching) {
     card.classList.toggle('not-watching', isNotWatching);
-    const btn = card.querySelector('.watch-toggle');
-    btn.querySelector('.icon-open').style.display = isNotWatching ? 'none' : 'block';
-    btn.querySelector('.icon-closed').style.display = isNotWatching ? 'block' : 'none';
 }
 
 // Every card on the page for one show. On All Episodes that is a dozen rows
@@ -392,6 +347,13 @@ async function toggleWatch(btn, event) {
     const isNotWatching = !card.classList.contains('not-watching');
     cardsForShow(id).forEach(c => setCardState(c, isNotWatching));
     if (isNotWatching) notWatching.add(id); else notWatching.delete(id);
+    // A show can air on a dozen days of one month, and the mark applies to all of
+    // them. Move the tiles by the month's count for this show rather than by the
+    // cards on screen, which is the same number today and won't be once days
+    // arrive separately.
+    const cards = showCounts[id] || 0;
+    notWatchingCount += isNotWatching ? cards : -cards;
+    watchingCount -= isNotWatching ? cards : -cards;
     updateStats();
     try {
         await saveNotWatchingDelta(id, isNotWatching);
@@ -409,8 +371,8 @@ function popStat(el) {
 
 function updateStats() {
     const total = currentTotalShows;
-    const actualNotWatching = document.querySelectorAll('.card.not-watching').length;
-    const actualWatching = total - actualNotWatching;
+    const actualNotWatching = notWatchingCount;
+    const actualWatching = watchingCount;
     const totalEl = document.getElementById('statTotal');
     const watchingEl = document.getElementById('statWatching');
     const notWatchingEl = document.getElementById('statNotWatching');
@@ -424,13 +386,66 @@ function updateStats() {
     updateEmptyDays();
 }
 
+// ---- Jump-to strip: pinned under the header, tucked behind it once scrolled ----
+// The strip sticks below the sticky header, so it needs the header's real height
+// — it wraps to a second row when narrow — published as --header-h for the CSS to
+// pin against. It also needs to know when it WOULD have pinned: from that point
+// on it is tucked up behind the header, and the hover band (a CSS ::before on the
+// strip) is what brings it back. Listeners are bound once, so a boosted nav can't
+// stack them; the measuring re-runs on every init because a nav lands a fresh
+// header and a fresh strip.
+let dayChipsBound = false;
+function syncDayChips() {
+    const header = document.querySelector('header.hero');
+    const strip = document.querySelector('.day-chips');
+    if (!header || !strip) return;
+    const headerH = header.offsetHeight;
+    document.body.style.setProperty('--header-h', headerH + 'px');
+    // Where the strip's slot in the document currently sits on screen. Measured
+    // from the element AFTER it, never from the strip itself: a stuck sticky
+    // element's own offsetTop/rect track the stuck position, so comparing it
+    // against the scroll offset gives a difference that never changes and the
+    // tuck would never fire. The neighbour is ordinary in-flow content, and the
+    // strip keeps its slot whether stuck or tucked (sticky and transforms both
+    // leave layout alone), so this reads the same either way.
+    const after = strip.nextElementSibling;
+    const naturalTop = after
+        ? after.getBoundingClientRect().top - strip.offsetHeight
+        : strip.offsetTop - window.scrollY;
+    // A pixel of slack: at rest the strip sits exactly on the header's edge, and
+    // sub-pixel layout would otherwise flap the class on and off.
+    document.body.classList.toggle('chips-tucked', naturalTop < headerH - 1);
+}
+
+function initDayChips() {
+    if (!dayChipsBound) {
+        dayChipsBound = true;
+        window.addEventListener('scroll', syncDayChips, { passive: true });
+        window.addEventListener('resize', syncDayChips, { passive: true });
+    }
+    syncDayChips();
+}
+
 // In "Hiding" mode, collapse any day whose items are all not-watching (so nothing
 // would render under its header). In "Showing all" mode every day is shown.
 function updateEmptyDays() {
     const hiding = BODY.classList.contains('hide-not-watching');
     document.querySelectorAll('.day-block').forEach(block => {
-        const hide = hiding && !block.querySelector('.card:not(.not-watching)');
+        // A day whose cards haven't arrived yet can't be asked how many of them
+        // are visible, so it answers from the count the server wrote onto it. Left
+        // to the card query it would look empty, collapse, and — being hidden —
+        // never be scrolled into view, so it would never load at all.
+        const hide = hiding && (block.classList.contains('is-skeleton')
+            ? parseInt(block.dataset.visible, 10) === 0
+            : !block.querySelector('.card:not(.not-watching)'));
         block.classList.toggle('is-empty-hidden', hide);
+        // A collapsed day is not somewhere to jump to, so its chip stops looking
+        // and acting like a destination. Only days actually in the DOM are
+        // touched: a chip for a day whose block hasn't loaded yet is still a
+        // perfectly good target, and greying it would be a lie.
+        const chip = block.dataset.date &&
+            document.querySelector(`.day-chip[data-date="${CSS.escape(block.dataset.date)}"]`);
+        if (chip) chip.classList.toggle('unreachable', hide);
     });
     updateCols();  // re-pack columns for the now-visible card counts
 }
@@ -548,6 +563,7 @@ async function openSettings() {
         // Stored in bytes; shown in MB, because nobody wants to count zeros.
         document.getElementById('s_cachecap').value = Math.round((s.api_cache_max_bytes ?? 1073741824) / MB);
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
+        document.getElementById('s_prewarm').checked = !!s.calendar_prewarm_enabled;
         document.getElementById('s_genres').value = s.genres || '';
         document.getElementById('s_countries').value = s.countries || '';
         setCertPicker(document.getElementById('s_show_certifications'), s.show_certifications || '');
@@ -883,10 +899,12 @@ function clearCertPicker(picker) {
 }
 
 // Build every picker up front so a modal opened before its fetch resolves (or
-// with no stored value) still shows the full, interactive chip row.
-document.addEventListener('DOMContentLoaded', () => {
+// with no stored value) still shows the full, interactive chip row. buildCertPicker
+// is idempotent per element, so re-running it after a boosted swap only builds the
+// freshly-inserted pickers.
+function initCertPickers() {
     document.querySelectorAll('.chip-picker').forEach(buildCertPicker);
-});
+}
 
 async function openFilters() {
     try {
@@ -965,6 +983,7 @@ async function saveSettings(event) {
         calendar_cache_ttl_minutes: parseInt(document.getElementById('s_calcache').value, 10) || 10,
         api_cache_max_bytes: (parseInt(document.getElementById('s_cachecap').value, 10) || 1024) * MB,
         hide_not_watching: document.getElementById('s_hide').checked,
+        calendar_prewarm_enabled: document.getElementById('s_prewarm').checked,
         genres: document.getElementById('s_genres').value,
         countries: document.getElementById('s_countries').value,
         show_certifications: readCertPicker(document.getElementById('s_show_certifications')),
@@ -1457,19 +1476,24 @@ async function enrichSeasonInfo(card) {
     } catch (e) { /* non-fatal */ }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+// One observer per view: a boosted nav brings a whole new set of cards, so the
+// previous month's observer is disconnected before a fresh one watches the new
+// cards (otherwise it lingers, holding detached nodes).
+let seasonObserver = null;
+function initSeasonInfo() {
     const cards = document.querySelectorAll('.card[data-season]:not([data-season=""])');
     if (!('IntersectionObserver' in window)) {
         cards.forEach(enrichSeasonInfo);
         return;
     }
-    const io = new IntersectionObserver((entries, obs) => {
+    if (seasonObserver) seasonObserver.disconnect();
+    seasonObserver = new IntersectionObserver((entries, obs) => {
         entries.forEach(entry => {
             if (entry.isIntersecting) { enrichSeasonInfo(entry.target); obs.unobserve(entry.target); }
         });
     }, { rootMargin: '200px' });
-    cards.forEach(c => io.observe(c));
-});
+    cards.forEach(c => seasonObserver.observe(c));
+}
 
 // ---- Details modal ----
 async function openDetails(card, event) {
@@ -1624,14 +1648,17 @@ function revealSecret() {
     location.href = '/distrakt';
 }
 
-// Once revealed, show the Distrakt nav button on the calendar.
-document.addEventListener('DOMContentLoaded', () => {
+// Once revealed, show the Distrakt nav button on the calendar. The inline head
+// script already set this class from local storage before first paint, so this is
+// only the in-session path — the reveal happening while the page is open. The
+// class lives on <html>, which a boosted nav does not swap, so a freshly swapped
+// nav element inherits the right visibility with nothing to re-apply.
+function initDistraktNav() {
     if (!window.DISTRAKT_AVAILABLE) return;
     let revealed = false;
     try { revealed = localStorage.getItem('distraktRevealed') === '1'; } catch (e) {}
-    const nav = document.getElementById('distraktNav');
-    if (revealed && nav) nav.hidden = false;
-});
+    if (revealed) document.documentElement.classList.add('has-distrakt');
+}
 
 const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
 let konamiBuffer = [];
@@ -1651,14 +1678,80 @@ const BUILD_TAP_WINDOW_MS = 1500;
 let buildTapCount = 0;
 let buildTapLast = 0;
 
-document.addEventListener('DOMContentLoaded', () => {
+// The version tag is inside the swapped region, so a boosted nav replaces it with
+// a fresh element; the dataset guard keeps a single tap listener per element (the
+// tap counters live at module scope, so a streak survives across a nav).
+function initBuildTap() {
     if (!window.DISTRAKT_AVAILABLE) return;
     const tag = document.querySelector('.version-tag');
-    if (!tag) return;
+    if (!tag || tag.dataset.tapBound) return;
+    tag.dataset.tapBound = '1';
     tag.addEventListener('click', () => {
         const now = Date.now();
         buildTapCount = (now - buildTapLast > BUILD_TAP_WINDOW_MS) ? 1 : buildTapCount + 1;
         buildTapLast = now;
         if (buildTapCount >= BUILD_TAP_TARGET) revealSecret();
     });
+}
+
+// ---- One idempotent page init, run on first load AND after every boosted swap ----
+// hx-boost swaps the <body>'s children in place without re-running this script, so
+// everything that used to hang off its own DOMContentLoaded is gathered here and
+// re-run on htmx:afterSwap as well. Document-level delegated listeners (mouseover,
+// and keydown for Escape and the Konami code) are bound once at load below and
+// survive swaps, so they deliberately stay OUT of this function.
+function initCalendarPage() {
+    readPageContext();
+    initCertPickers();
+    updateCols();
+    initArrIntegrations();
+    initSeasonInfo();
+    initDistraktNav();
+    initBuildTap();
+    readViewData();
+    updateEmptyDays();
+    initDayChips();
+}
+
+// ---- Day blocks that arrive after the page has painted ----
+// The shell renders the first few days and each later one fetches itself when it
+// is scrolled to, so cards can appear without a navigation. Those cards need three
+// things the shell's own cards got for free, and NOT a re-init: re-reading the
+// page's embedded view data here would throw away a mark the viewer made while the
+// day was still in flight.
+function applyViewStateTo(root) {
+    if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
+    root.querySelectorAll('.card').forEach(card => {
+        const id = card.getAttribute('data-id');
+        // is-new is the shell's whole-month answer (see newIds).
+        if (newIds.has(id)) card.classList.add('is-new');
+        // The server rendered not-watching from what was stored when it built this
+        // block. A toggle made before the block arrived exists only in memory here,
+        // so reconcile against it rather than trusting the markup — otherwise a
+        // show hidden a moment ago comes back visible on the days that loaded late.
+        setCardState(card, notWatching.has(id));
+    });
+    // Column packing is per day block and counts that block's (visible) cards, so
+    // it has to run for blocks that did not exist when the page initialised.
+    updateEmptyDays();
+}
+
+// afterSwap fires only on AJAX swaps, never the initial paint, so the readyState
+// branch owns first load and afterSwap owns every subsequent boosted nav — each
+// runs initCalendarPage exactly once. This script is deferred, so by the time it
+// executes the document is parsed (readyState is past 'loading') and init runs now.
+// A boosted navigation replaces the whole <body> and so needs the full init; a
+// content swap only brings one day's cards, and must NOT re-run it (see
+// applyViewStateTo). The event is dispatched on what the swap PRODUCED, which for
+// a day block replacing its own placeholder (an outerHTML swap) is the new
+// section — detail.target is still the placeholder htmx just detached, so it is
+// the wrong thing to look inside.
+document.addEventListener('htmx:afterSwap', (evt) => {
+    if (evt.detail && evt.detail.boosted) initCalendarPage();
+    else applyViewStateTo(evt.target);
 });
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initCalendarPage);
+} else {
+    initCalendarPage();
+}

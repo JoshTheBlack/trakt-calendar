@@ -1,0 +1,29 @@
+{# A day that has been ANNOUNCED but not yet fetched.
+
+   It carries everything the page needs about that day before its cards exist:
+   the real heading and item count (the shell assembled the whole month to get
+   the tiles and the is-new answer right, so it knows them), the anchor the
+   jump-to strip scrolls to, and a reserved height so landing on it lands in the
+   right place and the page doesn't lurch when the cards arrive.
+
+   `intersect once` rather than `revealed`: htmx's revealed check reads
+   getBoundingClientRect, which a display:none element answers with zeros — so a
+   day collapsed because everything on it is hidden would count as on-screen and
+   fetch itself immediately. An IntersectionObserver never reports a hidden
+   element, and it also fires when one BECOMES visible (turning "Hiding" off)
+   without waiting for the viewer to scroll.
+
+   `data-visible` is what this viewer would see of the day: app.js needs it to
+   decide whether the placeholder collapses when hiding is toggled, which it
+   cannot work out by counting cards that are not here yet. #}
+<section class="day-block is-skeleton{% if group.collapsed %} is-empty-hidden{% endif %}"
+         id="day-{{ group.date }}" data-date="{{ group.date }}"
+         data-visible="{{ group.visible }}"
+         style="--cols: {{ group.cols | default(1) }}; --skeleton-rows: {{ group.rows | default(1) }}"
+         hx-get="{{ group.url }}" hx-trigger="intersect once" hx-swap="outerHTML">
+    <div class="day-header">
+        <div class="day-title">📅 {{ group.label }}</div>
+        <div class="day-count">{{ group['items']|length }} item{{ '' if group['items']|length == 1 else 's' }}</div>
+    </div>
+    <div class="day-placeholder" aria-hidden="true"></div>
+</section>
