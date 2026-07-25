@@ -55,7 +55,7 @@ from zoneinfo import ZoneInfo
 
 from . import calendar_filter, db, trakt
 from .cache import COMPRESS_LEVEL
-from .endpoints import Endpoint
+from .endpoints import ENDPOINTS, Endpoint
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger app/trakt.py's _cached_get already uses for its own
@@ -560,3 +560,57 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
     )
     items = [item for day in grouped for item in day["items"]]
     return items, meta["as_of"]
+
+
+# ---------------------------------------------------------------------------
+# heartbeat pre-warm
+# ---------------------------------------------------------------------------
+
+PREWARM_DAYS = 60
+
+# In-memory only: resets on restart, which just causes one extra (harmless)
+# warm right after a deploy rather than losing pre-warm state permanently.
+_last_prewarm_at: int | None = None
+
+
+async def prewarm_calendar_cache(settings, *, now: int | None = None) -> None:
+    """Fill the shared window cache ahead of any viewer, GATED behind the
+    calendar_prewarm_enabled setting and the calendar_cache_ttl_minutes floor.
+
+    Below a 24h TTL the pre-warmed windows would expire before a viewer could
+    ever benefit from them, so pre-warming is skipped entirely rather than
+    spending a Trakt call for nothing. Runs at most once per TTL, tracked by an
+    in-memory marker (see _last_prewarm_at).
+
+    Warms at the WINDOW layer via load_window, not assemble_range/read_month:
+    the cached rows are user-independent, so normalizing them for a fake viewer
+    here would be wasted work — a real request normalizes on read. Every
+    calendar endpoint is warmed across the aligned windows covering
+    [now, now + PREWARM_DAYS], the same api_cache the live read path fills.
+    """
+    global _last_prewarm_at
+    if not settings.calendar_prewarm_enabled:
+        return
+    if settings.calendar_cache_ttl_minutes < 1440:
+        return
+    ts = db.now() if now is None else now
+    ttl = _ttl_seconds(settings)
+    if _last_prewarm_at is not None and (ts - _last_prewarm_at) < ttl:
+        return
+    _last_prewarm_at = ts
+
+    today = datetime.fromtimestamp(ts, tz=timezone.utc).date()
+    windows = aligned_windows(today, today + timedelta(days=PREWARM_DAYS))
+    await asyncio.gather(
+        *(load_window(endpoint, settings, start, allow_fetch=True, now=ts)
+          for endpoint in ENDPOINTS.values()
+          for start in windows),
+        return_exceptions=True,
+    )
+    # Visible at normal log level on purpose (not perftrace.span, which is
+    # DEBUG): this spends the instance's Trakt budget on a schedule with no
+    # viewer present, and an operator should be able to see that it ran.
+    _perf.info(
+        "calendar pre-warm: %d endpoint(s) x %d window(s) covering %s..+%dd",
+        len(ENDPOINTS), len(windows), today.isoformat(), PREWARM_DAYS,
+    )

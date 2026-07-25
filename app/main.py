@@ -232,6 +232,10 @@ async def _heartbeat_loop() -> None:
             await _sweep_auth_rows()
         except Exception:
             pass
+        try:
+            await calendar_cache.prewarm_calendar_cache(load_settings())
+        except Exception:
+            pass
         await asyncio.sleep(HEARTBEAT_SECONDS)
 
 

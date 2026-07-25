@@ -448,6 +448,14 @@
                     <input type="checkbox" id="s_hide" name="hide_not_watching">
                     <label for="s_hide">Hide not-watching by default</label>
                 </div>
+                <div class="field checkbox">
+                    <input type="checkbox" id="s_prewarm" name="calendar_prewarm_enabled">
+                    <label for="s_prewarm">Pre-warm calendar cache (background)</label>
+                    <span class="hint">Periodically fetches upcoming calendar windows in the
+                        background so viewers get instant loads. This spends Trakt API calls on
+                        a schedule even when no one is viewing, and only takes effect when the
+                        calendar cache TTL is 24h or higher.</span>
+                </div>
                 </div>
 
                 <div class="tab-panel" data-tab-panel="integrations" role="tabpanel" hidden>

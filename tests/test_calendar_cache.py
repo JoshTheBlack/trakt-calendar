@@ -24,7 +24,7 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
@@ -584,6 +584,67 @@ class AssembleRangeTests(CacheTestCase):
             items, _as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7)
         self.assertEqual({i["id"] for i in items}, {"good"})
+
+
+# ---------------------------------------------------------------------------
+# heartbeat pre-warm — gated behind calendar_prewarm_enabled + the TTL floor
+# ---------------------------------------------------------------------------
+
+class PrewarmTests(CacheTestCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        calendar_cache._last_prewarm_at = None
+
+    async def asyncTearDown(self):
+        calendar_cache._last_prewarm_at = None
+        await super().asyncTearDown()
+
+    async def test_disabled_setting_skips_even_with_a_qualifying_ttl(self):
+        self.settings.calendar_prewarm_enabled = False
+        self.settings.calendar_cache_ttl_minutes = 1440
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
+        mocked.assert_not_called()
+
+    async def test_enabled_but_ttl_below_a_day_skips(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1439
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
+        mocked.assert_not_called()
+
+    async def test_enabled_and_ttl_at_the_floor_warms_every_endpoint_and_window(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1440
+        now = 1_753_000_000  # an arbitrary but fixed instant
+        today = datetime.fromtimestamp(now, tz=timezone.utc).date()
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], None)
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=now)
+        expected_windows = calendar_cache.aligned_windows(
+            today, today + timedelta(days=calendar_cache.PREWARM_DAYS))
+        self.assertEqual(mocked.call_count, len(ENDPOINTS) * len(expected_windows))
+        called_endpoints = {call.args[0].key for call in mocked.call_args_list}
+        self.assertEqual(called_endpoints, set(ENDPOINTS))
+
+    async def test_runs_at_most_once_per_ttl(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1440  # ttl = 86400 seconds
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            mocked.return_value = ([], None)
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
+            first_count = mocked.call_count
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000 + 100)
+            self.assertEqual(mocked.call_count, first_count)  # too soon, skipped
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000 + 86400 + 1)
+            self.assertGreater(mocked.call_count, first_count)  # ttl elapsed, runs again
+
+    async def test_a_failed_window_does_not_raise(self):
+        self.settings.calendar_prewarm_enabled = True
+        self.settings.calendar_cache_ttl_minutes = 1440
+        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+            mocked.side_effect = trakt.TraktError("Trakt unreachable", 503)
+            await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)  # must not raise
 
 
 # ---------------------------------------------------------------------------

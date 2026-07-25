@@ -96,6 +96,14 @@ class Settings:
     # the current/near month shift; a far-past or far-future month rarely changes
     # but costs nothing to leave on the same clock.
     calendar_cache_ttl_minutes: int = 10
+    # Off by default: fills the calendar window cache from the heartbeat on a
+    # schedule, ahead of any viewer opening the page, so a cold load never pays
+    # the sequential-fetch cost. It only takes effect once
+    # calendar_cache_ttl_minutes >= 1440 — see main._heartbeat_loop — because a
+    # shorter TTL would let the pre-warmed data expire before it helps anyone.
+    # It spends the instance's Trakt API budget on a schedule even with nobody
+    # viewing, which is why it defaults off; see the settings-modal caveat.
+    calendar_prewarm_enabled: bool = False
     # Total budget for the shared api_cache blob table. The heartbeat evicts the
     # least-recently-stored entries once the summed byte_size crosses this. Detail
     # lookups were measured at ~213 KB each, so 1 GB is on the order of a few
@@ -174,6 +182,8 @@ class Settings:
             clean["hide_not_watching"] = _as_bool(clean["hide_not_watching"])
         if "allow_open_registration" in clean:
             clean["allow_open_registration"] = _as_bool(clean["allow_open_registration"])
+        if "calendar_prewarm_enabled" in clean:
+            clean["calendar_prewarm_enabled"] = _as_bool(clean["calendar_prewarm_enabled"])
         # Normalized on the way in as well as validated on save, so a
         # hand-edited settings.json with a trailing slash still builds a correct
         # redirect URI instead of one with a doubled separator in it.

@@ -563,6 +563,7 @@ async function openSettings() {
         // Stored in bytes; shown in MB, because nobody wants to count zeros.
         document.getElementById('s_cachecap').value = Math.round((s.api_cache_max_bytes ?? 1073741824) / MB);
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
+        document.getElementById('s_prewarm').checked = !!s.calendar_prewarm_enabled;
         document.getElementById('s_genres').value = s.genres || '';
         document.getElementById('s_countries').value = s.countries || '';
         setCertPicker(document.getElementById('s_show_certifications'), s.show_certifications || '');
@@ -982,6 +983,7 @@ async function saveSettings(event) {
         calendar_cache_ttl_minutes: parseInt(document.getElementById('s_calcache').value, 10) || 10,
         api_cache_max_bytes: (parseInt(document.getElementById('s_cachecap').value, 10) || 1024) * MB,
         hide_not_watching: document.getElementById('s_hide').checked,
+        calendar_prewarm_enabled: document.getElementById('s_prewarm').checked,
         genres: document.getElementById('s_genres').value,
         countries: document.getElementById('s_countries').value,
         show_certifications: readCertPicker(document.getElementById('s_show_certifications')),
