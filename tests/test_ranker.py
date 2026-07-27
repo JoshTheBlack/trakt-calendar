@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, db, posters, ranker, ranker_import  # noqa: E402
+from app import auth, db, distrakt, posters, ranker, ranker_import  # noqa: E402
 from app import ranker_routes, ranker_sources, trakt  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -49,6 +49,13 @@ def async_result(value):
     """An async stand-in that always answers `value`."""
     async def _call(*args, **kwargs):
         return value
+    return _call
+
+
+def _explode(reason: str):
+    """An async stand-in that fails the test if it is reached at all."""
+    async def _call(*args, **kwargs):
+        raise AssertionError(reason)
     return _call
 
 
@@ -948,6 +955,12 @@ class TrackerImportTests(RankerTestCase):
         source = ranker_import.finished_titles_source()
         return asyncio.run(source.finished_titles(self.user_id, media=media, year=year))
 
+    def linked_account(self):
+        """An open month needs the caller's own credential to be worked out at
+        all, so a test about one has to supply it."""
+        return patched(ranker_sources, "user_trakt_settings",
+                       async_result(Settings(trakt_client_id="c", trakt_access_token="t")))
+
     def test_a_closed_month_uses_its_stored_verdict(self):
         """A frozen month's counts stopped being refreshed the moment it froze,
         so recomputing from them would silently unfinish finished shows."""
@@ -956,11 +969,49 @@ class TrackerImportTests(RankerTestCase):
         self.show("2026-01", 11, 1, watched=0, total=0, bucket="cleanup")
         self.assertEqual([ref.ids["trakt"] for ref in self.finished()], [10])
 
-    def test_an_open_month_is_computed_the_same_way_the_other_feature_computes_it(self):
+    def test_an_open_month_is_worked_out_the_same_way_the_other_feature_does_it(self):
+        """THE STORED ROWS OF AN OPEN MONTH ARE NOT ITS LIVE COUNTS. They are
+        only written back when the month freezes, so a season finished this
+        month sits at 0/0 in the database while the other feature's own screen
+        shows it completed. Reading those rows made this import report nothing
+        for an account looking at six finished shows, so it asks that feature to
+        work the month out instead — one rule, one answer.
+        """
         self.month("2026-07")
-        self.show("2026-07", 10, 1, watched=8, total=8)
-        self.show("2026-07", 11, 1, watched=3, total=8)
-        self.assertEqual([ref.ids["trakt"] for ref in self.finished()], [10])
+        self.show("2026-07", 10, 1, watched=0, total=0, title="Finished")
+        self.show("2026-07", 11, 1, watched=0, total=0, title="Halfway")
+        live = [
+            {"trakt_id": 10, "season": 1, "title": "Finished", "network": "HBO",
+             "tmdb": 100, "slug": "a-show", "total": 8, "bucket": "completed"},
+            {"trakt_id": 11, "season": 1, "title": "Halfway", "network": "HBO",
+             "tmdb": 101, "slug": "b-show", "total": 8, "bucket": "keepup"},
+        ]
+        with self.linked_account(), patched(distrakt, "compute_live_shows", async_result(live)):
+            refs = self.finished()
+        self.assertEqual([ref.title for ref in refs], ["Finished"])
+        self.assertEqual(refs[0].episode_count, 8)
+
+    def test_an_open_month_is_skipped_rather_than_guessed_at_without_a_credential(self):
+        """Its live counts cannot be obtained, and the stored ones would answer
+        "nothing is finished" — which is a wrong answer, not a missing one."""
+        self.month("2026-07")
+        self.show("2026-07", 10, 1, watched=0, total=0)
+        with patched(distrakt, "compute_live_shows",
+                     _explode("the open month was computed with no credential")):
+            self.assertEqual(self.finished(), [])
+
+    def test_only_the_open_month_costs_anything(self):
+        """THE COST RULE. A closed month is answered from its stored verdict, so
+        an account with years of history spends nothing on any of it — only the
+        single month still open is worked out live, however much came before.
+        """
+        for month in ("2024-01", "2024-02", "2025-06", "2025-07", "2026-01"):
+            self.month(month, closed=True)
+            self.show(month, 10, 1, watched=0, total=5, bucket="completed")
+        with patched(distrakt, "compute_live_shows",
+                     _explode("a frozen month was recomputed")), \
+             patched(distrakt, "load_month", _explode("a frozen month was reloaded")):
+            self.assertEqual(len(self.finished()), 1)
 
     def test_counts_describe_how_much_was_finished(self):
         self.month("2026-01", closed=True)
