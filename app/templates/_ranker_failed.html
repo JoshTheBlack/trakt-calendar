@@ -1,0 +1,13 @@
+{# A fragment that could not be built, rendered AS A GAP rather than as a broken
+   board — the same shape _day_fragment.html uses when one day of a month fails.
+
+   The rest of the board is already on screen and correct, so one piece that did
+   not arrive is a hole with a way out of it: the Retry button re-requests
+   exactly this fragment and swaps itself out with the answer. `target` is the
+   class of the element being replaced, so the retry lands where the failure did
+   whether it stood in for a pool page or a tier's rows. #}
+<div class="ranker-failed {{ target }}">
+    ⚠️ {{ error }} — this part of the board couldn't be loaded.
+    <button type="button" class="btn-ghost small" hx-get="{{ retry_url }}"
+            hx-target="closest .ranker-failed" hx-swap="outerHTML">Retry</button>
+</div>

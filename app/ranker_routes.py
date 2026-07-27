@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import anyio
 import anyio.to_thread
@@ -64,6 +65,18 @@ MAX_SEARCH_RESULTS = 20
 # One warm request stays a bounded piece of work: the client asks for the page
 # of titles it is about to show, not for the whole board.
 MAX_WARM_ITEMS = 250
+
+# How much of the unranked pool comes down in the first response. Everything past
+# it arrives a page at a time behind an intersect sentinel, because a board may
+# hold a thousand titles and each card is a poster request. Sixty is more than a
+# screenful at any window size, so the first page is never what a viewer waits on.
+POOL_PAGE_SIZE = 60
+
+# Above this many tiered titles a board draws its tiers closed and each one
+# fetches its rows the first time it is opened. Below it the board simply shows
+# itself: rendering a couple of hundred rows costs less than making somebody
+# click through six tiers to see the arrangement they came to look at.
+EAGER_ROW_LIMIT = 200
 
 # What an export may ask for. Columns below three make a canvas taller than any
 # format will encode at the item ceiling, and above six the tiles are too small
@@ -140,20 +153,222 @@ def _refusal(exc: ranker.RankerError) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# the page
+# the page and its fragments
 # ---------------------------------------------------------------------------
+# The board renders SERVER-SIDE and is usable that way. Everything below adds to
+# a page that already works: the pool pages itself in behind a sentinel and a
+# closed tier fetches its rows, both through the same htmx idioms the calendar
+# uses, and neither is load-bearing for seeing what is on a board.
+
+def _board_state(board: dict) -> dict:
+    """What the client needs to build a save from, including the parts of the
+    board it has not drawn.
+
+    A closed tier renders no rows, so the DOM alone cannot say what is in one —
+    and a save that omitted a tier would be refused, while one that named a tier
+    with an empty list and the wrong label would overwrite the label. The keys
+    and the tier settings are the whole answer and cost almost nothing to send:
+    a board at its thousand-title cap is a thousand short strings.
+    """
+    return {
+        "uid": board["uid"],
+        "name": board["name"],
+        "year": board["year"],
+        "media_scope": board["media_scope"],
+        "version": board["version"],
+        "categories": [
+            {
+                "uid": category["uid"], "label": category["label"],
+                "rank_priority": category["rank_priority"],
+                "is_isolated": category["is_isolated"], "colour": category["colour"],
+                "items": [item["key"] for item in category["items"]],
+            }
+            for category in board["categories"]
+        ],
+        "pool": [item["key"] for item in board["pool"]],
+    }
+
+
+def _export_limits() -> dict:
+    """The geometry the export modal's live size readout works from.
+
+    SENT RATHER THAN RESTATED IN JAVASCRIPT. The pre-render refusal and the
+    number the modal shows beside it have to agree, and the only way to be sure
+    of that is for both to come from the constants the renderer itself uses.
+    """
+    return {
+        "tile_w": grid_builder.TILE_W, "tile_h": grid_builder.TILE_H,
+        "header_h": grid_builder.HEADER_H, "label_h": grid_builder.LABEL_H,
+        "caption_h": grid_builder.CAPTION_H, "gutter": grid_builder.GUTTER,
+        "margin": grid_builder.MARGIN, "podium_ranks": grid_builder.PODIUM_RANKS,
+        "max_dimension": grid_builder.MAX_DIMENSION,
+        "columns": list(EXPORT_COLUMNS), "scales": list(EXPORT_SCALES),
+        "max_top_x": ranker_export.MAX_TOP_X,
+        "tiers": ranker.MAX_CATEGORIES_PER_BOARD,
+    }
+
+
+def _board_groups(boards: list[dict]) -> list[dict]:
+    """The switcher's year groupings.
+
+    Grouped HERE rather than with a template filter because a board's year is
+    optional, and sorting a mixed list of integers and Nones raises. The data
+    layer already returns them in the order the switcher wants — years newest
+    first, undated last — so this only has to break the run into groups.
+    """
+    groups: list[dict] = []
+    for entry in boards:
+        if not groups or groups[-1]["year"] != entry["year"]:
+            groups.append({"year": entry["year"], "boards": []})
+        groups[-1]["boards"].append(entry)
+    return groups
+
+
+def _pool_url(board_uid: str, page: int) -> str:
+    return f"/rankings/fragments/pool?board={quote(board_uid)}&page={page}"
+
+
+def _rows_url(board_uid: str, category_uid: str) -> str:
+    return (f"/rankings/fragments/tier?board={quote(board_uid)}"
+            f"&tier={quote(category_uid)}")
+
+
+def _pool_context(board: dict, page: int) -> dict:
+    """One page of the pool, plus the sentinel that asks for the one after it.
+    The last page carries no sentinel, which is what ends the chain."""
+    start = page * POOL_PAGE_SIZE
+    items = board["pool"][start:start + POOL_PAGE_SIZE]
+    remaining = len(board["pool"]) - (start + len(items))
+    return {
+        "items": items,
+        "next_url": _pool_url(board["uid"], page + 1) if remaining > 0 else None,
+        # The sentinel reserves the height its page will take, so arriving cards
+        # slot into space already made for them instead of shoving the page down.
+        "next_rows": min(remaining, POOL_PAGE_SIZE),
+    }
+
+
+async def _sources(user_id: int) -> dict[str, object]:
+    """Which ways of adding titles this account actually has, ANSWERING BY
+    OMISSION: a source that is missing from this map is one the UI renders
+    nothing for at all, rather than a disabled button that advertises a feature
+    the account cannot reach.
+
+    Shared by the page and by GET /api/rankings/sources so first paint and any
+    later refresh can never disagree about what is on offer.
+    """
+    sources: dict[str, object] = {"search": True}
+    if await ranker_sources.ratings_available(user_id):
+        sources["ratings"] = True
+    if await ranker_import.tracker_available(user_id):
+        sources["import"] = {
+            "years": {
+                str(media): await ranker_import.available_years(user_id, media)
+                for media in Media
+            },
+        }
+    return sources
+
 
 @guard.get("/rankings", AuthLevel.RANKER_APPROVED)
 async def rankings_page(request: Request):
     """The ranker's own page. Standalone: it needs nothing from the calendar or
-    from any other feature to be useful."""
+    from any other feature to be useful.
+
+    `board` selects which one is open, so the switcher is a set of real links
+    that work without any script at all — and with htmx they boost into a body
+    swap that leaves the stylesheet, the scripts and the drag machinery resident.
+    """
     user = await auth.current_user(request)
-    return templates.TemplateResponse(request, "ranker.html", {
+    boards = await ranker.fetch_boards(user.user_id)
+    wanted = request.query_params.get("board") or (boards[0]["uid"] if boards else None)
+    board = None
+    if wanted:
+        try:
+            board = await ranker.fetch_board(user.user_id, wanted)
+        except ranker.RankerError:
+            # A uid that is not this account's lands on the board list rather than
+            # a 404 page: somebody following a stale link still gets a working
+            # switcher, which is what they need in order to go somewhere real.
+            board = None
+
+    tiered = sum(len(c["items"]) for c in board["categories"]) if board else 0
+    context = {
         "request": request,
         "is_admin": bool(user and user.is_admin),
-        "boards": await ranker.fetch_boards(user.user_id),
+        "username": user.username or "",
+        "boards": boards,
+        "board_groups": _board_groups(boards),
+        "board": board,
+        "rows_url": _rows_url,
+        "pool_page_size": POOL_PAGE_SIZE,
+        "board_state": _board_state(board) if board else None,
+        "sources": await _sources(user.user_id),
+        "rows_open": tiered <= EAGER_ROW_LIMIT,
+        "export_limits": _export_limits(),
+        "tier_template": ranker.TIER_TEMPLATE,
         "asset_v": assets.ASSET_VERSION,
+    }
+    if board:
+        context.update(_pool_context(board, 0))
+    return templates.TemplateResponse(request, "ranker.html", context)
+
+
+@guard.get("/rankings/fragments/pool", AuthLevel.RANKER_APPROVED)
+async def pool_page_fragment(request: Request):
+    """The next page of a board's unranked pool.
+
+    A VIEW, NOT AN API: it answers with the same cards the shell renders inline,
+    and nothing else, so a page that arrives late is indistinguishable from one
+    that came with the document.
+    """
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    page = max(0, _query_int(request.query_params.get("page"), 0))
+    try:
+        board = await ranker.fetch_board(user.user_id, board_uid)
+    except ranker.RankerError as exc:
+        return _fragment_failure(request, str(exc), _pool_url(board_uid, page),
+                                 "ranker-pool-sentinel")
+    return templates.TemplateResponse(
+        request, "_ranker_pool_page.html", {"request": request, **_pool_context(board, page)},
+    )
+
+
+@guard.get("/rankings/fragments/tier", AuthLevel.RANKER_APPROVED)
+async def category_rows_fragment(request: Request):
+    """One tier's rows, fetched the first time it is opened."""
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    category_uid = request.query_params.get("tier") or ""
+    retry = _rows_url(board_uid, category_uid)
+    try:
+        board = await ranker.fetch_board(user.user_id, board_uid)
+    except ranker.RankerError as exc:
+        return _fragment_failure(request, str(exc), retry, "ranker-rows")
+    found = [c for c in board["categories"] if c["uid"] == category_uid]
+    if not found:
+        return _fragment_failure(request, "No such tier.", retry, "ranker-rows")
+    return templates.TemplateResponse(
+        request, "_ranker_category_rows.html",
+        {"request": request, "items": found[0]["items"]},
+    )
+
+
+def _fragment_failure(request: Request, message: str, retry_url: str, target: str):
+    """A fragment that could not be built renders AS A GAP with a Retry button
+    that re-requests exactly itself, following the calendar's day fragments. One
+    unreachable piece of a board must not take the board down with it."""
+    return templates.TemplateResponse(request, "_ranker_failed.html", {
+        "request": request, "error": message, "retry_url": retry_url, "target": target,
     })
+
+
+def _query_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +450,22 @@ async def get_board(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, "board": board})
+
+
+@guard.delete("/api/rankings/boards/{board_uid}/categories/{category_uid}",
+              AuthLevel.RANKER_APPROVED)
+async def remove_category(board_uid: str, category_uid: str, request: Request):
+    """Delete one tier. Its titles RETURN TO THE POOL rather than going with it,
+    so a mis-click costs the arrangement of one tier and not the titles in it —
+    which is also what makes undoing this a matter of re-creating the tier and
+    putting the same keys back."""
+    user = await auth.current_user(request)
+    await _json_body(request)
+    try:
+        returned = await ranker.delete_category(user.user_id, board_uid, category_uid)
+    except ranker.RankerError as exc:
+        return _refusal(exc)
+    return JSONResponse({"ok": True, "returned": returned})
 
 
 @guard.post("/api/rankings/boards/{board_uid}/save", AuthLevel.RANKER_APPROVED)
@@ -332,17 +563,7 @@ async def list_sources(request: Request):
     what it has done elsewhere.
     """
     user = await auth.current_user(request)
-    sources: dict[str, object] = {"search": True}
-    if await ranker_sources.ratings_available(user.user_id):
-        sources["ratings"] = True
-    if await ranker_import.tracker_available(user.user_id):
-        sources["import"] = {
-            "years": {
-                str(media): await ranker_import.available_years(user.user_id, media)
-                for media in Media
-            },
-        }
-    return JSONResponse({"ok": True, "sources": sources})
+    return JSONResponse({"ok": True, "sources": await _sources(user.user_id)})
 
 
 @guard.post("/api/rankings/search", AuthLevel.RANKER_APPROVED)

@@ -6,12 +6,25 @@
        is the page's own dark rather than the browser's default white. #}
     <meta name="color-scheme" content="dark">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rankings</title>
+    <title>Rankings{% if board %} &ndash; {{ board.name or "Untitled board" }}{% endif %}</title>
     <link rel="shortcut icon" href="/static/images/favicon.ico">
     <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-    <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/ranker.css?v={{ asset_v }}">
+    {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
+       navigation swaps the whole <body> in place. A <script src> living inside
+       that swapped region would be re-fetched and re-executed on every board
+       switch — re-declaring every top-level const and double-binding every
+       listener. In <head> they load exactly once and survive the swaps. #}
+    <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
+    {# SortableJS 1.15.6 (MIT), vendored rather than fetched from a CDN so the
+       page has no third-party origin to trust or to be offline without.
+       Integrity of the file as committed:
+       sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU #}
+    <script src="/static/js/sortable.min.js?v={{ asset_v }}" defer></script>
+    <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
+    <script src="/static/js/ranker.js?v={{ asset_v }}" defer></script>
 </head>
-<body class="auth-page has-nav">
+<body class="has-nav ranker-page">
 
 <header class="hero">
     <div class="hero-lead">
@@ -19,6 +32,10 @@
         <h1>Rankings</h1>
     </div>
     <div class="hero-actions">
+        <span class="ranker-save-state" id="saveState" data-state="idle"></span>
+        {% if board %}
+        <button type="button" class="pill-btn" onclick="openExportModal()">🖼️ Export</button>
+        {% endif %}
         <details class="nav-menu">
             <summary title="Account and settings">☰ Menu</summary>
             <div class="nav-menu-items">
@@ -33,33 +50,179 @@
     </div>
 </header>
 
-<div class="auth-page-inner">
-<div class="auth-shell">
-  <div class="auth-card">
-    <h1>Your boards</h1>
-    <p class="auth-sub">Build ordered lists of shows and movies, arrange them into
-      tiers, and turn the result into a poster grid you can share.</p>
+{# Everything the client needs about THIS board that the markup cannot carry:
+   the version a save has to echo back, every tier's settings, and the item keys
+   of tiers whose rows have not been drawn. It lives inside the swapped region so
+   a boosted board switch replaces it along with the board. #}
+<script id="rankerData" type="application/json">{{ {
+    "board": board_state, "sources": sources, "username": username,
+    "limits": export_limits, "template": tier_template,
+    "poolPageSize": pool_page_size
+} | tojson }}</script>
 
-    {# Server-rendered from the board list the route already loaded, so the shell
-       is honest about what exists before any script has run. The board itself,
-       its pool and its tiers arrive with the rest of this screen. #}
-    <div class="auth-list" id="boardList">
-      {% for board in boards %}
-      <div class="row">
-        <span class="label">{{ board.name or "Untitled board" }}</span>
-        <span class="auth-badge off">{{ board.item_count }} title{{ '' if board.item_count == 1 else 's' }}</span>
-      </div>
-      {% endfor %}
-      {% if not boards %}
-      <div class="row">
-        <span class="label">No boards yet.</span>
-      </div>
-      {% endif %}
+<div class="ranker-shell">
+
+    {# BOARD BAR. Real links to real URLs, boosted so switching keeps the page's
+       CSS and scripts resident with htmx managing history — and degrading to
+       plain navigation with no script at all. Grouped by year because that is
+       how somebody with a dozen boards finds one. #}
+    <nav class="ranker-boards" hx-boost="true">
+        {% for group in board_groups %}
+        <span class="ranker-year-group">
+            <span class="ranker-year">{{ group.year or "No year" }}</span>
+            {% for entry in group.boards %}
+            <a class="ranker-board-link{% if board and entry.uid == board.uid %} active{% endif %}"
+               href="/rankings?board={{ entry.uid | urlencode }}">
+                {{ entry.name or "Untitled board" }}
+                <span class="ranker-count">{{ entry.item_count }}</span>
+            </a>
+            {% endfor %}
+        </span>
+        {% endfor %}
+        <span class="ranker-board-tools">
+            <button type="button" class="btn-ghost small" onclick="newBoard()">＋ New board</button>
+            {% if board %}
+            <button type="button" class="btn-ghost small" onclick="renameBoard()">✎ Rename</button>
+            <button type="button" class="btn-ghost small" onclick="cloneBoard()">⧉ Clone</button>
+            <button type="button" class="btn-ghost small" onclick="deleteBoard(event)">🗑 Delete</button>
+            {% endif %}
+        </span>
+    </nav>
+
+    {% if board %}
+    {% include "_ranker_board_shell.html" %}
+    {% else %}
+    <div class="ranker-blank">
+        <h2>No board open</h2>
+        <p>Make a board to start ranking. Each one has its own pool of titles and
+            its own tiers, so "Top Movies" and "Top Drama" can happily coexist.</p>
+        <button type="button" class="btn-primary" onclick="newBoard()">Create a board</button>
     </div>
-  </div>
-</div>
+    {% endif %}
 </div>
 
-<script src="/static/js/nav.js?v={{ asset_v }}"></script>
+{# ---- Move-to-tier menu, opened from a row's ⇄ button ---- #}
+<div class="ranker-menu" id="moveMenu" hidden></div>
+
+{# ---- Tier settings ---- #}
+<div class="modal-overlay" id="tierModal" onclick="if (event.target === this) closeTierModal()">
+    <div class="modal">
+        <div class="modal-head"><h2>Tier</h2>
+            <button type="button" class="modal-close" onclick="closeTierModal()">×</button></div>
+        <div class="modal-body">
+            <div class="field"><label for="tierLabel">Label</label>
+                <input type="text" id="tierLabel" maxlength="40"></div>
+            <div class="field"><label for="tierPriority">Ranking priority</label>
+                <input type="number" id="tierPriority" min="0" max="1000" step="1">
+                <span class="hint">Higher tiers rank above lower ones in a consolidated
+                    export. Ties fall back to the order the tiers are in.</span></div>
+            <div class="field"><label for="tierColour">Colour</label>
+                <input type="color" id="tierColour" value="#E8B545">
+                <span class="hint">Tints this tier's rank numbers in the exported image.</span></div>
+            <div class="field checkbox">
+                <input type="checkbox" id="tierIsolated">
+                <label for="tierIsolated">Isolated — keep out of the consolidated ranking</label></div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="closeTierModal()">Cancel</button>
+            <button type="button" class="btn-primary" onclick="saveTierSettings()">Save tier</button>
+        </div>
+    </div>
+</div>
+
+{# ---- Import finished titles ----
+   Rendered ONLY when the account actually has this source, exactly as its button
+   is. "Absent, not disabled" has to mean absent from the markup: leaving the
+   dialog in the page for an account that cannot use it would advertise a feature
+   the sources endpoint deliberately declines to mention. #}
+{% if sources.import %}
+<div class="modal-overlay" id="importModal" onclick="if (event.target === this) closeImportModal()">
+    <div class="modal">
+        <div class="modal-head"><h2>Import finished titles</h2>
+            <button type="button" class="modal-close" onclick="closeImportModal()">×</button></div>
+        <div class="modal-body">
+            <div class="field"><label for="importMedia">What to import</label>
+                <select id="importMedia" onchange="refreshImportYears()">
+                    <option value="show">Shows</option>
+                    <option value="movie">Movies</option>
+                </select></div>
+            <div class="field"><label for="importYear">Finished during</label>
+                <select id="importYear"><option value="">Any year</option></select>
+                <span class="hint">The year you finished it, not the year it came
+                    out — "what I watched in 2026" is a different list.</span></div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="closeImportModal()">Cancel</button>
+            <button type="button" class="btn-primary" id="importGo" onclick="runImport()">Import</button>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{# ---- Export ---- #}
+<div class="modal-overlay" id="exportModal" onclick="if (event.target === this) closeExportModal()">
+    <div class="modal wide">
+        <div class="modal-head"><h2>Export a poster grid</h2>
+            <button type="button" class="modal-close" onclick="closeExportModal()">×</button></div>
+        <div class="modal-body ranker-export-body">
+            <div class="ranker-export-opts">
+                <div class="field"><label for="exTitle">Title</label>
+                    <input type="text" id="exTitle" maxlength="80" oninput="onExportChange()"></div>
+                <div class="field"><label for="exUser">Name</label>
+                    <input type="text" id="exUser" maxlength="80" oninput="onExportChange()"></div>
+                <div class="ranker-opt-row">
+                    <div class="field"><label for="exTopX">Top X</label>
+                        <input type="number" id="exTopX" min="1" max="100" value="25"
+                               oninput="onExportChange()"></div>
+                    <div class="field"><label for="exCols">Columns</label>
+                        <select id="exCols" onchange="onExportChange()"></select></div>
+                </div>
+                <div class="ranker-opt-row">
+                    <div class="field"><label for="exScope">Scope</label>
+                        <select id="exScope" onchange="onExportChange()">
+                            <option value="global">All tiers, consolidated</option>
+                        </select></div>
+                    <div class="field"><label for="exScale">Size</label>
+                        <select id="exScale" onchange="onExportChange()">
+                            <option value="1">Full</option>
+                            <option value="0.5">Half — for attachment limits</option>
+                        </select></div>
+                </div>
+                <div class="field"><label for="exFmt">Format</label>
+                    <select id="exFmt" onchange="onExportChange()"></select></div>
+                <div class="field"><label for="exHeader">Header image</label>
+                    <select id="exHeader" onchange="onExportChange()">
+                        <option value="">None</option>
+                        <option value="avatar">My avatar</option>
+                    </select>
+                    <span class="hint">Upload a new one on your
+                        <a href="/me">account page</a>, or below.</span>
+                    <input type="file" id="exUpload" accept="image/*" onchange="uploadHeaderImage(this)">
+                </div>
+                <div class="ranker-opt-row">
+                    <div class="field checkbox"><input type="checkbox" id="exTitles"
+                        onchange="onExportChange()"><label for="exTitles">Show titles</label></div>
+                    <div class="field checkbox"><input type="checkbox" id="exPodium"
+                        onchange="onExportChange()"><label for="exPodium">Podium top 3</label></div>
+                </div>
+                {# The live readout mirrors the renderer's own geometry, so the
+                   hard refusal on the way in is a backstop rather than the first
+                   time anybody hears the canvas is too big. #}
+                <p class="ranker-size" id="exSize"></p>
+            </div>
+            <div class="ranker-export-preview">
+                <div class="ranker-preview-frame" id="exPreview">
+                    <span class="ranker-preview-hint">Preview appears here.</span>
+                </div>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="copyMarkdown()">📋 Copy as Markdown</button>
+            <button type="button" class="btn-ghost" onclick="closeExportModal()">Close</button>
+            <button type="button" class="btn-primary" id="exportGo" onclick="downloadExport()">Download</button>
+        </div>
+    </div>
+</div>
+
 </body>
 </html>

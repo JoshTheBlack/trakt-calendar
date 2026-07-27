@@ -22,11 +22,15 @@ _CACHED_ASSETS = (
     "static/css/auth.css",
     "static/css/distrakt.css",
     "static/css/share.css",
+    "static/css/ranker.css",
     "static/js/app.js",
     "static/js/distrakt.js",
     "static/js/nav.js",
     "static/js/plex-auth.js",
     "static/js/share.js",
+    "static/js/ranker.js",
+    # Vendored third-party, so its mtime only moves when the pinned version does.
+    "static/js/sortable.min.js",
 )
 
 # Falls back to a constant when the files can't be stat'd — a wrong-but-stable

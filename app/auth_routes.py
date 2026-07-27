@@ -772,6 +772,34 @@ async def upload_saved_image(request: Request):
     return JSONResponse({"ok": True, "uid": uid})
 
 
+@guard.get("/api/me/images", AuthLevel.SESSION)
+async def list_saved_images(request: Request):
+    """The uids of this account's saved images, oldest first — enough for a
+    picker to render a thumbnail of each through the route below."""
+    user = await auth.require_session(request)
+    return JSONResponse({
+        "ok": True,
+        "images": user_images.list_images(user.user_id),
+        "max": user_images.MAX_IMAGES_PER_USER,
+    })
+
+
+@guard.get("/api/me/images/{image_uid}", AuthLevel.SESSION)
+async def get_saved_image(image_uid: str, request: Request):
+    """One saved image's bytes.
+
+    THE UID IS CHECKED AGAINST WHAT THIS ACCOUNT ACTUALLY HAS before it becomes a
+    path segment. It is server-issued at upload, but it arrives back here from a
+    client, and a membership test answers both questions at once: that the shape
+    is one we produced, and that this caller owns it.
+    """
+    user = await auth.require_session(request)
+    if image_uid not in user_images.list_images(user.user_id):
+        return Response(status_code=404)
+    return FileResponse(user_images.image_path(user.user_id, image_uid),
+                        media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+
+
 @guard.delete("/api/me/images/{image_uid}", AuthLevel.SESSION)
 async def remove_saved_image(image_uid: str, request: Request):
     user = await auth.require_session(request)
