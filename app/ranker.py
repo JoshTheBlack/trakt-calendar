@@ -1024,6 +1024,288 @@ def _next_ranks(conn: db.Connection, board_id: int, category_ids) -> dict[int, i
     return ranks
 
 
+# ---------------------------------------------------------------------------
+# backup and restore
+# ---------------------------------------------------------------------------
+# EVERYTHING IS KEYED BY uid, NEVER BY INTEGER id. A backup's whole purpose is to
+# be restorable somewhere else — a rebuilt database, a second instance, an
+# account that was deleted and remade — and in any of those the autoincrement ids
+# that were current when the file was written point at unrelated rows or at
+# nothing at all. Boards and categories carry their uid; an item names its
+# category by that uid, and items are nested inside their board so a uid only has
+# to be unique where it actually is (per board).
+#
+# NOT IN THE DOCUMENT, deliberately: `show_posters` (shared, rebuildable, and
+# nobody's personal data), and avatars and saved images (binary, large, and not
+# something a JSON document should carry). The UI says so where it offers this.
+
+# Bump only on an incompatible change to the shape below. A restore refuses a
+# version it does not understand rather than guessing at the layout.
+EXPORT_SCHEMA = 1
+SUPPORTED_EXPORT_SCHEMAS = (1,)
+
+# The board columns a backup carries. `version` is not among them: it counts
+# saves against THIS database's copy of the board, so carrying it across would
+# tell a client to expect a history the restored row does not have.
+_BACKUP_BOARD_FIELDS = ("uid", "name", "year", "media_scope", "sort_order",
+                        "created_at", "updated_at")
+_BACKUP_CATEGORY_FIELDS = ("uid", "label", "rank_priority", "is_isolated",
+                           "sort_order", "colour", "created_at")
+_BACKUP_ITEM_FIELDS = ("media", "match_source", "match_id", "tmdb", "ids_json",
+                       "title", "year", "network", "season_count", "episode_count",
+                       "runtime", "user_rating", "added_from", "rank_in_category",
+                       "created_at")
+
+
+async def export_user_data(user_id: int) -> dict[str, Any]:
+    """This user's every board, tier and title as one JSON-able document.
+
+    Three queries regardless of how many boards there are — one per table,
+    grouped in Python — rather than a walk that costs a query per board.
+    """
+    def _work(conn: db.Connection) -> dict[str, Any]:
+        boards = conn.execute(
+            "SELECT * FROM tier_boards WHERE user_id = ? ORDER BY sort_order, id",
+            (user_id,),
+        ).fetchall()
+        categories: dict[int, list[dict[str, Any]]] = {}
+        category_uids: dict[int, str] = {}
+        for row in conn.execute(
+            "SELECT c.* FROM tier_categories c JOIN tier_boards b ON b.id = c.board_id "
+            " WHERE b.user_id = ? ORDER BY c.sort_order, c.id",
+            (user_id,),
+        ):
+            categories.setdefault(int(row["board_id"]), []).append(
+                {field: row[field] for field in _BACKUP_CATEGORY_FIELDS}
+            )
+            category_uids[int(row["id"])] = str(row["uid"])
+        items: dict[int, list[dict[str, Any]]] = {}
+        for row in conn.execute(
+            "SELECT i.* FROM tier_items i JOIN tier_boards b ON b.id = i.board_id "
+            " WHERE b.user_id = ? ORDER BY i.rank_in_category, i.id",
+            (user_id,),
+        ):
+            entry = {field: row[field] for field in _BACKUP_ITEM_FIELDS}
+            # NULL category means the board's pool, and it stays NULL through the
+            # round trip: a pool title is unranked work in progress, not a title
+            # whose tier went missing.
+            entry["category_uid"] = (
+                None if row["category_id"] is None
+                else category_uids.get(int(row["category_id"]))
+            )
+            items.setdefault(int(row["board_id"]), []).append(entry)
+
+        return {
+            "schema": EXPORT_SCHEMA,
+            "exported_at": db.now(),
+            "boards": [
+                {
+                    **{field: row[field] for field in _BACKUP_BOARD_FIELDS},
+                    "categories": categories.get(int(row["id"]), []),
+                    "items": items.get(int(row["id"]), []),
+                }
+                for row in boards
+            ],
+        }
+
+    return await db.run(_work)
+
+
+async def restore_user_data(user_id: int, doc: Any) -> int:
+    """Replace this user's boards with the document's, in one transaction, and
+    return how many boards were written.
+
+    REPLACE, not merge: merging would need a conflict rule for every field and
+    for every arrangement, and the thing being restored is precisely an
+    arrangement. The user comes from the session — a `user_id` anywhere in the
+    file is ignored — so a document can never write into somebody else's account.
+
+    The whole document is validated before a single row is deleted, so a file
+    that turns out to be malformed halfway through leaves the boards that are
+    already here untouched.
+    """
+    boards = _validate_backup(doc)
+    ts = db.now()
+
+    def _work(conn: db.Connection) -> int:
+        # The cascade takes the categories and items with it.
+        conn.execute("DELETE FROM tier_boards WHERE user_id = ?", (user_id,))
+        for order, board in enumerate(boards):
+            cur = conn.execute(
+                "INSERT INTO tier_boards (user_id, uid, name, year, media_scope, sort_order, "
+                "created_at, updated_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+                (user_id, board["uid"], board["name"], board["year"], board["media_scope"],
+                 order, board["created_at"] or ts, board["updated_at"] or ts),
+            )
+            board_id = int(cur.lastrowid)
+            category_ids: dict[str, int] = {}
+            for position, category in enumerate(board["categories"]):
+                cur = conn.execute(
+                    "INSERT INTO tier_categories (board_id, uid, label, rank_priority, "
+                    "is_isolated, sort_order, colour, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (board_id, category["uid"], category["label"], category["rank_priority"],
+                     int(category["is_isolated"]), position, category["colour"],
+                     category["created_at"] or ts),
+                )
+                category_ids[category["uid"]] = int(cur.lastrowid)
+            for item in board["items"]:
+                category_uid = item["category_uid"]
+                _insert_item(
+                    conn, board_id, item["row"], item["added_from"],
+                    item["created_at"] or ts,
+                    category_id=None if category_uid is None else category_ids[category_uid],
+                    rank=item["rank_in_category"],
+                )
+        return len(boards)
+
+    return await db.transaction(_work)
+
+
+def _validate_backup(doc: Any) -> list[dict[str, Any]]:
+    """Read a backup document into the shape the restore writes, refusing
+    anything it cannot fully account for.
+
+    Caps are applied here exactly as they are on a live edit: a document is
+    untrusted input like any other, and a file that would build a board no route
+    could have built is a file this app should not accept.
+    """
+    if not isinstance(doc, Mapping):
+        raise ValidationError("A backup must be a JSON object.")
+    schema = doc.get("schema")
+    if schema not in SUPPORTED_EXPORT_SCHEMAS:
+        raise ValidationError(f"Unsupported rankings backup version: {schema!r}.")
+    raw_boards = doc.get("boards") or []
+    if not isinstance(raw_boards, list):
+        raise ValidationError("`boards` must be a list.")
+    if len(raw_boards) > MAX_BOARDS_PER_USER:
+        raise ValidationError(f"A backup can hold at most {MAX_BOARDS_PER_USER} boards.")
+
+    boards = [_validate_backup_board(entry) for entry in raw_boards]
+    if len({board["uid"] for board in boards}) != len(boards):
+        raise ValidationError("Two boards in this backup share an id.")
+    per_year: dict[int, int] = {}
+    for board in boards:
+        if board["year"] is not None:
+            per_year[board["year"]] = per_year.get(board["year"], 0) + 1
+            if per_year[board["year"]] > MAX_BOARDS_PER_YEAR:
+                raise ValidationError(
+                    f"A backup can hold at most {MAX_BOARDS_PER_YEAR} boards for "
+                    f"{board['year']}."
+                )
+    return boards
+
+
+def _validate_backup_board(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, Mapping):
+        raise ValidationError("Each board must be an object.")
+    raw_categories = entry.get("categories") or []
+    raw_items = entry.get("items") or []
+    if not isinstance(raw_categories, list) or not isinstance(raw_items, list):
+        raise ValidationError("A board's categories and items must be lists.")
+    if len(raw_categories) > MAX_CATEGORIES_PER_BOARD:
+        raise ValidationError(f"A board holds at most {MAX_CATEGORIES_PER_BOARD} tiers.")
+    if len(raw_items) > MAX_ITEMS_PER_BOARD:
+        raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
+
+    categories = [_validate_backup_category(row) for row in raw_categories]
+    uids = {category["uid"] for category in categories}
+    if len(uids) != len(categories):
+        raise ValidationError("Two tiers on one board share an id.")
+
+    items = [_validate_backup_item(row, uids) for row in raw_items]
+    keys = {item_key(item["row"]["media"], item["row"]["match_source"],
+                     item["row"]["match_id"]) for item in items}
+    if len(keys) != len(items):
+        # The UNIQUE would drop the second copy silently, which would restore a
+        # board that is quietly smaller than the one that was backed up.
+        raise ValidationError("The same title appears twice on one board in this backup.")
+
+    # Ordering is the artifact this feature produces, so it is carried across
+    # rather than recomputed — but renumbered densely per tier on the way in, the
+    # same normalization a layout save applies, so a hand-edited file cannot
+    # introduce gaps or ties the rest of the app does not expect.
+    items.sort(key=lambda item: item["rank_in_category"])
+    ranks: dict[str | None, int] = {}
+    for item in items:
+        target = item["category_uid"]
+        item["rank_in_category"] = 0 if target is None else ranks.get(target, 0)
+        if target is not None:
+            ranks[target] = item["rank_in_category"] + 1
+
+    return {
+        "uid": _uid(entry.get("uid"), "board"),
+        "name": _name(entry.get("name"), MAX_BOARD_NAME, "board name"),
+        "year": _year(entry.get("year")),
+        "media_scope": _media_scope(entry.get("media_scope")),
+        "created_at": _optional_int(entry.get("created_at")),
+        "updated_at": _optional_int(entry.get("updated_at")),
+        "categories": categories,
+        "items": items,
+    }
+
+
+def _validate_backup_category(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, Mapping):
+        raise ValidationError("Each tier must be an object.")
+    return {
+        "uid": _uid(entry.get("uid"), "tier"),
+        "label": _name(entry.get("label"), MAX_CATEGORY_LABEL, "tier label"),
+        "rank_priority": _rank_priority(entry.get("rank_priority", 0)),
+        "is_isolated": bool(entry.get("is_isolated")),
+        "colour": _colour(entry.get("colour")),
+        "created_at": _optional_int(entry.get("created_at")),
+    }
+
+
+def _validate_backup_item(entry: Any, category_uids: set[str]) -> dict[str, Any]:
+    if not isinstance(entry, Mapping):
+        raise ValidationError("Each title must be an object.")
+    # _normalize_ref reads `ids`, while the export writes the stored `ids_json`
+    # verbatim so a round trip is an identity. Parse it back into the map that
+    # function expects rather than teaching it a second input shape.
+    ref = dict(entry)
+    if "ids" not in ref:
+        ref["ids"] = _ids_from_json(entry.get("ids_json"))
+    row = _normalize_ref(ref)
+
+    category_uid = entry.get("category_uid")
+    if category_uid is not None:
+        category_uid = _uid(category_uid, "tier")
+        if category_uid not in category_uids:
+            # Silently pooling it would restore a board whose arrangement is
+            # subtly different from the one that was saved, which is the one
+            # thing a backup must not do.
+            raise ValidationError(
+                f"A title in this backup names tier {category_uid!r}, which is not on its board."
+            )
+    added_from = entry.get("added_from") or "manual"
+    if added_from not in ADDED_FROM_VALUES:
+        raise ValidationError(f"Unknown source {added_from!r}.")
+    rank = _optional_int(entry.get("rank_in_category")) or 0
+    if rank < 0:
+        raise ValidationError("A rank cannot be negative.")
+    return {
+        "row": row,
+        "category_uid": category_uid,
+        "added_from": added_from,
+        "rank_in_category": rank,
+        "created_at": _optional_int(entry.get("created_at")),
+    }
+
+
+def _ids_from_json(value: Any) -> dict[str, Any]:
+    """The provenance map out of a stored `ids_json` string. A map we can no
+    longer read is dropped rather than refused: the row's own match_source and
+    match_id are what the feature ranks by, and they are validated separately."""
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _touch(conn: db.Connection, board_id: int, user_id: int, ts: int) -> int:
     """Stamp a board as changed and bump the version a client echoes back.
     Returns the new version.

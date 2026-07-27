@@ -1431,6 +1431,234 @@ class MarkdownExportTests(RankerTestCase):
             0)
 
 
+class BackupTests(RankerTestCase):
+    """Backup and restore, and the reason the document is keyed by uid.
+
+    THE ROUND TRIP THAT MATTERS restores into a DIFFERENT database, where every
+    autoincrement id has come out different from the one the file was written
+    against. An export carrying integer ids would restore a board whose titles
+    point at unrelated tiers or at nothing; the uid keying is what survives it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        self.build_source_board()
+
+    def build_source_board(self) -> None:
+        """One board with two tiers, an isolated one, and a title left in the
+        pool — every kind of linkage the document has to carry."""
+        asyncio.run(ranker.create_board(
+            self.user_id, uid="b1", name="Top 2026", year=2026, media_scope="mixed"))
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [
+            dict(show_ref("1", "Alpha"), network="HBO"),
+            dict(show_ref("2", "Beta")),
+            dict(show_ref("3", "Gamma")),
+            {"media": "movie", "match_source": "tmdb", "match_id": "550",
+             "tmdb": 550, "title": "Fight Club", "year": 1999, "runtime": 139},
+        ]))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": 1,
+            "categories": [
+                {"uid": "tier-s", "label": "S", "rank_priority": 60,
+                 "colour": "#FF7F7F",
+                 "items": ["show:tmdb:2", "show:tmdb:1"]},
+                {"uid": "tier-x", "label": "Rewatches", "rank_priority": 40,
+                 "is_isolated": True, "items": ["movie:tmdb:550"]},
+            ],
+            "pool": ["show:tmdb:3"],
+        }))
+
+    def fresh_database(self, decoys: int = 3) -> int:
+        """A second, unrelated database with a signed-in ranker account whose
+        rows start at DIFFERENT ids — which is the whole point of the exercise.
+
+        The decoy account is built first and holds boards, tiers and titles of
+        its own, so no id in the restored data can coincidentally match the id
+        the same row had in the database the backup came from.
+        """
+        RankerTestCase._counter += 1
+        db.close_thread_connection()
+        db.set_db_path(TMP / f"ranker-restore-{RankerTestCase._counter}.db")
+        asyncio.run(db.migrate())
+        self.client.cookies.clear()
+        self.make_user("admin_user", is_admin=True)
+        decoy = self.ranker_user("decoy")
+        for n in range(decoys):
+            asyncio.run(ranker.create_board(decoy, uid=f"decoy{n}", name=f"Decoy {n}"))
+            asyncio.run(ranker.add_titles(decoy, f"decoy{n}", [show_ref(str(900 + n))]))
+            asyncio.run(ranker.save_layout(decoy, f"decoy{n}", {
+                "version": 1,
+                "categories": [{"uid": "d", "label": "D",
+                                "items": [f"show:tmdb:{900 + n}"]}]}))
+        self.decoy_id = decoy
+        user_id = self.ranker_user("restorer")
+        self.sign_in_as(user_id)
+        return user_id
+
+    def test_the_round_trip_survives_a_database_with_different_ids(self):
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        source = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+
+        user_id = self.fresh_database()
+        self.assertEqual(asyncio.run(ranker.restore_user_data(user_id, doc)), 1)
+        restored = asyncio.run(ranker.fetch_board(user_id, "b1"))
+
+        # The ids really did come out different, or this test proves nothing:
+        # the decoy account built first has already taken the low ones, so the
+        # restored board, its tiers and its titles all landed on numbers the
+        # document never mentioned.
+        self.assertGreater(self.value("SELECT id FROM tier_boards WHERE uid = 'b1'"), 1)
+        self.assertGreater(
+            self.value("SELECT MIN(id) FROM tier_categories WHERE uid = 'tier-s'"), 1)
+
+        self.assertEqual(restored["name"], "Top 2026")
+        self.assertEqual(restored["year"], 2026)
+        self.assertEqual(restored["media_scope"], "mixed")
+        self.assertEqual([c["uid"] for c in restored["categories"]],
+                         [c["uid"] for c in source["categories"]])
+        for was, now in zip(source["categories"], restored["categories"]):
+            self.assertEqual(now["label"], was["label"])
+            self.assertEqual(now["rank_priority"], was["rank_priority"])
+            self.assertEqual(now["is_isolated"], was["is_isolated"])
+            self.assertEqual(now["colour"], was["colour"])
+            # Order within a tier is the artifact this feature produces.
+            self.assertEqual([i["key"] for i in now["items"]],
+                             [i["key"] for i in was["items"]])
+        self.assertEqual([i["key"] for i in restored["pool"]],
+                         [i["key"] for i in source["pool"]])
+
+    def test_a_restored_title_keeps_everything_the_row_held(self):
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        user_id = self.fresh_database()
+        asyncio.run(ranker.restore_user_data(user_id, doc))
+
+        board = asyncio.run(ranker.fetch_board(user_id, "b1"))
+        movie = board["categories"][1]["items"][0]
+        self.assertEqual(movie["media"], "movie")
+        self.assertEqual(movie["title"], "Fight Club")
+        self.assertEqual(movie["year"], 1999)
+        self.assertEqual(movie["runtime"], 139)
+        self.assertEqual(movie["tmdb"], 550)
+        alpha = next(i for i in board["categories"][0]["items"] if i["title"] == "Alpha")
+        self.assertEqual(alpha["network"], "HBO")
+
+    def test_the_restored_board_belongs_to_the_session_user_not_the_file(self):
+        """A document is untrusted input. Any owner named in it is ignored, so a
+        file cannot write into somebody else's account however it was edited."""
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        user_id = self.fresh_database()
+        doc["user_id"] = self.decoy_id
+        doc["boards"][0]["user_id"] = self.decoy_id
+        doc["boards"][0]["id"] = 1
+
+        asyncio.run(ranker.restore_user_data(user_id, doc))
+
+        owner = self.value("SELECT user_id FROM tier_boards WHERE uid = 'b1'")
+        self.assertEqual(owner, user_id)
+        # The decoy still has exactly the boards it had.
+        self.assertEqual(
+            self.value("SELECT COUNT(*) FROM tier_boards WHERE user_id = ?", (self.decoy_id,)),
+            3)
+
+    def test_a_restore_replaces_rather_than_merging(self):
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        asyncio.run(ranker.create_board(self.user_id, uid="scratch", name="Scratch"))
+        asyncio.run(ranker.add_titles(self.user_id, "scratch", [show_ref("77")]))
+
+        asyncio.run(ranker.restore_user_data(self.user_id, doc))
+
+        boards = asyncio.run(ranker.fetch_boards(self.user_id))
+        self.assertEqual([b["uid"] for b in boards], ["b1"])
+        # The replaced board's titles went with it rather than being orphaned.
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 4)
+
+    def test_a_malformed_document_writes_nothing_at_all(self):
+        """Validation happens before the delete, so a file that turns out to be
+        unreadable halfway through does not cost the boards already here."""
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        doc["boards"][0]["items"][-1]["category_uid"] = "tier-that-is-not-here"
+
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.restore_user_data(self.user_id, doc))
+
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        self.assertEqual(len(board["categories"]), 2)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 4)
+
+    def test_an_unknown_schema_version_is_refused(self):
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.restore_user_data(self.user_id, {"schema": 99, "boards": []}))
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 1)
+
+    def test_the_document_carries_no_integer_ids(self):
+        """The linkage is uid-based by construction, not by luck: an id in the
+        file would be a number that means something only in the database it came
+        from."""
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        board = doc["boards"][0]
+        self.assertNotIn("id", board)
+        self.assertNotIn("user_id", board)
+        for category in board["categories"]:
+            self.assertNotIn("id", category)
+            self.assertNotIn("board_id", category)
+        for item in board["items"]:
+            self.assertNotIn("id", item)
+            self.assertNotIn("category_id", item)
+        self.assertEqual({i["category_uid"] for i in board["items"]},
+                         {"tier-s", "tier-x", None})
+
+    def test_a_backup_of_an_account_with_nothing_is_an_empty_document(self):
+        empty = self.ranker_user("empty")
+        doc = asyncio.run(ranker.export_user_data(empty))
+        self.assertEqual(doc["boards"], [])
+        # And restoring it is a legal way to clear the boards you have.
+        self.assertEqual(asyncio.run(ranker.restore_user_data(self.user_id, doc)), 0)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 0)
+
+    def test_caps_apply_to_a_document_exactly_as_they_do_to_an_edit(self):
+        doc = asyncio.run(ranker.export_user_data(self.user_id))
+        template = doc["boards"][0]
+        doc["boards"] = [dict(template, uid=f"b{n}", year=2026)
+                         for n in range(ranker.MAX_BOARDS_PER_YEAR + 1)]
+        with self.assertRaises(ranker.ValidationError):
+            asyncio.run(ranker.restore_user_data(self.user_id, doc))
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_boards"), 1)
+
+    def test_the_routes_round_trip_the_file(self):
+        downloaded = self.client.get("/api/rankings/backup")
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertIn("attachment", downloaded.headers["content-disposition"])
+        self.assertIn("rankings-backup-", downloaded.headers["content-disposition"])
+        doc = downloaded.json()
+
+        user_id = self.fresh_database()
+        restored = self.client.post("/api/rankings/restore", json=doc)
+
+        self.assertEqual(restored.status_code, 200, restored.text)
+        self.assertEqual(restored.json()["boards"], 1)
+        board = self.client.get("/api/rankings/boards/b1").json()["board"]
+        self.assertEqual([i["key"] for i in board["categories"][0]["items"]],
+                         ["show:tmdb:2", "show:tmdb:1"])
+        self.assertEqual([i["key"] for i in board["pool"]], ["show:tmdb:3"])
+        self.assertEqual(board["version"], 0)
+        self.assertEqual(
+            self.value("SELECT user_id FROM tier_boards WHERE uid = 'b1'"), user_id)
+
+    def test_the_restore_route_refuses_a_broken_file_with_a_readable_message(self):
+        resp = self.client.post("/api/rankings/restore", json={"schema": 4, "boards": []})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("backup", resp.json()["error"].lower())
+
+    def test_both_routes_need_the_grant(self):
+        self.sign_in_as(self.make_user("plain"))
+        self.assertEqual(self.client.get("/api/rankings/backup").status_code, 403)
+        self.assertEqual(
+            self.client.post("/api/rankings/restore", json={"schema": 1, "boards": []}).status_code,
+            403)
+
+
 def _generated_root(user_id: int) -> Path:
     """Where this account's finished renders are kept, whatever year they were
     filed under."""

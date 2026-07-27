@@ -219,6 +219,14 @@
 .ranker-size { font-size: 0.74rem; color: var(--text-dim); }
 .ranker-size.is-over { color: var(--crimson); font-weight: 600; }
 
+/* ---- backup modal ----
+   The restore button is the primary action of that dialog and also the only
+   irreversible one on this page, so it reads in the destructive colour rather
+   than the inviting one. Same rule the other backup screen carries; it lives
+   here too because each page loads only its own stylesheet. */
+#backupGo { background: var(--crimson); border-color: var(--crimson); }
+#backupGo:disabled { opacity: 0.45; }
+
 .ranker-blank { padding: 40px 4px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
 .ranker-blank h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.6rem; letter-spacing: 1px; color: var(--gold-soft); font-weight: 400; }
 .ranker-blank p { color: var(--text-dim); font-size: 0.86rem; max-width: 52ch; }

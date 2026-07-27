@@ -48,6 +48,13 @@ _POSTER_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 # is refused before it is parsed rather than after it has been held in memory.
 MAX_BODY_BYTES = 1024 * 1024
 
+# A restore is the one request that legitimately carries whole boards rather than
+# a list of keys: fifty boards of a thousand titles, each with its own title,
+# network and provenance map, is several megabytes of perfectly ordinary
+# document. The caps in the data layer are what actually bound what may be
+# written; this only stops something absurd being read into memory first.
+MAX_RESTORE_BYTES = 32 * 1024 * 1024
+
 # Search is the one route here that reaches a provider on every call, so it is
 # the one that can be turned into an amplifier. The window is short and the
 # allowance generous because the caller is a signed-in, approved account typing
@@ -124,10 +131,10 @@ def _error(message: str, status: int = 400, **extra) -> JSONResponse:
     return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
 
 
-async def _json_body(request: Request) -> dict:
+async def _json_body(request: Request, limit: int = MAX_BODY_BYTES) -> dict:
     """Require a JSON object body, within the size cap."""
     body = await request.body()
-    if len(body) > MAX_BODY_BYTES:
+    if len(body) > limit:
         raise HTTPException(status_code=413, detail="That request is too large.")
     try:
         data = await request.json()
@@ -479,6 +486,44 @@ async def save_board_layout(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, **result})
+
+
+# ---------------------------------------------------------------------------
+# backup and restore
+# ---------------------------------------------------------------------------
+# Its own pair rather than a section of another feature's backup: an account may
+# use the rankings and nothing else, and would then have no other document to
+# live inside. The restoring user always comes from the session.
+
+@guard.get("/api/rankings/backup", AuthLevel.RANKER_APPROVED)
+async def download_backup(request: Request):
+    """Download the requesting user's boards, tiers and titles as one JSON
+    document — the input POST /api/rankings/restore takes back.
+
+    Everything in it is keyed by uid, so it restores into a database whose
+    autoincrement ids came out completely different. It carries no credentials,
+    nobody else's data, and no images."""
+    user = await auth.current_user(request)
+    doc = await ranker.export_user_data(user.user_id)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return JSONResponse(doc, headers={
+        "Content-Disposition": f'attachment; filename="rankings-backup-{stamp}.json"',
+    })
+
+
+@guard.post("/api/rankings/restore", AuthLevel.RANKER_APPROVED)
+async def restore_backup(request: Request):
+    """Replace the requesting user's boards with an exported document's.
+
+    REPLACE, not merge, in one transaction — see ranker.restore_user_data for
+    why merging an arrangement is not a coherent thing to ask for."""
+    user = await auth.current_user(request)
+    data = await _json_body(request, MAX_RESTORE_BYTES)
+    try:
+        boards = await ranker.restore_user_data(user.user_id, data)
+    except ranker.RankerError as exc:
+        return _refusal(exc)
+    return JSONResponse({"ok": True, "boards": boards})
 
 
 # ---------------------------------------------------------------------------

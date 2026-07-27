@@ -40,6 +40,7 @@
             <summary title="Account and settings">☰ Menu</summary>
             <div class="nav-menu-items">
                 <a href="/me">👤 Account</a>
+                <button type="button" onclick="openBackupModal()">🗄️ Backup</button>
                 {% if is_admin %}
                 <a href="/admin">🛠️ Admin</a>
                 {% endif %}
@@ -243,6 +244,52 @@
             <button type="button" class="btn-ghost" onclick="copyMarkdown()">📋 Copy as Markdown</button>
             <button type="button" class="btn-ghost" onclick="closeExportModal()">Close</button>
             <button type="button" class="btn-primary" id="exportGo" onclick="downloadExport()">Download</button>
+        </div>
+    </div>
+</div>
+
+{# ---- Backup ----
+   Every board, tier and title as one file. Restore REPLACES rather than merges,
+   which makes it the only destructive control on this page that cannot be undone
+   by dragging something back — hence the typed acknowledgement, which is
+   deliberately more friction than a confirmation somebody can dismiss by reflex.
+   Same shape the other backup screen in this app uses. #}
+<div class="modal-overlay" id="backupModal" onclick="if (event.target === this) closeBackupModal()">
+    <div class="modal">
+        <div class="modal-head"><h2>Backup</h2>
+            <button type="button" class="modal-close" onclick="closeBackupModal()">×</button></div>
+        <div class="modal-body">
+            <p class="hint">Every board you have, its tiers and everything in them, as one
+                file. It holds no credentials and nobody else's data. Profile and header
+                <strong>images are not included</strong> — they live on your account, not
+                in a board.</p>
+
+            <div class="field">
+                <label>Download a backup</label>
+                <a class="btn-ghost small" href="/api/rankings/backup" download>⤓ Download</a>
+                <span class="hint">Keep a copy locally. Restoring it later takes seconds,
+                    and it restores fine into a rebuilt database.</span>
+            </div>
+
+            <div class="field">
+                <label for="backupFile">Restore from a backup</label>
+                <p class="hint warn">This <strong>replaces</strong> every board here
+                    with the ones in the file. What is here now is not recoverable
+                    afterwards unless you downloaded it first.</p>
+                <input type="file" id="backupFile" accept="application/json,.json"
+                       onchange="onBackupFileChosen(this)">
+                <div id="backupConfirm" hidden>
+                    <label for="backupAck">Type <code>REPLACE MY BOARDS</code> to confirm:</label>
+                    <input type="text" id="backupAck" spellcheck="false" autocomplete="off"
+                           placeholder="REPLACE MY BOARDS" oninput="onBackupAckInput()">
+                </div>
+                <p class="hint" id="backupStatus"></p>
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="closeBackupModal()">Close</button>
+            <button type="button" class="btn-primary" id="backupGo"
+                    onclick="restoreBackup()" disabled>Replace my boards</button>
         </div>
     </div>
 </div>
