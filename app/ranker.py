@@ -562,25 +562,36 @@ async def add_titles(
         known = set(_item_ids(conn, board_id))
         if existing + len(keys - known) > MAX_ITEMS_PER_BOARD:
             raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
-        added = 0
-        for row in rows:
-            cur = conn.execute(
-                "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
-                "tmdb, ids_json, title, year, network, season_count, episode_count, runtime, "
-                "user_rating, added_from, rank_in_category, created_at) "
-                "VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?) "
-                "ON CONFLICT (board_id, media, match_source, match_id) DO NOTHING",
-                (board_id, row["media"], row["match_source"], row["match_id"], row["tmdb"],
-                 row["ids_json"], row["title"], row["year"], row["network"],
-                 row["season_count"], row["episode_count"], row["runtime"],
-                 row["user_rating"], added_from, ts),
-            )
-            added += cur.rowcount if cur.rowcount > 0 else 0
+        added = sum(_insert_item(conn, board_id, row, added_from, ts) for row in rows)
         if added:
             _touch(conn, board_id, user_id, ts)
         return added
 
     return await db.transaction(_work)
+
+
+def _insert_item(conn: db.Connection, board_id: int, row: Mapping[str, Any],
+                 added_from: str, ts: int, category_id: int | None = None,
+                 rank: int = 0) -> int:
+    """Insert one title, or do nothing if the board already holds it. Returns 1
+    when a row was actually created.
+
+    The one place a tier_items row is written, so every way a title can arrive —
+    a search, an import, a ratings seed — stores exactly the same columns and
+    respects the same UNIQUE.
+    """
+    cur = conn.execute(
+        "INSERT INTO tier_items (board_id, category_id, media, match_source, match_id, "
+        "tmdb, ids_json, title, year, network, season_count, episode_count, runtime, "
+        "user_rating, added_from, rank_in_category, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (board_id, media, match_source, match_id) DO NOTHING",
+        (board_id, category_id, row["media"], row["match_source"], row["match_id"],
+         row["tmdb"], row["ids_json"], row["title"], row["year"], row["network"],
+         row["season_count"], row["episode_count"], row["runtime"],
+         row["user_rating"], added_from, rank, ts),
+    )
+    return 1 if cur.rowcount > 0 else 0
 
 
 def _normalize_ref(ref: Mapping[str, Any]) -> dict[str, Any]:
@@ -824,6 +835,193 @@ def _normalize_category(entry: Any) -> dict[str, Any]:
         "colour": _colour(entry.get("colour")),
         "items": [parse_item_key(key) for key in items],
     }
+
+
+# ---------------------------------------------------------------------------
+# the tier template and the ratings seed
+# ---------------------------------------------------------------------------
+# One S/A/B/C/D/F set, defined once. The seed creates whichever of these it
+# needs, and the UI's "apply template" offers the same six — two spellings of
+# the same ladder would put a board in a state where a re-seed created
+# duplicates of tiers the user already had.
+#
+# The uids are FIXED rather than generated, which is what makes "create the ones
+# that are missing" work: a second seed finds the tier it made the first time
+# instead of adding another beside it. Priorities descend in tens so a user can
+# slot something between two of them without renumbering.
+TIER_TEMPLATE: tuple[dict[str, Any], ...] = (
+    {"uid": "tier-s", "label": "S", "rank_priority": 60, "colour": "#FF7F7F"},
+    {"uid": "tier-a", "label": "A", "rank_priority": 50, "colour": "#FFBF7F"},
+    {"uid": "tier-b", "label": "B", "rank_priority": 40, "colour": "#FFDF7F"},
+    {"uid": "tier-c", "label": "C", "rank_priority": 30, "colour": "#BFEF7F"},
+    {"uid": "tier-d", "label": "D", "rank_priority": 20, "colour": "#7FC7FF"},
+    {"uid": "tier-f", "label": "F", "rank_priority": 10, "colour": "#B0B4BA"},
+)
+_TEMPLATE_BY_UID = {entry["uid"]: entry for entry in TIER_TEMPLATE}
+
+# A 1-10 score onto that ladder. The top three scores each get their own tier
+# because that is where a person's opinion is most differentiated; everything at
+# 5 or below lands together, because "I did not like it" is one verdict however
+# it was spelled.
+_TIER_FOR_RATING = {10: "tier-s", 9: "tier-a", 8: "tier-b", 7: "tier-c", 6: "tier-d"}
+_LOWEST_TIER = "tier-f"
+
+
+def tier_for_rating(rating: int) -> str:
+    """Which template tier a score seeds into."""
+    return _TIER_FOR_RATING.get(int(rating), _LOWEST_TIER)
+
+
+async def seed_ratings(
+    user_id: int, board_uid: str, entries: list[Mapping[str, Any]], *, commit: bool = False,
+) -> dict[str, Any]:
+    """Arrange rated titles into the template tiers, or report what that would
+    do when `commit` is false.
+
+    A SEED, NOT A SYNC, and the difference is the whole design:
+      - A title the user has already placed is never moved. Their arrangement is
+        the artifact; the scores are only a starting point.
+      - Titles the board does not hold yet are added with their score, then
+        placed. A title that arrives with a rating and no tier would leave the
+        user to do by hand the exact work they asked for.
+      - Nothing here runs on a schedule or repeats itself. Seeding a board twice
+        does nothing the second time beyond whatever was rated in between.
+
+    Titles outside the board's media scope are skipped rather than refused: a
+    movies board seeded from a mixed ratings list should get the movies, not an
+    error about the shows.
+
+    `entries` carry the tier_items fields plus `user_rating`. Returns the counts
+    a preview shows, and — when committed — the board's new version.
+    """
+    rated = [(_normalize_ref(entry), _rating(entry.get("user_rating"))) for entry in entries]
+
+    def _work(conn: db.Connection) -> dict[str, Any]:
+        board = _resolve_board(conn, user_id, board_uid)
+        board_id = int(board["id"])
+        scope = board["media_scope"]
+        in_scope = [(row, score) for row, score in rated
+                    if scope == "mixed" or row["media"] == scope]
+
+        placements = _item_placements(conn, board_id)
+        categories = _category_ids(conn, board_id)
+        # Highest score first so the tiers fill in the order somebody would have
+        # dragged them, and so a truncated run keeps the titles that matter most.
+        ordered = sorted(in_scope, key=lambda pair: (-pair[1], pair[0]["title"]))
+
+        new_items: list[tuple[dict[str, Any], int, str]] = []   # row, score, tier uid
+        moves: list[tuple[int, str]] = []                       # item id, tier uid
+        already_placed = 0
+        seen: set[str] = set()
+        for row, score in ordered:
+            key = item_key(row["media"], row["match_source"], row["match_id"])
+            if key in seen:
+                # The same title twice in one payload — a show rated under two
+                # ids, say. The first (highest) score has already claimed it, and
+                # counting the second would report an insert the UNIQUE will drop.
+                continue
+            seen.add(key)
+            tier_uid = tier_for_rating(score)
+            existing = placements.get(key)
+            if existing is None:
+                new_items.append((row, score, tier_uid))
+            elif existing[1] is not None:
+                already_placed += 1
+            else:
+                moves.append((existing[0], tier_uid))
+
+        wanted_tiers = {uid for _, _, uid in new_items} | {uid for _, uid in moves}
+        missing = [uid for entry in TIER_TEMPLATE
+                   if (uid := entry["uid"]) in wanted_tiers and uid not in categories]
+        if len(categories) + len(missing) > MAX_CATEGORIES_PER_BOARD:
+            raise ValidationError(f"A board holds at most {MAX_CATEGORIES_PER_BOARD} tiers.")
+        held = int(conn.execute(
+            "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
+        ).fetchone()[0])
+        if held + len(new_items) > MAX_ITEMS_PER_BOARD:
+            raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
+
+        summary = {
+            "tiers_created": len(missing),
+            "titles_added": len(new_items),
+            "titles_placed": len(new_items) + len(moves),
+            "already_placed": already_placed,
+            "out_of_scope": len(rated) - len(in_scope),
+            "version": int(board["version"]),
+        }
+        if not commit:
+            return summary
+
+        ts = db.now()
+        next_order = int(conn.execute(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tier_categories WHERE board_id = ?",
+            (board_id,),
+        ).fetchone()[0])
+        for offset, uid in enumerate(missing):
+            template = _TEMPLATE_BY_UID[uid]
+            cur = conn.execute(
+                "INSERT INTO tier_categories (board_id, uid, label, rank_priority, is_isolated, "
+                "sort_order, colour, created_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)",
+                (board_id, uid, template["label"], template["rank_priority"],
+                 next_order + offset, template["colour"], ts),
+            )
+            categories[uid] = int(cur.lastrowid)
+
+        # Appended AFTER whatever each tier already holds, so a seed onto a board
+        # somebody has started arranging never reshuffles their existing order.
+        ranks = _next_ranks(conn, board_id, categories.values())
+        for row, score, uid in new_items:
+            category_id = categories[uid]
+            _insert_item(conn, board_id, row, "ratings", ts,
+                         category_id=category_id, rank=ranks[category_id])
+            ranks[category_id] += 1
+        for item_id, uid in moves:
+            category_id = categories[uid]
+            conn.execute(
+                "UPDATE tier_items SET category_id = ?, rank_in_category = ? "
+                " WHERE id = ? AND board_id = ?",
+                (category_id, ranks[category_id], item_id, board_id),
+            )
+            ranks[category_id] += 1
+
+        summary["version"] = _touch(conn, board_id, user_id, ts)
+        return summary
+
+    return await (db.transaction(_work) if commit else db.run(_work))
+
+
+def _rating(value: Any) -> int:
+    score = _optional_int(value)
+    if score is None or not 1 <= score <= 10:
+        raise ValidationError("A rating must be a whole number from 1 to 10.")
+    return score
+
+
+def _item_placements(conn: db.Connection, board_id: int) -> dict[str, tuple[int, int | None]]:
+    """Composite item key -> (id, category_id), for one already-owned board. The
+    category is what tells an unplaced title apart from one the user has already
+    put somewhere."""
+    return {
+        item_key(row["media"], row["match_source"], row["match_id"]):
+            (int(row["id"]), row["category_id"])
+        for row in conn.execute(
+            "SELECT id, category_id, media, match_source, match_id FROM tier_items "
+            " WHERE board_id = ?", (board_id,),
+        )
+    }
+
+
+def _next_ranks(conn: db.Connection, board_id: int, category_ids) -> dict[int, int]:
+    """The rank an appended title takes in each tier: one past whatever is
+    already there. Read once for the whole seed rather than per title."""
+    ranks = {int(cid): 0 for cid in category_ids}
+    for row in conn.execute(
+        "SELECT category_id, MAX(rank_in_category) + 1 AS next FROM tier_items "
+        " WHERE board_id = ? AND category_id IS NOT NULL GROUP BY category_id",
+        (board_id,),
+    ):
+        ranks[int(row["category_id"])] = int(row["next"])
+    return ranks
 
 
 def _touch(conn: db.Connection, board_id: int, user_id: int, ts: int) -> int:

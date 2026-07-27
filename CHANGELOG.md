@@ -9,6 +9,9 @@ All notable changes to this project are documented here. Format loosely follows 
 - ✅ **Rankings is its own access grant**, separate from everything else. Administrators can approve or revoke it per account from the admin screen, and new invites now carry a "Grants rankings on accept" checkbox — ticked by default — so an invited account arrives ready to use it. Existing outstanding invites are unaffected and grant nothing new.
 - 🔗 A **Rankings** entry appears in the header menu once your account has it.
 - 🖼️ Poster artwork for rankings is cached on the server and kept under a configurable size cap (Settings → Calendar), so tiles load instantly instead of being re-fetched every time.
+- 🔎 **Search for shows and movies to add**, either one, from the same box. Results show the poster, the year and the network or runtime, so two things with the same name are still telling apart. Adding the same title twice does nothing rather than duplicating it, and a title you've already sorted into a tier stays where you put it.
+- ⭐ **Seed a board from your own ratings.** If you've linked a Trakt account, one click turns your scores into a starting arrangement — 10s in the top tier, 9s below them, and so on — creating whichever tiers it needs. It shows you the counts before it changes anything, it never moves a title you've placed yourself, and it's a starting point rather than a sync: run it again later and it only picks up what you've rated since. The option simply isn't there if you haven't linked an account.
+- 📥 **Import titles you've already finished** into a board's pool in one go, optionally narrowed to a single year — the year you *watched* them, which is usually the list you actually want.
 
 ## 🏷️ [1.1.3] - 2026-07-25
 

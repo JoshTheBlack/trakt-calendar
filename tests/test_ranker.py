@@ -22,18 +22,34 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-ranker-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, db, ranker  # noqa: E402
+from app import auth, db, posters, ranker, ranker_import  # noqa: E402
+from app import ranker_routes, ranker_sources, trakt  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
+from app.ranker_sources import Media, TitleRef  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
 ORIGIN = "https://testserver"
+
+
+def patched(module, name, replacement):
+    """Swap one function on a module for the duration of a block. No network
+    reaches a provider in this suite; the seams are driven with stand-ins."""
+    return mock.patch.object(module, name, replacement)
+
+
+def async_result(value):
+    """An async stand-in that always answers `value`."""
+    async def _call(*args, **kwargs):
+        return value
+    return _call
 
 
 def show_ref(match_id: str, title: str = "A Show", **extra) -> dict:
@@ -50,6 +66,11 @@ class RankerTestCase(unittest.TestCase):
         RankerTestCase._counter += 1
         db.set_db_path(TMP / f"ranker-{RankerTestCase._counter}.db")
         asyncio.run(db.migrate())
+        # The search budget lives in process, keyed by user id — which only
+        # means anything within one database. Every test here gets a fresh one,
+        # so the counter has to be cleared with it or an earlier test's spending
+        # lands on a later test's unrelated account.
+        ranker_routes._search_hits.clear()
         save_settings(Settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         # Something has to exist or the first-run gate answers every request
@@ -682,6 +703,326 @@ class CrossTenantTests(RankerTestCase):
             "SELECT COUNT(*) FROM tier_items WHERE board_id = "
             "(SELECT id FROM tier_boards WHERE uid = 'mine')"), 0)
         self.assertVictimUntouched()
+
+
+class RatingsSeedTests(RankerTestCase):
+    """A seed arranges; it does not synchronize. The tests that matter here are
+    the ones about what it REFUSES to touch — somebody's own arrangement is the
+    artifact, and a seed that reshuffled it would destroy the thing it was asked
+    to help build."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+
+    def rated(self, match_id: str, score: int, media: str = "show", **extra) -> dict:
+        return {"media": media, "match_source": "tmdb", "match_id": match_id,
+                "tmdb": int(match_id), "title": f"Title {match_id}",
+                "user_rating": score, **extra}
+
+    def seed(self, entries, *, commit=True) -> dict:
+        return asyncio.run(ranker.seed_ratings(self.user_id, "b1", entries, commit=commit))
+
+    def test_scores_land_in_the_template_tiers(self):
+        summary = self.seed([self.rated("1", 10), self.rated("2", 9), self.rated("3", 4)])
+        self.assertEqual(summary["titles_added"], 3)
+        self.assertEqual(summary["tiers_created"], 3)
+
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        placed = {c["uid"]: [i["key"] for i in c["items"]] for c in board["categories"]}
+        self.assertEqual(placed["tier-s"], ["show:tmdb:1"])
+        self.assertEqual(placed["tier-a"], ["show:tmdb:2"])
+        self.assertEqual(placed["tier-f"], ["show:tmdb:3"])
+        self.assertEqual(board["pool"], [])
+
+    def test_the_score_is_stored_for_display(self):
+        self.seed([self.rated("1", 8)])
+        self.assertEqual(self.value("SELECT user_rating FROM tier_items"), 8)
+        self.assertEqual(self.value("SELECT added_from FROM tier_items"), "ratings")
+
+    def test_a_title_the_user_has_already_placed_is_never_moved(self):
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1")]))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": 1,
+            "categories": [{"uid": "mine", "label": "Mine", "items": ["show:tmdb:1"]}],
+        }))
+        summary = self.seed([self.rated("1", 10)])
+        self.assertEqual(summary["already_placed"], 1)
+        self.assertEqual(summary["titles_placed"], 0)
+
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        self.assertEqual([c["uid"] for c in board["categories"]], ["mine"])
+        self.assertEqual([i["key"] for i in board["categories"][0]["items"]], ["show:tmdb:1"])
+
+    def test_a_pooled_title_is_placed_rather_than_duplicated(self):
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1")]))
+        summary = self.seed([self.rated("1", 10)])
+        self.assertEqual((summary["titles_added"], summary["titles_placed"]), (0, 1))
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 1)
+
+    def test_seeding_twice_changes_nothing_the_second_time(self):
+        first = self.seed([self.rated("1", 10), self.rated("2", 7)])
+        second = self.seed([self.rated("1", 10), self.rated("2", 7)])
+        self.assertEqual(second["titles_added"], 0)
+        self.assertEqual(second["titles_placed"], 0)
+        self.assertEqual(second["already_placed"], 2)
+        self.assertEqual(second["tiers_created"], 0)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_categories"), first["tiers_created"])
+
+    def test_a_preview_writes_nothing(self):
+        summary = self.seed([self.rated("1", 10)], commit=False)
+        self.assertEqual(summary["titles_added"], 1)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_categories"), 0)
+        self.assertEqual(self.value("SELECT version FROM tier_boards"), 0)
+
+    def test_titles_outside_the_boards_scope_are_skipped_not_refused(self):
+        asyncio.run(ranker.update_board(self.user_id, "b1", media_scope="movie"))
+        summary = self.seed([self.rated("1", 10), self.rated("2", 10, media="movie")])
+        self.assertEqual(summary["out_of_scope"], 1)
+        self.assertEqual(summary["titles_added"], 1)
+        self.assertEqual(self.value("SELECT media FROM tier_items"), "movie")
+
+    def test_a_seeded_tier_appends_after_what_is_already_in_it(self):
+        self.seed([self.rated("1", 10)])
+        self.seed([self.rated("2", 10)])
+        board = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        tier = next(c for c in board["categories"] if c["uid"] == "tier-s")
+        self.assertEqual([i["key"] for i in tier["items"]], ["show:tmdb:1", "show:tmdb:2"])
+        self.assertEqual([i["rank_in_category"] for i in tier["items"]], [0, 1])
+
+    def test_a_score_outside_one_to_ten_is_refused(self):
+        with self.assertRaises(ranker.ValidationError):
+            self.seed([self.rated("1", 11)])
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
+
+    def test_the_whole_ladder_is_reachable(self):
+        self.assertEqual(
+            [ranker.tier_for_rating(score) for score in range(10, 0, -1)],
+            ["tier-s", "tier-a", "tier-b", "tier-c", "tier-d",
+             *["tier-f"] * 5],
+        )
+
+
+class ItemRouteTests(RankerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+
+    def test_titles_are_added_and_removed_through_the_routes(self):
+        added = self.client.post("/api/rankings/boards/b1/items", json={
+            "refs": [show_ref("1"), show_ref("2")]})
+        self.assertEqual(added.json()["added"], 2)
+
+        removed = self.client.request("DELETE", "/api/rankings/boards/b1/items",
+                                      json={"keys": ["show:tmdb:1"]})
+        self.assertEqual(removed.json()["removed"], 1)
+        self.assertEqual(self.value("SELECT match_id FROM tier_items"), "2")
+
+    def test_a_malformed_add_is_refused_whole(self):
+        resp = self.client.post("/api/rankings/boards/b1/items", json={
+            "refs": [show_ref("1"), {"media": "show", "match_source": "nope", "match_id": "2"}]})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
+
+
+class SearchRouteTests(RankerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+
+    def search(self, **body):
+        with patched(ranker_sources, "search_source", lambda: _CannedSearch()):
+            return self.client.post("/api/rankings/search", json=body)
+
+    def test_a_query_too_short_to_mean_anything_is_refused(self):
+        self.assertEqual(self.search(query="a").status_code, 400)
+
+    def test_an_unknown_media_type_is_refused(self):
+        self.assertEqual(self.search(query="test", media="album").status_code, 400)
+
+    def test_results_are_capped(self):
+        results = self.search(query="test").json()["results"]
+        self.assertEqual(len(results), ranker_routes.MAX_SEARCH_RESULTS)
+
+    def test_the_budget_bounds_a_script_rather_than_a_person(self):
+        for _ in range(ranker_routes.SEARCH_MAX_PER_WINDOW):
+            self.assertEqual(self.search(query="test").status_code, 200)
+        self.assertEqual(self.search(query="test").status_code, 429)
+
+    def test_the_budget_is_per_account(self):
+        for _ in range(ranker_routes.SEARCH_MAX_PER_WINDOW + 1):
+            self.search(query="test")
+        self.sign_in_as(self.ranker_user("someone_else"))
+        self.assertEqual(self.search(query="test").status_code, 200)
+
+
+class _CannedSearch:
+    """More results than the route is allowed to return, so the cap is visible."""
+
+    async def search(self, query, media):
+        return [
+            TitleRef(media=media, title=f"Title {n}", ids={"tmdb": n})
+            for n in range(1, ranker_routes.MAX_SEARCH_RESULTS + 10)
+        ]
+
+
+class WarmRouteTests(RankerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1"), show_ref("2")]))
+
+    def test_it_warms_the_titles_it_is_given(self):
+        seen = {}
+
+        async def _ensure(settings, pairs):
+            seen["pairs"] = list(pairs)
+            return len(seen["pairs"])
+
+        with patched(posters, "ensure_posters", _ensure), \
+             patched(posters, "cached_poster", lambda media, tmdb: Path("x.jpg")):
+            resp = self.client.post("/api/rankings/boards/b1/warm",
+                                    json={"keys": ["show:tmdb:1"]})
+        self.assertEqual(seen["pairs"], [("show", 1)])
+        self.assertEqual(resp.json(), {"ok": True, "generated": 1, "cached": 1, "missing": 0})
+
+    def test_an_oversized_request_is_refused(self):
+        resp = self.client.post("/api/rankings/boards/b1/warm",
+                                json={"keys": ["show:tmdb:1"] * 251})
+        self.assertEqual(resp.status_code, 400)
+
+    def test_another_users_board_cannot_be_warmed(self):
+        self.sign_in_as(self.ranker_user("someone_else"))
+        resp = self.client.post("/api/rankings/boards/b1/warm", json={})
+        self.assertEqual(resp.status_code, 404)
+
+
+class TrackerImportTests(RankerTestCase):
+    """The optional import: what counts as finished, and who is even told it
+    exists. The availability rules are as much the point as the aggregation —
+    an account that cannot use this must not learn from the app that it is
+    there."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("importer", ranker_approved=True, distrakt_approved=True)
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+
+    def month(self, month: str, *, closed: bool = False) -> None:
+        asyncio.run(db.execute(
+            "INSERT INTO distrakt_months (user_id, month, closed, created_at) VALUES (?, ?, ?, 0)",
+            (self.user_id, month, int(closed)),
+        ))
+
+    def show(self, month: str, trakt_id: int, season: int, *, watched: int, total: int,
+             bucket: str | None = None, title: str = "A Show", tmdb: int | None = 100) -> None:
+        asyncio.run(db.execute(
+            "INSERT INTO distrakt_shows (user_id, month, trakt_id, tmdb, slug, title, season, "
+            "network, watched, total, bucket, started_airing, finished_airing) "
+            "VALUES (?, ?, ?, ?, 'a-show', ?, ?, 'HBO', ?, ?, ?, 1, 1)",
+            (self.user_id, month, trakt_id, tmdb, title, season, watched, total, bucket),
+        ))
+
+    def movie(self, trakt_id: int, watched_at: str, title: str = "A Film") -> None:
+        asyncio.run(db.execute(
+            "INSERT INTO distrakt_movie_watches (user_id, trakt_id, watched_at, title, year) "
+            "VALUES (?, ?, ?, ?, 2026)",
+            (self.user_id, trakt_id, watched_at, title),
+        ))
+
+    def finished(self, media=Media.SHOW, year=None):
+        source = ranker_import.finished_titles_source()
+        return asyncio.run(source.finished_titles(self.user_id, media=media, year=year))
+
+    def test_a_closed_month_uses_its_stored_verdict(self):
+        """A frozen month's counts stopped being refreshed the moment it froze,
+        so recomputing from them would silently unfinish finished shows."""
+        self.month("2026-01", closed=True)
+        self.show("2026-01", 10, 1, watched=0, total=0, bucket="completed")
+        self.show("2026-01", 11, 1, watched=0, total=0, bucket="cleanup")
+        self.assertEqual([ref.ids["trakt"] for ref in self.finished()], [10])
+
+    def test_an_open_month_is_computed_the_same_way_the_other_feature_computes_it(self):
+        self.month("2026-07")
+        self.show("2026-07", 10, 1, watched=8, total=8)
+        self.show("2026-07", 11, 1, watched=3, total=8)
+        self.assertEqual([ref.ids["trakt"] for ref in self.finished()], [10])
+
+    def test_counts_describe_how_much_was_finished(self):
+        self.month("2026-01", closed=True)
+        self.show("2026-01", 10, 1, watched=0, total=10, bucket="completed")
+        self.show("2026-01", 10, 2, watched=0, total=12, bucket="completed")
+        self.show("2026-01", 10, 3, watched=0, total=6, bucket="keepup")
+        ref, = self.finished()
+        self.assertEqual((ref.season_count, ref.episode_count), (2, 22))
+
+    def test_the_year_filter_is_when_it_was_watched(self):
+        self.month("2025-06", closed=True)
+        self.month("2026-06", closed=True)
+        self.show("2025-06", 10, 1, watched=0, total=5, bucket="completed", title="Older")
+        self.show("2026-06", 11, 1, watched=0, total=5, bucket="completed", title="Newer")
+        self.assertEqual([r.title for r in self.finished(year=2026)], ["Newer"])
+        self.assertEqual(
+            asyncio.run(ranker_import.available_years(self.user_id, Media.SHOW)), [2026, 2025])
+
+    def test_a_movie_is_resolved_to_a_real_id_map(self):
+        """Those records carry no tmdb, so each needs one summary lookup — and
+        the poster URL that comes back with it is kept for later."""
+        self.movie(77, "2026-03-04T00:00:00.000Z")
+        summary = {"title": "A Film", "year": 2025, "runtime": 101,
+                   "ids": {"trakt": 77, "tmdb": 550, "imdb": "tt0137523", "slug": ""},
+                   "images": {"poster": ["image.tmdb.org/p/w500/x.jpg"]}}
+        with patched(trakt, "fetch_movie_summary", async_result(summary)):
+            ref, = self.finished(Media.MOVIE)
+        self.assertEqual(ref.identity(), ("tmdb", "550"))
+        self.assertEqual(ref.ids["imdb"], "tt0137523")
+        self.assertEqual(ref.runtime, 101)
+        self.assertEqual(
+            self.value("SELECT url FROM show_posters WHERE media = 'movie' AND tmdb = 550"),
+            "https://image.tmdb.org/p/w500/x.jpg")
+
+    def test_a_movie_whose_lookup_fails_still_imports(self):
+        self.movie(77, "2026-03-04T00:00:00.000Z")
+
+        async def _boom(*args, **kwargs):
+            raise trakt.TraktError("Could not reach Trakt", 502)
+
+        with patched(trakt, "fetch_movie_summary", _boom):
+            ref, = self.finished(Media.MOVIE)
+        # It keeps the id it had and simply has no artwork key, which the
+        # renderer answers with a placeholder rather than a missing title.
+        self.assertEqual(ref.ids, {"trakt": 77})
+        self.assertIsNone(ref.identity())
+
+    def test_the_import_route_adds_to_the_pool(self):
+        self.month("2026-01", closed=True)
+        self.show("2026-01", 10, 1, watched=0, total=5, bucket="completed")
+        resp = self.client.post("/api/rankings/boards/b1/import/tracker", json={"media": "show"})
+        self.assertEqual(resp.json(), {"ok": True, "found": 1, "added": 1})
+        self.assertEqual(self.value("SELECT added_from FROM tier_items"), "tracker")
+        self.assertIsNone(self.value("SELECT category_id FROM tier_items"))
+
+    def test_an_account_with_no_data_is_not_offered_it(self):
+        self.assertFalse(asyncio.run(ranker_import.tracker_available(self.user_id)))
+        self.assertNotIn("import", self.client.get("/api/rankings/sources").json()["sources"])
+
+    def test_an_unapproved_account_is_told_nothing(self):
+        """404, not a 403 explaining what they are missing: the route answers as
+        though the source does not exist, because for that account it does not."""
+        other = self.make_user("ranker_only", ranker_approved=True)
+        asyncio.run(ranker.create_board(other, uid="b2"))
+        self.sign_in_as(other)
+        resp = self.client.post("/api/rankings/boards/b2/import/tracker", json={"media": "show"})
+        self.assertEqual(resp.status_code, 404)
+        self.assertNotIn("import", resp.text.lower().replace("no such source.", ""))
 
 
 if __name__ == "__main__":

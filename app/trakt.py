@@ -845,20 +845,70 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     return out
 
 
-async def search_shows(settings: Settings, query: str) -> list[dict]:
-    """/search/show?query=... -> compact [{trakt_id, slug, title, year, network}]
-    for the add-show flow. Empty query returns []."""
+SEARCH_MEDIA = ("show", "movie")
+
+
+def ids_map(media: dict) -> dict:
+    """Every id Trakt knows for a title, with the empty ones dropped.
+
+    The whole map travels rather than the one id a given caller happens to want:
+    an id we discard here is one a future match against another service cannot
+    use, and re-fetching it costs a call we have already paid for.
+    """
+    ids = media.get("ids") or {}
+    return {key: value for key, value in ids.items() if value not in (None, "")}
+
+
+async def search_titles(settings: Settings, media: str, query: str) -> list[dict]:
+    """/search/{show|movie}?query=... -> [{media, ids, title, year, network,
+    runtime, overview}], newest-match-first as Trakt orders it.
+
+    ONE implementation for both media types. The two searches differ only in the
+    path segment and in which key the result object hangs under, so a second
+    copy shaped for movies would drift from this one the first time either is
+    touched. Empty query returns [] without a call.
+    """
+    if media not in SEARCH_MEDIA:
+        raise ValueError(f"Unknown media type {media!r}.")
     q = (query or "").strip()
     if not q:
         return []
     results = await _cached_get(
-        shared_client(), settings, "search/show", {"query": q, "extended": "full"}, raise_errors=True,
+        shared_client(), settings, f"search/{media}", {"query": q, "extended": "full"},
+        raise_errors=True,
     )
 
     out = []
     for entry in results if isinstance(results, list) else []:
-        show = entry.get("show") or {}
-        ids = show.get("ids") or {}
+        item = entry.get(media) or {}
+        ids = ids_map(item)
+        if not ids:
+            # Nothing to identify it by, so nothing downstream could store,
+            # dedupe or look up artwork for it.
+            continue
+        out.append({
+            "media": media,
+            "ids": ids,
+            "title": item.get("title") or "",
+            "year": item.get("year"),
+            # Movies have no network and shows no runtime worth showing, so each
+            # simply comes back empty for the other — the caller decides which
+            # it renders.
+            "network": item.get("network") or "",
+            "runtime": item.get("runtime"),
+            "overview": (item.get("overview") or "").strip(),
+        })
+    logger.info("search_titles(%s, %r) -> %d raw / %d usable result(s)", media, q,
+                len(results) if isinstance(results, list) else 0, len(out))
+    return out
+
+
+async def search_shows(settings: Settings, query: str) -> list[dict]:
+    """/search/show?query=... -> compact [{trakt_id, slug, title, year, network}]
+    for the add-show flow. Empty query returns []."""
+    out = []
+    for entry in await search_titles(settings, "show", query):
+        ids = entry["ids"]
         tid = ids.get("trakt")
         if tid is None:
             continue
@@ -866,9 +916,49 @@ async def search_shows(settings: Settings, query: str) -> list[dict]:
             "trakt_id": int(tid),
             "tmdb": ids.get("tmdb"),
             "slug": ids.get("slug") or "",
-            "title": show.get("title") or "",
-            "year": show.get("year"),
-            "network": show.get("network") or "",
+            "title": entry["title"],
+            "year": entry["year"],
+            "network": entry["network"],
         })
-    logger.info("search_shows(%r) -> %d raw / %d usable result(s)", q, len(results) if isinstance(results, list) else 0, len(out))
     return out
+
+
+async def fetch_movie_summary(settings: Settings, trakt_id) -> dict | None:
+    """/movies/{id}?extended=full,images -> the raw movie object, or None.
+
+    The id resolution step for a movie known only by its Trakt id: ids never
+    change, so this caches like any other detail lookup. `images` is asked for
+    because the same response then answers "what is this movie's poster URL"
+    without a second call.
+    """
+    data = await _cached_get(
+        shared_client(), settings, f"movies/{trakt_id}", {"extended": "full,images"},
+    )
+    return data if isinstance(data, dict) else None
+
+
+async def fetch_ratings(settings: Settings) -> list[dict]:
+    """/sync/ratings -> everything the token's owner has rated, shows and movies
+    together, as Trakt's own entries ({type, rating, rated_at, show|movie}).
+
+    PRIVATE TO WHOEVER'S TOKEN ASKED, so it is never written to the shared
+    URL-keyed cache — two accounts asking send the identical URL and would
+    otherwise be served each other's ratings.
+
+    Pagination headers are deliberately NOT sent: this endpoint returns the
+    whole set in one response, and asking for a page would silently cap a large
+    library at the pagination limit with nothing in the response to say so.
+    """
+    url = f"{API_BASE}/sync/ratings?{urlencode({'extended': 'full'})}"
+    resp = await _send(shared_client(), "GET", url, headers=_headers(settings, paginate=False))
+    if resp.status_code == 401:
+        raise TraktError("Trakt rejected the credentials (401).", 401)
+    if resp.status_code != 200:
+        raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+    try:
+        data = resp.json()
+    except ValueError:
+        raise TraktError("Trakt API returned an unreadable response.") from None
+    entries = data if isinstance(data, list) else []
+    logger.info("fetch_ratings -> %d rated item(s)", len(entries))
+    return entries
