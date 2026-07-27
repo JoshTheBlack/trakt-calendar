@@ -107,10 +107,6 @@ class StandaloneTestCase(unittest.TestCase):
         StandaloneTestCase._counter += 1
         db.set_db_path(TMP / f"standalone-{StandaloneTestCase._counter}.db")
         asyncio.run(db.migrate())
-        # In-process and keyed by user id, so it outlives the database a test
-        # runs against; cleared here or an unrelated module's searches count
-        # against this account.
-        ranker_routes._search_hits.clear()
         # A configured instance credential, which is what a search is supposed
         # to use. Nothing in this file links an account to anything.
         save_settings(Settings(trakt_client_id="instance-client",

@@ -962,6 +962,32 @@ CREATE INDEX ix_tier_items_category ON tier_items(category_id, rank_in_category)
 CREATE INDEX ix_tier_items_pool ON tier_items(board_id) WHERE category_id IS NULL;
 """
 
+# Migration 14 — widen login_attempts.key_type to admit 'ranker_search' and
+# 'ranker_export', so both of the ranker's volume throttles live in the same
+# table every other feature's rate limiter uses instead of an in-process
+# counter. SQLite cannot alter a CHECK constraint in place, so the table is
+# rebuilt exactly as migration 7 rebuilt it for 'handshake_ip'; the rows are
+# copied across for the same reason that migration's comment gives — a rebuild
+# that silently forgot an in-progress lockout would be a way to clear one.
+# 'ranker_export' has no caller yet; the export cooldown lands in a later
+# change and needs no schema work of its own once this ships.
+MIGRATION_14 = """
+CREATE TABLE login_attempts_new (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_type     TEXT    NOT NULL CHECK (key_type IN
+                     ('username', 'ip', 'register_ip', 'invite_ip', 'share_ip',
+                      'handshake_ip', 'ranker_search', 'ranker_export')),
+    key_value    TEXT    NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    succeeded    INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO login_attempts_new (id, key_type, key_value, attempted_at, succeeded)
+    SELECT id, key_type, key_value, attempted_at, succeeded FROM login_attempts;
+DROP TABLE login_attempts;
+ALTER TABLE login_attempts_new RENAME TO login_attempts;
+CREATE INDEX ix_login_attempts_lookup ON login_attempts(key_type, key_value, attempted_at);
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -979,6 +1005,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (11, MIGRATION_11),
     (12, MIGRATION_12),
     (13, MIGRATION_13),
+    (14, MIGRATION_14),
 ]
 
 

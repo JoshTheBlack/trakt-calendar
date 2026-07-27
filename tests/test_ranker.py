@@ -66,11 +66,6 @@ class RankerTestCase(unittest.TestCase):
         RankerTestCase._counter += 1
         db.set_db_path(TMP / f"ranker-{RankerTestCase._counter}.db")
         asyncio.run(db.migrate())
-        # The search budget lives in process, keyed by user id — which only
-        # means anything within one database. Every test here gets a fresh one,
-        # so the counter has to be cleared with it or an earlier test's spending
-        # lands on a later test's unrelated account.
-        ranker_routes._search_hits.clear()
         save_settings(Settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         # Something has to exist or the first-run gate answers every request
@@ -101,8 +96,8 @@ class RankerTestCase(unittest.TestCase):
 
 class SchemaTests(RankerTestCase):
     def test_migration_is_idempotent_through_the_runner(self):
-        self.assertEqual(asyncio.run(db.migrate()), 13)
-        self.assertEqual(asyncio.run(db.migrate()), 13)
+        self.assertEqual(asyncio.run(db.migrate()), 14)
+        self.assertEqual(asyncio.run(db.migrate()), 14)
 
     def test_the_new_tables_exist(self):
         names = {row["name"] for row in self.rows(
@@ -142,7 +137,7 @@ class SchemaTests(RankerTestCase):
         admin_id = asyncio.run(db.run(lambda conn: _legacy_user(conn, "legacy_admin", True)))
         plain_id = asyncio.run(db.run(lambda conn: _legacy_user(conn, "legacy_plain", False)))
 
-        self.assertEqual(asyncio.run(db.migrate()), 13)
+        self.assertEqual(asyncio.run(db.migrate()), 14)
         self.assertEqual(
             self.value("SELECT ranker_approved FROM users WHERE id = ?", (admin_id,)), 1)
         self.assertEqual(
@@ -859,6 +854,17 @@ class SearchRouteTests(RankerTestCase):
             self.search(query="test")
         self.sign_in_as(self.ranker_user("someone_else"))
         self.assertEqual(self.search(query="test").status_code, 200)
+
+    def test_the_budget_survives_a_restart(self):
+        """The budget lives in `login_attempts`, not a process-local dict, so it
+        is unaffected by the app restarting — a real behaviour change from the
+        in-process counter this replaced, not a side effect."""
+        self.search(query="test")
+        self.assertEqual(
+            self.value(
+                "SELECT COUNT(*) FROM login_attempts WHERE key_type = 'ranker_search' "
+                "AND key_value = ?", (str(self.user_id),)),
+            1)
 
 
 class _CannedSearch:

@@ -16,8 +16,6 @@ deleting a board sends `{}` rather than nothing at all.
 """
 from __future__ import annotations
 
-import time
-from collections import deque
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -47,14 +45,10 @@ MAX_BODY_BYTES = 1024 * 1024
 # allowance generous because the caller is a signed-in, approved account typing
 # into a debounced box — this bounds a script, not a person.
 #
-# COUNTED IN PROCESS, not in the database. `login_attempts` is the app's other
-# limiter, but its `key_type` is a closed CHECK set and this feature is not
-# allowed a schema change of its own; and the budget being approximate across a
-# restart is fine for a throttle whose window is a minute. The assumption this
-# rests on is that ONE worker serves the instance — the Dockerfile's CMD runs
-# hypercorn with no `--workers` — so this dict is the whole instance's view. Add
-# workers and the effective allowance multiplies by their count, at which point
-# this needs to move somewhere shared.
+# Stored in `login_attempts` via `auth.rate_limited`/`auth.record_attempt`, the
+# same house pattern `share_routes._share_rate_limited` uses for its per-IP
+# volume throttle, rather than an in-process counter: a dict's budget would
+# silently multiply if the instance ever ran more than one worker.
 SEARCH_MAX_PER_WINDOW = 30
 SEARCH_WINDOW_SECONDS = 60
 MIN_SEARCH_LENGTH = 2
@@ -65,24 +59,16 @@ MAX_SEARCH_RESULTS = 20
 MAX_WARM_ITEMS = 250
 
 
-_search_hits: dict[int, deque[float]] = {}
-
-
-def _search_over_budget(user_id: int, now: float | None = None) -> bool:
+async def _search_over_budget(user_id: int) -> bool:
     """Whether this account has already spent its search allowance, recording
     this request either way. Volume-only — there is no failed search to count
     separately."""
-    ts = time.monotonic() if now is None else now
-    hits = _search_hits.setdefault(user_id, deque())
-    while hits and hits[0] <= ts - SEARCH_WINDOW_SECONDS:
-        hits.popleft()
-    if not hits:
-        # Nothing left in the window: drop the key rather than accumulate one
-        # empty deque per account that has ever searched.
-        _search_hits.pop(user_id, None)
-        hits = _search_hits.setdefault(user_id, deque())
-    hits.append(ts)
-    return len(hits) > SEARCH_MAX_PER_WINDOW
+    key = str(user_id)
+    limited = await auth.rate_limited(
+        "ranker_search", key, max_attempts=SEARCH_MAX_PER_WINDOW, window_seconds=SEARCH_WINDOW_SECONDS,
+    )
+    await auth.record_attempt("ranker_search", key, True)
+    return limited
 
 
 def _error(message: str, status: int = 400, **extra) -> JSONResponse:
@@ -334,7 +320,7 @@ async def search_titles(request: Request):
     media = _media(data.get("media"), Media.SHOW)
     if len(query) < MIN_SEARCH_LENGTH:
         return _error(f"Type at least {MIN_SEARCH_LENGTH} characters to search.")
-    if _search_over_budget(user.user_id):
+    if await _search_over_budget(user.user_id):
         return _error("Too many searches just now — give it a moment.", 429)
 
     source = ranker_sources.search_source()

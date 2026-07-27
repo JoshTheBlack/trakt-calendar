@@ -163,6 +163,50 @@ class MigrationTests(DbTestCase):
                 "INSERT INTO users (username, created_at, updated_at) VALUES ('ADMIN', ?, ?)",
                 (now, now))
 
+    async def test_migration_14_widens_key_type_and_keeps_existing_rows(self):
+        """The rebuild that adds 'ranker_search'/'ranker_export' must carry an
+        in-progress lockout across, the same guarantee migration 7 made for
+        'handshake_ip' — a rebuild that silently forgot one would be a way to
+        clear it."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-14-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 13]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO login_attempts (key_type, key_value, attempted_at, succeeded) "
+                "VALUES ('ip', '1.2.3.4', ?, 0)", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            rows = conn.execute(
+                "SELECT key_type, key_value, attempted_at FROM login_attempts").fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["key_type"], "ip")
+            self.assertEqual(rows[0]["key_value"], "1.2.3.4")
+            self.assertEqual(rows[0]["attempted_at"], now)
+
+            conn.execute(
+                "INSERT INTO login_attempts (key_type, key_value, attempted_at, succeeded) "
+                "VALUES ('ranker_search', '7', ?, 1)", (now,))
+            conn.execute(
+                "INSERT INTO login_attempts (key_type, key_value, attempted_at, succeeded) "
+                "VALUES ('ranker_export', '7', ?, 1)", (now,))
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO login_attempts (key_type, key_value, attempted_at, succeeded) "
+                    "VALUES ('bogus_type', '7', ?, 1)", (now,))
+        finally:
+            conn.close()
+
 
 class PragmaTests(DbTestCase):
     async def test_foreign_keys_are_actually_on(self):
