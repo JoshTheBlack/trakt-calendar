@@ -836,6 +836,132 @@ ALTER TABLE user_prefs ADD COLUMN show_certifications TEXT NOT NULL DEFAULT '';
 ALTER TABLE user_prefs ADD COLUMN movie_certifications TEXT NOT NULL DEFAULT '';
 """
 
+# Migration 13 — the tier ranker: its own per-feature approval, and the tables
+# behind boards, tiers and the titles in them, plus the shared poster-URL
+# registry those tiles are drawn from.
+#
+# ranker_approved is granted to ADMINS ONLY as part of this migration. A plain
+# DEFAULT 0 would lock the operator out of the feature the moment they deployed
+# it, with no account able to reach the screen that hands out the grant;
+# granting it to everyone would hand a brand-new feature to every account on the
+# instance without anyone reviewing that. Admins can pass it on from the admin
+# screen.
+#
+# invites.grants_ranker_on_accept sits with grants_calendar_on_accept rather
+# than with the deliberately-absent distrakt counterpart: the ranker exposes
+# nothing about anyone's watch history — its optional import is separately gated
+# on distrakt_approved — so an invite can hand it over the way it already hands
+# over the calendar. The column DEFAULTS TO 0 while the UI checkbox ships
+# checked: invites already outstanding must not silently start granting a
+# feature their issuer never chose, but a newly issued one behaves like the
+# calendar's, where issuing an invite is already a deliberate act of trust.
+MIGRATION_13 = """
+ALTER TABLE users ADD COLUMN ranker_approved INTEGER NOT NULL DEFAULT 0;
+UPDATE users SET ranker_approved = 1 WHERE is_admin = 1;
+ALTER TABLE invites ADD COLUMN grants_ranker_on_accept INTEGER NOT NULL DEFAULT 0;
+
+-- Every poster URL the app has ever seen, so a lookup already paid for is never
+-- paid for twice. GLOBAL rather than per user: most accounts on an instance
+-- watch overlapping titles, so one shared record serves everyone and the table
+-- does not grow with the user count. Its own table specifically so the
+-- size-capped LRU on api_cache can never evict it.
+CREATE TABLE show_posters (
+    -- TMDB ids are namespaced per media type: movie 550 and TV 550 are
+    -- different titles, so the identity is the PAIR and never the id alone.
+    media          TEXT    NOT NULL,
+    tmdb           INTEGER NOT NULL,
+    -- Which provider handed us this URL. An open set of names rather than a
+    -- CHECK constraint, so adding a provider is not a migration.
+    source         TEXT    NOT NULL,
+    url            TEXT    NOT NULL,
+    first_seen_at  INTEGER NOT NULL,
+    last_seen_at   INTEGER NOT NULL,
+    last_ok_at     INTEGER,
+    last_failed_at INTEGER,
+    fail_count     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (media, tmdb, source)
+);
+-- Retention is swept by age, so the sweep is index-served.
+CREATE INDEX ix_show_posters_seen ON show_posters(last_seen_at);
+
+CREATE TABLE tier_boards (
+    id          INTEGER PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- Client-generated and the ONLY identifier a request may name a board by.
+    -- An autoincrement id is guessable, so addressing by (user_id, uid) is what
+    -- makes a cross-tenant reference impossible to even express; it also
+    -- survives a restore into a database whose rowids came out different.
+    uid         TEXT    NOT NULL,
+    name        TEXT    NOT NULL DEFAULT '',
+    year        INTEGER,
+    media_scope TEXT    NOT NULL DEFAULT 'mixed',
+    sort_order  INTEGER NOT NULL DEFAULT 0,
+    created_at  INTEGER NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    -- Bumped on every accepted layout write; the client echoes it back so a
+    -- second tab's stale save is refused rather than silently clobbering the
+    -- arrangement the first tab made.
+    version     INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (user_id, uid)
+);
+
+CREATE TABLE tier_categories (
+    id            INTEGER PRIMARY KEY,
+    board_id      INTEGER NOT NULL REFERENCES tier_boards(id) ON DELETE CASCADE,
+    uid           TEXT    NOT NULL,
+    label         TEXT    NOT NULL DEFAULT '',
+    -- Higher competes above lower when tiers are consolidated into one ranking.
+    rank_priority INTEGER NOT NULL DEFAULT 0,
+    -- An isolated tier keeps its own 1..X order and stays out of the
+    -- consolidated ranking unless it is exported on its own.
+    is_isolated   INTEGER NOT NULL DEFAULT 0,
+    sort_order    INTEGER NOT NULL DEFAULT 0,
+    colour        TEXT,
+    created_at    INTEGER NOT NULL,
+    UNIQUE (board_id, uid)
+);
+
+CREATE TABLE tier_items (
+    id            INTEGER PRIMARY KEY,
+    board_id      INTEGER NOT NULL REFERENCES tier_boards(id) ON DELETE CASCADE,
+    -- NULL means the board's unranked pool. SET NULL rather than CASCADE so
+    -- deleting a tier returns its titles to the pool instead of destroying
+    -- curated work over a mis-click.
+    category_id   INTEGER REFERENCES tier_categories(id) ON DELETE SET NULL,
+    media         TEXT    NOT NULL DEFAULT 'show',
+    -- The first shared id the identity waterfall found: tmdb, then tvdb, then
+    -- imdb, then mal. A title with no tmdb can still be ranked; it just has no
+    -- artwork, because ranking must not be gated on a poster existing.
+    match_source  TEXT    NOT NULL,
+    match_id      TEXT    NOT NULL,
+    -- Artwork key specifically, because TMDB is the artwork source and its id is
+    -- what indexes the image. NULL renders the placeholder tile.
+    tmdb          INTEGER,
+    -- The whole id map as it arrived, so an id this feature does not use today
+    -- is still there for a future match.
+    ids_json      TEXT    NOT NULL DEFAULT '{}',
+    -- Self-contained by design: a manually searched title has no other row in
+    -- this database to join against. Refreshed opportunistically, never
+    -- authoritative.
+    title         TEXT    NOT NULL DEFAULT '',
+    year          INTEGER,
+    network       TEXT    NOT NULL DEFAULT '',
+    season_count  INTEGER,
+    episode_count INTEGER,
+    runtime       INTEGER,
+    user_rating   INTEGER,
+    added_from    TEXT    NOT NULL DEFAULT 'manual',
+    rank_in_category INTEGER NOT NULL DEFAULT 0,
+    created_at    INTEGER NOT NULL,
+    -- One entry per title per board. Board-scoped rather than user-scoped on
+    -- purpose: the same film appearing in both "Top 2026" and "All-Time" is a
+    -- normal thing to want.
+    UNIQUE (board_id, media, match_source, match_id)
+);
+CREATE INDEX ix_tier_items_category ON tier_items(category_id, rank_in_category);
+CREATE INDEX ix_tier_items_pool ON tier_items(board_id) WHERE category_id IS NULL;
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -852,6 +978,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (10, MIGRATION_10),
     (11, MIGRATION_11),
     (12, MIGRATION_12),
+    (13, MIGRATION_13),
 ]
 
 

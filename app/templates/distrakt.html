@@ -43,6 +43,9 @@
             <summary title="Account and settings">☰ Menu</summary>
             <div class="nav-menu-items">
                 <a href="/me">👤 Account</a>
+                {% if ranker_available %}
+                <a href="/rankings">🏆 Rankings</a>
+                {% endif %}
                 {% if is_admin %}
                 <a href="/admin">🛠️ Admin</a>
                 {% endif %}

@@ -46,6 +46,7 @@ from . import encryption_routes
 from . import logos
 from . import plex_auth
 from . import plex_routes
+from . import ranker_routes
 from . import secrets_backfill
 from . import secrets_box
 from . import seer
@@ -320,6 +321,7 @@ app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(encryption_routes.router)
 app.include_router(share_routes.router)
+app.include_router(ranker_routes.router)
 
 # Every route below is registered through this, which requires an access level
 # and refuses to register one without it.
@@ -710,6 +712,10 @@ async def calendar_page(request: Request):
         # endpoint answering "may I?" is itself a disclosure that there is
         # something to be allowed into.
         "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
+        # The ranker is a normal, visible feature, so unlike the easter egg above
+        # its link is simply present or absent according to the grant — there is
+        # nothing to keep quiet about.
+        "ranker_available": bool(user and user.ranker_approved),
         "integrations": INTEGRATION_HEALTH if is_admin else {},
         "version": VERSION,
         "build": BUILD_LABEL,
@@ -863,6 +869,7 @@ async def distrakt(request: Request):
         # back to these emoji whenever a network has no logo.
         "network_emojis": network_emojis,
         "default_network_emoji": default_network_emoji,
+        "ranker_available": bool(user and user.ranker_approved),
         "version": VERSION,
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,

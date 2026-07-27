@@ -139,7 +139,8 @@ async def onboarding_create(request: Request):
         user_id = auth.insert_user(
             conn, username=username.lower(), password_hash=password_hash,
             is_admin=True, is_bootstrap=True, calendar_approved=True,
-            distrakt_approved=True, timezone=settings.timezone or None,
+            distrakt_approved=True, ranker_approved=True,
+            timezone=settings.timezone or None,
         )
         # Seeded from settings.json so an upgraded instance's calendar renders
         # exactly as it did before there were accounts — filters included, which
@@ -392,10 +393,11 @@ async def register(request: Request):
             # registration — it just doesn't grant anything either.
             row = candidate if usable else None
         grants_calendar = bool(row["grants_calendar_on_accept"]) if row else False
+        grants_ranker = bool(row["grants_ranker_on_accept"]) if row else False
         user_id = auth.insert_user(
             conn, username=username_lower, password_hash=password_hash,
             calendar_approved=grants_calendar, distrakt_approved=False,
-            timezone=settings.timezone or None,
+            ranker_approved=grants_ranker, timezone=settings.timezone or None,
         )
         auth.insert_user_prefs(conn, user_id, settings)
         if row is not None:
@@ -737,5 +739,6 @@ async def admin_create_invite(request: Request):
     invite = await auth.create_invite(
         created_by=admin.user_id, label=label, expires_at=expires_at, max_uses=max_uses,
         grants_calendar_on_accept=bool(data.get("grants_calendar_on_accept", True)),
+        grants_ranker_on_accept=bool(data.get("grants_ranker_on_accept", True)),
     )
     return JSONResponse({"ok": True, **invite})

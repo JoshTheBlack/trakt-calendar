@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.1.4] - Unreleased
+
+### Rankings
+- 🏆 **A new Rankings page**, at `/rankings`. Build boards of shows and movies — "Top Movies 2026", "Top Reality 2026" — and arrange them into your own tiers. A board keeps its own pool of candidates alongside the tiers you've sorted, so you can gather far more than you'll finish with and curate down. Deleting a tier hands its titles back to the pool rather than throwing them away.
+- ✅ **Rankings is its own access grant**, separate from everything else. Administrators can approve or revoke it per account from the admin screen, and new invites now carry a "Grants rankings on accept" checkbox — ticked by default — so an invited account arrives ready to use it. Existing outstanding invites are unaffected and grant nothing new.
+- 🔗 A **Rankings** entry appears in the header menu once your account has it.
+
 ## 🏷️ [1.1.3] - 2026-07-25
 
 ### Admin interface

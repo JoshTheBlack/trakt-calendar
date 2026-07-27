@@ -43,7 +43,7 @@
       <table class="admin-table">
         <thead>
           <tr>
-            <th>Account</th><th>Linked</th><th>Calendar</th><th>Distrakt</th><th>Admin</th>
+            <th>Account</th><th>Linked</th><th>Calendar</th><th>Distrakt</th><th>Rankings</th><th>Admin</th>
             <th>Status</th><th>Created</th><th>Last login</th><th>Last active</th><th>Actions</th>
           </tr>
         </thead>
@@ -57,6 +57,7 @@
             </div></td>
             <td><span class="auth-badge {{ 'ok' if u.calendar_approved else 'pending' }}">{{ 'Yes' if u.calendar_approved else 'No' }}</span></td>
             <td><span class="auth-badge {{ 'ok' if u.distrakt_approved else 'off' }}">{{ 'Yes' if u.distrakt_approved else 'No' }}</span></td>
+            <td><span class="auth-badge {{ 'ok' if u.ranker_approved else 'off' }}">{{ 'Yes' if u.ranker_approved else 'No' }}</span></td>
             <td><span class="auth-badge {{ 'ok' if u.is_admin else 'off' }}">{{ 'Yes' if u.is_admin else 'No' }}</span></td>
             <td><span class="auth-badge {{ 'off' if u.is_disabled else 'ok' }}">{{ 'Disabled' if u.is_disabled else 'Active' }}</span></td>
             <td data-ts="{{ u.created_at or 0 }}"></td>
@@ -65,6 +66,7 @@
             <td class="actions"><div class="action-group">
               <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="calendar" data-value="{{ 'false' if u.calendar_approved else 'true' }}">{{ 'Revoke calendar' if u.calendar_approved else 'Approve calendar' }}</button>
               <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="distrakt" data-value="{{ 'false' if u.distrakt_approved else 'true' }}">{{ 'Revoke distrakt' if u.distrakt_approved else 'Approve distrakt' }}</button>
+              <button type="button" class="btn-ghost tiny" data-action="approval" data-user="{{ u.id }}" data-field="ranker" data-value="{{ 'false' if u.ranker_approved else 'true' }}">{{ 'Revoke rankings' if u.ranker_approved else 'Approve rankings' }}</button>
               <button type="button" class="btn-ghost tiny" data-action="admin" data-user="{{ u.id }}" data-value="{{ 'false' if u.is_admin else 'true' }}">{{ 'Demote' if u.is_admin else 'Promote' }}</button>
               <button type="button" class="btn-ghost tiny" data-action="disabled" data-user="{{ u.id }}" data-value="{{ 'false' if u.is_disabled else 'true' }}">{{ 'Re-enable' if u.is_disabled else 'Disable' }}</button>
               <button type="button" class="btn-ghost tiny" data-action="password" data-user="{{ u.id }}" data-has-username="{{ 'true' if u.username else 'false' }}">Reset password</button>
@@ -79,7 +81,7 @@
           </tr>
           {% endfor %}
           {% if not users %}
-          <tr><td colspan="10" class="admin-empty">No accounts.</td></tr>
+          <tr><td colspan="11" class="admin-empty">No accounts.</td></tr>
           {% endif %}
         </tbody>
       </table>
@@ -93,12 +95,13 @@
       <div class="field"><label>Max uses</label><input type="number" name="max_uses" min="1" placeholder="unlimited"></div>
       <div class="field"><label>Expires (hours)</label><input type="number" name="expires_in_hours" min="1" placeholder="never"></div>
       <div class="field checkbox"><input type="checkbox" name="grants_calendar_on_accept" id="grantsCalendar" checked><label for="grantsCalendar">Grants calendar on accept</label></div>
+      <div class="field checkbox"><input type="checkbox" name="grants_ranker_on_accept" id="grantsRanker" checked><label for="grantsRanker">Grants rankings on accept</label></div>
       <button type="submit" class="btn-ghost small">Issue invite</button>
     </form>
     <p class="admin-msg" id="inviteMsg"></p>
     <div class="admin-table-wrap">
       <table class="admin-table">
-        <thead><tr><th>Label</th><th>Status</th><th>Uses</th><th>Grants calendar</th><th>Created</th><th>Expires</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Label</th><th>Status</th><th>Uses</th><th>Grants calendar</th><th>Grants rankings</th><th>Created</th><th>Expires</th><th>Actions</th></tr></thead>
         <tbody>
           {% for inv in invites %}
           <tr>
@@ -106,6 +109,7 @@
             <td><span class="auth-badge {{ 'off' if inv.revoked else 'ok' }}">{{ 'Revoked' if inv.revoked else 'Active' }}</span></td>
             <td>{{ inv.used_count }}{% if inv.max_uses %} / {{ inv.max_uses }}{% endif %}</td>
             <td>{{ 'Yes' if inv.grants_calendar_on_accept else 'No' }}</td>
+            <td>{{ 'Yes' if inv.grants_ranker_on_accept else 'No' }}</td>
             <td data-ts="{{ inv.created_at or 0 }}"></td>
             <td data-ts="{{ inv.expires_at or 0 }}" data-ts-empty="Never"></td>
             <td class="actions"><div class="action-group">
@@ -118,7 +122,7 @@
           </tr>
           {% endfor %}
           {% if not invites %}
-          <tr><td colspan="7" class="admin-empty">No invites yet.</td></tr>
+          <tr><td colspan="8" class="admin-empty">No invites yet.</td></tr>
           {% endif %}
         </tbody>
       </table>
@@ -194,6 +198,7 @@ document.getElementById('inviteForm').addEventListener('submit', async (ev) => {
   const body = {
     label: form.label.value.trim() || undefined,
     grants_calendar_on_accept: form.grants_calendar_on_accept.checked,
+    grants_ranker_on_accept: form.grants_ranker_on_accept.checked,
   };
   if (form.max_uses.value) body.max_uses = parseInt(form.max_uses.value, 10);
   if (form.expires_in_hours.value) body.expires_in_hours = parseFloat(form.expires_in_hours.value);

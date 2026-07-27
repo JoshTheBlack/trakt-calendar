@@ -28,6 +28,9 @@
         {% if user.calendar_approved %}
         <a class="pill-btn" href="/calendar">📅 Calendar</a>
         {% endif %}
+        {% if user.ranker_approved %}
+        <a class="pill-btn" href="/rankings">🏆 Rankings</a>
+        {% endif %}
         <details class="nav-menu">
             <summary title="Account and settings">☰ Menu</summary>
             <div class="nav-menu-items">
@@ -66,6 +69,16 @@
         <span class="label">Calendar access</span>
         <span class="auth-badge {{ 'ok' if user.calendar_approved else 'pending' }}">
           {{ "Approved" if user.calendar_approved else "Pending" }}
+        </span>
+      </div>
+      {# Rendered either way, unlike the two rows below: the ranker is a normal
+         visible feature, so an account that hasn't been granted it yet is better
+         told that this is where the answer will appear than left wondering why
+         a link it saw mentioned refuses. #}
+      <div class="row">
+        <span class="label">Rankings access</span>
+        <span class="auth-badge {{ 'ok' if user.ranker_approved else 'pending' }}">
+          {{ "Approved" if user.ranker_approved else "Pending" }}
         </span>
       </div>
       {# Both rows are rendered ONLY when the answer is yes. distrakt is an

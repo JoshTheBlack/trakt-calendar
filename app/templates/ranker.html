@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    {# Parsed before first paint, so the gap before the stylesheet applies
+       is the page's own dark rather than the browser's default white. #}
+    <meta name="color-scheme" content="dark">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rankings</title>
+    <link rel="shortcut icon" href="/static/images/favicon.ico">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
+    <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
+</head>
+<body class="auth-page has-nav">
+
+<header class="hero">
+    <div class="hero-lead">
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
+        <h1>Rankings</h1>
+    </div>
+    <div class="hero-actions">
+        <details class="nav-menu">
+            <summary title="Account and settings">☰ Menu</summary>
+            <div class="nav-menu-items">
+                <a href="/me">👤 Account</a>
+                {% if is_admin %}
+                <a href="/admin">🛠️ Admin</a>
+                {% endif %}
+                <button type="button" onclick="signOut()">🚪 Sign out</button>
+            </div>
+        </details>
+        <a class="pill-btn" href="/calendar">📅 Calendar</a>
+    </div>
+</header>
+
+<div class="auth-page-inner">
+<div class="auth-shell">
+  <div class="auth-card">
+    <h1>Your boards</h1>
+    <p class="auth-sub">Build ordered lists of shows and movies, arrange them into
+      tiers, and turn the result into a poster grid you can share.</p>
+
+    {# Server-rendered from the board list the route already loaded, so the shell
+       is honest about what exists before any script has run. The board itself,
+       its pool and its tiers arrive with the rest of this screen. #}
+    <div class="auth-list" id="boardList">
+      {% for board in boards %}
+      <div class="row">
+        <span class="label">{{ board.name or "Untitled board" }}</span>
+        <span class="auth-badge off">{{ board.item_count }} title{{ '' if board.item_count == 1 else 's' }}</span>
+      </div>
+      {% endfor %}
+      {% if not boards %}
+      <div class="row">
+        <span class="label">No boards yet.</span>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+</div>
+
+<script src="/static/js/nav.js?v={{ asset_v }}"></script>
+</body>
+</html>
