@@ -20,6 +20,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from . import tmdb
 from .config import DATA_DIR
 from .perftrace import span
 
@@ -27,8 +28,7 @@ logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
 
 LOGO_DIR = DATA_DIR / "logos"
-TMDB_API = "https://api.themoviedb.org/3"
-TMDB_IMG = "https://image.tmdb.org/t/p"
+TMDB_IMG = tmdb.IMG
 
 TILE = 128          # output square size (Discord emoji max)
 PAD = 14            # transparent padding inside the tile
@@ -68,11 +68,6 @@ def delete(network: str) -> None:
             pass
 
 
-def _is_v4_token(key: str) -> bool:
-    # TMDB v4 read tokens are long JWTs ("eyJ..."); v3 keys are short hex.
-    return key.startswith("eyJ") or len(key) > 60
-
-
 def _norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
 
@@ -96,34 +91,8 @@ def _pick_network(networks: list[dict], want: str) -> dict | None:
     return networks[0]
 
 
-async def _tmdb_get(settings, path: str, label: str) -> dict | None:
-    """GET a TMDB API path (auth via v4 bearer or v3 api_key). Returns parsed JSON."""
-    from .trakt import shared_client
-    key = (settings.tmdb_api_key or "").strip()
-    headers, params = {}, {}
-    if _is_v4_token(key):
-        headers["Authorization"] = f"Bearer {key}"
-    else:
-        params["api_key"] = key
-    auth = "v4/bearer" if _is_v4_token(key) else "v3/api_key"
-    with span(label, path=path, auth=auth) as sp:
-        try:
-            resp = await shared_client().get(f"{TMDB_API}{path}", params=params, headers=headers)
-        except Exception as exc:  # network / client error
-            logger.warning("TMDB %s failed: %s", path, exc)
-            return None
-        sp.set(status=resp.status_code)
-    if resp.status_code != 200:
-        logger.warning("TMDB %s -> HTTP %s: %s", path, resp.status_code, resp.text[:160])
-        return None
-    try:
-        return resp.json()
-    except ValueError:
-        return None
-
-
 async def _tmdb_tv_networks(settings, tmdb_id) -> list[dict]:
-    data = await _tmdb_get(settings, f"/tv/{tmdb_id}", "logo.tmdb_tv")
+    data = await tmdb.get_json(settings, f"/tv/{tmdb_id}", "logo.tmdb_tv")
     nets = (data or {}).get("networks") or []
     logger.info("TMDB tv/%s -> %d network(s): %s", tmdb_id, len(nets), [n.get("name") for n in nets])
     return nets
@@ -134,7 +103,7 @@ async def _network_raster_logo(settings, network_id) -> str | None:
     a network whose primary /tv logo is an SVG)."""
     if not network_id:
         return None
-    data = await _tmdb_get(settings, f"/network/{network_id}/images", "logo.network_images")
+    data = await tmdb.get_json(settings, f"/network/{network_id}/images", "logo.network_images")
     for lg in (data or {}).get("logos") or []:
         fp = lg.get("file_path") or ""
         if fp and not fp.lower().endswith(".svg"):

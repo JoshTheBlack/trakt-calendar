@@ -10,6 +10,7 @@ const BODY = document.body;
 
 // The cache size cap is stored in bytes and edited in megabytes.
 const MB = 1024 * 1024;
+const GB = 1024 * MB;
 
 let MONTH, YEAR, ENDPOINT, currentTotalShows, STATE_URL;
 
@@ -562,6 +563,8 @@ async function openSettings() {
         document.getElementById('s_calcache').value = (s.calendar_cache_ttl_minutes ?? 10);
         // Stored in bytes; shown in MB, because nobody wants to count zeros.
         document.getElementById('s_cachecap').value = Math.round((s.api_cache_max_bytes ?? 1073741824) / MB);
+        // Shown in GB: the sensible values here are far larger than the API cache's.
+        document.getElementById('s_postercap').value = Math.round((s.poster_cache_max_bytes ?? 10737418240) / GB);
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
         document.getElementById('s_prewarm').checked = !!s.calendar_prewarm_enabled;
         document.getElementById('s_genres').value = s.genres || '';
@@ -982,6 +985,7 @@ async function saveSettings(event) {
         cache_ttl_minutes: parseInt(document.getElementById('s_cache').value, 10) || 0,
         calendar_cache_ttl_minutes: parseInt(document.getElementById('s_calcache').value, 10) || 10,
         api_cache_max_bytes: (parseInt(document.getElementById('s_cachecap').value, 10) || 1024) * MB,
+        poster_cache_max_bytes: (parseInt(document.getElementById('s_postercap').value, 10) || 10) * GB,
         hide_not_watching: document.getElementById('s_hide').checked,
         calendar_prewarm_enabled: document.getElementById('s_prewarm').checked,
         genres: document.getElementById('s_genres').value,

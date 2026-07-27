@@ -109,6 +109,13 @@ class Settings:
     # lookups were measured at ~213 KB each, so 1 GB is on the order of a few
     # thousand of them — a handful of active users' browsing.
     api_cache_max_bytes: int = 1024 * 1024 * 1024
+    # Budget for the ranker's poster tile cache (DATA_DIR/posters/), swept LRU by
+    # file mtime alongside api_cache_max_bytes. Generous on purpose: at ~95 KB
+    # per poster (measured), 10 GB holds on the order of 100,000 of them against
+    # a realistic need of a few thousand for a busy instance — this exists so a
+    # runaway can't fill the volume, not because anyone should ever think about
+    # it. The cache is global and shared across every user on the instance.
+    poster_cache_max_bytes: int = 10 * 1024 * 1024 * 1024
     day_packing: str = "stacked"   # "stacked" | "packed"
     card_style: str = "vertical"   # "vertical" | "horizontal" | "poster" (poster-only wall, info on hover)
     # Sonarr / Radarr integration (add-to-library buttons)
@@ -170,7 +177,7 @@ class Settings:
         if isinstance(nf, str):
             clean["network_filter"] = [s.strip() for s in nf.split(",") if s.strip()]
         for int_field in ("pagination_limit", "cache_ttl_minutes", "calendar_cache_ttl_minutes",
-                          "api_cache_max_bytes", "sonarr_quality_profile_id",
+                          "api_cache_max_bytes", "poster_cache_max_bytes", "sonarr_quality_profile_id",
                           "sonarr_language_profile_id", "radarr_quality_profile_id",
                           "trakt_token_expires_at"):
             if int_field in clean:

@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio.to_thread
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
@@ -44,8 +45,10 @@ from . import distrakt as distrakt_store
 from . import encryption_flow
 from . import encryption_routes
 from . import logos
+from . import artwork
 from . import plex_auth
 from . import plex_routes
+from . import posters
 from . import ranker_routes
 from . import secrets_backfill
 from . import secrets_box
@@ -216,7 +219,14 @@ async def _sweep_auth_rows() -> None:
     await auth.sweep_login_attempts(now)
     # Age out expired cache windows and hold the shared blob table under its
     # size cap, evicting least-recently-stored first.
-    await cache.sweep(now, load_settings().api_cache_max_bytes)
+    settings = load_settings()
+    await cache.sweep(now, settings.api_cache_max_bytes)
+    # Drop poster-URL sightings past their retention window, and hold the
+    # on-disk poster tile cache under its own size cap, oldest file first. The
+    # tile sweep is filesystem walking, not a DB call, so it goes through a
+    # worker thread rather than the event loop.
+    await artwork.sweep(now)
+    await anyio.to_thread.run_sync(posters.sweep, settings.poster_cache_max_bytes)
 
 
 async def _heartbeat_loop() -> None:

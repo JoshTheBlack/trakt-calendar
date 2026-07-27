@@ -19,15 +19,20 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, ranker
+from . import assets, auth, authz, posters, ranker
 from .auth import AuthLevel
+from .config import load_settings
 
 router = APIRouter()
 guard = authz.Guard(router)
 templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
+
+# `private`: this response requires a session, so a shared cache in front of
+# the app has no business holding a copy.
+_POSTER_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 
 # A layout for a board at its 1000-item cap is a list of short keys and comes in
 # well under this; anything larger is not a board this feature can produce, so it
@@ -176,3 +181,24 @@ async def save_board_layout(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, **result})
+
+
+# ---------------------------------------------------------------------------
+# posters
+# ---------------------------------------------------------------------------
+
+@guard.get("/api/rankings/poster", AuthLevel.RANKER_APPROVED)
+async def rankings_poster(request: Request):
+    """A cached 500x750 poster tile for (media, tmdb). Mirrors /api/network-logo:
+    serves the disk cache, generating it from the resolution chain on first
+    request; 404 -> the caller falls back to the placeholder tile."""
+    media = (request.query_params.get("media") or "").strip()
+    tmdb = request.query_params.get("tmdb")
+    if media not in posters.MEDIA_VALUES or not tmdb:
+        return Response(status_code=404)
+    path = posters.cached_poster(media, tmdb)
+    if path is None and not posters.is_negative(media, tmdb):
+        path = await posters.ensure_poster(load_settings(), media, tmdb)
+    if path is None or not path.exists():
+        return Response(status_code=404, headers=_POSTER_CACHE_HEADERS)
+    return FileResponse(path, media_type="image/jpeg", headers=_POSTER_CACHE_HEADERS)

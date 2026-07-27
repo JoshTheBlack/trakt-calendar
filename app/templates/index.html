@@ -472,6 +472,16 @@
                             least-recently-stored entries are evicted.</span>
                     </div>
                 </div>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="s_postercap">Poster cache cap (GB)</label>
+                        <input type="number" id="s_postercap" name="poster_cache_max_bytes" min="1" max="1024">
+                        <span class="hint">Total budget for the rankings feature's cached poster
+                            images. Shared across every user on this instance, so the cap is
+                            instance-wide rather than per-account. Past this, the
+                            least-recently-used posters are evicted.</span>
+                    </div>
+                </div>
                 <div class="field checkbox">
                     <input type="checkbox" id="s_hide" name="hide_not_watching">
                     <label for="s_hide">Hide not-watching by default</label>
