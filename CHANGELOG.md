@@ -13,8 +13,12 @@ All notable changes to this project are documented here. Format loosely follows 
 - ⭐ **Seed a board from your own ratings.** If you've linked a Trakt account, one click turns your scores into a starting arrangement — 10s in the top tier, 9s below them, and so on — creating whichever tiers it needs. It shows you the counts before it changes anything, it never moves a title you've placed yourself, and it's a starting point rather than a sync: run it again later and it only picks up what you've rated since. The option simply isn't there if you haven't linked an account.
 - 📥 **Import titles you've already finished** into a board's pool in one go, optionally narrowed to a single year — the year you *watched* them, which is usually the list you actually want.
 
+### Accounts
+- 🖼️ **Upload a profile picture** from your account page. It's centred, cropped to a square and re-encoded on upload, so an odd aspect ratio or leftover photo metadata never makes it into what's stored. Re-uploading replaces it; removing it is one click.
+
 ### Internals
 - 🧹 Rankings search throttling now shares the same storage as every other rate limit in the app, instead of an in-process counter — so the allowance is tracked correctly no matter how the server is deployed.
+- 🧹 Deleting an account now also removes its uploaded images from disk, rather than leaving them behind with no row to point at them.
 
 ## 🏷️ [1.1.3] - 2026-07-25
 

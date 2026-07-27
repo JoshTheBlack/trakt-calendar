@@ -26,7 +26,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response
 
-from . import db, encryption_flow, secrets_box
+from . import db, encryption_flow, secrets_box, user_images
 from .config import TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings
 
 logger = logging.getLogger(__name__)
@@ -1881,8 +1881,10 @@ async def delete_user(user_id: int, *, actor_user_id: int) -> None:
     behind in any of them. The account's username, custom share slug, and
     share token are all recorded in retired_identifiers so a new registration
     can't silently inherit a `/u/<username>`, `/c/<slug>`, or `/s/<token>` link
-    that was already shared. Raises CannotDeleteSelf or LastAdmin rather than
-    performing either.
+    that was already shared. The account's avatar and any saved images are
+    removed from disk after the row commits, since they live under the user's
+    id rather than in a cascading table. Raises CannotDeleteSelf or LastAdmin
+    rather than performing either.
     """
     if user_id == actor_user_id:
         raise CannotDeleteSelf()
@@ -1920,6 +1922,12 @@ async def delete_user(user_id: int, *, actor_user_id: int) -> None:
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     await db.transaction(_work)
+    # The row is gone; the per-user upload directory (avatar, saved images) has
+    # no row of its own to cascade from, so it needs its own sweep or it would
+    # survive the account forever. Filesystem work, so it goes to a worker
+    # thread; best-effort, since a stray leftover file must not make an
+    # otherwise-successful deletion look like it failed.
+    await anyio.to_thread.run_sync(user_images.delete_user_data, user_id)
 
 
 async def list_retired_identifiers():

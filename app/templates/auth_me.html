@@ -65,6 +65,24 @@
     {% endif %}
 
     <div class="auth-list">
+      <div class="row avatar-row">
+        <span class="label">Profile picture</span>
+        <div class="row-main">
+          <img id="avatarPreview" class="avatar-thumb" alt="Your profile picture"
+               src="{% if has_avatar %}/api/me/avatar?size=96{% endif %}"
+               {% if not has_avatar %}style="display:none"{% endif %}>
+          <div id="avatarPlaceholder" class="avatar-thumb avatar-placeholder"
+               {% if has_avatar %}style="display:none"{% endif %}>🙂</div>
+          <button class="btn-ghost tiny" type="button" id="avatarUploadBtn">Upload</button>
+          <button class="btn-ghost tiny" type="button" id="avatarRemoveBtn"
+                  {% if not has_avatar %}style="display:none"{% endif %}>Remove</button>
+          <input type="file" id="avatarFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        </div>
+      </div>
+    </div>
+    <p class="auth-error" id="avatarError" role="alert"></p>
+
+    <div class="auth-list">
       <div class="row">
         <span class="label">Calendar access</span>
         <span class="auth-badge {{ 'ok' if user.calendar_approved else 'pending' }}">
@@ -261,6 +279,79 @@ passwordForm.addEventListener('submit', (e) => {
 
 // Signing out is the header menu's job now — see nav.js — so this page no longer
 // carries its own copy of the request.
+
+const avatarFile = document.getElementById('avatarFile');
+const avatarUploadBtn = document.getElementById('avatarUploadBtn');
+const avatarRemoveBtn = document.getElementById('avatarRemoveBtn');
+const avatarPreview = document.getElementById('avatarPreview');
+const avatarPlaceholder = document.getElementById('avatarPlaceholder');
+const avatarError = document.getElementById('avatarError');
+
+avatarUploadBtn.addEventListener('click', () => avatarFile.click());
+
+avatarFile.addEventListener('change', async () => {
+  const file = avatarFile.files[0];
+  avatarFile.value = '';
+  if (!file) return;
+  avatarError.textContent = '';
+  avatarUploadBtn.disabled = true;
+  try {
+    // readAsDataURL includes the "data:image/...;base64," prefix; the server
+    // strips it before decoding, so it can be sent through unmodified.
+    const image_b64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Could not read that file.'));
+      reader.readAsDataURL(file);
+    });
+    const resp = await fetch('/api/me/avatar', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_b64}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) {
+      // Cache-bust: the URL is otherwise identical to whatever the browser
+      // already cached for the previous avatar.
+      avatarPreview.src = '/api/me/avatar?size=96&t=' + Date.now();
+      avatarPreview.style.display = '';
+      avatarPlaceholder.style.display = 'none';
+      avatarRemoveBtn.style.display = '';
+    } else {
+      avatarError.textContent = data.error || 'Could not upload that image.';
+    }
+  } catch (e) {
+    avatarError.textContent = e.message || 'Could not upload that image.';
+  }
+  avatarUploadBtn.disabled = false;
+});
+
+avatarRemoveBtn.addEventListener('click', () => {
+  confirmInline(avatarRemoveBtn, 'Remove your profile picture?', doRemoveAvatar, {danger: true});
+});
+
+async function doRemoveAvatar() {
+  avatarRemoveBtn.disabled = true;
+  avatarError.textContent = '';
+  try {
+    const resp = await fetch('/api/me/avatar', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) {
+      avatarPreview.style.display = 'none';
+      avatarPlaceholder.style.display = '';
+      avatarRemoveBtn.style.display = 'none';
+    } else {
+      avatarError.textContent = data.error || 'Could not remove your profile picture.';
+    }
+  } catch (e) {
+    avatarError.textContent = 'Could not reach the server.';
+  }
+  avatarRemoveBtn.disabled = false;
+}
 </script>
 </body>
 </html>
