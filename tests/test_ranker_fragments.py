@@ -270,6 +270,33 @@ class BoostedFormTests(FragmentTestCase):
         self.assertRegex(html, r'<a class="ranker-board-link[^"]*"\s+href="/rankings\?board=')
 
 
+class NoBrowserDialogTests(FragmentTestCase):
+    """This page asks for a name and asks to confirm through its own dialog, never
+    through the browser's.
+
+    prompt()/confirm()/alert() block the page, cannot be styled to match anything
+    around them, and a browser set to suppress them turns "name your board" into
+    a button that does nothing at all. Scanned rather than reviewed, because the
+    failure is silent on the machine of whoever adds one.
+    """
+
+    SCRIPT = Path(__file__).resolve().parent.parent / "app" / "static" / "js" / "ranker.js"
+
+    def test_the_page_script_calls_no_browser_dialog(self):
+        source = re.sub(r"//.*", "", self.SCRIPT.read_text(encoding="utf-8"))
+        for name in ("prompt", "confirm", "alert"):
+            self.assertNotRegex(
+                source, r"(?<![.\w])(window\.)?" + name + r"\s*\(",
+                f"ranker.js calls {name}(); ask() is the in-page replacement",
+            )
+
+    def test_the_page_carries_the_dialog_that_replaces_them(self):
+        self.board_with(pool=1)
+        html = self.client.get("/rankings").text
+        for element in ('id="askModal"', 'id="askInput"', 'id="askOk"', 'id="askMessage"'):
+            self.assertIn(element, html)
+
+
 class FragmentGatingTests(FragmentTestCase):
     """Fragment routes are views on private data and are gated exactly as the
     page is. A view that forgot its level is a board readable by anyone with a

@@ -36,6 +36,26 @@
     border: 1px solid var(--card-border); border-radius: 14px;
     background: var(--bg-panel); padding: 14px; min-width: 0;
 }
+/* PINNED WHILE THE TIERS SCROLL. Dragging a title from the pool into the bottom
+   tier of a long board otherwise means scrolling the pool out of the window
+   first, which leaves nothing to drag. The offset clears the sticky header, and
+   the column becomes its own scroll container so a long pool scrolls inside the
+   pin rather than escaping it. */
+/* The offset clears the sticky hero (a 30px logo inside 8px padding, plus its
+   border). Named so the two places that depend on it cannot drift; the column
+   also sits below the header in the stacking order, so a header that wraps to
+   two lines covers the pool rather than colliding with it. */
+.ranker-page { --ranker-pinned-top: 54px; }
+.ranker-pool-col {
+    position: sticky; top: var(--ranker-pinned-top); align-self: start;
+    max-height: calc(100vh - var(--ranker-pinned-top) - 14px);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+/* Stacked on a narrow screen, the pool sits ABOVE the tiers rather than beside
+   them, so pinning it would cover the thing being dragged to. */
+@media (max-width: 900px) {
+    .ranker-pool-col { position: static; max-height: none; }
+}
 .ranker-panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .ranker-panel-head h2 {
     font-family: 'Bebas Neue', sans-serif; font-size: 1.35rem; letter-spacing: 1px;
@@ -115,7 +135,11 @@
    poster are what somebody scanning a pool is reading. */
 .ranker-pool .ranker-facts { display: none; }
 .ranker-pool, .ranker-rows { display: flex; flex-direction: column; gap: 5px; min-height: 40px; }
-.ranker-pool { max-height: 62vh; overflow-y: auto; padding-right: 4px; }
+/* The scrolling part of the pinned column: it takes whatever height is left
+   under the search box and the source buttons, so the pool is as tall as the
+   window allows rather than a fixed fraction of it. */
+.ranker-pool { flex: 1 1 auto; overflow-y: auto; padding-right: 4px; }
+@media (max-width: 900px) { .ranker-pool { max-height: 62vh; } }
 
 /* Height reserved from a count the server already knew, so a page of cards or a
    tier's rows slot into space made for them instead of shoving the page down. */
@@ -198,6 +222,11 @@
 .ranker-blank { padding: 40px 4px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
 .ranker-blank h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.6rem; letter-spacing: 1px; color: var(--gold-soft); font-weight: 400; }
 .ranker-blank p { color: var(--text-dim); font-size: 0.86rem; max-width: 52ch; }
+
+/* `.field` is display:flex in style.css, which beats the browser's own rule for
+   [hidden] — so the ask dialog's input would still show when it is only asking
+   a yes/no question. */
+.ranker-page [hidden] { display: none !important; }
 
 /* SortableJS's own hooks. `.sortable-ghost` is the placeholder left where the
    dragged item would land; `.sortable-drag` is the element under the cursor. */

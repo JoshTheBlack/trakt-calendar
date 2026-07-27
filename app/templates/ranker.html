@@ -104,6 +104,29 @@
 {# ---- Move-to-tier menu, opened from a row's ⇄ button ---- #}
 <div class="ranker-menu" id="moveMenu" hidden></div>
 
+{# ---- Asking the user something ----
+   ONE dialog for "type a name" and for "are you sure", so nothing on this page
+   reaches for the browser's own prompt()/confirm(). Those block the page, cannot
+   be styled to look like anything else here, and a browser that suppresses them
+   leaves a board that simply cannot be named. #}
+<div class="modal-overlay" id="askModal" onclick="if (event.target === this) closeAsk(null)">
+    <div class="modal">
+        <div class="modal-head"><h2 id="askTitle"></h2>
+            <button type="button" class="modal-close" onclick="closeAsk(null)">×</button></div>
+        <div class="modal-body">
+            <p class="hint" id="askMessage" hidden></p>
+            <div class="field" id="askField">
+                <label for="askInput" id="askLabel">Name</label>
+                <input type="text" id="askInput" maxlength="60" autocomplete="off">
+            </div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="closeAsk(null)">Cancel</button>
+            <button type="button" class="btn-primary" id="askOk" onclick="submitAsk()">OK</button>
+        </div>
+    </div>
+</div>
+
 {# ---- Tier settings ---- #}
 <div class="modal-overlay" id="tierModal" onclick="if (event.target === this) closeTierModal()">
     <div class="modal">

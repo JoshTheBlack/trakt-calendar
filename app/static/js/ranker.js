@@ -81,6 +81,53 @@ function bumpVersion() { state.board.version += 1; }
 function tierByUid(uid) { return (state.board.categories || []).find(c => c.uid === uid) || null; }
 
 // ---------------------------------------------------------------------------
+// asking the user something
+// ---------------------------------------------------------------------------
+// Nothing here calls prompt(), confirm() or alert(). They block the page, they
+// cannot be made to look like the rest of it, and a browser configured to
+// suppress them turns "name your board" into a dead button. One in-page dialog
+// serves both shapes and resolves a promise, so the callers still read as
+// straight-line code.
+
+let askResolve = null;
+
+// Resolves to the typed string (asking for text), to true (asking to confirm),
+// or to null when it was dismissed — so `=== null` is always "cancelled" and an
+// empty string stays a real answer.
+function ask(options) {
+    const modal = document.getElementById('askModal');
+    const field = document.getElementById('askField');
+    const input = document.getElementById('askInput');
+    const message = document.getElementById('askMessage');
+    document.getElementById('askTitle').textContent = options.title || '';
+    document.getElementById('askOk').textContent = options.confirmText || 'OK';
+    message.textContent = options.message || '';
+    message.hidden = !options.message;
+    const wantsText = options.input !== false;
+    field.hidden = !wantsText;
+    if (wantsText) {
+        document.getElementById('askLabel').textContent = options.label || 'Name';
+        input.maxLength = options.maxlength || 60;
+        input.value = options.value || '';
+    }
+    modal.classList.add('open');
+    if (wantsText) { input.focus(); input.select(); }
+    return new Promise(resolve => { askResolve = resolve; });
+}
+
+function closeAsk(answer) {
+    document.getElementById('askModal').classList.remove('open');
+    const resolve = askResolve;
+    askResolve = null;
+    if (resolve) resolve(answer);
+}
+
+function submitAsk() {
+    const wantsText = !document.getElementById('askField').hidden;
+    closeAsk(wantsText ? document.getElementById('askInput').value.trim() : true);
+}
+
+// ---------------------------------------------------------------------------
 // talking to the API
 // ---------------------------------------------------------------------------
 
@@ -482,14 +529,24 @@ function deleteTier(button, uid) {
     const snapshot = Object.assign({}, cat, { items: cat.items.slice() });
     confirmInline(button,
         'Delete this tier? Its titles go back to the pool.', async () => {
+        // The rows are fetched FIRST, before anything is deleted. They are the
+        // titles about to land in the pool, and moving the elements that already
+        // exist is what puts them on screen without a reload — a tier nobody had
+        // opened has no rows to move.
+        const body = await openTierBody(uid);
         try {
             await api('/api/rankings/boards/' + encodeURIComponent(boardUid()) +
                       '/categories/' + encodeURIComponent(uid), 'DELETE', {});
         } catch (e) { toast(e.message, false); return; }
-        // The titles fell back to the pool in the database. They are not on
-        // screen — the pool is paginated and they went to the end of it — so
-        // they join the state's unseen tail, which is where a save already knows
-        // to leave titles it can't see. The pool count picks them up.
+        // Straight into the pool, keeping each row's own element — so its
+        // artwork is already loaded and its `data-ref` still describes it.
+        const pool = document.getElementById('rankerPool');
+        if (body && pool) {
+            Array.from(body.querySelectorAll(':scope > .ranker-item'))
+                .forEach(row => pool.appendChild(row));
+        }
+        const empty = document.getElementById('poolEmpty');
+        if (empty) empty.remove();
         state.board.categories = (state.board.categories || []).filter(c => c.uid !== uid);
         state.board.pool = (state.board.pool || []).concat(snapshot.items);
         bumpVersion();
@@ -500,8 +557,17 @@ function deleteTier(button, uid) {
             // Re-creating a tier IS a save: save_layout creates a category whose
             // uid it has not seen, and naming the same keys under it puts them
             // back in the order they were in.
+            //
+            // The rows have to leave the pool FIRST, in the DOM as well as in
+            // state. A save that named the same title in both the pool and the
+            // restored tier is refused outright, so leaving them on screen would
+            // make undo fail rather than merely look wrong.
+            const returning = new Set(snapshot.items);
+            document.querySelectorAll('#rankerPool > .ranker-item').forEach(row => {
+                if (returning.has(row.dataset.key)) row.remove();
+            });
             state.board.pool = (state.board.pool || [])
-                .filter(key => !snapshot.items.includes(key));
+                .filter(key => !returning.has(key));
             state.board.categories.push(snapshot);
             try {
                 await api('/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/save',
@@ -520,8 +586,8 @@ function newUid(prefix) {
     return prefix + '-' + Math.random().toString(36).slice(2, 10);
 }
 
-function addTier() {
-    const label = window.prompt('Name for the new tier');
+async function addTier() {
+    const label = await ask({ title: 'New tier', label: 'Label', maxlength: 40 });
     if (label === null) return;
     state.board.categories.push({
         uid: newUid('tier'), label: label.slice(0, 40), rank_priority: 0,
@@ -588,7 +654,7 @@ async function saveAndReload() {
 // ---------------------------------------------------------------------------
 
 async function newBoard() {
-    const name = window.prompt('Name for the new board');
+    const name = await ask({ title: 'New board', label: 'Name', maxlength: 60 });
     if (name === null) return;
     try {
         const data = await api('/api/rankings/boards', 'POST',
@@ -598,7 +664,8 @@ async function newBoard() {
 }
 
 async function renameBoard() {
-    const name = window.prompt('New name for this board', state.board.name || '');
+    const name = await ask({ title: 'Rename board', label: 'Name', maxlength: 60,
+                             value: state.board.name || '', confirmText: 'Rename' });
     if (name === null) return;
     try {
         await api('/api/rankings/boards/' + encodeURIComponent(boardUid()), 'PATCH',
@@ -763,10 +830,14 @@ async function seedFromRatings(commit) {
         if (commit) { window.location.reload(); return; }
         // The counts before anything is written — a seed rearranges a board, so
         // it says what it is about to do first.
-        const ok = window.confirm(
-            'Seeding from your ratings would add ' + data.titles_added + ' title(s), place ' +
-            data.titles_placed + ' and create ' + data.tiers_created + ' tier(s).\n' +
-            data.already_placed + ' are already in a tier and will not be moved.\n\nGo ahead?');
+        const ok = await ask({
+            title: 'Seed from ratings',
+            input: false,
+            confirmText: 'Seed the board',
+            message: 'This would add ' + data.titles_added + ' title(s), place ' +
+                data.titles_placed + ' and create ' + data.tiers_created + ' tier(s). ' +
+                data.already_placed + ' are already in a tier and will not be moved.',
+        });
         if (ok) await seedFromRatings(true);
     } catch (e) { toast(e.message, false); }
 }
@@ -1135,6 +1206,14 @@ document.addEventListener('htmx:afterSwap', (event) => {
 
 document.addEventListener('click', (event) => {
     if (!event.target.closest('#moveMenu') && !event.target.closest('.ranker-act')) closeMoveMenu();
+});
+
+// The keys the dialog it replaces answered to, so muscle memory still works.
+document.addEventListener('keydown', (event) => {
+    if (!askResolve) return;
+    if (event.key === 'Enter' && event.target.id === 'askInput') { event.preventDefault(); submitAsk(); }
+    else if (event.key === 'Enter' && document.getElementById('askField').hidden) submitAsk();
+    else if (event.key === 'Escape') closeAsk(null);
 });
 
 // A drag that has not been written yet must not leave with the tab.
