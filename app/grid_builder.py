@@ -81,7 +81,7 @@ FORMATS = frozenset(MAX_DIMENSION)
 # Bumped whenever anything above changes where a pixel lands. A render cache
 # keyed on the inputs alone would keep serving the old layout after the code
 # that produced it was replaced.
-RENDERER_VERSION = 1
+RENDERER_VERSION = 2
 
 _FONT_PATH = Path(__file__).resolve().parent / "static" / "fonts" / "Inter-Bold.ttf"
 _PLACEHOLDER_PATH = (
@@ -307,14 +307,21 @@ def draw_centered_text(
     text: str,
     font: ImageFont.FreeTypeFont,
     fill: tuple[int, int, int],
+    *,
+    align: str = "center",
 ) -> None:
-    """Draw `text` centred in `box`, shortened with an ellipsis if it does not
-    fit across.
+    """Draw `text` inside `box`, shortened with an ellipsis if it does not fit
+    across. Always centred vertically; `align` decides the horizontal.
 
     THE ONLY PLACE THIS MODULE MEASURES OR DRAWS A STRING. Centring is done from
     `textbbox`, not from the string length: the bounding box accounts for the
     glyphs actually present, and it is what replaced the `textsize` that Pillow
     10 removed.
+
+    `align="left"` exists for the header line, which sits directly beside its
+    icon rather than floating in the space left over. It stays a parameter of
+    this function rather than a second drawing path, because measurement and
+    ellipsizing are the parts worth having in one place.
     """
     if not text:
         return
@@ -328,10 +335,10 @@ def draw_centered_text(
     if not shown:
         return
     x0, y0, x1, y1 = draw.textbbox((0, 0), shown, font=font)
-    # Offset by the bbox origin as well as by half the difference: a glyph's ink
-    # does not start at the pen position, and ignoring that leaves text visibly
-    # low in its strip.
-    x = left + (box_w - (x1 - x0)) / 2 - x0
+    # Offset by the bbox origin as well as by the alignment: a glyph's ink does
+    # not start at the pen position, and ignoring that leaves text visibly low in
+    # its strip and a hair inside its left edge.
+    x = left - x0 if align == "left" else left + (box_w - (x1 - x0)) / 2 - x0
     y = top + (box_h - (y1 - y0)) / 2 - y0
     draw.text((x, y), shown, font=font, fill=fill)
 
@@ -431,18 +438,24 @@ def _draw_header(canvas: Image.Image, draw: ImageDraw.ImageDraw, layout: Layout,
     right = layout.width - layout.margin
     bottom = top + layout.header_h
 
-    text_left = left
+    # A gap of a third of the banner's height, used either as the inset from the
+    # canvas edge or as the space between the icon and the line beside it.
+    gap = max(1, layout.header_h // 3)
+    text_left = left + gap
     if header_image:
         icon = _circular_icon(header_image, layout.header_h)
         if icon is not None:
             with icon:
                 canvas.paste(icon, (left, top), icon)
-            # A gap of a third of the icon so the line does not touch it.
-            text_left = left + layout.header_h + max(1, layout.header_h // 3)
+            text_left = left + layout.header_h + gap
 
+    # LEFT-ALIGNED, immediately beside the icon. Centred in the space left over,
+    # the line drifts with the length of the name and stops reading as a label
+    # belonging to the picture next to it.
     line = f"{username}'s {title}" if username and title else (title or username)
     draw_centered_text(draw, (text_left, top, right, bottom), line,
-                       _font(round(layout.header_h * _HEADER_TYPE)), TEXT_COLOUR)
+                       _font(round(layout.header_h * _HEADER_TYPE)), TEXT_COLOUR,
+                       align="left")
 
 
 def _circular_icon(raw: bytes, size: int) -> Image.Image | None:
@@ -491,24 +504,29 @@ def _paste_tile(canvas: Image.Image, box: tuple[int, int, int, int],
     _paste_placeholder(canvas, box)
 
 
-def _paste_placeholder(canvas: Image.Image, box: tuple[int, int, int, int]) -> None:
-    """The no-poster tile: the house placeholder centred at its own size on a
-    filled tile. It is not 2:3, so stretching it to the tile would distort and
-    blur it — it is composited instead."""
-    left, top, right, bottom = box
-    width, height = right - left, bottom - top
-    canvas.paste(PLACEHOLDER_BACKGROUND, (left, top, right, bottom))
+@lru_cache(maxsize=8)
+def _placeholder_tile(width: int, height: int) -> Image.Image:
+    """The no-poster tile at one size, built once per size rather than per
+    missing poster — a grid can be a hundred tiles and most of them may have no
+    artwork.
 
-    art = _PLACEHOLDER
-    ratio = min(width / art.width, height / art.height, 1.0)
-    if ratio < 1.0:
-        art = art.resize(
-            (max(1, round(art.width * ratio)), max(1, round(art.height * ratio))),
-            Image.LANCZOS,
-        )
-    canvas.paste(art, (left + (width - art.width) // 2, top + (height - art.height) // 2), art)
-    if art is not _PLACEHOLDER:
-        art.close()
+    FILLED, NOT CENTRED. The source art is 321x431, which is not the 2:3 a
+    poster is, so this does stretch it slightly. That was the choice made
+    looking at real output: a smaller image floating in a larger tile reads as
+    something that failed to load, while a filled tile reads as a deliberate
+    stand-in and keeps the grid's rhythm.
+    """
+    tile = Image.new("RGB", (width, height), PLACEHOLDER_BACKGROUND)
+    art = _PLACEHOLDER.resize((width, height), Image.LANCZOS)
+    tile.paste(art, (0, 0), art)
+    art.close()
+    return tile
+
+
+def _paste_placeholder(canvas: Image.Image, box: tuple[int, int, int, int]) -> None:
+    """Fill one tile with the no-poster art."""
+    left, top, right, bottom = box
+    canvas.paste(_placeholder_tile(right - left, bottom - top), (left, top))
 
 
 def _encode(canvas: Image.Image, fmt: str) -> bytes:

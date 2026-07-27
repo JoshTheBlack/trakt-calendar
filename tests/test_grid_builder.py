@@ -241,20 +241,29 @@ class PlaceholderTests(unittest.TestCase):
         ]
         self.assertEqual(len(self._placeholder_boxes(items)), 2)
 
-    def test_the_placeholder_is_composited_rather_than_stretched(self):
-        """It is 321x431, which is not 2:3. Resizing it to the tile would
-        distort and blur it, so it is centred on a filled tile instead."""
-        self.assertNotEqual(
-            grid_builder._PLACEHOLDER.width / grid_builder._PLACEHOLDER.height,
-            grid_builder.TILE_W / grid_builder.TILE_H,
-        )
+    def test_the_placeholder_fills_its_whole_tile(self):
+        """A smaller image floating in a larger tile reads as artwork that
+        failed to load. Filling the tile reads as a deliberate stand-in and
+        keeps the grid's rhythm, which is worth the slight stretch — the source
+        is 321x431, not 2:3."""
         payload = grid_builder.build_grid(
             [grid_builder.GridEntry(rank=1)], columns=3, fmt="png")
+        tile = grid_builder.compute_layout(1, columns=3).cells[0].tile
         with Image.open(BytesIO(payload)) as img:
-            tile = grid_builder.compute_layout(1, columns=3).cells[0].tile
-            # The tile's own corner is the placeholder's backdrop, not artwork.
-            self.assertEqual(img.convert("RGB").getpixel((tile[0] + 2, tile[1] + 2)),
-                             grid_builder.PLACEHOLDER_BACKGROUND)
+            pixels = img.convert("RGB")
+            corners = (
+                (tile[0] + 2, tile[1] + 2), (tile[2] - 3, tile[1] + 2),
+                (tile[0] + 2, tile[3] - 3), (tile[2] - 3, tile[3] - 3),
+            )
+            for corner in corners:
+                with self.subTest(corner=corner):
+                    self.assertNotEqual(pixels.getpixel(corner), grid_builder.BACKGROUND)
+
+    def test_the_placeholder_tile_is_built_once_per_size(self):
+        grid_builder._placeholder_tile.cache_clear()
+        grid_builder.build_grid(entries(6), columns=3, fmt="jpeg")
+        self.assertEqual(grid_builder._placeholder_tile.cache_info().currsize, 1)
+        self.assertEqual(grid_builder._placeholder_tile.cache_info().misses, 1)
 
 
 class TextTests(unittest.TestCase):
@@ -266,9 +275,9 @@ class TextTests(unittest.TestCase):
         drawn = []
         real = grid_builder.draw_centered_text
 
-        def record(draw, box, text, font, fill):
+        def record(draw, box, text, font, fill, **kwargs):
             drawn.append(text)
-            real(draw, box, text, font, fill)
+            real(draw, box, text, font, fill, **kwargs)
 
         with mock.patch.object(grid_builder, "draw_centered_text", record):
             grid_builder.build_grid(items, columns=5, fmt="jpeg", **kwargs)
@@ -312,6 +321,20 @@ class TextTests(unittest.TestCase):
         self.assertLess(len(shown), len("An Extremely Long Title Indeed"))
         bbox = draw.textbbox((0, 0), shown, font=font)
         self.assertLessEqual(bbox[2] - bbox[0], 120)
+
+    def test_left_aligned_text_starts_at_its_box_rather_than_floating_in_it(self):
+        """The header line sits beside its icon. Centred in the space left over
+        it drifts with the length of the name, which stops it reading as a label
+        belonging to the picture next to it."""
+        canvas = Image.new("RGB", (400, 60), grid_builder.BACKGROUND)
+        from PIL import ImageDraw
+        draw = ImageDraw.Draw(canvas)
+        font = grid_builder._font(30)
+        grid_builder.draw_centered_text(draw, (0, 0, 400, 60), "Hi", font,
+                                        grid_builder.TEXT_COLOUR, align="left")
+        ink = [x for x in range(400)
+               if any(canvas.getpixel((x, y)) != grid_builder.BACKGROUND for y in range(60))]
+        self.assertLess(min(ink), 4)
 
     def test_a_tier_colour_tints_the_rank_and_a_bad_one_does_not_break_it(self):
         self.assertEqual(grid_builder._rank_colour("#FF7F7F"), (255, 127, 127))
