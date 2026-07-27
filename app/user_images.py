@@ -86,6 +86,17 @@ def images_dir(user_id: int) -> Path:
     return _user_dir(user_id) / "images"
 
 
+def generated_dir(user_id: int, year: int) -> Path:
+    """Where images this account GENERATED are kept, grouped by year.
+
+    Under the same per-account directory as its uploads, and for the same
+    reason: deleting the account is one recursive remove, with nothing of theirs
+    living anywhere else. Both segments are server-produced — an integer id and
+    an integer year — so no user text ever becomes a path component.
+    """
+    return _user_dir(user_id) / "generated" / str(int(year))
+
+
 def image_path(user_id: int, image_uid: str) -> Path:
     """Path for a saved custom image. `image_uid` is always server-generated
     (see add_image) except when it arrives back from a client in a DELETE URL,

@@ -16,13 +16,20 @@ deleting a board sends `{}` rather than nothing at all.
 """
 from __future__ import annotations
 
+import functools
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
+import anyio
+import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, posters, ranker, ranker_import, ranker_sources
+from . import (assets, auth, authz, grid_builder, posters, ranker, ranker_export,
+               ranker_import, ranker_sources, user_images)
 from .auth import AuthLevel
 from .config import load_settings
 from .ranker_sources import Media
@@ -57,6 +64,35 @@ MAX_SEARCH_RESULTS = 20
 # One warm request stays a bounded piece of work: the client asks for the page
 # of titles it is about to show, not for the whole board.
 MAX_WARM_ITEMS = 250
+
+# What an export may ask for. Columns below three make a canvas taller than any
+# format will encode at the item ceiling, and above six the tiles are too small
+# to be worth the pixels.
+EXPORT_COLUMNS = (3, 4, 5, 6)
+# Full size, or half for somewhere with an attachment limit. Arbitrary scales are
+# not offered because every one of them is a different set of rounded constants
+# to have looked at.
+EXPORT_SCALES = (0.5, 1.0)
+MAX_EXPORT_TEXT = 80
+
+# The preview is rendered by exactly the same code as the export, at a size that
+# fits beside the options that produced it. Deriving the scale from the column
+# count keeps the preview the same shape as the thing it is previewing.
+PREVIEW_WIDTH = 600
+PREVIEW_FORMAT = "webp"
+
+# TWO CONCURRENT RENDERS, INSTANCE-WIDE — the real memory control. A full-size
+# grid at the caps is a canvas of tens of megapixels and a few hundred megabytes
+# through encode; a third request waiting a moment is much better than a third
+# request the machine cannot hold. Preview renders take a slot too: they are
+# smaller, but they are the ones that arrive in bursts as options change.
+_render_slots = anyio.Semaphore(2)
+
+# Long enough that holding down the export button cannot queue a stream of
+# full-size renders behind the semaphore, short enough that trying a different
+# format is not a wait. The semaphore bounds how much memory is in use at once;
+# this bounds how much work one account can line up.
+EXPORT_COOLDOWN_SECONDS = 20
 
 
 async def _search_over_budget(user_id: int) -> bool:
@@ -432,3 +468,307 @@ async def seed_from_ratings(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, "committed": commit, "rated": len(rated), **summary})
+
+
+# ---------------------------------------------------------------------------
+# taking a ranking away: the image, the preview and the Markdown
+# ---------------------------------------------------------------------------
+# All three consolidate through app/ranker_export.py and only then diverge, so
+# the picture and the text block a user posts beside it are always the same
+# ranking. Nothing below decides an ordering of its own.
+
+@dataclass(frozen=True)
+class _ExportOptions:
+    """A validated export request. Parsed once and shared by the three routes,
+    so the preview cannot be rendered from different options than the download
+    it is previewing."""
+    top_x: int
+    columns: int
+    title: str
+    username: str
+    scope: str
+    category_uid: str | None
+    scale: float
+    fmt: str
+    show_titles: bool
+    podium: bool
+    header_image: Any
+
+
+def _parse_export(data: dict) -> _ExportOptions:
+    """Validate an export body, raising ExportError with a message meant for the
+    person who asked. Nothing here reaches the database or the renderer."""
+    top_x = _whole_number(data.get("top_x"), "Top X", 1, ranker_export.MAX_TOP_X)
+    columns = _whole_number(data.get("columns"), "Columns", min(EXPORT_COLUMNS),
+                            max(EXPORT_COLUMNS))
+    if columns not in EXPORT_COLUMNS:
+        raise ranker_export.ExportError(
+            "Columns must be one of: " + ", ".join(str(c) for c in EXPORT_COLUMNS) + "."
+        )
+    scale = data.get("scale", 1.0)
+    try:
+        scale = float(scale)
+    except (TypeError, ValueError):
+        raise ranker_export.ExportError("Size must be a number.") from None
+    if scale not in EXPORT_SCALES:
+        raise ranker_export.ExportError("Size must be either full or half.")
+
+    fmt = str(data.get("fmt") or "webp").lower()
+    if fmt not in grid_builder.FORMATS:
+        raise ranker_export.ExportError("Format must be WebP, JPEG or PNG.")
+    scope = str(data.get("scope") or "global")
+    if scope not in ranker_export.SCOPES:
+        raise ranker_export.ExportError("Export scope must be either the whole board or one tier.")
+    category_uid = data.get("category_uid") or None
+    if scope == "category" and not category_uid:
+        raise ranker_export.ExportError("Choose which tier to export.")
+
+    return _ExportOptions(
+        top_x=top_x, columns=columns,
+        title=_export_text(data.get("title"), "title"),
+        username=_export_text(data.get("username"), "name"),
+        scope=scope, category_uid=str(category_uid) if category_uid else None,
+        scale=scale, fmt=fmt,
+        show_titles=bool(data.get("show_titles")),
+        podium=bool(data.get("podium")),
+        header_image=data.get("header_image"),
+    )
+
+
+def _whole_number(value: Any, what: str, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        raise ranker_export.ExportError(f"{what} must be a whole number.") from None
+    if not low <= number <= high:
+        raise ranker_export.ExportError(f"{what} must be between {low} and {high}.")
+    return number
+
+
+def _export_text(value: Any, what: str) -> str:
+    text = str(value or "").strip()
+    if len(text) > MAX_EXPORT_TEXT:
+        raise ranker_export.ExportError(
+            f"The {what} can be at most {MAX_EXPORT_TEXT} characters."
+        )
+    return text
+
+
+def _header_bytes(user_id: int, spec: Any) -> bytes | None:
+    """The icon for the banner: this account's avatar, or one of the images it
+    has saved, or nothing.
+
+    A SAVED IMAGE IS NAMED, NOT UPLOADED HERE. The uid has to be one this
+    account actually owns — checked against its own list rather than trusted —
+    which also means the bytes were validated and normalized when they were
+    uploaded, and this route never has to decode anything a client just sent it.
+    """
+    if not spec:
+        return None
+    if spec == "avatar":
+        path = user_images.avatar_path(user_id)
+    elif isinstance(spec, dict) and (uid := spec.get("image_uid")):
+        if str(uid) not in user_images.list_images(user_id):
+            raise ranker_export.ExportError("That saved image is not available.")
+        path = user_images.image_path(user_id, str(uid))
+    else:
+        raise ranker_export.ExportError("Choose the avatar or one of your saved images.")
+    try:
+        return path.read_bytes()
+    except OSError:
+        # An avatar that was never uploaded is the ordinary case, not an error:
+        # the header simply lays out without an icon.
+        return None
+
+
+def _grid_entries(ranked: list[ranker_export.RankedTitle]) -> list[grid_builder.GridEntry]:
+    """The ranking as the renderer wants it, with each poster resolved from the
+    cache on disk.
+
+    NO NETWORK HERE, and none inside the renderer either. A title whose poster
+    has not been warmed renders the placeholder tile; warming is its own
+    explicit step, so an export never waits on a provider.
+    """
+    return [
+        grid_builder.GridEntry(
+            rank=entry.rank,
+            title=entry.title,
+            poster=posters.cached_poster(entry.media, entry.tmdb) if entry.tmdb else None,
+            colour=entry.colour,
+        )
+        for entry in ranked
+    ]
+
+
+async def _render(entries: list[grid_builder.GridEntry], options: _ExportOptions, *,
+                  scale: float, fmt: str, header: bytes | None) -> bytes:
+    """Run a render off the event loop, one of at most two at a time.
+
+    Pillow is synchronous CPU work measured in seconds at full size. Calling it
+    directly would stall every other request on this worker for the duration —
+    not slow them, stop them.
+    """
+    work = functools.partial(
+        grid_builder.build_grid, entries,
+        columns=options.columns, title=options.title, username=options.username,
+        header_image=header, scale=scale, fmt=fmt,
+        show_titles=options.show_titles, podium=options.podium,
+    )
+    async with _render_slots:
+        return await anyio.to_thread.run_sync(work)
+
+
+async def _export_on_cooldown(user_id: int) -> bool:
+    """Whether this account exported too recently, recording this one either
+    way. Stored in `login_attempts` like every other volume throttle here, so it
+    is one budget however many workers the instance runs."""
+    key = str(user_id)
+    limited = await auth.rate_limited(
+        "ranker_export", key, max_attempts=1, window_seconds=EXPORT_COOLDOWN_SECONDS,
+    )
+    await auth.record_attempt("ranker_export", key, True)
+    return limited
+
+
+async def _consolidated(user_id: int, board_uid: str, options: _ExportOptions):
+    """The board and the ordered slice an export is of."""
+    board = await ranker.fetch_board(user_id, board_uid)
+    ranked = ranker_export.consolidate(
+        board, scope=options.scope, category_uid=options.category_uid,
+        top_x=options.top_x,
+    )
+    return board, ranked
+
+
+@guard.post("/api/rankings/boards/{board_uid}/preview", AuthLevel.RANKER_APPROVED)
+async def preview_grid(board_uid: str, request: Request):
+    """A small render of exactly what the export would produce.
+
+    Same consolidation, same renderer, same options — only the scale differs, so
+    what is previewed is what is downloaded. Exempt from the export cooldown: a
+    preview is what stops somebody exporting repeatedly to find the settings
+    they wanted.
+    """
+    user = await auth.current_user(request)
+    data = await _json_body(request)
+    try:
+        options = _parse_export(data)
+        _, ranked = await _consolidated(user.user_id, board_uid, options)
+        header = _header_bytes(user.user_id, options.header_image)
+    except ranker.RankerError as exc:
+        return _refusal(exc)
+    except ranker_export.ExportError as exc:
+        return _error(str(exc))
+
+    scale = PREVIEW_WIDTH / (options.columns * grid_builder.TILE_W)
+    try:
+        payload = await _render(_grid_entries(ranked), options, scale=scale,
+                                fmt=PREVIEW_FORMAT, header=header)
+    except grid_builder.GridError as exc:
+        # A preview is small enough that no allowed request reaches a format
+        # ceiling, but the renderer is the authority on that rather than this
+        # route's arithmetic about it.
+        return _error(str(exc))
+    return Response(payload, media_type="image/webp",
+                    headers={"Cache-Control": "no-store"})
+
+
+@guard.post("/api/rankings/boards/{board_uid}/export", AuthLevel.RANKER_APPROVED)
+async def export_grid(board_uid: str, request: Request):
+    """The finished image.
+
+    THE SIZE CHECK RUNS BEFORE ANY PIXEL IS ALLOCATED. WebP cannot encode above
+    16383 pixels in either direction, so a hundred titles in three columns is a
+    canvas its encoder throws on — after thirty seconds of rendering. The same
+    geometry the renderer will use is computed first and checked against the
+    chosen format's ceiling, and the refusal says what the canvas came to, what
+    the limit is, and what would get under it.
+    """
+    user = await auth.current_user(request)
+    data = await _json_body(request)
+    try:
+        options = _parse_export(data)
+        board, ranked = await _consolidated(user.user_id, board_uid, options)
+        header = _header_bytes(user.user_id, options.header_image)
+    except ranker.RankerError as exc:
+        return _refusal(exc)
+    except ranker_export.ExportError as exc:
+        return _error(str(exc))
+
+    layout = grid_builder.compute_layout(
+        len(ranked), columns=options.columns, scale=options.scale,
+        show_titles=options.show_titles, podium=options.podium,
+    )
+    if not layout.fits(options.fmt):
+        return _error(
+            str(grid_builder.CanvasTooLarge(
+                layout.width, layout.height, options.fmt,
+                grid_builder.MAX_DIMENSION[options.fmt],
+            )),
+            reason="canvas_too_large",
+            width=layout.width, height=layout.height,
+            limit=grid_builder.MAX_DIMENSION[options.fmt], format=options.fmt,
+        )
+
+    key = ranker_export.render_key(
+        ranked, renderer_version=grid_builder.RENDERER_VERSION,
+        columns=options.columns, scale=options.scale, fmt=options.fmt,
+        show_titles=options.show_titles, podium=options.podium,
+        title=options.title, username=options.username, header_image=header,
+    )
+    year = board["year"] or datetime.now(timezone.utc).year
+    path = ranker_export.cache_path(user.user_id, int(year), board_uid, key, options.fmt)
+
+    payload = await anyio.to_thread.run_sync(ranker_export.cached_render, path)
+    if payload is None:
+        # Checked only when something actually has to be rendered, so downloading
+        # the same image again — which costs nothing — is never refused.
+        if await _export_on_cooldown(user.user_id):
+            return _error(
+                f"Exports are limited to one every {EXPORT_COOLDOWN_SECONDS} seconds. "
+                "Give it a moment and try again.",
+                429, reason="export_cooldown",
+            )
+        payload = await _render(_grid_entries(ranked), options,
+                                scale=options.scale, fmt=options.fmt, header=header)
+        await anyio.to_thread.run_sync(ranker_export.store_render, path, payload)
+
+    filename = ranker_export.download_name(
+        (board["name"], options.title), options.fmt,
+    )
+    return Response(payload, media_type=f"image/{options.fmt}", headers={
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "no-store",
+    })
+
+
+@guard.post("/api/rankings/boards/{board_uid}/export/markdown", AuthLevel.RANKER_APPROVED)
+async def export_markdown(board_uid: str, request: Request):
+    """The same ranking as a pasteable text block.
+
+    A ranking is already an ordered list, so this is the cheapest export there
+    is: no renderer, no semaphore, no cooldown. Network emoji come from the
+    account's own preferences WHERE THEY EXIST — an account that has none gets
+    plain text rather than an error, because nothing in this feature may require
+    them.
+    """
+    user = await auth.current_user(request)
+    data = await _json_body(request)
+    try:
+        options = _parse_export(data)
+        board, ranked = await _consolidated(user.user_id, board_uid, options)
+    except ranker.RankerError as exc:
+        return _refusal(exc)
+    except ranker_export.ExportError as exc:
+        return _error(str(exc))
+
+    emojis, default_emoji = await ranker_import.network_emojis(user.user_id)
+    markdown = ranker_export.to_markdown(
+        ranked, title=options.title, emojis=emojis, default_emoji=default_emoji,
+    )
+    return JSONResponse({
+        "ok": True,
+        "markdown": markdown,
+        "filename": ranker_export.download_name((board["name"], options.title), "md"),
+        "count": len(ranked),
+    })

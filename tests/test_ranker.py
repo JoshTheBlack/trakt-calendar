@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
@@ -28,9 +30,11 @@ os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-ranker-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
+from PIL import Image  # noqa: E402
 
-from app import auth, db, distrakt, posters, ranker, ranker_import  # noqa: E402
-from app import ranker_routes, ranker_sources, trakt  # noqa: E402
+from app import auth, db, distrakt, posters, ranker, ranker_export  # noqa: E402
+from app import ranker_import, ranker_routes, ranker_sources, trakt  # noqa: E402
+from app import user_images  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ranker_sources import Media, TitleRef  # noqa: E402
@@ -72,6 +76,11 @@ class RankerTestCase(unittest.TestCase):
     def setUp(self):
         RankerTestCase._counter += 1
         db.set_db_path(TMP / f"ranker-{RankerTestCase._counter}.db")
+        # A fresh database has to mean a fresh disk as well. User ids restart
+        # from the same numbers in every test, so an earlier test's generated
+        # images would sit exactly where this one's account expects to find its
+        # own — and be served back as a cache hit that never rendered anything.
+        shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
         asyncio.run(db.migrate())
         save_settings(Settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
@@ -1080,6 +1089,352 @@ class TrackerImportTests(RankerTestCase):
         resp = self.client.post("/api/rankings/boards/b2/import/tracker", json={"media": "show"})
         self.assertEqual(resp.status_code, 404)
         self.assertNotIn("import", resp.text.lower().replace("no such source.", ""))
+
+
+def a_board(*, categories, pool=()) -> dict:
+    """A board in the shape the data layer returns one, for testing the
+    consolidation rules without a database.
+
+    Items arrive from `read_board` already ordered by `rank_in_category, id` and
+    categories by `sort_order, id`, so these fixtures are written in that order
+    too — the tie-break is the SQL's, and consolidation inherits it rather than
+    re-deriving it.
+    """
+    return {
+        "uid": "b1", "name": "A Board", "year": 2026, "version": 1,
+        "categories": [
+            {"uid": uid, "label": label, "rank_priority": priority,
+             "is_isolated": isolated, "sort_order": order, "colour": colour,
+             "items": [dict(show_ref(str(n)), title=f"Title {n}") for n in items]}
+            for order, (uid, label, priority, isolated, colour, items)
+            in enumerate(categories)
+        ],
+        "pool": [dict(show_ref(str(n)), title=f"Pooled {n}") for n in pool],
+    }
+
+
+class ConsolidationTests(unittest.TestCase):
+    """The one ordering every export shares. It has to be TOTAL and STABLE: two
+    exports of an unchanged board that disagree about who came fourth would make
+    the image and the text block pasted beside it contradict each other."""
+
+    def test_priority_orders_the_tiers(self):
+        board = a_board(categories=[
+            ("low", "B", 50, False, None, [3, 4]),
+            ("high", "A", 100, False, None, [1, 2]),
+        ])
+        ranked = ranker_export.consolidate(board)
+        self.assertEqual([e.match_id for e in ranked], ["1", "2", "3", "4"])
+        self.assertEqual([e.rank for e in ranked], [1, 2, 3, 4])
+
+    def test_equal_priorities_fall_back_to_the_stored_order(self):
+        """sort_order then id, which the data layer's ORDER BY already applied —
+        so a stable sort on priority alone is the whole rule, not half of it."""
+        board = a_board(categories=[
+            ("first", "A", 10, False, None, [1]),
+            ("second", "B", 10, False, None, [2]),
+            ("third", "C", 10, False, None, [3]),
+        ])
+        self.assertEqual([e.match_id for e in ranker_export.consolidate(board)],
+                         ["1", "2", "3"])
+
+    def test_an_isolated_tier_is_left_out_of_the_global_ranking(self):
+        board = a_board(categories=[
+            ("main", "A", 50, False, None, [1, 2]),
+            ("silo", "Anime", 100, True, None, [8, 9]),
+        ])
+        self.assertEqual([e.match_id for e in ranker_export.consolidate(board)], ["1", "2"])
+
+    def test_one_tier_can_be_exported_on_its_own_isolated_or_not(self):
+        board = a_board(categories=[
+            ("main", "A", 50, False, None, [1, 2]),
+            ("silo", "Anime", 100, True, None, [8, 9]),
+        ])
+        for uid, expected in (("main", ["1", "2"]), ("silo", ["8", "9"])):
+            with self.subTest(uid=uid):
+                ranked = ranker_export.consolidate(
+                    board, scope="category", category_uid=uid)
+                self.assertEqual([e.match_id for e in ranked], expected)
+                # An isolated tier keeps its OWN 1..X numbering.
+                self.assertEqual([e.rank for e in ranked], [1, 2])
+
+    def test_pool_titles_are_never_exported(self):
+        board = a_board(categories=[("main", "A", 50, False, None, [1])], pool=[7, 8])
+        ranked = ranker_export.consolidate(board)
+        self.assertEqual([e.match_id for e in ranked], ["1"])
+
+    def test_top_x_slices_after_ordering(self):
+        board = a_board(categories=[
+            ("low", "B", 10, False, None, [3, 4]),
+            ("high", "A", 90, False, None, [1, 2]),
+        ])
+        ranked = ranker_export.consolidate(board, top_x=3)
+        self.assertEqual([e.match_id for e in ranked], ["1", "2", "3"])
+
+    def test_a_tier_that_is_not_on_the_board_is_refused(self):
+        board = a_board(categories=[("main", "A", 50, False, None, [1])])
+        with self.assertRaises(ranker_export.ExportError):
+            ranker_export.consolidate(board, scope="category", category_uid="nope")
+
+    def test_a_board_with_nothing_tiered_is_refused_rather_than_rendered_empty(self):
+        board = a_board(categories=[], pool=[1, 2])
+        with self.assertRaises(ranker_export.ExportError):
+            ranker_export.consolidate(board)
+
+    def test_the_tier_colour_travels_with_each_title(self):
+        board = a_board(categories=[("main", "S", 50, False, "#FF7F7F", [1])])
+        entry = ranker_export.consolidate(board)[0]
+        self.assertEqual(entry.colour, "#FF7F7F")
+        self.assertEqual(entry.tier_label, "S")
+
+
+class ExportRouteTests(RankerTestCase):
+    """The export endpoints: what they refuse before rendering, what they only
+    render once, and how often one account may ask."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top 2026", year=2026))
+
+    def fill(self, count: int, *, tier: str = "S", priority: int = 50,
+             isolated: bool = False) -> None:
+        asyncio.run(ranker.add_titles(
+            self.user_id, "b1", [show_ref(str(n), f"Title {n}") for n in range(count)]))
+        version = asyncio.run(ranker.fetch_board(self.user_id, "b1"))["version"]
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": version,
+            "categories": [{"uid": "t1", "label": tier, "rank_priority": priority,
+                            "is_isolated": isolated,
+                            "items": [f"show:tmdb:{n}" for n in range(count)]}],
+        }))
+
+    def export(self, **body):
+        return self.client.post("/api/rankings/boards/b1/export",
+                                json={"top_x": 25, "columns": 5, **body})
+
+    def test_an_export_comes_back_as_an_attachment_named_after_the_board(self):
+        self.fill(6)
+        resp = self.export(top_x=6, columns=3, fmt="jpeg", title="Top Shows",
+                           username="someone")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["content-type"], "image/jpeg")
+        self.assertIn("attachment", resp.headers["content-disposition"])
+        self.assertIn("Top 2026 Top Shows.jpeg", resp.headers["content-disposition"])
+        self.assertGreater(len(resp.content), 1000)
+
+    def test_a_hundred_titles_in_three_columns_is_refused_for_webp_and_allowed_for_jpeg(self):
+        """The measured trap: WebP hard-fails above 16383 pixels, and the canvas
+        this asks for is 27270 tall. The refusal has to arrive BEFORE the render,
+        which is why it names a size nothing has drawn yet."""
+        self.fill(100)
+        refused = self.export(top_x=100, columns=3, fmt="webp")
+        self.assertEqual(refused.status_code, 400)
+        body = refused.json()
+        self.assertEqual(body["reason"], "canvas_too_large")
+        self.assertEqual((body["width"], body["height"]), (1500, 27270))
+        self.assertEqual(body["limit"], 16383)
+        self.assertIn("16383", body["error"])
+
+        allowed = self.export(top_x=100, columns=3, fmt="jpeg")
+        self.assertEqual(allowed.status_code, 200)
+
+    def test_the_size_check_runs_before_anything_is_rendered(self):
+        self.fill(100)
+        with patched(ranker_routes, "_render", _explode("nothing may be rendered")):
+            self.assertEqual(self.export(top_x=100, columns=3, fmt="webp").status_code, 400)
+
+    def test_an_identical_second_export_is_served_from_the_cache(self):
+        self.fill(6)
+        first = self.export(top_x=6, columns=3, fmt="jpeg", title="Top")
+        self.assertEqual(first.status_code, 200)
+        # A second render would also be refused by the cooldown; proving the
+        # cache means proving neither happened.
+        with patched(ranker_routes, "_render", _explode("this was already rendered")):
+            second = self.export(top_x=6, columns=3, fmt="jpeg", title="Top")
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.content, first.content)
+
+    def test_a_changed_title_or_header_image_misses_the_cache(self):
+        self.fill(6)
+        self.assertEqual(self.export(top_x=6, columns=3, fmt="jpeg", title="Top").status_code, 200)
+        asyncio.run(db.execute("DELETE FROM login_attempts"))
+        changed = self.export(top_x=6, columns=3, fmt="jpeg", title="Different")
+        self.assertEqual(changed.status_code, 200)
+        self.assertEqual(
+            len(list((_generated_root(self.user_id)).rglob("*.jpeg"))), 2)
+
+    def test_a_second_export_inside_the_cooldown_is_refused(self):
+        self.fill(6)
+        self.assertEqual(self.export(top_x=6, columns=3, fmt="jpeg", title="A").status_code, 200)
+        refused = self.export(top_x=6, columns=3, fmt="jpeg", title="B")
+        self.assertEqual(refused.status_code, 429)
+        self.assertEqual(refused.json()["reason"], "export_cooldown")
+
+    def test_downloading_the_same_image_again_is_exempt_from_the_cooldown(self):
+        """The cooldown exists to bound RENDERING. Refusing a cached download
+        would punish somebody for clicking the button they were given twice."""
+        self.fill(6)
+        self.assertEqual(self.export(top_x=6, columns=3, fmt="jpeg", title="A").status_code, 200)
+        self.assertEqual(self.export(top_x=6, columns=3, fmt="jpeg", title="A").status_code, 200)
+
+    def test_the_cooldown_is_stored_where_every_other_volume_limit_is(self):
+        self.fill(6)
+        self.export(top_x=6, columns=3, fmt="jpeg", title="A")
+        self.assertEqual(
+            self.value("SELECT key_value FROM login_attempts WHERE key_type = 'ranker_export'"),
+            str(self.user_id))
+
+    def test_the_cooldown_is_per_account(self):
+        self.fill(6)
+        self.export(top_x=6, columns=3, fmt="jpeg", title="A")
+        other = self.ranker_user("someone_else")
+        asyncio.run(ranker.create_board(other, uid="b1"))
+        asyncio.run(ranker.add_titles(other, "b1", [show_ref("1")]))
+        version = asyncio.run(ranker.fetch_board(other, "b1"))["version"]
+        asyncio.run(ranker.save_layout(other, "b1", {
+            "version": version,
+            "categories": [{"uid": "t1", "label": "S", "items": ["show:tmdb:1"]}]}))
+        self.sign_in_as(other)
+        self.assertEqual(self.export(top_x=1, columns=3, fmt="jpeg").status_code, 200)
+
+    def test_a_generated_image_lands_under_the_account_that_made_it(self):
+        """So that deleting the account sweeps it, with nothing of theirs living
+        outside their own directory."""
+        self.fill(6)
+        self.export(top_x=6, columns=3, fmt="jpeg", title="A")
+        made = list(_generated_root(self.user_id).rglob("*.jpeg"))
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].parent.name, "2026")
+        self.assertTrue(made[0].name.startswith("b1-"))
+
+    def test_the_render_cache_is_capped(self):
+        self.fill(6)
+        for n in range(ranker_export.MAX_CACHED_RENDERS + 3):
+            asyncio.run(db.execute("DELETE FROM login_attempts"))
+            self.assertEqual(
+                self.export(top_x=6, columns=3, fmt="jpeg", title=f"Take {n}").status_code, 200)
+        self.assertLessEqual(len(list(_generated_root(self.user_id).rglob("*.jpeg"))),
+                             ranker_export.MAX_CACHED_RENDERS)
+
+    def test_an_out_of_range_option_is_refused(self):
+        self.fill(6)
+        for bad in ({"top_x": 0}, {"top_x": 101}, {"columns": 2}, {"columns": 7},
+                    {"scale": 0.25}, {"fmt": "gif"}, {"scope": "everything"},
+                    {"title": "x" * 81}, {"username": "x" * 81},
+                    {"scope": "category"}):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.export(**bad).status_code, 400)
+
+    def test_a_tier_on_somebody_elses_board_cannot_be_exported(self):
+        self.fill(6)
+        other = self.ranker_user("neighbour")
+        asyncio.run(ranker.create_board(other, uid="theirs"))
+        resp = self.client.post("/api/rankings/boards/theirs/export",
+                                json={"top_x": 5, "columns": 5})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_a_board_with_nothing_tiered_says_so(self):
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [show_ref("1")]))
+        resp = self.export(top_x=5, columns=5)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("nothing tiered", resp.json()["error"])
+
+    def test_a_missing_poster_does_not_stop_an_export(self):
+        """Nothing in these fixtures has a cached poster, so every tile in every
+        export above is the placeholder — which is the point: the render path
+        never goes looking for artwork."""
+        self.fill(3)
+        with patched(posters, "ensure_poster", _explode("the render path is offline")):
+            self.assertEqual(self.export(top_x=3, columns=3, fmt="jpeg").status_code, 200)
+
+
+class PreviewRouteTests(RankerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top"))
+        asyncio.run(ranker.add_titles(
+            self.user_id, "b1", [show_ref(str(n)) for n in range(6)]))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": 1,
+            "categories": [{"uid": "t1", "label": "S",
+                            "items": [f"show:tmdb:{n}" for n in range(6)]}]}))
+
+    def preview(self, **body):
+        return self.client.post("/api/rankings/boards/b1/preview",
+                                json={"top_x": 6, "columns": 3, **body})
+
+    def test_a_preview_is_a_small_image_of_the_same_ranking(self):
+        resp = self.preview()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["content-type"], "image/webp")
+        with Image.open(BytesIO(resp.content)) as img:
+            self.assertEqual(img.width, ranker_routes.PREVIEW_WIDTH)
+
+    def test_previews_are_exempt_from_the_export_cooldown(self):
+        for _ in range(4):
+            self.assertEqual(self.preview().status_code, 200)
+        self.assertEqual(
+            self.value("SELECT COUNT(*) FROM login_attempts WHERE key_type = 'ranker_export'"),
+            0)
+
+    def test_a_preview_is_not_kept_on_disk(self):
+        self.preview()
+        self.assertFalse(list(_generated_root(self.user_id).rglob("*")))
+
+
+class MarkdownExportTests(RankerTestCase):
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.ranker_user()
+        self.sign_in_as(self.user_id)
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top 2026"))
+        asyncio.run(ranker.add_titles(self.user_id, "b1", [
+            dict(show_ref("1", "Alpha"), network="HBO"),
+            dict(show_ref("2", "Beta"), network="HBO"),
+        ]))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": 1,
+            "categories": [{"uid": "t1", "label": "S",
+                            "items": ["show:tmdb:1", "show:tmdb:2"]}]}))
+
+    def markdown(self, **body):
+        return self.client.post("/api/rankings/boards/b1/export/markdown",
+                                json={"top_x": 25, "columns": 5, **body})
+
+    def test_the_block_is_the_same_ranking_as_the_image(self):
+        body = self.markdown(title="Top Shows").json()
+        self.assertIn("# Top Shows", body["markdown"])
+        self.assertIn("1. **Alpha**", body["markdown"])
+        self.assertIn("2. **Beta**", body["markdown"])
+        self.assertEqual(body["count"], 2)
+        self.assertEqual(body["filename"], "Top 2026 Top Shows.md")
+
+    def test_top_x_applies_to_the_text_export_too(self):
+        body = self.markdown(top_x=1).json()
+        self.assertIn("Alpha", body["markdown"])
+        self.assertNotIn("Beta", body["markdown"])
+
+    def test_an_account_with_no_emoji_preferences_gets_plain_text(self):
+        """Nothing in this feature may require the other one. An account that
+        has never had emoji preferences gets a list, not an error."""
+        markdown = self.markdown().json()["markdown"]
+        self.assertIn("**Alpha**", markdown)
+
+    def test_the_markdown_export_costs_no_cooldown(self):
+        self.markdown()
+        self.assertEqual(
+            self.value("SELECT COUNT(*) FROM login_attempts WHERE key_type = 'ranker_export'"),
+            0)
+
+
+def _generated_root(user_id: int) -> Path:
+    """Where this account's finished renders are kept, whatever year they were
+    filed under."""
+    return user_images.generated_dir(user_id, 2000).parent
 
 
 if __name__ == "__main__":

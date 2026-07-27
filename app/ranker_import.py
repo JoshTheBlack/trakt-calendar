@@ -63,6 +63,22 @@ async def _has_data(user_id: int) -> bool:
         "SELECT 1 FROM distrakt_movie_watches WHERE user_id = ? LIMIT 1", (user_id,)))
 
 
+async def network_emojis(user_id: int) -> tuple[dict[str, str], str]:
+    """This account's network -> emoji map and its default, or nothing at all.
+
+    The Markdown export decorates each line with the emoji its author already
+    chose for that network rather than inventing a second set of preferences for
+    the same thing. It lives here for the same reason everything else in this
+    file does: an account without the other feature must get plain text, not an
+    error, and the rankings feature itself must not know that any of this
+    exists.
+    """
+    user = await auth.get_user(user_id)
+    if user is None or not user["distrakt_approved"]:
+        return {}, ""
+    return await distrakt.get_emoji_prefs(user_id)
+
+
 async def available_years(user_id: int, media: Media) -> list[int]:
     """The years this account has finished something in, newest first.
 

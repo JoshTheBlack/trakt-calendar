@@ -170,6 +170,19 @@ class JourneyTests(StandaloneTestCase):
         tier, = board["categories"]
         self.assertEqual([i["title"] for i in tier["items"]], ["Breaking Bad"])
         self.assertEqual(board["pool"], [])
+
+        # And out the other end, which is the half of "end to end" that matters
+        # most here: an account with nothing but this feature can take its
+        # ranking away as both an image and a text block.
+        image = self.client.post("/api/rankings/boards/b1/export", json={
+            "top_x": 1, "columns": 3, "fmt": "jpeg", "title": "Top Shows",
+            "username": "ranker_only"})
+        self.assertEqual(image.status_code, 200, image.text)
+        self.assertEqual(image.headers["content-type"], "image/jpeg")
+
+        text = self.client.post("/api/rankings/boards/b1/export/markdown",
+                                json={"top_x": 1, "columns": 3, "title": "Top Shows"})
+        self.assertIn("**Breaking Bad**", text.json()["markdown"])
         self.assertHasNothingElse()
 
     def test_a_movie_only_board_works_the_same_way(self):
@@ -320,7 +333,7 @@ class ModuleIsolationTests(unittest.TestCase):
     # skipped, and starts being checked the moment it lands.
     RANKER_MODULES = (
         "ranker.py", "ranker_routes.py", "ranker_sources.py",
-        "grid_builder.py", "posters.py", "artwork.py",
+        "grid_builder.py", "ranker_export.py", "posters.py", "artwork.py",
     )
     # The single module allowed to know, which is what keeps the coupling
     # deletable rather than diffuse.
