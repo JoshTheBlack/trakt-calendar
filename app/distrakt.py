@@ -42,10 +42,24 @@ _BOOL_FIELDS = ("abandoned",)
 _SHOW_COLUMNS = (
     "trakt_id", "tmdb", "slug", "media", "title", "season", "network",
     "abandoned", "abandoned_form", "watched", "total", "cadence", "premiere",
-    "finale", "bucket", "started_airing", "finished_airing",
+    "finale", "bucket", "started_airing", "finished_airing", "source",
 )
+
+# Who put a row on the roster. Only CALENDAR rows are re-imported on every load
+# of a preview month, and only they mean "the calendar says you're watching
+# this" — which is why removing one marks the show not-watching there and
+# removing any other kind does not. "" is a row written before the column
+# existed; see MIGRATION_16 and api_distrakt_remove.
+SOURCE_CALENDAR = "calendar"
+SOURCE_HISTORY = "history"
+SOURCE_MANUAL = "manual"
+SOURCES = (SOURCE_CALENDAR, SOURCE_HISTORY, SOURCE_MANUAL)
+
 # Columns an in-place update is allowed to touch (identity keys excluded).
-_UPDATABLE_COLUMNS = frozenset(_SHOW_COLUMNS) - {"trakt_id", "season"}
+# `source` is excluded with them: it records who FIRST put the row on the roster
+# and must not be rewritten by the live-counts writer or by re-adding a show that
+# is already there, or a calendar row could quietly become a manual one.
+_UPDATABLE_COLUMNS = frozenset(_SHOW_COLUMNS) - {"trakt_id", "season", "source"}
 _BOOL_COLUMNS = frozenset(("abandoned", "started_airing", "finished_airing"))
 
 _INSERT_SHOW_SQL = (
@@ -89,6 +103,7 @@ def _normalize_show(show: dict) -> dict:
         "premiere": incoming.get("premiere"),
         "finale": incoming.get("finale"),
         "bucket": incoming.get("bucket"),
+        "source": str(incoming.get("source") or ""),
     }
 
 
@@ -129,6 +144,7 @@ def _show_params(user_id: int, month: str, rec: dict) -> tuple:
         rec.get("bucket"),
         1 if rec.get("started_airing") else 0,
         1 if rec.get("finished_airing") else 0,
+        str(rec.get("source") or ""),
     )
 
 
@@ -152,6 +168,7 @@ def _row_to_show(row) -> dict:
         "bucket": row["bucket"],
         "started_airing": bool(row["started_airing"]),
         "finished_airing": bool(row["finished_airing"]),
+        "source": row["source"] or "",
     }
 
 
@@ -216,6 +233,37 @@ async def save_month(user_id: int, doc: dict) -> None:
             conn.execute(_INSERT_SHOW_SQL, _show_params(user_id, month, rec))
 
     await db.transaction(_work)
+
+
+async def months_with_shows(user_id: int) -> set[str]:
+    """The months that actually HOLD something for this user.
+
+    Distinct from list_months, which answers "has a month row", because the two
+    diverge the moment a month is emptied: removing its last show leaves the
+    month row behind, so the history backfill — which refuses to touch a month
+    somebody is already keeping — saw a curated month where there was nothing at
+    all, and could never refill it. What deserves protecting is the content, not
+    the row.
+    """
+    rows = await db.fetch_all(
+        "SELECT DISTINCT month FROM distrakt_shows WHERE user_id = ?", (user_id,))
+    return {r["month"] for r in rows}
+
+
+async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
+    """Replace just the films a CLOSED month snapshotted, leaving its roster rows
+    and its closed flag alone.
+
+    Targeted rather than a save_month round trip because the caller (the history
+    backfill) has learned about films for a month that was already frozen: the
+    verdicts in it were settled and must not be rewritten, but the **Movies**
+    section is a record of what was watched, and leaving it stale would make the
+    month contradict the plan that just told the user what it found.
+    """
+    await db.execute(
+        "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
+        (json.dumps(list(movies or [])), user_id, _validate_month(month)),
+    )
 
 
 async def list_months(user_id: int) -> list[str]:
@@ -394,12 +442,16 @@ def _identity_record(src: dict) -> dict:
         "network": str(src.get("network") or ""),
         "abandoned": False,
         "abandoned_form": None,
+        # Carried forward with the show: a premiere that rolls into next month is
+        # still the calendar's row, and a hand-added one is still the user's.
+        "source": str(src.get("source") or ""),
     }
 
 
 async def compute_live_shows(user_id: int, records: list[dict], settings, fresh: bool = False,
                              watched_lookup: dict | None = None,
-                             allow_degrade: bool = False) -> list[dict]:
+                             allow_degrade: bool = False,
+                             completed_lookup: dict | None = None) -> list[dict]:
     """Merge each stored record with its live Trakt-derived fields into the flat
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
 
@@ -445,6 +497,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                 _season_details(),
             )
         watched_lookup = watch_history.watched_map(state)
+        completed_lookup = watch_history.season_completed_map(state)
     else:
         with span("cls.season_gather", n=len(records), fresh=fresh):
             details = await _season_details()
@@ -485,6 +538,11 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                 "unavailable": False,
             }
         show["bucket"] = discord_fmt.bucket_of(show, show)
+        # WHEN the season was finished, and only for a season that IS finished:
+        # on a partly-watched season the same date is just "last time I watched
+        # something", which must not read as a completion. "" = not finished, or
+        # finished on a date the history cache cannot name.
+        show["completed_on"] = (completed_lookup or {}).get(key, "") if show["bucket"] == "completed" else ""
         shows.append(show)
 
     if unavailable:
@@ -652,7 +710,7 @@ async def _add_premieres(doc: dict, present: set[tuple[int, int]], user_id: int,
         key = (int(rec["trakt_id"]), int(rec["season"]))
         if key in present or _matches_not_watching(rec, nw_ids):
             continue
-        doc["shows"].append(_normalize_show(rec))
+        doc["shows"].append(_normalize_show({**rec, "source": SOURCE_CALENDAR}))
         present.add(key)
         added += 1
     return added
@@ -671,6 +729,61 @@ async def import_premieres(user_id: int, month_key: str, settings) -> dict | Non
     if await _add_premieres(doc, present, user_id, settings, year, month, nw_ids):
         await save_month(user_id, doc)
     return doc
+
+
+async def drop_seasons_finished_earlier(user_id: int, month_key: str,
+                                        shows: list[dict]) -> list[dict]:
+    """Take out the shows whose season was finished BEFORE this month began, and
+    delete their roster rows.
+
+    Completed means "completed this month". Rollover already refuses to carry a
+    completed show into a new month, but it decides that once, when the month is
+    created — so a show carried into August during the July preview and then
+    finished in July stayed on August's roster and, being fully watched, sat in
+    August's Completed for good. This closes that window on every load.
+
+    Removed rather than re-bucketed: with the Completed rule applied, a fully
+    watched season would otherwise fall through to Cleanup or Keepup and read as
+    work outstanding, which is worse than not being on the month at all. It is
+    still on the month it WAS finished in.
+
+    Only acts on a date it actually has: a season the history cache cannot date
+    (nothing dated for it, or a show that predates dated history and has not been
+    re-baselined yet) is left exactly where it is.
+    """
+    from . import watch_history
+    start, _ = watch_history.month_bounds(month_key)
+    keep, stale = [], []
+    for show in shows:
+        done = str(show.get("completed_on") or "")
+        (stale if done and done < start else keep).append(show)
+    for show in stale:
+        await remove_show(user_id, month_key, int(show["trakt_id"]), int(show["season"]))
+    return keep
+
+
+async def is_calendar_premiere(user_id: int, month_key: str, settings,
+                               trakt_id: int, season: int) -> bool:
+    """Whether this month's calendar premieres include this show+season.
+
+    Only for rows written before `source` existed (see MIGRATION_16), where the
+    question "did the calendar put this here" has no recorded answer: a show the
+    premiere import would hand straight back is one the calendar is asserting,
+    and removing it has to say something to the calendar or it cannot stick.
+    Reads through the same cache import_premieres uses, which the page load that
+    rendered the ✕ has just warmed.
+
+    Answers False rather than raising if Trakt is unreachable: not knowing means
+    not marking, which is the conservative half — the row simply comes back.
+    """
+    if not (settings and getattr(settings, "configured", False)):
+        return False
+    year, month = int(month_key[:4]), int(month_key[5:7])
+    try:
+        records = await _premiere_records(user_id, settings, year, month)
+    except Exception:  # noqa: BLE001 — a hiccup here must not fail the removal
+        return False
+    return any(int(r["trakt_id"]) == trakt_id and int(r["season"]) == season for r in records)
 
 
 async def backfill_tmdb(user_id: int, month_key: str, settings) -> dict | None:
@@ -801,7 +914,7 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
         key = (int(rec["trakt_id"]), int(rec["season"]))
         if key in present:
             continue
-        doc["shows"].append(_normalize_show(rec))
+        doc["shows"].append(_normalize_show({**rec, "source": SOURCE_HISTORY}))
         present.add(key)
 
     doc["totals_refreshed_at"] = db.now()

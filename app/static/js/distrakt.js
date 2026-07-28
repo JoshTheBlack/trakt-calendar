@@ -60,7 +60,7 @@ function applyMonthResponse(d) {
     (d.shows || []).forEach(s => { if (s.network && s.tmdb) networkTmdb[s.network] = s.tmdb; });
     applyReadonlyState(monthClosed, d.closed ? 'frozen' : (d.readonly ? 'untracked' : ''));
     renderNotice(d);
-    renderShowList(d.shows || []);
+    renderShowList(d.shows || [], d.movies || []);
     renderCopyBlocks(d.post1 || '', d.post2 || '');
     if (emojiEntries.length) renderEmojiRows();  // refresh emoji-row logos now we have tmdb
 }
@@ -124,9 +124,21 @@ async function importFromCalendar() {
 }
 
 // Delete a show from the tracker entirely (cleanup mistakes, incl. abandoned ones).
-async function deleteShow(traktId, season, event) {
+// A row the calendar put here is also marked not-watching there — otherwise a
+// preview month hands it straight back — so the confirm says so BEFORE the click
+// for those rows, and stays quiet about the calendar for a row this page owns.
+// The server has the last word (`hidden_on_calendar`), since a row predating the
+// provenance column only finds out by asking the calendar.
+async function deleteShow(traktId, season, event, source) {
+    // A closed month never touches the calendar, whatever the row says — see
+    // api_distrakt_remove. Only an open month can, and only for a calendar row.
+    const hides = !monthClosed && (source === 'calendar' || !source);
     confirmInline(event.currentTarget,
-        'Remove this show from the tracker for this month? This cannot be undone.',
+        hides
+            ? 'Remove this show and mark it not-watching on your calendar? This cannot be undone.'
+            : (monthClosed
+                ? 'Take this off what this month records? Your calendar is not touched. This cannot be undone.'
+                : 'Remove this show from the tracker for this month? This cannot be undone.'),
         async () => {
             try {
                 const res = await fetch('/api/distrakt/remove', {
@@ -136,7 +148,9 @@ async function deleteShow(traktId, season, event) {
                 });
                 const d = await res.json();
                 if (!d.ok) throw new Error(d.error || 'failed');
-                toast('Removed from tracker', true);
+                toast(d.hidden_on_calendar
+                    ? 'Removed — and hidden on your calendar'
+                    : (monthClosed ? 'Taken off this month' : 'Removed from tracker'), true);
                 applyMonthResponse(d);  // mutation returns the recomputed month (1d)
             } catch (e) {
                 toast('Could not remove show', false);
@@ -152,9 +166,12 @@ function applyReadonlyState(readonly, kind) {
     if (toolbar) toolbar.style.visibility = readonly ? 'hidden' : '';
     let note = document.getElementById('distraktFrozenNote');
     if (readonly) {
+        // Both states are read-only to the bucketing, but neither is a dead end
+        // any more: a finished show can be recorded by hand, and Backup →
+        // Backfill fills whole months in from watch history.
         const text = kind === 'untracked'
-            ? '🕗 Past month — not tracked (read-only). Months earlier than your first tracked month are never backfilled.'
-            : '🔒 Past month — frozen snapshot (read-only).';
+            ? '🕗 Past month — never tracked. Nothing is bucketed here, but you can record a finished show with ➕ Add show, or fill months in from watch history under Backup.'
+            : '🔒 Past month — frozen snapshot. ➕ Add show records something as finished during it.';
         if (!note) {
             note = document.createElement('div');
             note.id = 'distraktFrozenNote';
@@ -267,10 +284,11 @@ function renderNotice(d) {
     }
 }
 
-function renderShowList(shows) {
+function renderShowList(shows, movies) {
     const host = document.getElementById('distraktShowList');
-    if (!shows.length) {
-        host.innerHTML = '<div class="distrakt-empty">No shows tracked yet this month.</div>';
+    const films = movies || [];
+    if (!shows.length && !films.length) {
+        host.innerHTML = '<div class="distrakt-empty">Nothing tracked yet this month.</div>';
         return;
     }
     const groups = {};
@@ -298,8 +316,70 @@ function renderShowList(shows) {
             html += rows.slice().sort(cmp).map(showRow).join('');
         }
     });
+    // Films watched during the month, in their own block. They were being
+    // recorded, counted and imported while appearing nowhere on this page except
+    // buried in the POST 2 text, which reads exactly like them not being there.
+    if (films.length) {
+        html += `<div class="distrakt-bucket-head">Films</div>`;
+        html += films.slice().sort(byWatchedAt).map(filmRow).join('');
+    }
     host.innerHTML = html;
     setupTitleScroll(host);
+}
+
+function byWatchedAt(a, b) {
+    return String(a.watched_at || '').localeCompare(String(b.watched_at || ''));
+}
+
+// A watched film: no buckets, no counts, no progress — a play on a day. The one
+// control it has is ✕, because Trakt's history is not always right about what
+// was watched and there is no roster row to correct it through.
+function filmRow(m) {
+    const day = String(m.watched_at || '').slice(0, 10);
+    return `
+        <div class="distrakt-show-row distrakt-film-row">
+            <span class="distrakt-badge">🎬</span>
+            <span class="distrakt-title"><span class="tt">${esc(m.title || 'Untitled')}</span></span>
+            <span class="distrakt-season"></span>
+            <span class="distrakt-network">Film</span>
+            <span class="distrakt-counts">${esc(m.year || '')}</span>
+            <span class="distrakt-dates">${esc(day)}</span>
+            <span class="distrakt-row-actions">${m.trakt_id ? `
+                <button type="button" class="btn-ghost small danger" title="Remove this film"
+                        data-title="${esc(m.title || '')}"
+                        onclick="deleteFilm(${m.trakt_id}, this)">✕</button>` : ''}
+            </span>
+        </div>`;
+}
+
+// Forgets the watch itself: a film is held once, with its latest play, so there
+// is no month-by-month share of it to remove.
+//
+// The title comes off the button rather than being interpolated into the onclick
+// attribute: a film called "Good Luck, Have Fun, Don't Die" carries both quote
+// characters, and either one ends the attribute early and kills the handler.
+async function deleteFilm(traktId, button) {
+    const title = (button && button.dataset.title) || '';
+    confirmInline(button,
+        `Forget watching ${title || 'this film'}? It comes off every month and out of Rankings imports.`,
+        async () => {
+            try {
+                const res = await fetch('/api/distrakt/remove-movie', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        trakt_id: traktId,
+                        year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+                    }),
+                });
+                const d = await res.json();
+                if (!d.ok) throw new Error(d.error || 'failed');
+                toast('Film removed', true);
+                applyMonthResponse(d);
+            } catch (e) {
+                toast(e.message || 'Could not remove that film', false);
+            }
+        }, { danger: true });
 }
 
 function showRow(s) {
@@ -313,9 +393,14 @@ function showRow(s) {
     // Server couldn't refresh THIS show's totals (rate-limited/unreachable): don't
     // present its last-known numbers as a fresh read — blank them and flag it.
     if (s.unavailable) { counts = ''; dates = 'unavailable — refresh to retry'; }
-    const actions = monthClosed ? '' : `
-            <button type="button" class="btn-ghost small" onclick="toggleAbandon(${s.trakt_id}, ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>
-            <button type="button" class="btn-ghost small danger" onclick="deleteShow(${s.trakt_id}, ${s.season}, event)" title="Remove from tracker">✕</button>`;
+    // A closed month keeps its ✕ but loses the abandon toggle: what a past month
+    // RECORDS can still be corrected (a season you finished years ago and
+    // re-watched one episode of does not belong on its list), but its verdicts
+    // were settled when it froze and are not up for re-deciding now.
+    const remove = `
+            <button type="button" class="btn-ghost small danger" onclick="deleteShow(${s.trakt_id}, ${s.season}, event, '${s.source || ''}')" title="${monthClosed ? 'Remove from this month' : 'Remove from tracker'}">✕</button>`;
+    const actions = monthClosed ? remove : `
+            <button type="button" class="btn-ghost small" onclick="toggleAbandon(${s.trakt_id}, ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>` + remove;
     const net = s.network || '';
     // Prefer the TMDB network logo (shared cache with the calendar); if it isn't
     // cached (404) fall back to the mapped emoji token.
@@ -512,6 +597,12 @@ function openAddShow() {
     document.getElementById('addSearchInput').value = '';
     document.getElementById('addSearchResults').innerHTML = '';
     document.getElementById('addSeasonPick').hidden = true;
+    // A closed month has nothing live to bucket against, so adding to one means
+    // recording something as finished during it. Say which mode this is before
+    // anything is picked.
+    document.getElementById('addShowTitle').textContent =
+        monthClosed ? '➕ Add a finished show' : '➕ Add show';
+    document.getElementById('addShowCompletedNote').hidden = !monthClosed;
     pickedShow = null;
     document.getElementById('addShowModal').classList.add('open');
     document.getElementById('addSearchInput').focus();
@@ -606,8 +697,9 @@ function renderSeasons(seasons) {
 
 async function addPickedShow(season) {
     if (!pickedShow) return;
+    const asFinished = monthClosed;
     try {
-        const res = await fetch('/api/distrakt/add', {
+        const res = await fetch(asFinished ? '/api/distrakt/add-completed' : '/api/distrakt/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -618,11 +710,94 @@ async function addPickedShow(season) {
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
-        toast(`Added ${pickedShow.title} S${String(season).padStart(2, '0')}`, true);
+        const label = `${pickedShow.title} S${String(season).padStart(2, '0')}`;
+        toast(asFinished ? `Recorded ${label} as finished` : `Added ${label}`, true);
         closeAddShow();
         applyMonthResponse(d);  // mutation returns the recomputed month (1d)
     } catch (e) {
-        toast('Could not add show', false);
+        toast(e.message || 'Could not add show', false);
+    }
+}
+
+// ---- Add a film ----
+// Films have no roster, no buckets and no progress: one is a play on a day. So
+// this flow is a date and a search, and the month it lands in follows from the
+// date rather than from whichever month happens to be on screen.
+let movieSearchTimer = null;
+let movieResults = [];
+
+function openAddMovie() {
+    const input = document.getElementById('addMovieDate');
+    // Defaults to the month being looked at, since that is almost always the
+    // one being filled in — the 1st, or today when it is the current month.
+    const now = new Date();
+    const viewing = (now.getFullYear() === window.DISTRAKT_YEAR && (now.getMonth() + 1) === window.DISTRAKT_MONTH);
+    input.value = viewing
+        ? now.toISOString().slice(0, 10)
+        : `${window.DISTRAKT_YEAR}-${String(window.DISTRAKT_MONTH).padStart(2, '0')}-01`;
+    input.max = new Date().toISOString().slice(0, 10);
+    document.getElementById('addMovieSearch').value = '';
+    document.getElementById('addMovieResults').innerHTML = '';
+    movieResults = [];
+    document.getElementById('addMovieModal').classList.add('open');
+    document.getElementById('addMovieSearch').focus();
+}
+
+function closeAddMovie() {
+    document.getElementById('addMovieModal').classList.remove('open');
+}
+
+function onAddMovieSearchInput() {
+    clearTimeout(movieSearchTimer);
+    const q = document.getElementById('addMovieSearch').value.trim();
+    if (!q) { document.getElementById('addMovieResults').innerHTML = ''; return; }
+    movieSearchTimer = setTimeout(() => runMovieSearch(q), 300);
+}
+
+async function runMovieSearch(q) {
+    const host = document.getElementById('addMovieResults');
+    host.innerHTML = '<div class="distrakt-empty">Searching…</div>';
+    try {
+        const res = await fetch('/api/distrakt/search-movie?q=' + encodeURIComponent(q));
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'Search failed.');
+        movieResults = d.results || [];
+        host.innerHTML = movieResults.length
+            ? movieResults.map((r, i) => `
+                <div class="distrakt-search-row" onclick="addPickedMovie(${i})">
+                    <span class="distrakt-title">${esc(r.title)}</span>
+                    <span class="distrakt-year">${esc(r.year || '')}</span>
+                    <span class="distrakt-network">${r.runtime ? esc(r.runtime) + ' min' : ''}</span>
+                </div>`).join('')
+            : '<div class="distrakt-empty">No matches.</div>';
+    } catch (e) {
+        host.innerHTML = `<div class="distrakt-empty">${esc(e.message || 'Search failed.')}</div>`;
+    }
+}
+
+async function addPickedMovie(i) {
+    const picked = movieResults[i];
+    if (!picked) return;
+    try {
+        const res = await fetch('/api/distrakt/add-movie', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                trakt_id: picked.trakt_id, title: picked.title, year: picked.year,
+                watched_on: document.getElementById('addMovieDate').value,
+                // Which month to re-render afterwards: the one on screen, which
+                // is not necessarily the one the film was filed under.
+                year_view: window.DISTRAKT_YEAR, month_view: window.DISTRAKT_MONTH,
+            }),
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        const day = document.getElementById('addMovieDate').value;
+        toast(`Recorded ${picked.title} — watched ${day}`, true);
+        closeAddMovie();
+        applyMonthResponse(d);
+    } catch (e) {
+        toast(e.message || 'Could not add that film', false);
     }
 }
 
@@ -844,6 +1019,114 @@ async function restoreBackup() {
     }
 }
 
+// ---- Backfill months from watch history ----
+// Two steps on purpose: the check does all the Trakt work and the server keeps
+// the plan, so what you confirm is exactly what gets written — this page never
+// hands records back to be stored.
+let backfillReady = false;
+
+function setBackfillStatus(text, ok) {
+    const el = document.getElementById('backfillStatus');
+    el.textContent = text || '';
+    el.classList.toggle('distrakt-warn', ok === false);
+}
+
+async function loadBackfillRange() {
+    try {
+        const res = await fetch('/api/distrakt/backfill');
+        const d = await res.json();
+        if (!d.ok) return;
+        document.getElementById('backfillStart').value = d.start;
+        document.getElementById('backfillEnd').value = d.end;
+    } catch (e) { /* the fields still take a range typed by hand */ }
+}
+
+async function checkBackfill() {
+    const btn = document.getElementById('backfillCheckBtn');
+    const out = document.getElementById('backfillResult');
+    backfillReady = false;
+    out.hidden = true;
+    btn.disabled = true;
+    setBackfillStatus('Reading your watch history… this one takes a while.', true);
+    try {
+        const res = await fetch('/api/distrakt/backfill/survey', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                start: document.getElementById('backfillStart').value,
+                end: document.getElementById('backfillEnd').value,
+            }),
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        renderBackfillPlan(d);
+    } catch (e) {
+        setBackfillStatus(e.message || 'Could not read your watch history.', false);
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+function renderBackfillPlan(d) {
+    const out = document.getElementById('backfillResult');
+    const months = d.months || [];
+    if (!months.length) {
+        out.hidden = true;
+        setBackfillStatus(
+            `Nothing to add — looked at ${d.seasons_seen || 0} season(s)`
+            + (d.movies_known ? ` and ${d.movies_known} film(s), all already recorded` : '')
+            + `, and found nothing in that range that isn't already here.`, true);
+        return;
+    }
+    backfillReady = true;
+    // Films get their own line per month rather than one total at the end: they
+    // come from the same sweep, and a count you cannot see the contents of is
+    // not something to confirm.
+    out.innerHTML = months.map(m => {
+        const parts = [];
+        if (m.count) parts.push(`${m.count} finished`);
+        if (m.movie_count) parts.push(`${m.movie_count} film${m.movie_count === 1 ? '' : 's'}`);
+        // Said out loud rather than left out: a month whose films are all
+        // already recorded looks identical to one where none could be found.
+        if (m.movie_known) parts.push(`${m.movie_known} film${m.movie_known === 1 ? '' : 's'} already here`);
+        return `
+        <details class="distrakt-backfill-month">
+            <summary><strong>${esc(m.month)}</strong> — ${parts.join(', ') || 'nothing'}</summary>
+            <ul>${m.titles.map(t => `<li>${esc(t)}</li>`).join('')
+                + m.movie_titles.map(t => `<li>🎬 ${esc(t)}</li>`).join('')}</ul>
+        </details>`;
+    }).join('')
+        + `<p class="distrakt-note">${months.length} month(s), ${d.total} finished season(s)`
+        + (d.movies ? `, and ${d.movies} watched film(s)` : '')
+        + `.${(d.skipped || []).length ? ` Already tracked, left alone: ${d.skipped.join(', ')}.` : ''}</p>`
+        + `<button type="button" class="btn-ghost small" onclick="applyBackfill()">Write these months</button>`;
+    out.hidden = false;
+    setBackfillStatus('Nothing has been written yet.', true);
+}
+
+async function applyBackfill() {
+    if (!backfillReady) return;
+    setBackfillStatus('Writing…', true);
+    try {
+        const res = await fetch('/api/distrakt/backfill/apply', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        backfillReady = false;
+        document.getElementById('backfillResult').hidden = true;
+        setBackfillStatus(
+            `Wrote ${(d.months || []).length} month(s), ${d.shows} finished season(s)`
+            + (d.movies ? `, ${d.movies} film(s)` : '')
+            + '. Films import into Rankings on their own — switch "What to import" to Movies.', true);
+        toast('Months backfilled', true);
+        loadBackfillRange();
+    } catch (e) {
+        setBackfillStatus(e.message || 'Could not write those months.', false);
+        toast('Could not backfill', false);
+    }
+}
+
 // ---- Tabs ----
 function switchTab(name) {
     document.querySelectorAll('.distrakt-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
@@ -866,4 +1149,5 @@ document.addEventListener('DOMContentLoaded', async () => {
     await loadEmojiMap();
     loadPostLink();
     loadMonthData();
+    loadBackfillRange();
 });

@@ -18,7 +18,7 @@ import secrets
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import auth, db
+from . import auth, db, share_code
 from .endpoints import ENDPOINTS
 
 PREFERRED_KINDS = ("token", "username", "slug")
@@ -31,9 +31,17 @@ CARD_STYLES = ("vertical", "horizontal", "poster")
 DAY_PACKINGS = ("stacked", "packed")
 
 # Param name -> what counts as a usable value. `year`/`month` are navigation
-# rather than display and are deliberately absent: a link pinned to one month
-# would go stale the moment that month passed.
-LINK_VIEW_PARAMS = ("endpoint", "card", "packing", "hidenw", "tz")
+# rather than display, and pinning them does go stale once that month passes —
+# but "here is August" is exactly what a link handed round in July is for, so
+# they are offered as an explicit opt-in (both together, never one alone) and
+# left out of a link that has not asked for them, which then opens on whatever
+# month it is opened in.
+LINK_VIEW_PARAMS = ("endpoint", "card", "packing", "hidenw", "tz", "year", "month")
+
+# The years a link may be pinned to. Wide enough that a pinned link is never
+# rejected for being a couple of years old, narrow enough that a typo or a
+# hand-crafted body cannot publish a link to the year 40000.
+LINK_VIEW_YEAR_RANGE = (1970, 2100)
 
 # kind -> the column that gates whether that form of the link answers at all.
 _ENABLED_COLUMN = {"token": "enabled_token", "username": "enabled_username", "slug": "enabled_slug"}
@@ -199,6 +207,18 @@ def link_view_error(view: dict) -> str | None:
                 ZoneInfo(text)
             except (ZoneInfoNotFoundError, ValueError):
                 return "Unknown timezone."
+        if key == "year":
+            low, high = LINK_VIEW_YEAR_RANGE
+            if not (text.isdigit() and low <= int(text) <= high):
+                return f"Year must be between {low} and {high}."
+        if key == "month":
+            if not (text.isdigit() and 1 <= int(text) <= 12):
+                return "Month must be between 1 and 12."
+    # A month with no year would land on the current year and silently mean
+    # something different next January; a year with no month is not a month at
+    # all. Either alone is a link that does not do what its author set it to.
+    if ("year" in view) != ("month" in view):
+        return "Pin both a month and a year, or neither."
     return None
 
 
@@ -259,8 +279,14 @@ def build_url(row, username: str | None, base_url: str, kind: str,
     path = _form_path(row, kind, username)
     if path is None:
         return None
-    query = urlencode({k: params[k] for k in LINK_VIEW_PARAMS if params and k in params})
-    return f"{base}{path}?{query}" if query else f"{base}{path}"
+    view = {k: str(params[k]) for k in LINK_VIEW_PARAMS if params and k in params}
+    if not view:
+        return f"{base}{path}"
+    # The short form when it can carry this view, the long one when it can't —
+    # `p` is a nicer way to write a link, never the only way to express one.
+    if code := share_code.encode(view):
+        return f"{base}{path}?p={code}"
+    return f"{base}{path}?{urlencode(view)}"
 
 
 def share_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:
@@ -296,10 +322,18 @@ def post_link_url(row, username: str | None, base_url: str) -> str | None:
     return None
 
 
-def post_link_with_view(row, username: str | None, base_url: str) -> str | None:
+def post_link_with_view(row, username: str | None, base_url: str,
+                        *, year: int | None = None, month: int | None = None) -> str | None:
     """post_link_url plus the owner's chosen calendar view as a query param, so
     an announcement can point at the premieres list while the owner's own share
-    page defaults to something else."""
+    page defaults to something else.
+
+    `year`/`month` pin the link to the month the post is about — announcing
+    August means handing out August, and a post is read for weeks after it goes
+    up, by which time "whatever month it is opened in" is the wrong month. Pinned
+    unconditionally, including for a post written during the month it announces:
+    the link outlives the moment it was copied.
+    """
     urls = share_urls(row, username, base_url)
     kind = next(
         (k for k in ([row["post_link_kind"], row["preferred_kind"], *PREFERRED_KINDS] if row is not None else [])
@@ -309,8 +343,12 @@ def post_link_with_view(row, username: str | None, base_url: str) -> str | None:
     if kind is None:
         return None
     endpoint = row["post_link_endpoint"]
-    params = {"endpoint": endpoint} if endpoint and endpoint in ENDPOINTS else None
-    return build_url(row, username, base_url, kind, params)
+    params: dict[str, str] = {}
+    if endpoint and endpoint in ENDPOINTS:
+        params["endpoint"] = endpoint
+    if year and month:
+        params["year"], params["month"] = str(year), str(month)
+    return build_url(row, username, base_url, kind, params or None)
 
 
 async def slug_error(slug: str, *, exclude_user_id: int | None = None) -> str | None:

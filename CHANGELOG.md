@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.1.5] - 2026-07-28
+
+### Sharing
+- 🔗 **Share links are short again.** A link carrying every option used to run to a hundred characters of query string with two of them percent-encoded; the same link is now `…/c/testing?p=13F11010E2A7`. Opening it puts the ordinary address back in the address bar straight away, so what a visitor bookmarks, edits or re-shares is still the plain readable URL — and every long link handed out before this keeps working exactly as it did.
+- 📅 **Share one particular month.** "How the link opens" now has an **Opens on** setting: leave it as it was and the link lands on whichever month it's opened in, or pin it to a month and a year — hand round August and it opens on August, in September as much as in July. Whoever has the link can still page to any other month from there, and pinning changes only the link, never your own calendar.
+
+### 🥚
+- 🗓️ It can now be told about the months before it was paying attention, working them out from what you'd already watched. It shows you what it found before it keeps any of it, and what turns up counts towards the boards.
+- ➕ Something it had no way of knowing about can be put into an old month by hand — films included, now that films can be added at all — and anything that shouldn't have made it onto an old month can be taken back off.
+- 🎬 Films you watched are actually shown on the month, rather than only appearing tucked inside the text it writes for you.
+- ✅ It now minds *when* you got to the end of something, not just whether you did — so each month shows what you actually finished during it, rather than everything you'd ever finished.
+- 🔗 The link it writes points at the month it's talking about.
+- ✕ Taking something off a list now sticks.
+
 ## 🏷️ [1.1.4] - 2026-07-28
 
 ### Rankings

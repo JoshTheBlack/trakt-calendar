@@ -25,18 +25,20 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qsl, urlsplit
 
 os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-distrakt-gate-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, db, main, share_links  # noqa: E402
+from app import auth, db, main, share_code, share_links  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -55,6 +57,8 @@ DISTRAKT_GETS = (
     "/api/distrakt/seasons",
     "/api/distrakt/export",
     "/api/distrakt/share-link",
+    "/api/distrakt/backfill",
+    "/api/distrakt/search-movie",
 )
 
 DISTRAKT_POSTS = (
@@ -66,6 +70,11 @@ DISTRAKT_POSTS = (
     "/api/distrakt/abandon",
     "/api/distrakt/restore",
     "/api/distrakt/share-link",
+    "/api/distrakt/add-completed",
+    "/api/distrakt/backfill/survey",
+    "/api/distrakt/backfill/apply",
+    "/api/distrakt/add-movie",
+    "/api/distrakt/remove-movie",
 )
 
 
@@ -424,15 +433,33 @@ class Post1ShareLinkTests(DistraktTestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.json()["post1"]
 
+    def _embedded_link(self) -> tuple[str, dict]:
+        """The URL the post embeds, split into (origin + path, what it asks for).
+
+        The post link is always pinned to the month it announces and handed out
+        as a `?p=` code, so the assertions below are about where it points and
+        what it says rather than about the exact characters."""
+        match = re.search(r"<(https?://[^>]+)>", self._post1())
+        self.assertIsNotNone(match, "no link embedded in post 1")
+        parts = urlsplit(match.group(1))
+        query = dict(parse_qsl(parts.query))
+        view = share_code.decode(query["p"]) if "p" in query else query
+        return f"{parts.scheme}://{parts.netloc}{parts.path}", view
+
+    def _assert_points_at(self, path: str):
+        url, view = self._embedded_link()
+        self.assertEqual(url, f"{self.BASE}{path}")
+        return view
+
     def test_the_default_link_is_the_form_the_share_panel_prefers(self):
         row = asyncio.run(share_links.get_or_create(self.user_id))
-        self.assertIn(f"<{self.BASE}/s/{row['token']}>", self._post1())
+        self._assert_points_at(f"/s/{row['token']}")
 
     def test_the_selector_switches_which_form_is_embedded(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         resp = self.client.post("/api/distrakt/share-link", json={"kind": "username"})
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(f"<{self.BASE}/u/poster>", self._post1())
+        self._assert_points_at("/u/poster")
 
     def test_the_choice_is_remembered_per_user(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
@@ -449,12 +476,20 @@ class Post1ShareLinkTests(DistraktTestCase):
         self.client.post("/api/distrakt/share-link", json={"kind": ""})
         row = asyncio.run(share_links.get(self.user_id))
         self.assertIsNone(row["post_link_kind"])
-        self.assertIn(f"<{self.BASE}/s/{row['token']}>", self._post1())
+        self._assert_points_at(f"/s/{row['token']}")
 
-    def test_the_view_option_rides_along_in_the_query_string(self):
+    def test_the_view_option_rides_along_in_the_link(self):
         resp = self.client.post("/api/distrakt/share-link", json={"endpoint": "shows/premieres"})
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("?endpoint=shows%2Fpremieres>", self._post1())
+        _, view = self._embedded_link()
+        self.assertEqual(view["endpoint"], "shows/premieres")
+
+    def test_the_link_is_pinned_to_the_month_the_post_announces(self):
+        """A post is read for weeks after it goes up. "Whatever month it is
+        opened in" is the wrong month by then — even for a post written during
+        the month it announces."""
+        _, view = self._embedded_link()
+        self.assertEqual((view.get("year"), view.get("month")), ("2026", "7"))
 
     def test_the_two_controls_save_independently(self):
         """Each field is only written when it is present, so changing the view
@@ -479,7 +514,7 @@ class Post1ShareLinkTests(DistraktTestCase):
         self.client.post("/api/distrakt/share-link", json={"kind": "username"})
         asyncio.run(share_links.set_enabled(self.user_id, "username", False))
         row = asyncio.run(share_links.get(self.user_id))
-        self.assertIn(f"<{self.BASE}/s/{row['token']}>", self._post1())
+        self._assert_points_at(f"/s/{row['token']}")
 
     def test_no_public_base_url_omits_the_link_cleanly(self):
         """With nowhere to point, the post is simply the two lists it always

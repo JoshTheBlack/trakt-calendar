@@ -32,7 +32,7 @@ os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import auth, calendar_state, db, distrakt  # noqa: E402
+from app import auth, calendar_state, db, distrakt, watch_history  # noqa: E402
 
 TMP = Path(_TMP_DATA)
 SETTINGS = SimpleNamespace(configured=True, network_emojis={}, default_network_emoji=":tv:",
@@ -529,6 +529,104 @@ class StampRefreshedTests(RolloverTestCase):
 
         self.assertFalse(distrakt.is_stale(await distrakt.load_month(self.user_id, "2026-07")))
         self.assertTrue(distrakt.is_stale(await distrakt.load_month(other, "2026-07")))
+
+
+class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
+    """Completed means completed THIS month.
+
+    Rollover refuses to carry a completed show into a new month, but it decides
+    that once, when the month is created. A show carried into August during the
+    July preview and finished in July afterwards stayed on August's roster and,
+    being fully watched, sat in August's Completed for good — and in September's,
+    and every month opened early after that.
+    """
+
+    async def _roster(self, month: str, *, completed_on: str) -> list[dict]:
+        await distrakt.add_show(self.user_id, month, {
+            "trakt_id": 700, "season": 1, "slug": "slug-700", "title": "Finished",
+            "network": "Net", "media": "show",
+        })
+        doc = await distrakt.load_month(self.user_id, month)
+        shows = [{**s, "watched": 8, "total": 8, "bucket": "completed",
+                  "completed_on": completed_on} for s in doc["shows"]]
+        return await distrakt.drop_seasons_finished_earlier(self.user_id, month, shows)
+
+    async def test_a_season_finished_last_month_leaves_this_month(self):
+        kept = await self._roster("2026-08", completed_on="2026-07-30")
+        self.assertEqual(kept, [])
+        # and the roster row goes with it, so it stops costing a season fetch
+        doc = await distrakt.load_month(self.user_id, "2026-08")
+        self.assertEqual(doc["shows"], [])
+
+    async def test_a_season_finished_this_month_stays(self):
+        kept = await self._roster("2026-08", completed_on="2026-08-01")
+        self.assertEqual([s["trakt_id"] for s in kept], [700])
+
+    async def test_a_future_month_does_not_inherit_it_either(self):
+        """September opened in July showed the same rows for the same reason."""
+        self.assertEqual(await self._roster("2026-09", completed_on="2026-08-06"), [])
+
+    async def test_a_season_with_no_known_finish_date_is_left_alone(self):
+        """A show whose history has not been re-baselined yet has no date to
+        judge by, and guessing would silently delete a roster row."""
+        kept = await self._roster("2026-08", completed_on="")
+        self.assertEqual([s["trakt_id"] for s in kept], [700])
+
+    async def test_the_whole_path_from_watch_history_to_the_month_payload(self):
+        """The reported bug, through the real machinery: watch history says the
+        season was finished on 30 July, the show is on August's roster, and
+        August must not show it.
+
+        Only Trakt itself is mocked — the watch-history cache, the completion
+        dates it derives, the bucketing and the payload assembly are all real.
+        """
+        from app import main
+
+        await distrakt.add_show(self.user_id, "2026-08", {
+            "trakt_id": 102, "season": 1, "slug": "slug-102", "title": "Finished In July",
+            "network": "Net", "media": "show", "tmdb": 1,
+        })
+        # 8 of 8 episodes, the last of them watched on 30 July.
+        progress = {1: {n: f"2026-07-{n + 10:02d}T00:00:00Z" for n in range(1, 8)}}
+        progress[1][8] = "2026-07-30T20:00:00Z"
+
+        async def no_premieres(endpoint, settings, **kw):
+            return [], None
+
+        # The payload builds the post's share link too, which reads a couple of
+        # fields the rest of this file's SETTINGS stand-in has never needed.
+        settings = SimpleNamespace(**vars(SETTINGS), public_base_url="")
+
+        with patch("app.trakt.fetch_show_progress_detail", return_value=progress), \
+             patch("app.trakt.fetch_last_activities", return_value={}), \
+             patch("app.trakt.fetch_history", return_value=[]), \
+             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.calendar_cache.read_month", side_effect=no_premieres), \
+             patch("app.logos.ensure_logos", new=AsyncMock(return_value=None)):
+            payload, status = await main._distrakt_month_payload(self.user_id, 2026, 8, settings)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["shows"], [])
+        self.assertEqual(await self._keys(await distrakt.load_month(self.user_id, "2026-08")), set())
+
+    async def test_only_a_finished_season_carries_a_finish_date(self):
+        """The date comes from the last episode watched, which on a partly
+        watched season is just "last time I watched something" — compute_live_shows
+        keeps it only for a season it has bucketed as completed, so a half-watched
+        show can never be dropped by this rule."""
+        state = {"shows": {"102": {"1": {"1": "2026-07-02T00:00:00Z"}}}}
+        self.assertEqual(watch_history.season_completed_map(state), {(102, 1): "2026-07-02"})
+
+        # 102's season has 8 episodes; one of them is watched.
+        records = [{"trakt_id": 102, "season": 1, "title": "Half", "slug": "s"}]
+        with patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
+            shows = await distrakt.compute_live_shows(
+                self.user_id, records, SETTINGS,
+                watched_lookup={(102, 1): 1},
+                completed_lookup=watch_history.season_completed_map(state),
+            )
+        self.assertNotEqual(shows[0]["bucket"], "completed")
+        self.assertEqual(shows[0]["completed_on"], "")
 
 
 if __name__ == "__main__":

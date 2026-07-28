@@ -114,6 +114,9 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
 .distrakt-counts { flex: 0 0 auto; width: 6em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 .distrakt-dates { flex: 0 0 auto; width: 8.5em; text-align: right; white-space: nowrap; color: var(--text-faint); font-variant-numeric: tabular-nums; }
 .distrakt-row-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+/* A watched film: same row shape as a show so the columns line up, but nothing
+   to open and nothing to act on — it is a play that happened on a day. */
+.distrakt-film-row { cursor: default; }
 
 .distrakt-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .distrakt-section-head h2 { margin: 0; }

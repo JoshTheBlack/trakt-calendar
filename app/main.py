@@ -42,6 +42,7 @@ from . import calendar_state
 from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
+from . import distrakt_backfill
 from . import encryption_flow
 from . import encryption_routes
 from . import logos
@@ -73,6 +74,7 @@ from .trakt import (
     fetch_tile_info,
     fetch_watched_map,
     search_shows,
+    search_titles,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,7 +93,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
-VERSION = "1.1.4"  # keep in sync with CHANGELOG.md
+VERSION = "1.1.5"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 COMMIT = os.environ.get("APP_COMMIT", "").strip()
@@ -669,6 +671,9 @@ async def calendar_page(request: Request):
         "year": year,
         "month": month,
         "month_label": calendar.month_name[month],
+        # For the Share panel's "opens on" month picker, which names months
+        # rather than numbering them.
+        "month_names": [calendar.month_name[m] for m in range(1, 13)],
         "nav": _nav(year, month),
         # The days rendered INLINE. `grouped` (the whole month) is what every
         # number on the page is computed from; this is only what is painted now.
@@ -1568,14 +1573,18 @@ async def _distrakt_settings(user_id: int):
     )
 
 
-async def _distrakt_post_link(user_id: int, settings) -> str | None:
+async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> str | None:
     """The public calendar link this user's announcement post embeds, or None when
     they have nothing publishable — no configured public base URL, or every link
-    form switched off. Omitted rather than rendered empty in that case."""
+    form switched off. Omitted rather than rendered empty in that case.
+
+    Pinned to the month the post announces, so a post read in September still
+    opens on the August it is about."""
     row = await share_links.get_or_create(user_id)
     user = await auth.get_user(user_id)
     return share_links.post_link_with_view(
         row, user["username"] if user else None, settings.public_base_url,
+        year=year, month=month,
     )
 
 
@@ -1638,6 +1647,7 @@ def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
     and read-only rather than retroactively populating from Trakt."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
+        "movies": [],
         "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2([], emojis, default_emoji),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1666,6 +1676,10 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         "closed": bool(doc and doc.get("closed")),
         "readonly": False,
         "shows": shows,
+        # The films watched that month travel WITH the month, not just inside the
+        # POST 2 text: they were being recorded, counted and imported while never
+        # appearing anywhere on the page, which reads as them not being there.
+        "movies": (doc or {}).get("movies") or [],
         "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=(doc or {}).get("movies")),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1690,7 +1704,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     http_status)."""
     today = date.today()
     month_key = _month_key(year, month)
-    link_url = await _distrakt_post_link(user_id, settings)
+    link_url = await _distrakt_post_link(user_id, settings, year, month)
     # This user's own map, fetched once and handed to every render below. It is
     # not on `settings` any more — see _distrakt_settings.
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
@@ -1723,6 +1737,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies"))
             return {
                 "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
+                "movies": doc.get("movies") or [],
                 "post1": post1, "post2": post2, "generated_at": datetime.now(timezone.utc).isoformat(),
             }, 200
 
@@ -1754,6 +1769,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         # Sync the incremental watch-history cache ONCE (gated by /sync/last_activities).
         # Reuse it for both watched counts and the month's watched-movies list.
         watched_lookup: dict = {}
+        completed_lookup: dict = {}
         movies: list[dict] = []
         if settings.configured:
             with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
@@ -1761,6 +1777,9 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
                     settings, user_id, [r["trakt_id"] for r in records], force=force_fresh, today=today,
                 )
                 watched_lookup = watch_history.watched_map(state)
+                # When each season was finished, for the "Completed means
+                # completed THIS month" rule below.
+                completed_lookup = watch_history.season_completed_map(state)
                 mstart, mend = watch_history.month_bounds(month_key)
                 movies = watch_history.movies_in_range(state, mstart, mend)
                 sp.set(watched_keys=len(watched_lookup), movies=len(movies))
@@ -1768,8 +1787,11 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
             # allow_degrade: a per-show season 429 marks THAT show unavailable and
             # renders the rest, instead of failing the whole roster.
-            shows = await distrakt_store.compute_live_shows(user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup, allow_degrade=True) if records else []
+            shows = await distrakt_store.compute_live_shows(user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup, allow_degrade=True, completed_lookup=completed_lookup) if records else []
         shows = await _apply_not_watching(user_id, month_key, shows, committed)
+        # A season finished before this month began belongs to the month it was
+        # finished in, not to this one — see drop_seasons_finished_earlier.
+        shows = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
         if records and season_fresh:
             await distrakt_store.stamp_refreshed(user_id, month_key)
 
@@ -1790,6 +1812,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             "closed": False,
             "readonly": False,
             "shows": shows,
+            "movies": movies,
             "post1": post1,
             "post2": post2,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -2001,8 +2024,29 @@ async def api_distrakt_set_emojis(request: Request):
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_remove(request: Request):
-    """Delete a show+season from an OPEN month (cleanup mistakes / abandons).
-    Frozen past months are read-only."""
+    """Delete a show+season from a month (cleanup mistakes / abandons), and for a
+    row the CALENDAR put there in an OPEN month, mark the show not-watching on
+    the calendar as well.
+
+    That mark is not a bonus, it is what makes such a removal STICK. A preview
+    month (before the 1st) re-imports the month's premieres on every load, and
+    the not-watching set is the only thing import_premieres skips — so deleting
+    the row alone put it straight back in the same response and the ✕ looked
+    broken.
+
+    It is deliberately NOT written for a row the user added by hand or one that
+    came from their watch history: neither is re-imported, so removing them
+    already sticks, and hiding a show on the calendar because someone undid a
+    manual add would take away something they never said they weren't watching.
+    A row from before `source` was recorded is resolved by asking the calendar
+    whether it would hand that show straight back (see is_calendar_premiere).
+
+    A CLOSED month never writes that mark, whatever the row says. Correcting what
+    a past month records is a statement about that month and nothing else — a
+    season you finished years ago and re-watched one episode of does not belong
+    on March's list, but it also is not something to start hiding from your
+    calendar today. The row goes; the month stays closed.
+    """
     user_id = await _distrakt_user_id(request)
     try:
         data = await request.json()
@@ -2020,11 +2064,30 @@ async def api_distrakt_remove(request: Request):
     doc = await distrakt_store.load_month(user_id, month_key)
     if doc is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
-    if doc.get("closed"):
-        return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
+    # Read before removing: both the provenance and the key the mark is written
+    # under (slug, falling back to the trakt id, exactly as the calendar keys its
+    # own items) live on the record that is about to go.
+    record = next((s for s in (doc.get("shows") or [])
+                   if int(s["trakt_id"]) == trakt_id and int(s["season"]) == season), None)
     if not await distrakt_store.remove_show(user_id, month_key, trakt_id, season):
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
-    payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id))  # recomputed month (1d)
+
+    settings = await _distrakt_settings(user_id)
+    closed = bool(doc.get("closed"))
+    source = str((record or {}).get("source") or "")
+    hide_on_calendar = not closed and source == distrakt_store.SOURCE_CALENDAR
+    if record is not None and not source and not closed:
+        hide_on_calendar = await distrakt_store.is_calendar_premiere(
+            user_id, month_key, settings, trakt_id, season,
+        )
+    if hide_on_calendar:
+        await calendar_state.set_not_watching(
+            user_id, str(record.get("slug") or trakt_id), True,
+        )
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
+    # So the toast can say what actually happened rather than guessing.
+    if isinstance(payload, dict):
+        payload["hidden_on_calendar"] = hide_on_calendar
     return JSONResponse(payload, status_code=status)
 
 
@@ -2039,6 +2102,129 @@ async def api_distrakt_search(request: Request):
     except TraktError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
     return JSONResponse({"ok": True, "results": results})
+
+
+@guard.get("/api/distrakt/search-movie", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_search_movie(request: Request):
+    """Film search for the add-a-film flow. Its own route rather than a media
+    flag on the show search, because what comes back is a different shape with
+    no seasons in it and the caller does something else entirely with it."""
+    settings = await _distrakt_settings(await _distrakt_user_id(request))
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    q = request.query_params.get("q", "")
+    try:
+        found = await search_titles(settings, "movie", q)
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
+    results = [
+        {"trakt_id": entry["ids"]["trakt"], "title": entry["title"],
+         "year": entry["year"], "runtime": entry.get("runtime")}
+        for entry in found if (entry.get("ids") or {}).get("trakt")
+    ]
+    return JSONResponse({"ok": True, "results": results})
+
+
+@guard.post("/api/distrakt/add-movie", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_add_movie(request: Request):
+    """Record a film as watched on a day, by hand.
+
+    Films are not a roster the way shows are — there is nothing to bucket, no
+    progress to follow and no season to finish. One is simply a play that
+    happened on a date, so this writes the same watch-history record the sweep
+    writes and nothing else. The month it shows up in follows from the date,
+    exactly as it does for a film Trakt reported itself.
+
+    The date is required rather than defaulted to today: a film added while
+    looking at March is a film watched in March, and quietly stamping it with
+    today's date would file it under a month the user is not even looking at.
+    """
+    user_id = await _distrakt_user_id(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    try:
+        trakt_id = int(data["trakt_id"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id"}, status_code=400)
+    day = str(data.get("watched_on") or "").strip()
+    try:
+        watched_on = date.fromisoformat(day)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Pick the day you watched it."}, status_code=400)
+    if watched_on > date.today():
+        return JSONResponse({"ok": False, "error": "That day hasn't happened yet."}, status_code=400)
+
+    await watch_history.record_movie_watches(user_id, [{
+        "trakt_id": trakt_id,
+        "title": data.get("title") or "",
+        "year": data.get("year"),
+        "watched_at": f"{watched_on.isoformat()}T12:00:00Z",
+    }])
+    # A CLOSED month renders films from its own snapshot, so it has to be told;
+    # an open one recomputes them on every load and needs nothing.
+    month_key = f"{watched_on.year:04d}-{watched_on.month:02d}"
+    doc = await distrakt_store.load_month(user_id, month_key)
+    if doc is not None and doc.get("closed"):
+        state = await watch_history.load_state(user_id)
+        mstart, mend = watch_history.month_bounds(month_key)
+        await distrakt_store.set_month_movies(
+            user_id, month_key, watch_history.movies_in_range(state, mstart, mend))
+
+    today = date.today()
+    year = _valid_year(data.get("year_view"), today.year)
+    month = _valid_month(data.get("month_view"), today.month)
+    payload, status = await _distrakt_month_payload(
+        user_id, year, month, await _distrakt_settings(user_id))
+    return JSONResponse(payload, status_code=status)
+
+
+@guard.post("/api/distrakt/remove-movie", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_remove_movie(request: Request):
+    """Forget a watched film — from a past month as readily as the current one.
+
+    Trakt's history is not always right about what was watched, and a film it
+    reports wrongly has nowhere else to be corrected: unlike a show there is no
+    roster row to take off, only the watch record itself. So this removes that,
+    and re-snapshots whichever CLOSED month had been carrying it.
+
+    A film is held once per id with its latest play, so this forgets the watch
+    rather than one month's share of it. It does not remember the decision: a
+    later backfill sweep over the same range will see Trakt still reporting the
+    film and offer it back — in a plan that has to be confirmed, not silently.
+    """
+    user_id = await _distrakt_user_id(request)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    try:
+        trakt_id = int(data["trakt_id"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id"}, status_code=400)
+
+    watched_at = await watch_history.forget_movie_watch(user_id, trakt_id)
+    if watched_at is None:
+        return JSONResponse({"ok": False, "error": "No such film on record."}, status_code=404)
+
+    # The month it was filed under renders films from its own snapshot once
+    # closed, so that snapshot is what has to be rebuilt — not necessarily the
+    # month being looked at.
+    month_key = watched_at[:7]
+    doc = await distrakt_store.load_month(user_id, month_key) if month_key else None
+    if doc is not None and doc.get("closed"):
+        state = await watch_history.load_state(user_id)
+        mstart, mend = watch_history.month_bounds(month_key)
+        await distrakt_store.set_month_movies(
+            user_id, month_key, watch_history.movies_in_range(state, mstart, mend))
+
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    payload, status = await _distrakt_month_payload(
+        user_id, year, month, await _distrakt_settings(user_id))
+    return JSONResponse(payload, status_code=status)
 
 
 @guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
@@ -2093,6 +2279,9 @@ async def api_distrakt_add(request: Request):
             "title": data.get("title") or "",
             "network": data.get("network") or "",
             "media": "show",
+            # Added by hand, so removing it later says nothing about the
+            # calendar — see api_distrakt_remove.
+            "source": distrakt_store.SOURCE_MANUAL,
         }
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
@@ -2113,6 +2302,145 @@ async def api_distrakt_add(request: Request):
         logger.warning("baseline_show failed for %s", show["trakt_id"], exc_info=True)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     return JSONResponse(payload, status_code=status)
+
+
+@guard.post("/api/distrakt/add-completed", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_add_completed(request: Request):
+    """Record a show+season as FINISHED in a past month, whatever watch history says.
+
+    The manual counterpart to the history backfill, for what a sweep cannot know:
+    a season watched somewhere that never reached Trakt, a play logged against
+    the wrong date, a show the history call simply did not return. It states
+    outright that it is not consulting history — the caller is the authority
+    here, which is why this is its own route rather than a flag on the ordinary
+    add, whose whole job is to let the buckets work the answer out.
+
+    Deliberately allowed to create a month that `can_initialize` would refuse.
+    That guard exists to stop month-nav from silently inventing history; this is a
+    person saying "January had this in it", which is the case it was never meant
+    to cover. Past months only: the current month is the tracker's own to bucket.
+
+    The episode total comes from Trakt's season detail, not from the caller — a
+    frozen month's counts are never recomputed, so a wrong one is wrong forever
+    and would reach the ranker import as a wrong episode count.
+    """
+    user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    try:
+        data = await request.json()
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    today = date.today()
+    year = _valid_year(data.get("year"), today.year)
+    month = _valid_month(data.get("month"), today.month)
+    month_key = _month_key(year, month)
+    if month_key >= _month_key(today.year, today.month):
+        return JSONResponse(
+            {"ok": False, "error": "Only a past month can be filled in by hand."},
+            status_code=400)
+    try:
+        trakt_id = int(data["trakt_id"])
+        season = int(data["season"])
+    except (KeyError, TypeError, ValueError):
+        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+
+    try:
+        detail = await fetch_season_detail(settings, trakt_id, season)
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
+    total = int((detail or {}).get("total") or 0)
+    if not total:
+        return JSONResponse(
+            {"ok": False, "error": "Trakt lists no episodes for that season, so it cannot be recorded as finished."},
+            status_code=400)
+
+    await distrakt_store.add_show(user_id, month_key, {
+        "trakt_id": trakt_id,
+        "tmdb": data.get("tmdb"),
+        "slug": data.get("slug") or "",
+        "title": data.get("title") or "",
+        "season": season,
+        "network": data.get("network") or "",
+        "media": "show",
+        "watched": total,
+        "total": total,
+        "cadence": (detail or {}).get("cadence"),
+        "premiere": (detail or {}).get("premiere"),
+        "finale": (detail or {}).get("finale"),
+        "started_airing": True,
+        "finished_airing": True,
+        "bucket": "completed",
+        "source": distrakt_store.SOURCE_MANUAL,
+    })
+    # add_show leaves an existing month's `closed` alone and creates a new one
+    # open; either way a hand-filled past month ends up closed, like every other
+    # past month, so it renders and imports with no further Trakt calls.
+    doc = await distrakt_store.load_month(user_id, month_key)
+    if doc is not None and not doc.get("closed"):
+        doc["closed"] = True
+        doc["totals_refreshed_at"] = db.now()
+        await distrakt_store.save_month(user_id, doc)
+    await _register_networks(user_id, [data.get("network") or ""])
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
+    return JSONResponse(payload, status_code=status)
+
+
+@guard.get("/api/distrakt/backfill", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_backfill_range(request: Request):
+    """The range the backfill dialog opens on, and what is already tracked."""
+    user_id = await _distrakt_user_id(request)
+    tracked = await distrakt_store.list_months(user_id)
+    start, end = distrakt_backfill.default_range()
+    return JSONResponse({"ok": True, "start": start, "end": end, "tracked": tracked})
+
+
+@guard.post("/api/distrakt/backfill/survey", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_backfill_survey(request: Request):
+    """Work out what a backfill of {start, end} would write, and write nothing.
+
+    The expensive half: one history sweep plus a lookup per show and per season.
+    The plan it produces is kept server-side for /apply, so the summary the user
+    confirms is the same set of records that gets written, and the client never
+    hands records back to be stored.
+    """
+    user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
+    if not settings.configured:
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    try:
+        data = await request.json()
+    except ValueError:
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    tracked = await distrakt_store.list_months(user_id)
+    default_start, default_end = distrakt_backfill.default_range()
+    start = distrakt_backfill.valid_month(data.get("start")) or default_start
+    end = distrakt_backfill.valid_month(data.get("end")) or default_end
+    if not distrakt_backfill.month_range(start, end):
+        return JSONResponse(
+            {"ok": False, "error": "That range covers no months — check the order."},
+            status_code=400)
+    try:
+        plan = await distrakt_backfill.survey(user_id, settings, start, end)
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
+    return JSONResponse({"ok": True, **distrakt_backfill.summarize(plan)})
+
+
+@guard.post("/api/distrakt/backfill/apply", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_backfill_apply(request: Request):
+    """Write the surveyed plan. Refuses if there isn't one — the survey is the
+    only thing that can produce records, and it expires."""
+    user_id = await _distrakt_user_id(request)
+    try:
+        written = await distrakt_backfill.apply(user_id)
+    except distrakt_backfill.BackfillExpired as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
+    months = await distrakt_store.list_months(user_id)
+    return JSONResponse({"ok": True, **written, "tracked": months})
 
 
 @guard.post("/api/distrakt/abandon", AuthLevel.DISTRAKT_APPROVED)

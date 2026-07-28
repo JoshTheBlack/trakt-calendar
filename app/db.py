@@ -1006,6 +1006,43 @@ MIGRATION_15 = """
 ALTER TABLE users ADD COLUMN display_name TEXT;
 """
 
+# Migration 16 — where a roster row came from.
+#
+# Removing a row from the tracker also marks the show not-watching on the
+# calendar, because on a preview month the roster re-imports the month's
+# premieres on every load and that mark is the only thing the import skips —
+# without it the row came straight back and the ✕ looked broken. But that mark
+# hides the show on the calendar too, which is right for a row the calendar put
+# there and wrong for one the user added by hand: removing a mistaken manual add
+# must not quietly hide a show they still want to see.
+#
+# So each row records who added it: 'calendar' (premiere import), 'history'
+# (in-progress from watch history), 'manual' (added on the tracker), or '' for a
+# row written before this column existed. Only 'calendar' rows write the mark;
+# see app/main.py's api_distrakt_remove for how the legacy '' case is resolved.
+MIGRATION_16 = """
+ALTER TABLE distrakt_shows ADD COLUMN source TEXT NOT NULL DEFAULT '';
+"""
+
+# Migration 17 — drop the cached episode progress so it is re-baselined WITH the
+# dates each episode was watched.
+#
+# distrakt_show_progress.watched_episodes_json held a bare list of episode
+# numbers, which cannot answer the question the Completed bucket actually asks:
+# was this season finished THIS month? Without it, a season finished in July sat
+# in August's Completed for good. The column now holds {episode: watched_at}.
+#
+# The rows are a CACHE of Trakt's own answer, so the honest fix is to throw them
+# away rather than migrate undated data into a dated shape: watch_history's
+# sync_and_baseline re-baselines any roster show it finds no progress for, from
+# /shows/{id}/progress/watched, which carries last_watched_at per episode. The
+# cost is one slower tracker load per user, once, after which past months read
+# correctly too. Nothing here is user-entered — there is nothing to lose.
+MIGRATION_17 = """
+DELETE FROM distrakt_show_progress;
+"""
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -1025,6 +1062,8 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (13, MIGRATION_13),
     (14, MIGRATION_14),
     (15, MIGRATION_15),
+    (16, MIGRATION_16),
+    (17, MIGRATION_17),
 ]
 
 

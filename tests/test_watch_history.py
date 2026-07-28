@@ -50,21 +50,31 @@ async def _make_user(username: str) -> int:
 
 class PureStateTests(unittest.TestCase):
     def test_watched_map_counts_len(self):
-        state = {"shows": {"101": {"1": [1, 2, 3], "2": [1]}}}
+        state = {"shows": {"101": {"1": {"1": "", "2": "", "3": ""}, "2": {"1": ""}}}}
         self.assertEqual(wh.watched_map(state), {(101, 1): 3, (101, 2): 1})
 
     def test_apply_episode_dedups_and_skips_untracked(self):
-        state = {"shows": {"101": {"1": [1, 2]}}}
+        state = {"shows": {"101": {"1": {"1": "", "2": ""}}}}
         wh._apply_episode(state, 101, 1, 2)   # already known -> no change
         wh._apply_episode(state, 101, 1, 3)   # new -> added
         wh._apply_episode(state, 999, 1, 1)   # untracked show -> ignored
-        self.assertEqual(state["shows"]["101"]["1"], [1, 2, 3])
+        self.assertEqual(sorted(state["shows"]["101"]["1"]), ["1", "2", "3"])
         self.assertNotIn("999", state["shows"])
 
+    def test_apply_episode_keeps_the_latest_date_for_an_episode(self):
+        """Same rule as movies. Re-watching a season's last episode this month is
+        finishing it this month, and an undated play never erases a date."""
+        state = {"shows": {"101": {"1": {}}}}
+        wh._apply_episode(state, 101, 1, 4, "2026-07-01T00:00:00Z")
+        wh._apply_episode(state, 101, 1, 4, "2026-08-09T00:00:00Z")  # later -> wins
+        wh._apply_episode(state, 101, 1, 4, "2026-06-01T00:00:00Z")  # earlier -> ignored
+        wh._apply_episode(state, 101, 1, 4)                          # undated -> ignored
+        self.assertEqual(state["shows"]["101"]["1"]["4"], "2026-08-09T00:00:00Z")
+
     def test_apply_episode_new_season_on_tracked_show(self):
-        state = {"shows": {"101": {"1": [1]}}}
-        wh._apply_episode(state, 101, 2, 1)
-        self.assertEqual(state["shows"]["101"]["2"], [1])
+        state = {"shows": {"101": {"1": {"1": ""}}}}
+        wh._apply_episode(state, 101, 2, 1, "2026-07-04T00:00:00Z")
+        self.assertEqual(state["shows"]["101"]["2"], {"1": "2026-07-04T00:00:00Z"})
 
     def test_apply_movie_keeps_latest_watched_at(self):
         state = {"movies": {}}
@@ -74,11 +84,24 @@ class PureStateTests(unittest.TestCase):
         self.assertEqual(state["movies"]["5"]["watched_at"], "2026-07-09T00:00:00Z")
 
     def test_apply_event_dispatch(self):
-        state = {"shows": {"101": {"1": []}}, "movies": {}}
+        state = {"shows": {"101": {"1": {}}}, "movies": {}}
         wh._apply_event(state, _ep_event(101, 1, 4))
         wh._apply_event(state, _mv_event(7, "Movie", 2024, "2026-07-15T00:00:00Z"))
-        self.assertEqual(state["shows"]["101"]["1"], [4])
+        self.assertEqual(list(state["shows"]["101"]["1"]), ["4"])
         self.assertEqual(state["movies"]["7"]["title"], "Movie")
+
+    def test_season_completed_map_is_the_day_the_last_episode_was_watched(self):
+        state = {"shows": {"101": {
+            "1": {"1": "2026-07-02T00:00:00Z", "2": "2026-08-06T12:00:00Z"},
+            "2": {"1": "", "2": ""},          # nothing dated -> no answer at all
+        }}}
+        self.assertEqual(wh.season_completed_map(state), {(101, 1): "2026-08-06"})
+
+    def test_season_completed_map_says_nothing_about_completeness(self):
+        """It reports WHEN, not WHETHER: the episode total lives on the show
+        record, so the caller decides (see compute_live_shows)."""
+        state = {"shows": {"101": {"1": {"1": "2026-08-06T00:00:00Z"}}}}
+        self.assertEqual(wh.season_completed_map(state), {(101, 1): "2026-08-06"})
 
     def test_movies_in_range(self):
         state = {"movies": {
@@ -122,26 +145,34 @@ class StorageRoundTripTests(WatchStateTestCase):
             "last_synced": "2026-07-20",
             "beacons": {"ep_watched": "T1", "ep_removed": None,
                         "mv_watched": "T1", "mv_removed": None},
-            "shows": {"101": {"1": [1, 2, 3], "2": [1]}},
+            "shows": {"101": {"1": {"1": "2026-07-01T00:00:00Z", "2": "", "3": ""},
+                              "2": {"1": ""}}},
             "movies": {"9": {"title": "M", "year": 2026, "watched_at": "2026-07-05T00:00:00Z"}},
         }
         await wh._save(self.user_id, state)
         back = await wh._load(self.user_id)
         self.assertEqual(back, state)
 
+    async def test_the_pre_dates_shape_is_read_as_dates_unknown(self):
+        """A backup taken before episodes carried dates still restores: the old
+        bare list of numbers keeps its counts and simply has no dates."""
+        self.assertEqual(wh._episodes([1, 2, 3]), {"1": "", "2": "", "3": ""})
+        self.assertEqual(wh.season_completed_map(
+            {"shows": {"101": {"1": wh._episodes([1, 2, 3])}}}), {})
+
     async def test_save_replaces_rather_than_accumulates(self):
         await wh._save(self.user_id, {"last_synced": "a", "beacons": None,
-                                      "shows": {"1": {"1": [1]}}, "movies": {}})
+                                      "shows": {"1": {"1": {"1": ""}}}, "movies": {}})
         await wh._save(self.user_id, {"last_synced": "b", "beacons": None,
-                                      "shows": {"2": {"1": [5]}}, "movies": {}})
+                                      "shows": {"2": {"1": {"5": ""}}}, "movies": {}})
         back = await wh._load(self.user_id)
-        self.assertEqual(back["shows"], {"2": {"1": [5]}})
+        self.assertEqual(back["shows"], {"2": {"1": {"5": ""}}})
         self.assertEqual(back["last_synced"], "b")
 
     async def test_two_users_keep_independent_watch_state(self):
         other = await _make_user("other")
         await wh._save(self.user_id, {"last_synced": "mine", "beacons": None,
-                                      "shows": {"101": {"1": [1, 2]}},
+                                      "shows": {"101": {"1": {"1": "", "2": ""}}},
                                       "movies": {"1": {"title": "Mine", "year": 2026,
                                                        "watched_at": "2026-07-01T00:00:00Z"}}})
         await wh._save(other, {"last_synced": "theirs", "beacons": None,
@@ -177,7 +208,7 @@ class SyncTests(WatchStateTestCase):
             hist2.assert_not_called()
 
     async def test_change_applies_history_delta(self):
-        await wh._save(self.user_id, {"shows": {"101": {"1": [1]}}, "movies": {},
+        await wh._save(self.user_id, {"shows": {"101": {"1": {"1": ""}}}, "movies": {},
                                       "last_synced": "2026-07-01",
                                       "beacons": {"ep_watched": "OLD"}})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
@@ -188,17 +219,17 @@ class SyncTests(WatchStateTestCase):
                                  _mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")]), \
              patch("app.trakt.fetch_show_progress_detail", return_value={}):
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
-        self.assertEqual(state["shows"]["101"]["1"], [1, 2])
+        self.assertEqual(sorted(state["shows"]["101"]["1"]), ["1", "2"])
         self.assertIn("9", state["movies"])
         # and it was persisted under this user, not just returned
-        self.assertEqual((await wh._load(self.user_id))["shows"]["101"]["1"], [1, 2])
+        self.assertEqual(sorted((await wh._load(self.user_id))["shows"]["101"]["1"]), ["1", "2"])
 
     async def test_sync_is_scoped_to_one_user(self):
         """Another user's sync must not fold events into this user's cache."""
         other = await _make_user("other")
-        await wh._save(self.user_id, {"shows": {"101": {"1": [1]}}, "movies": {},
+        await wh._save(self.user_id, {"shows": {"101": {"1": {"1": ""}}}, "movies": {},
                                       "last_synced": "2026-07-01", "beacons": None})
-        await wh._save(other, {"shows": {"101": {"1": []}}, "movies": {},
+        await wh._save(other, {"shows": {"101": {"1": {}}}, "movies": {},
                                "last_synced": "2026-07-01", "beacons": None})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "NEW", "removed_at": None}}
@@ -206,12 +237,13 @@ class SyncTests(WatchStateTestCase):
              patch("app.trakt.fetch_history", return_value=[_ep_event(101, 1, 7)]), \
              patch("app.trakt.fetch_show_progress_detail", return_value={}):
             await wh.sync(SETTINGS, other, today=date(2026, 7, 20))
-        self.assertEqual((await wh._load(other))["shows"]["101"]["1"], [7])
-        self.assertEqual((await wh._load(self.user_id))["shows"]["101"]["1"], [1])
+        self.assertEqual(list((await wh._load(other))["shows"]["101"]["1"]), ["7"])
+        self.assertEqual(list((await wh._load(self.user_id))["shows"]["101"]["1"]), ["1"])
 
     async def test_baseline_show_lands_on_the_named_user(self):
         other = await _make_user("other")
-        with patch("app.trakt.fetch_show_progress_detail", return_value={1: [1, 2, 3]}):
+        with patch("app.trakt.fetch_show_progress_detail",
+                   return_value={1: {1: "2026-07-01T00:00:00Z", 2: "", 3: ""}}):
             await wh.baseline_show(SETTINGS, self.user_id, 404)
         self.assertEqual(wh.watched_map(await wh._load(self.user_id)), {(404, 1): 3})
         self.assertEqual(wh.watched_map(await wh._load(other)), {})

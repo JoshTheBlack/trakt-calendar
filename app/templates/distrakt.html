@@ -33,6 +33,7 @@
                         ranker_available=ranker_available, is_admin=is_admin) %}
         <button type="button" class="pill-btn" onclick="importFromCalendar()" title="Pull this month's premieres from the Trakt calendar">⤓ Import</button>
         <button type="button" class="pill-btn" onclick="openAddShow()">➕ Add show</button>
+        <button type="button" class="pill-btn" onclick="openAddMovie()">🎬 Add film</button>
 {% endcall %}
 
 <main class="distrakt-main">
@@ -128,6 +129,33 @@
                 </div>
                 <p class="distrakt-note" id="restoreStatus"></p>
             </div>
+
+            {# Not a backup, but it belongs with them: it is the other way data
+               that predates this tracker gets into it. #}
+            <div class="distrakt-copy-block">
+                <div class="distrakt-copy-head"><span>Backfill months from watch history</span></div>
+                <p class="distrakt-note">Months from before you started tracking are empty — the
+                    tracker only ever grows forward. This reads your Trakt watch history and fills
+                    them in with the <strong>seasons you finished during each one, and the films you
+                    watched</strong>, in one pass — both count towards Rankings imports, which take
+                    shows and movies separately. Each month it writes is closed, like any past month.
+                    Months already tracked keep their own decisions; only their films are topped up,
+                    so this is safe to run again.</p>
+                <div class="two-col">
+                    <div class="field">
+                        <label for="backfillStart">From</label>
+                        <input type="month" id="backfillStart">
+                    </div>
+                    <div class="field">
+                        <label for="backfillEnd">To</label>
+                        <input type="month" id="backfillEnd">
+                    </div>
+                </div>
+                <button type="button" class="btn-ghost small" id="backfillCheckBtn"
+                        onclick="checkBackfill()">Check what's there</button>
+                <div id="backfillResult" hidden></div>
+                <p class="distrakt-note" id="backfillStatus"></p>
+            </div>
         </section>
 
         <section class="distrakt-panel distrakt-section" data-panel="emoji" hidden>
@@ -161,14 +189,48 @@
     </div>
 </div>
 
+<!-- Add-film modal: a film is a play on a day, not a roster entry, so this asks
+     for the date and nothing else — the month it lands in follows from it. -->
+<div id="addMovieModal" class="modal-overlay" onclick="if(event.target===this) closeAddMovie()">
+    <div class="modal">
+        <div class="modal-head">
+            <h2>🎬 Add a film</h2>
+            <button type="button" class="modal-close" onclick="closeAddMovie()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="distrakt-note">Recorded as watched on the day you pick, which is the month
+                it shows up in — here and in Rankings imports.</p>
+            <div class="field">
+                <label for="addMovieDate">Watched on</label>
+                <input type="date" id="addMovieDate">
+            </div>
+            <div class="field">
+                <label for="addMovieSearch">Search Trakt</label>
+                <input type="text" id="addMovieSearch" placeholder="Type a film title…" autocomplete="off" spellcheck="false" oninput="onAddMovieSearchInput()">
+            </div>
+            <div id="addMovieResults" class="distrakt-search-results"></div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="closeAddMovie()">Cancel</button>
+        </div>
+    </div>
+</div>
+
 <!-- Add-show modal -->
 <div id="addShowModal" class="modal-overlay" onclick="if(event.target===this) closeAddShow()">
     <div class="modal">
         <div class="modal-head">
-            <h2>➕ Add show</h2>
+            <h2 id="addShowTitle">➕ Add show</h2>
             <button type="button" class="modal-close" onclick="closeAddShow()">&times;</button>
         </div>
         <div class="modal-body">
+            {# A past month is closed, so there is nothing live to bucket a show
+               against: what goes in was finished, and the wording says so before
+               anything is picked rather than after it lands. #}
+            <p class="distrakt-note distrakt-warn" id="addShowCompletedNote" hidden>
+                This month is closed. Whatever you pick is recorded as
+                <strong>finished during it</strong> — your Trakt watch history is not
+                consulted and cannot contradict it.</p>
             <div class="field">
                 <label for="addSearchInput">Search Trakt</label>
                 <input type="text" id="addSearchInput" placeholder="Type a show title…" autocomplete="off" spellcheck="false" oninput="onAddSearchInput()">

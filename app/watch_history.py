@@ -6,12 +6,12 @@ cheaply:
 
   - BASELINE: when a show first enters a user's roster it is baselined once from
     /shows/{id}/progress/watched -> the exact set of completed episode numbers
-    per season (authoritative + deduped).
+    per season, each with the date it was watched (authoritative + deduped).
   - INCREMENTAL: on each load we hit /sync/last_activities (a tiny, fixed-size
     "last changed at" beacon). If nothing changed, we serve the cache with zero
     further calls. If it changed, we pull only NEW plays via
-    /users/me/history?start_at=<last_synced> and fold them in (idempotent: adding
-    an already-known episode number to a set is a no-op, so day-granularity
+    /users/me/history?start_at=<last_synced> and fold them in (idempotent: an
+    already-known episode is re-stamped with the same date, so day-granularity
     `start_at` overlap is harmless).
   - MOVIES: the same history sweep carries movie plays, cached with their
     watched_at so a month can list the movies watched during it (POST 2's
@@ -20,11 +20,17 @@ cheaply:
     forces it) we re-baseline every cached show from progress and re-seed movies.
 
 Storage: three per-user SQLite tables (distrakt_watch_state,
-distrakt_show_progress, distrakt_movie_watches). In memory the state is the same
-dict shape it always was — {last_synced, beacons, shows: {tid: {season: [eps]}},
-movies: {tid: {title, year, watched_at}}} — so the pure folders and readers
-(watched_map, movies_in_range, month_bounds, the _apply_* folders) are unchanged;
-only _load / _save around them talk to the database instead of a JSON file.
+distrakt_show_progress, distrakt_movie_watches). In memory:
+
+    {last_synced, beacons,
+     shows:  {tid: {season: {episode: watched_at}}},
+     movies: {tid: {title, year, watched_at}}}
+
+Episodes carry their watch DATE (they were a bare list of numbers until the
+Completed bucket needed to know which month a season was finished in — see
+season_completed_map). A date is "" when it is genuinely unknown, which readers
+treat as "no answer", never as an old date. _load accepts the old list shape and
+reads it as dates-unknown, so a backup taken before the change still restores.
 
 The Trakt calls still authenticate with the app-wide token carried on `settings`;
 `user_id` scopes the STORAGE only. Pointing a user's own token at the fetches is a
@@ -68,8 +74,8 @@ async def _load(user_id: int) -> dict:
     )
     shows: dict = {}
     for row in prog:
-        shows.setdefault(str(int(row["trakt_id"])), {})[str(int(row["season"]))] = list(
-            json.loads(row["watched_episodes_json"] or "[]")
+        shows.setdefault(str(int(row["trakt_id"])), {})[str(int(row["season"]))] = _episodes(
+            json.loads(row["watched_episodes_json"] or "{}")
         )
     state["shows"] = shows
     movies_rows = await db.fetch_all(
@@ -114,7 +120,7 @@ async def _save(user_id: int, state: dict) -> None:
                 conn.execute(
                     "INSERT INTO distrakt_show_progress "
                     "(user_id, trakt_id, season, watched_episodes_json) VALUES (?, ?, ?, ?)",
-                    (user_id, int(tid_s), int(season_s), json.dumps(list(eps or []))),
+                    (user_id, int(tid_s), int(season_s), json.dumps(_episodes(eps or {}))),
                 )
         conn.execute("DELETE FROM distrakt_movie_watches WHERE user_id = ?", (user_id,))
         for tid_s, movie in movies.items():
@@ -133,6 +139,18 @@ async def _save(user_id: int, state: dict) -> None:
 # ---------------------------------------------------------------------------
 # Pure state folders / readers (no I/O — unit-tested directly)
 # ---------------------------------------------------------------------------
+
+def _episodes(stored) -> dict[str, str]:
+    """Stored season episodes as {episode: watched_at}.
+
+    Accepts the pre-dates shape (a bare list of episode numbers) and reads it as
+    dates-unknown, so a backup taken before dates existed still restores rather
+    than being refused or silently losing its counts.
+    """
+    if isinstance(stored, dict):
+        return {str(int(k)): str(v or "") for k, v in stored.items()}
+    return {str(int(n)): "" for n in (stored or [])}
+
 
 def _beacons(la: dict) -> dict:
     """The subset of /sync/last_activities we gate on: episode + movie watched/
@@ -157,26 +175,36 @@ def _removed_changed(old: dict | None, new: dict) -> bool:
 
 
 def _set_show_baseline(state: dict, trakt_id, season_to_eps: dict) -> None:
+    """Replace one show's cached progress with a fresh baseline. `season_to_eps`
+    is what fetch_show_progress_detail returns, {season: {episode: watched_at}};
+    a bare list of episode numbers is still accepted as dates-unknown."""
     state.setdefault("shows", {})[str(int(trakt_id))] = {
-        str(int(season)): sorted({int(n) for n in eps})
+        str(int(season)): _episodes(eps)
         for season, eps in (season_to_eps or {}).items()
     }
 
 
-def _apply_episode(state: dict, trakt_id, season, number) -> None:
+def _apply_episode(state: dict, trakt_id, season, number, watched_at=None) -> None:
     """Fold one episode play into a cached show (idempotent). Untracked shows
-    (never baselined) are ignored — only roster shows carry counts."""
+    (never baselined) are ignored — only roster shows carry counts.
+
+    Keeps the LATEST date seen for an episode, the same rule _apply_movie uses:
+    re-watching a season's last episode this month is finishing it this month.
+    A play with no date never overwrites one that has a date.
+    """
     if trakt_id is None or season is None or number is None:
         return
     shows = state.setdefault("shows", {})
     key = str(int(trakt_id))
     if key not in shows:  # not baselined -> not on the roster; skip
         return
-    lst = shows[key].setdefault(str(int(season)), [])
-    n = int(number)
-    if n not in lst:
-        lst.append(n)
-        lst.sort()
+    eps = shows[key].setdefault(str(int(season)), {})
+    n = str(int(number))
+    when = str(watched_at or "")
+    if when > eps.get(n, ""):
+        eps[n] = when
+    elif n not in eps:
+        eps[n] = when
 
 
 def _apply_movie(state: dict, trakt_id, title, year, watched_at) -> None:
@@ -196,7 +224,7 @@ def _apply_event(state: dict, event: dict) -> None:
         show = event.get("show") or {}
         ep = event.get("episode") or {}
         tid = ((show.get("ids") or {}).get("trakt"))
-        _apply_episode(state, tid, ep.get("season"), ep.get("number"))
+        _apply_episode(state, tid, ep.get("season"), ep.get("number"), event.get("watched_at"))
     elif etype == "movie":
         movie = event.get("movie") or {}
         tid = ((movie.get("ids") or {}).get("trakt"))
@@ -212,14 +240,36 @@ def watched_map(state: dict) -> dict[tuple[int, int], int]:
     return out
 
 
+def season_completed_map(state: dict) -> dict[tuple[int, int], str]:
+    """{(trakt_id, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
+    watched, which is the day it was finished.
+
+    Says nothing about whether the season is actually complete: that needs the
+    episode total, which lives on the show record, so the caller decides (see
+    compute_live_shows, which only keeps this for a season it has just bucketed
+    as completed). A season with no dated episodes is absent rather than dated
+    ""; "I don't know when" and "finished on the epoch" must never be confused.
+    """
+    out: dict[tuple[int, int], str] = {}
+    for tid_s, seasons in (state.get("shows") or {}).items():
+        for season_s, eps in (seasons or {}).items():
+            days = [str(w)[:10] for w in (eps or {}).values() if w] if isinstance(eps, dict) else []
+            if days:
+                out[(int(tid_s), int(season_s))] = max(days)
+    return out
+
+
 def movies_in_range(state: dict, start_date: str, end_date: str) -> list[dict]:
     """Movies whose watched_at date falls within [start_date, end_date]
     (YYYY-MM-DD, inclusive), as [{title, year, watched_at}]."""
     out = []
-    for m in (state.get("movies") or {}).values():
+    for tid, m in (state.get("movies") or {}).items():
         day = (m.get("watched_at") or "")[:10]
         if day and start_date <= day <= end_date:
-            out.append({"title": m.get("title") or "", "year": m.get("year"), "watched_at": m.get("watched_at")})
+            # The id travels with it: the page needs something to name when a
+            # film has to be removed, and the title is not an identifier.
+            out.append({"trakt_id": int(tid), "title": m.get("title") or "",
+                        "year": m.get("year"), "watched_at": m.get("watched_at")})
     return out
 
 
@@ -242,6 +292,50 @@ def _month_start_of(today: date) -> str:
 # ---------------------------------------------------------------------------
 # Orchestration (Trakt I/O)
 # ---------------------------------------------------------------------------
+
+async def load_state(user_id: int) -> dict:
+    """This user's cached watch state, read-only. Public because the backfill
+    needs the movies it holds to build a frozen month's **Movies** section, the
+    same way the freeze pass does."""
+    return await _load(user_id)
+
+
+async def record_movie_watches(user_id: int, movies: list[dict]) -> int:
+    """Fold movie plays into the cache and save; returns how many were recorded.
+
+    For the backfill: the routine sync only ever looks back to the start of the
+    CURRENT month, so movies watched before tracking began are recorded nowhere,
+    and the ranker imports movies too. Uses the same fold as a normal sync, so a
+    movie already known keeps whichever play is later.
+    """
+    if not movies:
+        return 0
+    state = await _load(user_id)
+    for movie in movies:
+        _apply_movie(state, movie.get("trakt_id"), movie.get("title"),
+                     movie.get("year"), movie.get("watched_at"))
+    await _save(user_id, state)
+    return len(movies)
+
+
+async def forget_movie_watch(user_id: int, trakt_id) -> str | None:
+    """Drop one film from the cache. Returns the day it was recorded on (so the
+    caller knows which month has to be re-snapshotted), or None if it was not
+    there.
+
+    A film is held once per id, carrying its latest play, so there is no "remove
+    it from March but keep it in May" — forgetting it forgets the watch. What
+    this does NOT do is remember that it was forgotten: a later sweep of the same
+    range will see Trakt still reporting it and offer it back, in a plan the
+    user confirms.
+    """
+    state = await _load(user_id)
+    movie = (state.get("movies") or {}).pop(str(int(trakt_id)), None)
+    if movie is None:
+        return None
+    await _save(user_id, state)
+    return str(movie.get("watched_at") or "")
+
 
 async def baseline_show(settings, user_id: int, trakt_id) -> None:
     """Baseline one show from progress/watched (called when it enters the roster)."""

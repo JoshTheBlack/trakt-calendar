@@ -692,25 +692,34 @@ async def fetch_last_activities(settings: Settings) -> dict:
 
 
 async def fetch_show_progress_detail(settings: Settings, trakt_id,
-                                     client: httpx.AsyncClient | None = None) -> dict[int, list[int]]:
-    """/shows/{id}/progress/watched -> {season_number: [completed episode numbers]}.
+                                     client: httpx.AsyncClient | None = None) -> dict[int, dict[int, str]]:
+    """/shows/{id}/progress/watched -> {season_number: {episode_number: watched_at}}.
     The per-show baseline: authoritative, deduped completion straight from Trakt.
     Never cached — this is one person's viewing, and the cache key is the URL.
-    Pass a shared `client` when batching."""
+    Pass a shared `client` when batching.
+
+    `last_watched_at` is carried per episode rather than discarded because WHEN a
+    season was finished is what decides which month gets to call it Completed —
+    a season finished in July is not August's business (see
+    distrakt.drop_seasons_finished_earlier). It is "" when Trakt reports an
+    episode as completed without a timestamp, which reads as "date unknown"
+    everywhere downstream and never as a date.
+    """
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     c = client or shared_client()
     res = await _cached_get(c, settings, f"shows/{trakt_id}/progress/watched", params, private=True)
-    out: dict[int, list[int]] = {}
+    out: dict[int, dict[int, str]] = {}
     if isinstance(res, dict):
         for season in res.get("seasons") or []:
             num = season.get("number")
             if num is None:
                 continue
-            eps = sorted({
-                int(e["number"]) for e in (season.get("episodes") or [])
-                if e.get("completed") and e.get("number") is not None
-            })
-            out[int(num)] = eps
+            eps: dict[int, str] = {}
+            for e in (season.get("episodes") or []):
+                if not e.get("completed") or e.get("number") is None:
+                    continue
+                eps[int(e["number"])] = str(e.get("last_watched_at") or "")
+            out[int(num)] = dict(sorted(eps.items()))
     return out
 
 
@@ -792,8 +801,19 @@ async def fetch_watched_progress(settings: Settings, since_days: int | None = 60
     start_at = None
     if since_days is not None:
         start_at = (datetime.now(timezone.utc).date() - timedelta(days=since_days)).isoformat()
-    events = await fetch_history(settings, start_at=start_at)
+    out = watched_progress_from(await fetch_history(settings, start_at=start_at))
+    logger.info("fetch_watched_progress(since_days=%s) -> %d recent season(s) from history", since_days, len(out))
+    return out
 
+
+def watched_progress_from(events: list[dict]) -> list[dict]:
+    """The aggregation half of fetch_watched_progress, over events already in
+    hand: [{trakt_id, tmdb, season, watched, slug, title, network}].
+
+    Split out so a caller that needs BOTH the seasons and the movies from one
+    window (app/distrakt_backfill) can sweep the history once and read it twice,
+    rather than paying for the same paged sweep twice over.
+    """
     agg: dict[tuple[int, int], dict] = {}
     for ev in events:
         if ev.get("type") != "episode":
@@ -810,12 +830,10 @@ async def fetch_watched_progress(settings: Settings, since_days: int | None = 60
         })
         if num is not None:
             rec["eps"].add(int(num))
-    out = [{
+    return [{
         "trakt_id": tid, "tmdb": rec["tmdb"], "season": season, "watched": len(rec["eps"]),
         "slug": rec["slug"], "title": rec["title"], "network": rec["network"],
     } for (tid, season), rec in agg.items()]
-    logger.info("fetch_watched_progress(since_days=%s) -> %d recent season(s) from history", since_days, len(out))
-    return out
 
 
 async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:

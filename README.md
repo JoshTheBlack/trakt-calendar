@@ -332,6 +332,8 @@ app/
   plex_routes.py    "Log in with Plex" (PIN flow)
   share_routes.py   Public read-only calendars (/s/, /u/, /c/)
   share_links.py    Share-link settings + URL building
+  share_code.py     The compact ?p= code a share link is handed out as
+  distrakt_backfill.py  Filling in never-tracked months from watch history
   calendar_cache.py Global UTC window cache + the read path over it
   calendar_state.py Per-user not-watching marks (show-level, all views) + change detection
   trakt.py          Async Trakt client + response normalizer

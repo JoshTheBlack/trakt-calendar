@@ -23,18 +23,29 @@ import unittest
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qsl, urlsplit
 
 os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-finishing-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, cache, calendar_cache, db, distrakt as distrakt_store, share_links, trakt  # noqa: E402
+from app import auth, cache, calendar_cache, calendar_state, db, distrakt as distrakt_store, share_code, share_links, trakt  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
 ORIGIN = "https://testserver"
+
+
+def _fake_premiere_read(trakt_id: int, season: int):
+    """Stand in for the shared calendar cache with exactly one premiere in it —
+    both halves of the tracker's premiere read (shows/new and shows/premieres)
+    see the same month."""
+    async def read_month(endpoint, settings, **kw):
+        return [{"trakt_id": trakt_id, "trakt_slug": f"slug-{trakt_id}",
+                 "title": f"Show {trakt_id}", "season": season, "network": "Net"}], None
+    return read_month
 
 
 class FinishingTestCase(unittest.TestCase):
@@ -140,6 +151,151 @@ class BackupPanelTests(FinishingTestCase):
         self.assertEqual([s["title"] for s in still_there["shows"]], ["Mine"])
 
 
+class RemovingFromTheTrackerTests(FinishingTestCase):
+    """The ✕ on a tracker row, and the one thing it is allowed to touch outside
+    the tracker.
+
+    It used to delete the row and nothing else, which on a PREVIEW month (before
+    the 1st, when the roster re-imports the month's premieres on every load) put
+    the show straight back in the same response — the button looked broken, and
+    the only way to get rid of a premiere was to go and hide it on the calendar
+    instead. It now makes that calendar mark itself, but ONLY for a row the
+    calendar put there: removing something the user added by hand must not hide a
+    show they never said they weren't watching.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.tracker_user()
+        self.sign_in_as(self.user_id)
+        self._add(202, 1, "slug-202", distrakt_store.SOURCE_CALENDAR)
+
+    def _add(self, trakt_id, season, slug, source):
+        asyncio.run(distrakt_store.add_show(self.user_id, "2026-08", {
+            "trakt_id": trakt_id, "season": season, "slug": slug, "title": f"Show {trakt_id}",
+            "network": "Net", "media": "show", "source": source,
+        }))
+
+    def _remove(self, trakt_id=202, season=1):
+        # The payload rebuild at the end of the route is a whole live month and
+        # not what is under test; the removal itself is.
+        with patch("app.main._distrakt_month_payload", return_value=({"ok": True}, 200)):
+            return self.client.post("/api/distrakt/remove", json={
+                "year": 2026, "month": 8, "trakt_id": trakt_id, "season": season})
+
+    def _marks(self) -> set:
+        return asyncio.run(calendar_state.not_watching_ids(self.user_id))
+
+    def test_removing_a_calendar_row_marks_the_show_not_watching(self):
+        resp = self._remove()
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("slug-202", self._marks())
+        self.assertTrue(resp.json()["hidden_on_calendar"])
+
+    def test_removing_a_hand_added_row_leaves_the_calendar_alone(self):
+        """THE POINT OF THE PROVENANCE COLUMN. Undoing a manual add is not a
+        statement about watching, and must not take the show off the calendar."""
+        self._add(404, 1, "slug-404", distrakt_store.SOURCE_MANUAL)
+        resp = self._remove(trakt_id=404, season=1)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("slug-404", self._marks())
+        self.assertFalse(resp.json()["hidden_on_calendar"])
+
+    def test_removing_a_watch_history_row_leaves_the_calendar_alone(self):
+        """Nor is dropping something the tracker picked up from watch history —
+        it is not re-imported either, so removing it already sticks."""
+        self._add(505, 3, "slug-505", distrakt_store.SOURCE_HISTORY)
+        self._remove(trakt_id=505, season=3)
+        self.assertNotIn("slug-505", self._marks())
+
+    def test_the_removed_calendar_row_does_not_come_straight_back(self):
+        """The bug, end to end: remove it, then let a preview month re-import the
+        month's premieres exactly as a page load does."""
+        self._remove()
+
+        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(202, 1)):
+            asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
+
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
+        self.assertEqual([s["trakt_id"] for s in doc["shows"]], [])
+
+    def test_a_row_with_no_slug_is_marked_by_its_trakt_id(self):
+        """The calendar keys an item by slug and falls back to the trakt id; a
+        mark written under the wrong key would silently match nothing."""
+        self._add(303, 2, "", distrakt_store.SOURCE_CALENDAR)
+        self._remove(trakt_id=303, season=2)
+        self.assertIn("303", self._marks())
+
+    def test_a_row_that_was_never_there_marks_nothing(self):
+        """A 404 must not leave a calendar mark behind for a show the tracker
+        never held."""
+        resp = self._remove(trakt_id=999, season=1)
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(self._marks(), set())
+
+    def test_an_imported_premiere_records_where_it_came_from(self):
+        """The provenance has to be written by the import itself, or every row on
+        a preview month would look hand-added the moment it mattered."""
+        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(606, 1)):
+            asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
+        added = next(s for s in doc["shows"] if s["trakt_id"] == 606)
+        self.assertEqual(added["source"], distrakt_store.SOURCE_CALENDAR)
+
+
+class LegacyRowRemovalTests(FinishingTestCase):
+    """Rows written before provenance was recorded, which is every row on every
+    instance the day this ships. There is no stored answer, so the calendar is
+    asked directly: would it hand this show straight back?"""
+
+    def setUp(self):
+        super().setUp()
+        # The legacy path asks the calendar, which it only does with Trakt
+        # credentials in place; the read itself is patched in each test.
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="id",
+                               trakt_access_token="tok"))
+        self.user_id = self.tracker_user()
+        self.sign_in_as(self.user_id)
+
+    def _add_legacy(self, trakt_id, slug):
+        asyncio.run(distrakt_store.add_show(self.user_id, "2026-08", {
+            "trakt_id": trakt_id, "season": 1, "slug": slug, "title": "Legacy",
+            "network": "Net", "media": "show",  # no source: the pre-column shape
+        }))
+
+    def _remove(self, trakt_id):
+        with patch("app.main._distrakt_month_payload", return_value=({"ok": True}, 200)):
+            return self.client.post("/api/distrakt/remove", json={
+                "year": 2026, "month": 8, "trakt_id": trakt_id, "season": 1})
+
+    def test_a_legacy_row_the_calendar_would_re_add_is_marked(self):
+        self._add_legacy(707, "slug-707")
+        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(707, 1)):
+            resp = self._remove(707)
+        self.assertTrue(resp.json()["hidden_on_calendar"])
+        self.assertIn("slug-707", asyncio.run(calendar_state.not_watching_ids(self.user_id)))
+
+    def test_a_legacy_row_the_calendar_knows_nothing_about_is_left_alone(self):
+        self._add_legacy(808, "slug-808")
+        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(707, 1)):
+            resp = self._remove(808)
+        self.assertFalse(resp.json()["hidden_on_calendar"])
+        self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
+
+    def test_an_unreachable_calendar_marks_nothing_rather_than_guessing(self):
+        """Not knowing means not marking: the row comes back, which is annoying
+        and undoable, where a wrong mark hides a show the user still wants."""
+        async def boom(endpoint, settings, **kw):
+            raise trakt.TraktError("unreachable")
+
+        self._add_legacy(909, "slug-909")
+        with patch("app.calendar_cache.read_month", side_effect=boom):
+            resp = self._remove(909)
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["hidden_on_calendar"])
+        self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
+
+
 class ShareLinkViewOptionsTests(FinishingTestCase):
     """The display options written into the generated link — and the promise
     that they are written into the LINK and nowhere else."""
@@ -160,17 +316,29 @@ class ShareLinkViewOptionsTests(FinishingTestCase):
         self.assertIsNone(payload["link_view"])
         self.assertNotIn("?", payload["urls"]["token"])
 
+    def _link_view_of(self, url: str) -> dict:
+        """What a generated link actually says, however it says it: the short
+        `?p=` code these are handed out as, or the long query it falls back to."""
+        query = dict(parse_qsl(urlsplit(url).query))
+        return share_code.decode(query["p"]) if "p" in query else query
+
     def test_chosen_options_are_written_into_the_link(self):
-        resp = self.client.post("/api/me/share/view", json={"view": {
-            "endpoint": "shows/premieres", "card": "poster", "packing": "packed",
-            "hidenw": "1", "tz": "America/New_York",
-        }})
+        view = {"endpoint": "shows/premieres", "card": "poster", "packing": "packed",
+                "hidenw": "1", "tz": "America/New_York"}
+        resp = self.client.post("/api/me/share/view", json={"view": view})
         self.assertEqual(resp.status_code, 200, resp.text)
-        url = resp.json()["urls"]["token"]
-        for fragment in ("endpoint=shows%2Fpremieres", "card=poster", "packing=packed",
-                         "hidenw=1", "tz=America%2FNew_York"):
-            with self.subTest(fragment=fragment):
-                self.assertIn(fragment, url)
+        self.assertEqual(self._link_view_of(resp.json()["urls"]["token"]), view)
+
+    def test_the_link_is_handed_out_short(self):
+        """A link people paste into chat: one short code rather than seven
+        params, two of them percent-encoded."""
+        self.client.post("/api/me/share/view", json={"view": {
+            "endpoint": "shows/premieres", "card": "horizontal", "packing": "stacked",
+            "hidenw": "1", "tz": "America/New_York", "year": "2026", "month": "8",
+        }})
+        query = urlsplit(self._share()["urls"]["token"]).query
+        self.assertLess(len(query), 20, query)
+        self.assertEqual(list(dict(parse_qsl(query))), ["p"])
 
     def test_the_link_options_do_not_touch_the_owners_own_view(self):
         """THE POINT OF THE WHOLE DESIGN. Customizing a link somebody else will
@@ -218,8 +386,41 @@ class ShareLinkViewOptionsTests(FinishingTestCase):
         self.client.post("/api/me/share/enabled", json={"kind": "username", "enabled": True})
         self.client.post("/api/me/share/view", json={"view": {"endpoint": "shows/premieres"}})
         urls = self._share()["urls"]
-        self.assertIn("endpoint=shows%2Fpremieres", urls["token"])
-        self.assertIn("endpoint=shows%2Fpremieres", urls["username"])
+        for kind in ("token", "username"):
+            with self.subTest(kind=kind):
+                self.assertEqual(self._link_view_of(urls[kind]), {"endpoint": "shows/premieres"})
+
+    def test_a_pinned_month_is_written_into_the_link(self):
+        resp = self.client.post("/api/me/share/view", json={"view": {"year": "2026", "month": "8"}})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(self._link_view_of(resp.json()["urls"]["token"]),
+                         {"year": "2026", "month": "8"})
+
+    def test_half_a_pinned_month_is_refused(self):
+        """A month with no year means something different once the year turns
+        over, and a year with no month is not a month at all."""
+        for view in ({"year": "2026"}, {"month": "8"},
+                     {"year": "2026", "month": "13"}, {"year": "40000", "month": "8"}):
+            with self.subTest(view=view):
+                resp = self.client.post("/api/me/share/view", json={"view": view})
+                self.assertEqual(resp.status_code, 400)
+        self.assertIsNone(self._share()["link_view"])
+
+    def test_a_link_with_no_pinned_month_opens_on_the_current_one(self):
+        """The default stays what it was: nothing in the URL, so the page lands
+        on whatever month it is opened in."""
+        self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
+        self.assertEqual(self._link_view_of(self._share()["urls"]["token"]), {"card": "poster"})
+
+    def test_the_pinned_month_is_the_month_the_public_page_opens_on(self):
+        """End to end: what the panel pins is where a visitor lands, without
+        them having to touch the month arrows."""
+        self.client.post("/api/me/share/view", json={"view": {"year": "2026", "month": "8"}})
+        url = self._share()["urls"]["token"]
+        self.client.cookies.clear()
+        resp = self.client.get(url.replace(ORIGIN, ""))
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("August 2026", resp.text)
 
     def test_the_generated_link_actually_opens_on_the_chosen_view(self):
         """End to end: the params the panel writes are the params the public
@@ -228,6 +429,69 @@ class ShareLinkViewOptionsTests(FinishingTestCase):
         url = self._share()["urls"]["token"]
         self.client.cookies.clear()
         resp = self.client.get(url.replace(ORIGIN, "") + "&year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("card-poster", resp.text)
+
+
+class ShareCodeArrivalTests(FinishingTestCase):
+    """A `?p=` code is only how a link is handed out. On arrival it becomes the
+    ordinary query params, so everything else on the page — the month arrows,
+    the view controls, a visitor's own bookmark — deals only with those."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("codeowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = self.client.get("/api/me/share").json()["token"]
+        self.client.cookies.clear()
+
+    def _arrive(self, query: str):
+        return self.client.get(f"/s/{self.token}?{query}", follow_redirects=False)
+
+    def test_a_code_redirects_to_the_plain_url(self):
+        code = share_code.encode({"card": "poster", "year": "2026", "month": "8"})
+        resp = self._arrive(f"p={code}")
+        self.assertEqual(resp.status_code, 302)
+        target = urlsplit(resp.headers["location"])
+        self.assertEqual(target.path, f"/s/{self.token}")
+        self.assertEqual(dict(parse_qsl(target.query)),
+                         {"card": "poster", "year": "2026", "month": "8"})
+
+    def test_the_code_never_survives_the_redirect(self):
+        """Including when it decoded to nothing — a `p` left in the URL would be
+        a param the page silently ignores from then on."""
+        for query in ("p=nonsense", "p=", f"p={share_code.encode({'card': 'poster'})}"):
+            with self.subTest(query=query):
+                resp = self._arrive(query)
+                self.assertEqual(resp.status_code, 302)
+                self.assertNotIn("p=", resp.headers["location"])
+
+    def test_a_param_the_visitor_typed_wins_over_the_code(self):
+        """The month arrows work this way: they carry the URL they were built
+        from and set their own year/month on top."""
+        code = share_code.encode({"card": "poster", "year": "2026", "month": "8"})
+        resp = self._arrive(f"p={code}&month=9")
+        self.assertEqual(dict(parse_qsl(urlsplit(resp.headers["location"]).query)),
+                         {"card": "poster", "year": "2026", "month": "9"})
+
+    def test_an_unusable_link_is_still_a_flat_404(self):
+        """Not a redirect that then 404s: a miss stays identical whatever the
+        reason, and costs a stranger nothing to discover."""
+        code = share_code.encode({"card": "poster"})
+        resp = self.client.get(f"/s/nosuchtoken?p={code}", follow_redirects=False)
+        self.assertEqual(resp.status_code, 404)
+
+    def test_following_the_redirect_lands_on_the_coded_view(self):
+        code = share_code.encode({"card": "poster", "year": "2026", "month": "8"})
+        resp = self.client.get(f"/s/{self.token}?p={code}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("card-poster", resp.text)
+        self.assertIn("August 2026", resp.text)
+
+    def test_a_long_link_still_works_untouched(self):
+        """Every link handed out before the short form existed stays valid."""
+        resp = self.client.get(f"/s/{self.token}?card=poster&year=2026&month=8",
+                               follow_redirects=False)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("card-poster", resp.text)
 

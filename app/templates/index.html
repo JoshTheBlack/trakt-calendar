@@ -703,6 +703,22 @@
                     <input type="checkbox" id="share_view_hidenw" onchange="saveShareView()"{% if view.hide_not_watching %} checked{% endif %}>
                     <label for="share_view_hidenw">Hide not-watching items on the shared page</label>
                 </div>
+                {# Pinning a month is the one option that goes stale by itself, so
+                   it defaults to off and says what off means. #}
+                <div class="field">
+                    <label for="share_view_month">Opens on</label>
+                    <div class="two-col">
+                        <select id="share_view_month" onchange="saveShareView()">
+                            <option value="">Whichever month it's opened in</option>
+                            {% for m in month_names %}
+                            <option value="{{ loop.index }}">{{ m }}</option>
+                            {% endfor %}
+                        </select>
+                        <select id="share_view_year" onchange="saveShareView()" hidden></select>
+                    </div>
+                    <span class="hint">Pin the link to one month and it lands there however late it's
+                        opened — whoever has it can still page to any other month from there.</span>
+                </div>
             </div>
         </div>
         <div class="modal-foot">

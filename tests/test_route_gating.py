@@ -183,12 +183,16 @@ class UnauthenticatedTests(GatingTestCase):
         specific user's private watch history."""
         for path in ("/distrakt", "/api/distrakt/list", "/api/distrakt/month",
                      "/api/distrakt/months", "/api/distrakt/search",
-                     "/api/distrakt/seasons"):
+                     "/api/distrakt/seasons", "/api/distrakt/backfill",
+                     "/api/distrakt/search-movie"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
                      "/api/distrakt/backfill-networks", "/api/distrakt/remove",
-                     "/api/distrakt/add", "/api/distrakt/abandon"):
+                     "/api/distrakt/add", "/api/distrakt/abandon",
+                     "/api/distrakt/add-completed", "/api/distrakt/backfill/survey",
+                     "/api/distrakt/backfill/apply", "/api/distrakt/add-movie",
+                     "/api/distrakt/remove-movie"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
 

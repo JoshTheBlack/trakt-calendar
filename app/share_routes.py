@@ -19,14 +19,14 @@ import json
 from datetime import date, datetime
 from itertools import groupby
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import auth, calendar_cache, calendar_state, share_links, trakt
+from . import auth, calendar_cache, calendar_state, share_code, share_links, trakt
 from .auth import AuthLevel
 from .authz import Guard
 from .config import load_settings
@@ -162,9 +162,36 @@ def _not_found(request: Request) -> Response:
     return templates.TemplateResponse(request, "share_not_found.html", {"request": request}, status_code=404)
 
 
+def _expanded_from_code(request: Request) -> str | None:
+    """Where a `?p=` request should go instead, or None when there is no code.
+
+    A code is only how a link is HANDED OUT. On arrival it is expanded back into
+    the ordinary query params this page has always taken and the visitor is sent
+    there, so from the first paint the URL they can edit, bookmark and re-share
+    is the plain one — and the month arrows, the view controls and every other
+    param-carrying thing on the page need know nothing about the short form.
+
+    Anything the visitor spelled out themselves wins over the same param in the
+    code, and `p` never survives the redirect, even when it decoded to nothing.
+    """
+    if "p" not in request.query_params:
+        return None
+    params = share_code.decode(request.query_params.get("p"))
+    for key, value in request.query_params.multi_items():
+        if key != "p":
+            params[key] = value
+    query = urlencode(params)
+    return f"{request.url.path}?{query}" if query else request.url.path
+
+
 async def _render(request: Request, share_row) -> Response:
     if share_row is None:
         return _not_found(request)
+
+    # After the miss above, so an unusable link is still a 404 on the spot rather
+    # than a redirect that then 404s.
+    if target := _expanded_from_code(request):
+        return RedirectResponse(target, status_code=302)
 
     settings = load_settings()
     owner_id = int(share_row["user_id"])

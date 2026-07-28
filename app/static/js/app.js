@@ -1076,12 +1076,37 @@ function renderShareView() {
     document.querySelector('input[name="share_view_mode"][value="current"]').checked = !custom;
     document.querySelector('input[name="share_view_mode"][value="custom"]').checked = custom;
     document.getElementById('share_view_options').hidden = !custom;
-    if (!custom) return;
+    if (!custom) {
+        // A hidden panel keeps whatever was last in it, and a stale pinned month
+        // would then be written straight back the next time "custom" is chosen.
+        setSharePinnedMonth('', null);
+        return;
+    }
     if (view.endpoint) document.getElementById('share_view_endpoint').value = view.endpoint;
     if (view.tz) document.getElementById('share_view_tz').value = view.tz;
     if (view.card) document.getElementById('share_view_card').value = view.card;
     if (view.packing) document.getElementById('share_view_packing').value = view.packing;
     document.getElementById('share_view_hidenw').checked = view.hidenw === '1';
+    setSharePinnedMonth(view.month || '', view.year || null);
+}
+
+// The "opens on" pair. No month means the link carries no year/month at all and
+// lands on whatever month it is opened in, so the year select has nothing to say
+// and is hidden rather than left offering a year that isn't used.
+function setSharePinnedMonth(month, year) {
+    const monthSel = document.getElementById('share_view_month');
+    const yearSel = document.getElementById('share_view_year');
+    const now = new Date().getFullYear();
+    const years = [];
+    for (let y = now - 1; y <= now + 3; y++) years.push(y);
+    // A link pinned years ago still shows its own year rather than snapping to
+    // one the owner never picked.
+    if (year && !years.includes(Number(year))) years.push(Number(year));
+    years.sort((a, b) => a - b);
+    yearSel.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).join('');
+    yearSel.value = String(year || now);
+    monthSel.value = month;
+    yearSel.hidden = !month;
 }
 
 async function postShareView(view) {
@@ -1107,13 +1132,24 @@ function setShareViewMode(mode) {
 }
 
 function saveShareView() {
-    postShareView({
+    const month = document.getElementById('share_view_month').value;
+    // Show the year the moment a month is chosen, without waiting for the round
+    // trip that will re-render this panel anyway.
+    document.getElementById('share_view_year').hidden = !month;
+    const view = {
         endpoint: document.getElementById('share_view_endpoint').value,
         tz: document.getElementById('share_view_tz').value,
         card: document.getElementById('share_view_card').value,
         packing: document.getElementById('share_view_packing').value,
         hidenw: document.getElementById('share_view_hidenw').checked ? '1' : '0',
-    });
+    };
+    // Both or neither — a month pinned without its year would mean a different
+    // month once the year turned over, and the server rejects the half of a pair.
+    if (month) {
+        view.month = month;
+        view.year = document.getElementById('share_view_year').value;
+    }
+    postShareView(view);
 }
 
 async function openShare() {
