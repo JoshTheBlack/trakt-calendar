@@ -14,6 +14,7 @@ import asyncio
 import base64
 import itertools
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -243,6 +244,65 @@ class SavedImageTests(unittest.TestCase):
         self.assertEqual(user_images.list_images(user_id), [first, second])
 
 
+class ImageNameTests(unittest.TestCase):
+    """Names, which live in a sidecar file beside the images rather than in the
+    database — so a directory removed by hand takes its names with it and cannot
+    leave rows describing files that are gone."""
+
+    def test_an_image_uploaded_with_a_name_reports_it(self):
+        user_id = _next_user_id()
+        uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Beach photo"))
+        self.assertEqual(user_images.describe_images(user_id),
+                         [{"uid": uid, "name": "Beach photo"}])
+
+    def test_an_unnamed_image_gets_a_positional_default(self):
+        """There is always something to show in a picker: an image nobody named
+        is "Image 1", not an empty row."""
+        user_id = _next_user_id()
+        first = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes())))
+        second = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes())))
+        self.assertEqual(user_images.describe_images(user_id),
+                         [{"uid": first, "name": "Image 1"},
+                          {"uid": second, "name": "Image 2"}])
+
+    def test_renaming_and_clearing_a_name(self):
+        user_id = _next_user_id()
+        uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "First"))
+        self.assertTrue(user_images.set_image_name(user_id, uid, "Second"))
+        self.assertEqual(user_images.describe_images(user_id)[0]["name"], "Second")
+        # Cleared falls back to the default rather than being stored as blank.
+        self.assertTrue(user_images.set_image_name(user_id, uid, ""))
+        self.assertEqual(user_images.describe_images(user_id)[0]["name"], "Image 1")
+
+    def test_naming_an_image_this_account_does_not_have_is_refused(self):
+        user_id = _next_user_id()
+        self.assertFalse(user_images.set_image_name(user_id, "0" * 32, "Nice try"))
+
+    def test_an_over_long_name_is_refused_not_truncated(self):
+        user_id = _next_user_id()
+        with self.assertRaises(user_images.ValidationError):
+            asyncio.run(user_images.add_image(
+                user_id, _b64(_png_bytes()), "x" * (user_images.MAX_IMAGE_NAME + 1)))
+        # And nothing was stored for the upload that was refused.
+        self.assertEqual(user_images.list_images(user_id), [])
+
+    def test_a_deleted_image_takes_its_name_with_it(self):
+        user_id = _next_user_id()
+        uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Gone soon"))
+        self.assertTrue(user_images.delete_image(user_id, uid))
+        self.assertEqual(user_images.describe_images(user_id), [])
+        self.assertEqual(user_images._read_names(user_id), {})
+
+    def test_an_unreadable_sidecar_costs_the_names_and_nothing_else(self):
+        """A name is a convenience. Losing the file that holds them must never
+        cost somebody access to the images themselves."""
+        user_id = _next_user_id()
+        uid = asyncio.run(user_images.add_image(user_id, _b64(_png_bytes()), "Named"))
+        user_images._names_path(user_id).write_text("{not json", encoding="utf-8")
+        self.assertEqual(user_images.describe_images(user_id),
+                         [{"uid": uid, "name": "Image 1"}])
+
+
 # ---------------------------------------------------------------------------
 # S15 — account deletion sweeps DATA_DIR/user_data/<id>/, and only that
 # ---------------------------------------------------------------------------
@@ -313,6 +373,10 @@ class RouteTests(unittest.TestCase):
     def setUp(self):
         RouteTests._counter += 1
         db.set_db_path(TMP / f"routes-{RouteTests._counter}.db")
+        # A fresh database has to mean a fresh disk too: onboarding hands out the
+        # same user id in every test, so images left by an earlier one would be
+        # sitting exactly where this one's account looks for its own.
+        shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
         asyncio.run(db.migrate())
         save_settings(Settings())
         self.client = TestClient(app, base_url="https://testserver",
@@ -381,6 +445,37 @@ class RouteTests(unittest.TestCase):
 
         resp = self.client.request("DELETE", "/api/me/images/not-a-real-uid", json={})
         self.assertEqual(resp.status_code, 404)
+
+    def test_naming_an_image_over_http(self):
+        created = self.client.post(
+            "/api/me/images", json={"image_b64": _data_url(_png_bytes()), "name": "Holiday"})
+        uid = created.json()["uid"]
+        listed = self.client.get("/api/me/images").json()
+        self.assertEqual(listed["images"], [{"uid": uid, "name": "Holiday"}])
+        self.assertEqual(listed["max_name"], user_images.MAX_IMAGE_NAME)
+
+        renamed = self.client.patch(f"/api/me/images/{uid}", json={"name": "Holiday 2019"})
+        self.assertEqual(renamed.status_code, 200, renamed.text)
+        self.assertEqual(self.client.get("/api/me/images").json()["images"][0]["name"],
+                         "Holiday 2019")
+
+    def test_renaming_an_image_that_is_not_this_accounts_is_a_404(self):
+        created = self.client.post("/api/me/images", json={"image_b64": _data_url(_png_bytes())})
+        uid = created.json()["uid"]
+        stranger = asyncio.run(auth.create_user(
+            username="stranger", password="hunter2hunter2", settings=Settings()))
+        self.client.cookies.set(auth.COOKIE_NAME_SECURE,
+                                asyncio.run(auth.create_session(stranger)))
+        resp = self.client.patch(f"/api/me/images/{uid}", json={"name": "Mine now"})
+        self.assertEqual(resp.status_code, 404)
+
+    def test_an_over_long_name_is_refused_over_http(self):
+        created = self.client.post("/api/me/images", json={"image_b64": _data_url(_png_bytes())})
+        uid = created.json()["uid"]
+        resp = self.client.patch(f"/api/me/images/{uid}",
+                                 json={"name": "x" * (user_images.MAX_IMAGE_NAME + 1)})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.client.get("/api/me/images").json()["images"][0]["name"], "Image 1")
 
 
 if __name__ == "__main__":

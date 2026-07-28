@@ -1226,14 +1226,14 @@ class ExportRouteTests(RankerTestCase):
 
     def test_a_hundred_titles_in_three_columns_is_refused_for_webp_and_allowed_for_jpeg(self):
         """The measured trap: WebP hard-fails above 16383 pixels, and the canvas
-        this asks for is 27270 tall. The refusal has to arrive BEFORE the render,
+        this asks for is 27748 tall. The refusal has to arrive BEFORE the render,
         which is why it names a size nothing has drawn yet."""
         self.fill(100)
         refused = self.export(top_x=100, columns=3, fmt="webp")
         self.assertEqual(refused.status_code, 400)
         body = refused.json()
         self.assertEqual(body["reason"], "canvas_too_large")
-        self.assertEqual((body["width"], body["height"]), (1500, 27270))
+        self.assertEqual((body["width"], body["height"]), (1500, 27748))
         self.assertEqual(body["limit"], 16383)
         self.assertIn("16383", body["error"])
 
@@ -1271,6 +1271,35 @@ class ExportRouteTests(RankerTestCase):
         refused = self.export(top_x=6, columns=3, fmt="jpeg", title="B")
         self.assertEqual(refused.status_code, 429)
         self.assertEqual(refused.json()["reason"], "export_cooldown")
+
+    def test_a_refused_export_says_how_long_is_left(self):
+        self.fill(6)
+        self.export(top_x=6, columns=3, fmt="jpeg", title="A")
+        body = self.export(top_x=6, columns=3, fmt="jpeg", title="B").json()
+        self.assertTrue(0 < body["retry_after"] <= ranker_routes.EXPORT_COOLDOWN_SECONDS)
+        self.assertIn(f"{body['retry_after']} second", body["error"])
+
+    def test_being_refused_does_not_restart_the_wait(self):
+        """A limiter that recorded its own refusals would push the window forward
+        on every rejected click, so somebody pressing the button while they wait
+        would never be let through — the countdown has to count down."""
+        self.fill(6)
+        self.export(top_x=6, columns=3, fmt="jpeg", title="A")
+        first = self.export(top_x=6, columns=3, fmt="jpeg", title="B").json()["retry_after"]
+
+        # Age the recorded render so a few seconds appear to have passed, then
+        # spend several attempts against the closed door.
+        asyncio.run(db.execute(
+            "UPDATE login_attempts SET attempted_at = attempted_at - 5 "
+            " WHERE key_type = 'ranker_export'"))
+        for _ in range(3):
+            refused = self.export(top_x=6, columns=3, fmt="jpeg", title="B")
+        self.assertEqual(refused.status_code, 429)
+        self.assertLess(refused.json()["retry_after"], first)
+        # And the attempts themselves left nothing behind to extend it with.
+        self.assertEqual(
+            self.value("SELECT COUNT(*) FROM login_attempts WHERE key_type = 'ranker_export'"),
+            1)
 
     def test_downloading_the_same_image_again_is_exempt_from_the_cooldown(self):
         """The cooldown exists to bound RENDERING. Refusing a cached download

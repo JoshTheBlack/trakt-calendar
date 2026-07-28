@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 import logging
 import re
 import shutil
@@ -129,6 +130,91 @@ def list_images(user_id: int) -> list[str]:
     return [uid for _mtime, uid in entries]
 
 
+# ---------------------------------------------------------------------------
+# names
+# ---------------------------------------------------------------------------
+# A saved image needs a name, or a picker offering five of them is asking the
+# user to recognize thirty-two hex characters.
+#
+# NAMES LIVE IN A SIDECAR FILE, NOT IN THE DATABASE, and the reason is that they
+# belong to the file rather than to a row: the images are stored on disk, the
+# account's directory is deleted wholesale when the account goes, and a table
+# would have to be kept in step with a directory that can also be emptied by an
+# operator with a broom. Keeping the label beside the thing it labels means the
+# two cannot disagree — a name with no file is ignored on read, and a file with
+# no name falls back to a numbered default.
+#
+# A name is never a path component (S13 still holds: paths are built only from
+# the integer user id and the server-issued uid), so it is free text bounded
+# only by a length.
+
+MAX_IMAGE_NAME = 40
+
+_NAMES_FILE = "images.json"
+
+
+def _names_path(user_id: int) -> Path:
+    return _user_dir(user_id) / _NAMES_FILE
+
+
+def _read_names(user_id: int) -> dict[str, str]:
+    """uid -> name. A missing or unreadable sidecar is an empty map rather than
+    an error: a name is a convenience, and losing one must never cost somebody
+    access to the image it was for."""
+    try:
+        raw = _names_path(user_id).read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if isinstance(v, str)}
+
+
+def _write_names(user_id: int, names: dict[str, str]) -> None:
+    path = _names_path(user_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(names, sort_keys=True), encoding="utf-8")
+
+
+def clean_name(value: object) -> str:
+    """A user-supplied name, trimmed and bounded. Empty is allowed and means
+    "no name": the caller substitutes a default rather than storing one, so an
+    image the user never named does not look like one they named badly."""
+    text = " ".join(str(value or "").split())
+    if len(text) > MAX_IMAGE_NAME:
+        raise ValidationError(f"A name can be at most {MAX_IMAGE_NAME} characters.")
+    return text
+
+
+def describe_images(user_id: int) -> list[dict[str, str]]:
+    """Every saved image as {uid, name}, oldest first — what a picker needs to
+    render something a person can choose between. An image with no stored name
+    gets a positional default so there is always something to show."""
+    names = _read_names(user_id)
+    return [
+        {"uid": uid, "name": names.get(uid) or f"Image {position}"}
+        for position, uid in enumerate(list_images(user_id), start=1)
+    ]
+
+
+def set_image_name(user_id: int, image_uid: str, name: str) -> bool:
+    """Name (or rename) a saved image. False when this account has no such
+    image, so a caller answers 404 rather than storing a name for nothing."""
+    if image_uid not in list_images(user_id):
+        return False
+    names = _read_names(user_id)
+    if name:
+        names[image_uid] = name
+    else:
+        names.pop(image_uid, None)
+    _write_names(user_id, names)
+    return True
+
+
 def _decode_upload(image_b64: str) -> bytes:
     if not isinstance(image_b64, str) or not image_b64.strip():
         raise ValidationError("No image was provided.")
@@ -211,18 +297,23 @@ def delete_avatar(user_id: int) -> bool:
         return False
 
 
-async def add_image(user_id: int, image_b64: str) -> str:
-    """Validate, normalize, and store a new saved image. Returns its uid.
-    Raises TooManyImages at the cap, checked before the (more expensive)
-    validation so a client already at the limit isn't paying for a decode
-    Pillow work it can't use."""
+async def add_image(user_id: int, image_b64: str, name: str = "") -> str:
+    """Validate, normalize, and store a new saved image under an optional name.
+    Returns its uid. Raises TooManyImages at the cap, checked before the (more
+    expensive) validation so a client already at the limit isn't paying for a
+    decode Pillow work it can't use."""
     if len(list_images(user_id)) >= MAX_IMAGES_PER_USER:
         raise TooManyImages()
+    label = clean_name(name)
     normalized = await _validated_master(image_b64)
     uid = uuid.uuid4().hex
     d = images_dir(user_id)
     d.mkdir(parents=True, exist_ok=True)
     image_path(user_id, uid).write_bytes(normalized)
+    if label:
+        names = _read_names(user_id)
+        names[uid] = label
+        _write_names(user_id, names)
     return uid
 
 
@@ -231,9 +322,15 @@ def delete_image(user_id: int, image_uid: str) -> bool:
         return False
     try:
         image_path(user_id, image_uid).unlink()
-        return True
     except FileNotFoundError:
         return False
+    # The name goes with the image. Left behind it would be handed straight back
+    # to the next upload that happened to reuse the uid — which cannot happen
+    # with uuid4, but a stale map that only grows is its own small mess.
+    names = _read_names(user_id)
+    if names.pop(image_uid, None) is not None:
+        _write_names(user_id, names)
+    return True
 
 
 def resize_master(master: bytes, size: int) -> bytes:

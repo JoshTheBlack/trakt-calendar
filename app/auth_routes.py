@@ -762,7 +762,8 @@ async def upload_saved_image(request: Request):
     user = await auth.require_session(request)
     data = await _json_body(request)
     try:
-        uid = await user_images.add_image(user.user_id, str(data.get("image_b64") or ""))
+        uid = await user_images.add_image(
+            user.user_id, str(data.get("image_b64") or ""), str(data.get("name") or ""))
     except user_images.TooManyImages:
         return _error(
             f"You can save up to {user_images.MAX_IMAGES_PER_USER} images. Delete one first.", 409,
@@ -774,14 +775,30 @@ async def upload_saved_image(request: Request):
 
 @guard.get("/api/me/images", AuthLevel.SESSION)
 async def list_saved_images(request: Request):
-    """The uids of this account's saved images, oldest first — enough for a
-    picker to render a thumbnail of each through the route below."""
+    """This account's saved images as {uid, name}, oldest first — enough for a
+    picker to render a named thumbnail of each through the route below."""
     user = await auth.require_session(request)
     return JSONResponse({
         "ok": True,
-        "images": user_images.list_images(user.user_id),
+        "images": user_images.describe_images(user.user_id),
         "max": user_images.MAX_IMAGES_PER_USER,
+        "max_name": user_images.MAX_IMAGE_NAME,
     })
+
+
+@guard.patch("/api/me/images/{image_uid}", AuthLevel.SESSION)
+async def rename_saved_image(image_uid: str, request: Request):
+    """Name or rename one saved image. An empty name clears it, and the image
+    falls back to its positional default rather than being left blank."""
+    user = await auth.require_session(request)
+    data = await _json_body(request)
+    try:
+        name = user_images.clean_name(data.get("name"))
+    except user_images.ValidationError as exc:
+        return _error(str(exc))
+    if not user_images.set_image_name(user.user_id, image_uid, name):
+        return _error("No such image.", 404)
+    return JSONResponse({"ok": True, "name": name})
 
 
 @guard.get("/api/me/images/{image_uid}", AuthLevel.SESSION)

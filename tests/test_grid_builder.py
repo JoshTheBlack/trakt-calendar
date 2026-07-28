@@ -145,8 +145,8 @@ class FormatLimitTests(unittest.TestCase):
         refusal = caught.exception
         self.assertEqual(refusal.limit, 16383)
         self.assertEqual(refusal.fmt, "webp")
-        self.assertEqual((refusal.width, refusal.height), (1500, 27270))
-        self.assertIn("27270", str(refusal))
+        self.assertEqual((refusal.width, refusal.height), (1500, 27748))
+        self.assertIn("27748", str(refusal))
         self.assertIn("16383", str(refusal))
 
     def test_the_same_hundred_titles_render_as_jpeg(self):
@@ -155,7 +155,7 @@ class FormatLimitTests(unittest.TestCase):
         the remedy the error message offers a lie."""
         payload = grid_builder.build_grid(entries(100), columns=3, fmt="jpeg")
         with Image.open(BytesIO(payload)) as img:
-            self.assertEqual(img.size, (1500, 27270))
+            self.assertEqual(img.size, (1500, 27748))
 
     def test_five_and_six_columns_fit_webp_at_the_item_ceiling(self):
         for columns in (5, 6):

@@ -41,14 +41,23 @@ from PIL import Image, ImageDraw, ImageFont
 TILE_W, TILE_H = 500, 750
 
 # The banner across the top: title, who made it, and an optional round icon.
-HEADER_H = 70
+# Both the icon and the type derive from this, so it is the one number that
+# decides how legible the banner is. Sized against the 2500px-wide canvas a
+# five-column grid comes to rather than against the tile: at half this, the name
+# and the picture read as a caption on a poster wall instead of as its title.
+HEADER_H = 140
 
-# The strip under each tile that carries the rank number.
-LABEL_H = 50
+# The strip under each tile that carries the rank number. It costs its height
+# once per ROW, which makes it the constant that decides whether a tall grid
+# still fits inside WebP's 16383px ceiling (see MAX_DIMENSION). 62 is as large as
+# it can be while the biggest grid the caps allow — 100 titles in five columns,
+# 16380px — still encodes as WebP. Raising it buys a bigger number at the cost of
+# that combination, so raise it deliberately or not at all.
+LABEL_H = 62
 
 # Added under the rank strip only when captions are switched on, so a grid
 # without them is not paying for the space.
-CAPTION_H = 44
+CAPTION_H = 62
 
 # Flush by default: the look this feature was designed around has no spacing at
 # all. They are real constants rather than inlined zeros so that putting a gutter
@@ -69,8 +78,8 @@ PLACEHOLDER_BACKGROUND = (28, 31, 34)
 # Type sizes as a fraction of the strip they sit in, so `scale` moves them with
 # everything else rather than needing a second set of scaled constants.
 _HEADER_TYPE = 0.60
-_RANK_TYPE = 0.66
-_CAPTION_TYPE = 0.52
+_RANK_TYPE = 0.78
+_CAPTION_TYPE = 0.58
 
 # Per-format hard ceilings, measured rather than assumed. WebP's is the one that
 # bites: a tall grid passes every other check and then throws from the encoder
@@ -81,7 +90,7 @@ FORMATS = frozenset(MAX_DIMENSION)
 # Bumped whenever anything above changes where a pixel lands. A render cache
 # keyed on the inputs alone would keep serving the old layout after the code
 # that produced it was replaced.
-RENDERER_VERSION = 2
+RENDERER_VERSION = 3
 
 _FONT_PATH = Path(__file__).resolve().parent / "static" / "fonts" / "Inter-Bold.ttf"
 _PLACEHOLDER_PATH = (

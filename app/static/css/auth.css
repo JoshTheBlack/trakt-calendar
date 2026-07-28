@@ -111,6 +111,27 @@ body.auth-page.has-nav .auth-logo { display: none; }
     font-size: 1.1rem;
 }
 
+/* Header images: a picture, the name it goes by, and the way to get rid of it,
+   in one card each. Wrapping rather than scrolling — there are at most five. */
+.auth-hint { color: var(--text-dim); font-size: 0.78rem; }
+.image-manager { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; }
+.image-card {
+    display: flex; flex-direction: column; gap: 6px; width: 108px;
+    padding: 8px; border: 1px solid var(--card-border); border-radius: 10px;
+    background: var(--card);
+}
+.image-card img {
+    width: 92px; height: 92px; object-fit: cover; border-radius: 8px;
+    background: var(--bg-panel);
+}
+.image-card input {
+    width: 100%; min-width: 0; padding: 4px 6px; font-size: 0.74rem;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 6px; color: var(--text); font-family: inherit;
+}
+.image-card input:focus { border-color: var(--gold); outline: none; }
+.image-card .btn-ghost { align-self: flex-start; }
+
 /* Error pages (404 / 403). The same card as the auth screens, with the status
    set as a watermark so the page is identifiable at a glance without the number
    competing with the sentence that actually explains it. */

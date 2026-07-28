@@ -36,11 +36,11 @@
         {% if board %}
         <button type="button" class="pill-btn" onclick="openExportModal()">🖼️ Export</button>
         {% endif %}
+        <button type="button" class="pill-btn" onclick="openBackupModal()">🗄️ Backup</button>
         <details class="nav-menu">
             <summary title="Account and settings">☰ Menu</summary>
             <div class="nav-menu-items">
                 <a href="/me">👤 Account</a>
-                <button type="button" onclick="openBackupModal()">🗄️ Backup</button>
                 {% if is_admin %}
                 <a href="/admin">🛠️ Admin</a>
                 {% endif %}
@@ -215,12 +215,18 @@
                 <div class="field"><label for="exFmt">Format</label>
                     <select id="exFmt" onchange="onExportChange()"></select></div>
                 <div class="field"><label for="exHeader">Header image</label>
-                    <select id="exHeader" onchange="onExportChange()">
-                        <option value="">None</option>
-                        <option value="avatar">My avatar</option>
-                    </select>
-                    <span class="hint">Upload a new one on your
-                        <a href="/me">account page</a>, or below.</span>
+                    <div class="ranker-header-pick">
+                        {# The picture beside the name, because "Beach photo" and
+                           "Beach photo 2" are not a choice anybody can make from
+                           the words alone. #}
+                        <img id="exHeaderThumb" alt="" hidden>
+                        <select id="exHeader" onchange="onExportChange()">
+                            <option value="">None</option>
+                            <option value="avatar">My avatar</option>
+                        </select>
+                    </div>
+                    <span class="hint">Name, view and remove saved images on your
+                        <a href="/me">account page</a>. Uploading here saves it there too.</span>
                     <input type="file" id="exUpload" accept="image/*" onchange="uploadHeaderImage(this)">
                 </div>
                 <div class="ranker-opt-row">

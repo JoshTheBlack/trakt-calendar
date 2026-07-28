@@ -219,6 +219,19 @@
 .ranker-size { font-size: 0.74rem; color: var(--text-dim); }
 .ranker-size.is-over { color: var(--crimson); font-weight: 600; }
 
+/* The ask dialog can be opened FROM another modal — naming an image while the
+   export dialog is up — and it sits earlier in the document, so at the shared
+   z-index it would open behind the thing that asked for it. */
+#askModal { z-index: 10001; }
+
+/* The header-image chooser: the picture beside the name it goes by. */
+.ranker-header-pick { display: flex; align-items: center; gap: 8px; }
+.ranker-header-pick select { flex: 1; min-width: 0; }
+#exHeaderThumb {
+    width: 42px; height: 42px; border-radius: 999px; object-fit: cover;
+    border: 1px solid var(--card-border); background: var(--card); flex-shrink: 0;
+}
+
 /* ---- backup modal ----
    The restore button is the primary action of that dialog and also the only
    irreversible one on this page, so it reads in the destructive colour rather

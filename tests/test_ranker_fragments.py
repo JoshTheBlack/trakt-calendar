@@ -385,7 +385,8 @@ class SavedImageRouteTests(FragmentTestCase):
         self.assertEqual(created.status_code, 200)
         uid = created.json()["uid"]
 
-        self.assertEqual(self.client.get("/api/me/images").json()["images"], [uid])
+        self.assertEqual(self.client.get("/api/me/images").json()["images"],
+                         [{"uid": uid, "name": "Image 1"}])
         served = self.client.get(f"/api/me/images/{uid}")
         self.assertEqual(served.status_code, 200)
         self.assertEqual(served.headers["content-type"], "image/webp")

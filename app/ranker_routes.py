@@ -884,16 +884,20 @@ async def _render(entries: list[grid_builder.GridEntry], options: _ExportOptions
         return await anyio.to_thread.run_sync(work)
 
 
-async def _export_on_cooldown(user_id: int) -> bool:
-    """Whether this account exported too recently, recording this one either
-    way. Stored in `login_attempts` like every other volume throttle here, so it
-    is one budget however many workers the instance runs."""
-    key = str(user_id)
-    limited = await auth.rate_limited(
-        "ranker_export", key, max_attempts=1, window_seconds=EXPORT_COOLDOWN_SECONDS,
+async def _export_cooldown_remaining(user_id: int) -> int:
+    """Seconds this account still has to wait before another render, or 0.
+
+    ASKING DOES NOT RESTART THE WAIT. Recording the refusal would push the window
+    forward on every rejected click, so somebody pressing the button while they
+    wait would never be let through — the countdown has to count down. The
+    attempt is recorded where the work actually begins, below.
+
+    Stored in `login_attempts` like every other volume throttle here, so it is
+    one budget however many workers the instance runs.
+    """
+    return await auth.cooldown_remaining(
+        "ranker_export", str(user_id), window_seconds=EXPORT_COOLDOWN_SECONDS,
     )
-    await auth.record_attempt("ranker_export", key, True)
-    return limited
 
 
 async def _consolidated(user_id: int, board_uid: str, options: _ExportOptions):
@@ -989,12 +993,16 @@ async def export_grid(board_uid: str, request: Request):
     if payload is None:
         # Checked only when something actually has to be rendered, so downloading
         # the same image again — which costs nothing — is never refused.
-        if await _export_on_cooldown(user.user_id):
+        wait = await _export_cooldown_remaining(user.user_id)
+        if wait:
             return _error(
                 f"Exports are limited to one every {EXPORT_COOLDOWN_SECONDS} seconds. "
-                "Give it a moment and try again.",
-                429, reason="export_cooldown",
+                f"Try again in {wait} second{'' if wait == 1 else 's'}.",
+                429, reason="export_cooldown", retry_after=wait,
             )
+        # Recorded HERE, where the render is actually about to happen, so the
+        # cooldown measures work done rather than requests made.
+        await auth.record_attempt("ranker_export", str(user.user_id), True)
         payload = await _render(_grid_entries(ranked), options,
                                 scale=options.scale, fmt=options.fmt, header=header)
         await anyio.to_thread.run_sync(ranker_export.store_render, path, payload)

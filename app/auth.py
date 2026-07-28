@@ -707,6 +707,27 @@ async def rate_limited(
     return int(count) >= max_attempts
 
 
+async def cooldown_remaining(
+    key_type: str, key_value: str, *, window_seconds: int, now: int | None = None,
+) -> int:
+    """Seconds left before this key may act again, or 0 when it may act now.
+
+    READS WITHOUT RECORDING, which is the whole point. A limiter that records the
+    refusal it just issued restarts its own window on every rejected attempt, so
+    somebody clicking a button every few seconds is never let through — the wait
+    resets instead of counting down. A caller pairs this with `record_attempt`
+    at the moment work actually starts.
+    """
+    ts = db.now() if now is None else now
+    last = await db.fetch_value(
+        "SELECT MAX(attempted_at) FROM login_attempts WHERE key_type = ? AND key_value = ?",
+        (key_type, key_value),
+    )
+    if last is None:
+        return 0
+    return max(0, int(last) + window_seconds - ts)
+
+
 async def handshake_start_limited(request: Request, settings: Settings | None = None) -> bool:
     """Whether this address has started too many provider sign-ins, recording
     this one either way.
