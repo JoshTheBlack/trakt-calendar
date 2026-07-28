@@ -24,6 +24,11 @@ body.auth-page.has-nav .auth-logo { display: none; }
 }
 
 .auth-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
+/* The signed-in account page is wider than the sign-in forms, which are a
+   column of single fields and read badly stretched. This one carries the header
+   images, and 420px wrapped five of them onto three rows for no reason: the
+   width is what makes the whole set visible at once. */
+body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .auth-logo { height: 34px; opacity: 0.92; }
 
 .auth-card {

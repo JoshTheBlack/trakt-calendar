@@ -241,9 +241,15 @@
                 <p class="ranker-size" id="exSize"></p>
             </div>
             <div class="ranker-export-preview">
-                <div class="ranker-preview-frame" id="exPreview">
+                {# Click to see it at rendered size and move the pointer to look
+                   around it — the header is a few percent of a tall grid, and
+                   shrunk into this column it cannot be judged at all. #}
+                <div class="ranker-preview-frame" id="exPreview"
+                     onclick="togglePreviewZoom()" onmousemove="panPreview(event)"
+                     title="Click to zoom, then move the pointer to look around">
                     <span class="ranker-preview-hint">Preview appears here.</span>
                 </div>
+                <p class="hint">Click the preview to zoom in.</p>
             </div>
         </div>
         <div class="modal-foot">

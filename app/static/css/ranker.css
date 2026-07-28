@@ -215,6 +215,22 @@
     overflow: hidden; padding: 6px;
 }
 .ranker-preview-frame img { max-width: 100%; max-height: 60vh; display: block; }
+/* Zoomed: the image at the size it was rendered, moved under a fixed window by
+   the pointer. The frame is the window, so it needs a height of its own — with
+   `min-height` alone it would simply grow to fit the image and there would be
+   nothing to look around. */
+.ranker-preview-frame { cursor: zoom-in; position: relative; }
+.ranker-preview-frame.is-zoomed {
+    cursor: zoom-out; height: 60vh; padding: 0;
+    align-items: flex-start; justify-content: flex-start;
+}
+.ranker-preview-frame.is-zoomed img {
+    /* The width is set in script, from the image's own natural size. */
+    max-width: none; max-height: none;
+    /* No transition: the image has to track the pointer, and easing it turns
+       looking around into waiting for it to catch up. */
+    will-change: transform;
+}
 .ranker-preview-hint { font-size: 0.76rem; color: var(--text-faint); text-align: center; }
 .ranker-size { font-size: 0.74rem; color: var(--text-dim); }
 .ranker-size.is-over { color: var(--crimson); font-weight: 600; }
