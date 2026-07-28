@@ -53,7 +53,7 @@ from itertools import groupby
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-from . import calendar_filter, db, trakt
+from . import artwork, calendar_filter, db, trakt
 from .cache import COMPRESS_LEVEL
 from .endpoints import ENDPOINTS, Endpoint
 
@@ -201,6 +201,16 @@ def _prune_media(media: dict) -> dict:
     if poster:
         out["images"] = {"poster": poster}
     return out
+
+
+def _poster_sighting(media: dict, media_key: str):
+    """(media_key, tmdb, 'trakt', url) for one pruned media object, or None when
+    it lacks either id — the pair the ranker's poster registry is keyed on."""
+    tmdb_id = (media.get("ids") or {}).get("tmdb")
+    poster = trakt._poster(media)
+    if not tmdb_id or not poster:
+        return None
+    return (media_key, int(tmdb_id), "trakt", poster)
 
 
 def prune_entry(entry: dict, media_key: str) -> dict | None:
@@ -369,6 +379,16 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
             return cached
         raise
     await store_window(endpoint.key, start, entries, ttl, ts)
+    # Recorded only on a genuine fetch, not on every cache-hit read: the URL
+    # arrived here already, so this is the point a lookup is "paid for" rather
+    # than a per-view cost added to the hot render path.
+    sightings = (
+        s for s in (
+            _poster_sighting(entry.get(endpoint.media) or {}, endpoint.media)
+            for entry in entries
+        ) if s is not None
+    )
+    await artwork.record_poster_urls(sightings)
     return entries, ts
 
 

@@ -78,8 +78,8 @@ async def admin_list_users():
 
 @guard.post("/api/admin/users/{user_id}/approval", AuthLevel.ADMIN)
 async def admin_set_approval(user_id: int, request: Request):
-    """Toggle calendar and/or distrakt approval, independently — a request may
-    include either key, both, or neither."""
+    """Toggle calendar, distrakt and/or ranker approval, independently — a
+    request may include any of the keys, all of them, or none."""
     if await auth.get_user(user_id) is None:
         return _error("No such account.", 404)
     data = await _json_body(request)
@@ -87,6 +87,8 @@ async def admin_set_approval(user_id: int, request: Request):
         await auth.set_calendar_approved(user_id, bool(data["calendar"]))
     if "distrakt" in data:
         await auth.set_distrakt_approved(user_id, bool(data["distrakt"]))
+    if "ranker" in data:
+        await auth.set_ranker_approved(user_id, bool(data["ranker"]))
     return JSONResponse({"ok": True})
 
 
@@ -281,6 +283,7 @@ async def admin_list_invites():
             "expires_at": row["expires_at"], "max_uses": row["max_uses"],
             "used_count": row["used_count"], "revoked": bool(row["revoked"]),
             "grants_calendar_on_accept": bool(row["grants_calendar_on_accept"]),
+            "grants_ranker_on_accept": bool(row["grants_ranker_on_accept"]),
             "redemption_count": row["redemption_count"],
             "usable": auth.invite_is_usable(row),
         }

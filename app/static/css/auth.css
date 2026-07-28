@@ -24,6 +24,11 @@ body.auth-page.has-nav .auth-logo { display: none; }
 }
 
 .auth-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
+/* The signed-in account page is wider than the sign-in forms, which are a
+   column of single fields and read badly stretched. This one carries the header
+   images, and 420px wrapped five of them onto three rows for no reason: the
+   width is what makes the whole set visible at once. */
+body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .auth-logo { height: 34px; opacity: 0.92; }
 
 .auth-card {
@@ -100,6 +105,37 @@ body.auth-page.has-nav .auth-logo { display: none; }
 }
 
 .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.avatar-row .row-main { display: flex; align-items: center; gap: 10px; }
+.avatar-thumb {
+    width: 40px; height: 40px; border-radius: 999px; object-fit: cover;
+    border: 1px solid var(--card-border); background: var(--card);
+}
+.avatar-placeholder {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem;
+}
+
+/* Header images: a picture, the name it goes by, and the way to get rid of it,
+   in one card each. Wrapping rather than scrolling — there are at most five. */
+.auth-hint { color: var(--text-dim); font-size: 0.78rem; }
+.image-manager { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; }
+.image-card {
+    display: flex; flex-direction: column; gap: 6px; width: 108px;
+    padding: 8px; border: 1px solid var(--card-border); border-radius: 10px;
+    background: var(--card);
+}
+.image-card img {
+    width: 92px; height: 92px; object-fit: cover; border-radius: 8px;
+    background: var(--bg-panel);
+}
+.image-card input {
+    width: 100%; min-width: 0; padding: 4px 6px; font-size: 0.74rem;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 6px; color: var(--text); font-family: inherit;
+}
+.image-card input:focus { border-color: var(--gold); outline: none; }
+.image-card .btn-ghost { align-self: flex-start; }
 
 /* Error pages (404 / 403). The same card as the auth screens, with the status
    set as a watermark so the page is identifiable at a glance without the number

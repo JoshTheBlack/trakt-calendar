@@ -28,6 +28,9 @@
         {% if user.calendar_approved %}
         <a class="pill-btn" href="/calendar">📅 Calendar</a>
         {% endif %}
+        {% if user.ranker_approved %}
+        <a class="pill-btn" href="/rankings">🏆 Rankings</a>
+        {% endif %}
         <details class="nav-menu">
             <summary title="Account and settings">☰ Menu</summary>
             <div class="nav-menu-items">
@@ -62,10 +65,63 @@
     {% endif %}
 
     <div class="auth-list">
+      <div class="row avatar-row">
+        <span class="label">Profile picture</span>
+        <div class="row-main">
+          <img id="avatarPreview" class="avatar-thumb" alt="Your profile picture"
+               src="{% if has_avatar %}/api/me/avatar?size=96{% endif %}"
+               {% if not has_avatar %}style="display:none"{% endif %}>
+          <div id="avatarPlaceholder" class="avatar-thumb avatar-placeholder"
+               {% if has_avatar %}style="display:none"{% endif %}>🙂</div>
+          <button class="btn-ghost tiny" type="button" id="avatarUploadBtn">Upload</button>
+          <button class="btn-ghost tiny" type="button" id="avatarRemoveBtn"
+                  {% if not has_avatar %}style="display:none"{% endif %}>Remove</button>
+          <input type="file" id="avatarFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        </div>
+      </div>
+    </div>
+    <p class="auth-error" id="avatarError" role="alert"></p>
+
+    {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
+       instead of the profile picture. They live here rather than only inside the
+       export dialog because they belong to the account, not to one export: this
+       is where you can see what you have, tell them apart by name, and get rid
+       of one. Deliberately unexplained on screen — the thumbnails say what they
+       are, and the export dialog is where the choice is actually made. #}
+    <div class="auth-list">
+      <div class="row">
+        <span class="label">Ranker images</span>
+      </div>
+      <div class="row">
+        <div class="image-manager" id="imageManager">
+          <span class="auth-hint" id="imageEmpty">Nothing saved yet.</span>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-main">
+          <button class="btn-ghost tiny" type="button" id="imageUploadBtn">Upload</button>
+          <input type="file" id="imageFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          <span class="auth-hint" id="imageCount"></span>
+        </div>
+      </div>
+    </div>
+    <p class="auth-error" id="imageError" role="alert"></p>
+
+    <div class="auth-list">
       <div class="row">
         <span class="label">Calendar access</span>
         <span class="auth-badge {{ 'ok' if user.calendar_approved else 'pending' }}">
           {{ "Approved" if user.calendar_approved else "Pending" }}
+        </span>
+      </div>
+      {# Rendered either way, unlike the two rows below: the ranker is a normal
+         visible feature, so an account that hasn't been granted it yet is better
+         told that this is where the answer will appear than left wondering why
+         a link it saw mentioned refuses. #}
+      <div class="row">
+        <span class="label">Rankings access</span>
+        <span class="auth-badge {{ 'ok' if user.ranker_approved else 'pending' }}">
+          {{ "Approved" if user.ranker_approved else "Pending" }}
         </span>
       </div>
       {# Both rows are rendered ONLY when the answer is yes. distrakt is an
@@ -248,6 +304,218 @@ passwordForm.addEventListener('submit', (e) => {
 
 // Signing out is the header menu's job now — see nav.js — so this page no longer
 // carries its own copy of the request.
+
+const avatarFile = document.getElementById('avatarFile');
+const avatarUploadBtn = document.getElementById('avatarUploadBtn');
+const avatarRemoveBtn = document.getElementById('avatarRemoveBtn');
+const avatarPreview = document.getElementById('avatarPreview');
+const avatarPlaceholder = document.getElementById('avatarPlaceholder');
+const avatarError = document.getElementById('avatarError');
+
+avatarUploadBtn.addEventListener('click', () => avatarFile.click());
+
+avatarFile.addEventListener('change', async () => {
+  const file = avatarFile.files[0];
+  avatarFile.value = '';
+  if (!file) return;
+  avatarError.textContent = '';
+  avatarUploadBtn.disabled = true;
+  try {
+    // readAsDataURL includes the "data:image/...;base64," prefix; the server
+    // strips it before decoding, so it can be sent through unmodified.
+    const image_b64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Could not read that file.'));
+      reader.readAsDataURL(file);
+    });
+    const resp = await fetch('/api/me/avatar', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_b64}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) {
+      // Cache-bust: the URL is otherwise identical to whatever the browser
+      // already cached for the previous avatar.
+      avatarPreview.src = '/api/me/avatar?size=96&t=' + Date.now();
+      avatarPreview.style.display = '';
+      avatarPlaceholder.style.display = 'none';
+      avatarRemoveBtn.style.display = '';
+    } else {
+      avatarError.textContent = data.error || 'Could not upload that image.';
+    }
+  } catch (e) {
+    avatarError.textContent = e.message || 'Could not upload that image.';
+  }
+  avatarUploadBtn.disabled = false;
+});
+
+avatarRemoveBtn.addEventListener('click', () => {
+  confirmInline(avatarRemoveBtn, 'Remove your profile picture?', doRemoveAvatar, {danger: true});
+});
+
+async function doRemoveAvatar() {
+  avatarRemoveBtn.disabled = true;
+  avatarError.textContent = '';
+  try {
+    const resp = await fetch('/api/me/avatar', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) {
+      avatarPreview.style.display = 'none';
+      avatarPlaceholder.style.display = '';
+      avatarRemoveBtn.style.display = 'none';
+    } else {
+      avatarError.textContent = data.error || 'Could not remove your profile picture.';
+    }
+  } catch (e) {
+    avatarError.textContent = 'Could not reach the server.';
+  }
+  avatarRemoveBtn.disabled = false;
+}
+
+// ---------------------------------------------------------------------------
+// header images
+// ---------------------------------------------------------------------------
+// View, name, upload and remove — the whole life of a saved image, in the place
+// it belongs to. The export dialog only ever CHOOSES between them.
+//
+// Cards are BUILT AS NODES with .textContent and .value rather than assembled
+// from a string: a name is text the user typed, and the difference between the
+// two approaches is whether it can close the tag it is sitting in.
+
+const imageManager = document.getElementById('imageManager');
+const imageFile = document.getElementById('imageFile');
+const imageUploadBtn = document.getElementById('imageUploadBtn');
+const imageCount = document.getElementById('imageCount');
+const imageError = document.getElementById('imageError');
+let imageMax = 5;
+let imageNameMax = 40;
+
+async function loadImages() {
+  imageError.textContent = '';
+  let data;
+  try {
+    const resp = await fetch('/api/me/images');
+    data = await resp.json();
+    if (!resp.ok || !data.ok) throw new Error(data.error || 'failed');
+  } catch (e) {
+    imageError.textContent = 'Could not load your saved images.';
+    return;
+  }
+  imageMax = data.max || imageMax;
+  imageNameMax = data.max_name || imageNameMax;
+  imageManager.textContent = '';
+  if (!data.images.length) {
+    const empty = document.createElement('span');
+    empty.className = 'auth-hint';
+    empty.textContent = 'Nothing saved yet.';
+    imageManager.appendChild(empty);
+  }
+  data.images.forEach(image => imageManager.appendChild(buildImageCard(image)));
+  imageCount.textContent = data.images.length + ' of ' + imageMax + ' saved.';
+  imageUploadBtn.disabled = data.images.length >= imageMax;
+}
+
+function buildImageCard(image) {
+  const card = document.createElement('div');
+  card.className = 'image-card';
+
+  const img = document.createElement('img');
+  img.src = '/api/me/images/' + encodeURIComponent(image.uid);
+  img.alt = image.name;
+  card.appendChild(img);
+
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.value = image.name;
+  name.maxLength = imageNameMax;
+  name.setAttribute('aria-label', 'Name for this image');
+  // On change rather than on every keystroke: renaming is not something worth a
+  // request per letter, and leaving the field is the moment the user is done.
+  name.addEventListener('change', () => renameImage(image.uid, name));
+  card.appendChild(name);
+
+  const remove = document.createElement('button');
+  remove.type = 'button';
+  remove.className = 'btn-ghost tiny';
+  remove.textContent = 'Remove';
+  remove.addEventListener('click', () => confirmInline(
+    remove, 'Remove this image?', () => deleteImage(image.uid), {danger: true}));
+  card.appendChild(remove);
+  return card;
+}
+
+async function renameImage(uid, input) {
+  imageError.textContent = '';
+  try {
+    const resp = await fetch('/api/me/images/' + encodeURIComponent(uid), {
+      method: 'PATCH',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: input.value}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || 'Could not save that name.');
+    // Cleared names come back as the positional default, so the field shows what
+    // the picker will actually say rather than staying empty.
+    if (!data.name) loadImages();
+  } catch (e) {
+    imageError.textContent = e.message || 'Could not save that name.';
+  }
+}
+
+async function deleteImage(uid) {
+  imageError.textContent = '';
+  try {
+    const resp = await fetch('/api/me/images/' + encodeURIComponent(uid), {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: '{}',
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || 'Could not remove that image.');
+  } catch (e) {
+    imageError.textContent = e.message || 'Could not remove that image.';
+  }
+  loadImages();
+}
+
+imageUploadBtn.addEventListener('click', () => imageFile.click());
+
+imageFile.addEventListener('change', async () => {
+  const file = imageFile.files[0];
+  imageFile.value = '';
+  if (!file) return;
+  imageError.textContent = '';
+  imageUploadBtn.disabled = true;
+  try {
+    const image_b64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Could not read that file.'));
+      reader.readAsDataURL(file);
+    });
+    // The file's own name is the obvious first guess at what to call it, minus
+    // the extension; it is editable the moment the card appears.
+    const suggested = file.name.replace(/\.[^.]+$/, '').slice(0, imageNameMax);
+    const resp = await fetch('/api/me/images', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({image_b64, name: suggested}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) throw new Error(data.error || 'Could not upload that image.');
+  } catch (e) {
+    imageError.textContent = e.message || 'Could not upload that image.';
+  }
+  loadImages();
+});
+
+loadImages();
 </script>
 </body>
 </html>

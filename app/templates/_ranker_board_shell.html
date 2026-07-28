@@ -1,0 +1,135 @@
+{# One board: its unranked pool beside its tiers. Rendered inline by the page and
+   never fetched on its own — switching boards is a boosted navigation to
+   /rankings?board=<uid>, which swaps the document body and leaves the
+   stylesheet, the scripts and the drag machinery resident.
+
+   EVERYTHING HERE IS SERVER-RENDERED AND USABLE WITHOUT SCRIPT. The pool's first
+   page, every tier's header, and the rows of a board small enough to draw them
+   all come down in the initial HTML. What JavaScript adds is dragging, saving
+   and the export modal — not the ability to see what is on a board. #}
+<div class="ranker-board" id="rankerBoard" data-board="{{ board.uid }}">
+
+    <section class="ranker-pool-col">
+        <div class="ranker-panel-head">
+            <h2>Pool</h2>
+            <span class="ranker-count" id="poolCount">{{ board.pool | length }}</span>
+        </div>
+
+        {# The search box is a plain input driven by fetch, NOT a boosted form.
+           Every mutation and every JSON call in this feature goes through fetch
+           with an application/json body, because a boosted form would submit
+           with its native urlencoded encoding and the request-shape middleware
+           refuses that — deliberately, as CSRF defence. #}
+        <div class="ranker-add">
+            <div class="ranker-search-row">
+                <input type="search" id="searchBox" placeholder="Search for a title…"
+                       autocomplete="off" oninput="onSearchInput()"
+                       onkeydown="if (event.key === 'Enter') runSearch()">
+                <select id="searchMedia" onchange="runSearch()" aria-label="What to search for">
+                    {% if board.media_scope != 'movie' %}<option value="show">Shows</option>{% endif %}
+                    {% if board.media_scope != 'show' %}<option value="movie">Movies</option>{% endif %}
+                </select>
+            </div>
+            <div class="ranker-results" id="searchResults" hidden></div>
+
+            {# ABSENT, NOT DISABLED. GET /api/rankings/sources answers by omitting
+               the keys for sources this account cannot use, and these controls
+               follow it exactly: an account with nothing to import from is not
+               shown an import button that would only ever refuse. #}
+            <div class="ranker-source-actions">
+                {% if sources.import %}
+                <button type="button" class="btn-ghost small" onclick="openImportModal()">
+                    ⬇ Import finished titles</button>
+                {% endif %}
+                {% if sources.ratings %}
+                <button type="button" class="btn-ghost small" onclick="seedFromRatings(false)">
+                    ★ Seed from ratings</button>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="ranker-bulk" id="poolBulk" hidden>
+            <span id="poolSelectedCount">0 selected</span>
+            <select id="bulkTarget" aria-label="Tier to move the selection into"></select>
+            <button type="button" class="btn-ghost small" onclick="moveSelectionToTier()">Move</button>
+            <button type="button" class="btn-ghost small" onclick="clearSelection()">Clear</button>
+        </div>
+
+        {# The first page inline, the rest behind the sentinel this page's own
+           fragment carries. `data-loaded` marks a container the DOM is
+           authoritative for at save time; the pool always is. #}
+        <div class="ranker-pool" id="rankerPool" data-loaded="1" role="list">
+            {% include "_ranker_pool_page.html" %}
+        </div>
+        {% if not board.pool %}
+        <p class="ranker-empty" id="poolEmpty">Nothing waiting. Search above, or drag a
+            title back out of a tier.</p>
+        {% endif %}
+    </section>
+
+    <section class="ranker-tier-col">
+        <div class="ranker-panel-head">
+            <h2>Tiers</h2>
+            <div class="ranker-panel-actions">
+                <button type="button" class="btn-ghost small" onclick="applyTierTemplate()"
+                        title="Add an S/A/B/C/D/F set, keeping any tiers you already have">
+                    ✨ Apply template</button>
+                <button type="button" class="btn-ghost small" onclick="addTier()">＋ New tier</button>
+            </div>
+        </div>
+
+        <div id="rankerTiers">
+            {% for category in board.categories %}
+            {# A closed tier draws its header, its count and a strip of its
+               artwork, and fetches its rows on first open. `click once` on the
+               summary is the whole mechanism: the tier opens natively and the
+               body is filled by the swap. #}
+            <details class="ranker-tier{% if category.is_isolated %} is-isolated{% endif %}"
+                     data-uid="{{ category.uid }}"{% if rows_open %} open{% endif %}
+                     {% if category.colour %}style="--tier-colour: {{ category.colour }}"{% endif %}>
+                <summary class="ranker-tier-head"
+                         {% if not rows_open %}hx-get="{{ rows_url(board.uid, category.uid) }}"
+                         hx-trigger="click once"
+                         hx-target="#tierBody-{{ category.uid }}"
+                         hx-swap="innerHTML"{% endif %}>
+                    <span class="ranker-tier-label">{{ category.label or "Untitled" }}</span>
+                    <span class="ranker-tier-meta">
+                        <span class="ranker-count">{{ category['items'] | length }}</span>
+                        <span class="ranker-prio" title="Ranking priority — higher tiers rank above lower ones">
+                            P{{ category.rank_priority }}</span>
+                        {% if category.is_isolated %}
+                        <span class="ranker-iso" title="Kept out of the consolidated ranking; exported on its own">
+                            isolated</span>
+                        {% endif %}
+                    </span>
+                    <span class="ranker-strip" aria-hidden="true">
+                        {% for item in category['items'][:8] %}{% if item.tmdb %}
+                        <img loading="lazy" width="24" height="36" alt=""
+                             src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
+                             onerror="this.remove()">
+                        {% endif %}{% endfor %}
+                    </span>
+                    <span class="ranker-tier-acts">
+                        <button type="button" class="ranker-act" title="Tier settings"
+                                onclick="event.preventDefault(); openTierModal('{{ category.uid }}')">⚙</button>
+                        <button type="button" class="ranker-act danger" title="Delete this tier"
+                                onclick="event.preventDefault(); deleteTier(this, '{{ category.uid }}')">✕</button>
+                    </span>
+                </summary>
+                {# Height reserved from the count the server already knows, so
+                   opening a tier does not lurch the page while its rows arrive. #}
+                <div class="ranker-rows" id="tierBody-{{ category.uid }}" role="list"
+                     data-uid="{{ category.uid }}"
+                     {% if rows_open %}data-loaded="1"{% else %}style="--skeleton-rows: {{ category['items'] | length }}"{% endif %}>
+                    {% if rows_open %}{% with items = category['items'] %}{% include "_ranker_category_rows.html" %}{% endwith %}{% endif %}
+                </div>
+            </details>
+            {% endfor %}
+        </div>
+
+        {% if not board.categories %}
+        <p class="ranker-empty">No tiers yet. Apply the template for an S/A/B/C/D/F
+            set, or make your own.</p>
+        {% endif %}
+    </section>
+</div>

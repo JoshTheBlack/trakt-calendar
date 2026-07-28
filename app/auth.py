@@ -26,7 +26,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from fastapi import HTTPException, Request, Response
 
-from . import db, encryption_flow, secrets_box
+from . import db, encryption_flow, secrets_box, user_images
 from .config import TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings
 
 logger = logging.getLogger(__name__)
@@ -129,6 +129,7 @@ def insert_user(
     is_bootstrap: bool = False,
     calendar_approved: bool = False,
     distrakt_approved: bool = False,
+    ranker_approved: bool = False,
     timezone: str | None = None,
     now: int | None = None,
 ) -> int:
@@ -141,13 +142,13 @@ def insert_user(
     ts = db.now() if now is None else now
     cur = conn.execute(
         "INSERT INTO users (username, password_hash, password_changed_at, is_admin, "
-        "is_bootstrap, calendar_approved, distrakt_approved, is_disabled, timezone, "
-        "created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
+        "is_bootstrap, calendar_approved, distrakt_approved, ranker_approved, is_disabled, "
+        "timezone, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)",
         (
             username, password_hash, ts if password_hash else None,
             int(is_admin), int(is_bootstrap), int(calendar_approved), int(distrakt_approved),
-            timezone, ts, ts,
+            int(ranker_approved), timezone, ts, ts,
         ),
     )
     return int(cur.lastrowid)
@@ -310,6 +311,7 @@ async def create_user(
     is_bootstrap: bool = False,
     calendar_approved: bool = False,
     distrakt_approved: bool = False,
+    ranker_approved: bool = False,
     timezone: str | None = None,
 ) -> int:
     """Create a user plus its seeded preferences row in one transaction.
@@ -325,7 +327,7 @@ async def create_user(
         user_id = insert_user(
             conn, username=username, password_hash=password_hash, is_admin=is_admin,
             is_bootstrap=is_bootstrap, calendar_approved=calendar_approved,
-            distrakt_approved=distrakt_approved, timezone=tz,
+            distrakt_approved=distrakt_approved, ranker_approved=ranker_approved, timezone=tz,
         )
         insert_user_prefs(conn, user_id, cfg)
         return user_id
@@ -445,21 +447,27 @@ async def create_invite(
     expires_at: int | None = None,
     max_uses: int | None = None,
     grants_calendar_on_accept: bool = True,
+    grants_ranker_on_accept: bool = True,
 ) -> dict:
     """Mint a new invite token. Returns {"id", "token"}.
 
-    `grants_calendar_on_accept` defaults to True: issuing an invite is already
-    a deliberate act of trust, so making the invitee then wait in the approval
-    queue is friction with no added safety. There is deliberately no distrakt
-    equivalent — distrakt exposes a user's private watch history, so that
-    grant is always a separate, manual step taken after the account exists.
+    Both grants default to True: issuing an invite is already a deliberate act
+    of trust, so making the invitee then wait in the approval queue is friction
+    with no added safety. The ranker qualifies for the same treatment as the
+    calendar because it exposes nobody's private data — its optional import of
+    finished titles is separately gated, so granting the ranker can never hand
+    over a watch history. There is deliberately no distrakt equivalent, for
+    exactly that reason: that grant is always a separate, manual step taken
+    after the account exists.
     """
     token = secrets.token_urlsafe(32)
     ts = db.now()
     await db.execute(
         "INSERT INTO invites (token, label, created_by, created_at, expires_at, max_uses, "
-        "used_count, revoked, grants_calendar_on_accept) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)",
-        (token, label or None, created_by, ts, expires_at, max_uses, int(grants_calendar_on_accept)),
+        "used_count, revoked, grants_calendar_on_accept, grants_ranker_on_accept) "
+        "VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)",
+        (token, label or None, created_by, ts, expires_at, max_uses,
+         int(grants_calendar_on_accept), int(grants_ranker_on_accept)),
     )
     invite_id = await db.fetch_value("SELECT id FROM invites WHERE token = ?", (token,))
     return {"id": int(invite_id), "token": token}
@@ -699,6 +707,27 @@ async def rate_limited(
     return int(count) >= max_attempts
 
 
+async def cooldown_remaining(
+    key_type: str, key_value: str, *, window_seconds: int, now: int | None = None,
+) -> int:
+    """Seconds left before this key may act again, or 0 when it may act now.
+
+    READS WITHOUT RECORDING, which is the whole point. A limiter that records the
+    refusal it just issued restarts its own window on every rejected attempt, so
+    somebody clicking a button every few seconds is never let through — the wait
+    resets instead of counting down. A caller pairs this with `record_attempt`
+    at the moment work actually starts.
+    """
+    ts = db.now() if now is None else now
+    last = await db.fetch_value(
+        "SELECT MAX(attempted_at) FROM login_attempts WHERE key_type = ? AND key_value = ?",
+        (key_type, key_value),
+    )
+    if last is None:
+        return 0
+    return max(0, int(last) + window_seconds - ts)
+
+
 async def handshake_start_limited(request: Request, settings: Settings | None = None) -> bool:
     """Whether this address has started too many provider sign-ins, recording
     this one either way.
@@ -761,6 +790,11 @@ class CurrentUser:
     is_admin: bool
     calendar_approved: bool
     distrakt_approved: bool
+    # The ranker is a standalone feature with its own grant. Unlike
+    # distrakt_approved it carries no provider requirement: a ranker user builds
+    # their lists by searching, so an account with no linked identity at all is
+    # a fully working one.
+    ranker_approved: bool
     timezone: str | None
     # distrakt reads the requesting user's own Trakt watch history through their
     # own token, so an account with no linked Trakt identity has nothing for it
@@ -800,6 +834,7 @@ SELECT s.id                AS session_id,
        u.is_admin          AS is_admin,
        u.calendar_approved AS calendar_approved,
        u.distrakt_approved AS distrakt_approved,
+       u.ranker_approved   AS ranker_approved,
        u.is_disabled       AS is_disabled,
        u.timezone          AS timezone,
        EXISTS (SELECT 1 FROM linked_identities li
@@ -856,6 +891,7 @@ async def validate_session(
             is_admin=bool(row["is_admin"]),
             calendar_approved=bool(row["calendar_approved"]),
             distrakt_approved=bool(row["distrakt_approved"]),
+            ranker_approved=bool(row["ranker_approved"]),
             timezone=row["timezone"],
             has_trakt_identity=bool(row["has_trakt"]),
             expires_at=expires_at,
@@ -1291,11 +1327,13 @@ async def login_with_provider_identity(
             # registration; it just doesn't grant anything either.
             row = candidate if usable else None
         grants_calendar = bool(row["grants_calendar_on_accept"]) if row is not None else False
+        grants_ranker = bool(row["grants_ranker_on_accept"]) if row is not None else False
         # No username and no password: this account's only credential is the
         # provider identity below. One can be added later from the account page.
         user_id = insert_user(
             conn, username=None, password_hash=None, calendar_approved=grants_calendar,
-            distrakt_approved=False, timezone=cfg.timezone or None, now=ts,
+            distrakt_approved=False, ranker_approved=grants_ranker,
+            timezone=cfg.timezone or None, now=ts,
         )
         insert_user_prefs(conn, user_id, cfg)
         insert_linked_identity(
@@ -1709,6 +1747,7 @@ async def list_users_overview() -> list[dict]:
             "is_bootstrap": bool(u["is_bootstrap"]),
             "calendar_approved": bool(u["calendar_approved"]),
             "distrakt_approved": bool(u["distrakt_approved"]),
+            "ranker_approved": bool(u["ranker_approved"]),
             "is_disabled": bool(u["is_disabled"]),
             "created_at": u["created_at"],
             "last_login_at": u["last_login_at"],
@@ -1742,6 +1781,13 @@ async def set_calendar_approved(user_id: int, approved: bool) -> None:
 async def set_distrakt_approved(user_id: int, approved: bool) -> None:
     await db.execute(
         "UPDATE users SET distrakt_approved = ?, updated_at = ? WHERE id = ?",
+        (int(approved), db.now(), user_id),
+    )
+
+
+async def set_ranker_approved(user_id: int, approved: bool) -> None:
+    await db.execute(
+        "UPDATE users SET ranker_approved = ?, updated_at = ? WHERE id = ?",
         (int(approved), db.now(), user_id),
     )
 
@@ -1856,8 +1902,10 @@ async def delete_user(user_id: int, *, actor_user_id: int) -> None:
     behind in any of them. The account's username, custom share slug, and
     share token are all recorded in retired_identifiers so a new registration
     can't silently inherit a `/u/<username>`, `/c/<slug>`, or `/s/<token>` link
-    that was already shared. Raises CannotDeleteSelf or LastAdmin rather than
-    performing either.
+    that was already shared. The account's avatar and any saved images are
+    removed from disk after the row commits, since they live under the user's
+    id rather than in a cascading table. Raises CannotDeleteSelf or LastAdmin
+    rather than performing either.
     """
     if user_id == actor_user_id:
         raise CannotDeleteSelf()
@@ -1895,6 +1943,12 @@ async def delete_user(user_id: int, *, actor_user_id: int) -> None:
         conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     await db.transaction(_work)
+    # The row is gone; the per-user upload directory (avatar, saved images) has
+    # no row of its own to cascade from, so it needs its own sweep or it would
+    # survive the account forever. Filesystem work, so it goes to a worker
+    # thread; best-effort, since a stray leftover file must not make an
+    # otherwise-successful deletion look like it failed.
+    await anyio.to_thread.run_sync(user_images.delete_user_data, user_id)
 
 
 async def list_retired_identifiers():
@@ -1930,6 +1984,7 @@ class AuthLevel(str, Enum):
     SESSION = "session"
     CALENDAR_APPROVED = "calendar_approved"
     DISTRAKT_APPROVED = "distrakt_approved"
+    RANKER_APPROVED = "ranker_approved"
     ADMIN = "admin"
 
 
@@ -1996,6 +2051,21 @@ async def require_distrakt(request: Request) -> CurrentUser:
     return user
 
 
+async def require_ranker(request: Request) -> CurrentUser:
+    """Signed in and approved for the ranker.
+
+    Deliberately only the grant, with no provider requirement attached. The
+    ranker's baseline way of adding a title is a search run with the instance's
+    own credential, so an account that has never linked anything is a complete
+    one here — asking for a link would refuse accounts the feature works fine
+    for.
+    """
+    user = await require_session(request)
+    if not user.ranker_approved:
+        raise AuthError(403, "ranker_not_approved", "Rankings access not yet approved.")
+    return user
+
+
 async def require_admin(request: Request) -> CurrentUser:
     """Signed in and an administrator."""
     user = await require_session(request)
@@ -2012,5 +2082,6 @@ DEPENDENCY_FOR_LEVEL: dict[AuthLevel, Callable | None] = {
     AuthLevel.SESSION: require_session,
     AuthLevel.CALENDAR_APPROVED: require_calendar,
     AuthLevel.DISTRAKT_APPROVED: require_distrakt,
+    AuthLevel.RANKER_APPROVED: require_ranker,
     AuthLevel.ADMIN: require_admin,
 }

@@ -1,0 +1,63 @@
+{# ONE title, and nothing else.
+
+   The unranked pool and a tier render EXACTLY this element. That is deliberate:
+   dragging a title from the pool into a tier then moves the node the browser
+   already has, rather than swapping it for a differently-shaped one mid-drag,
+   and a row that arrives from a fragment is byte-identical to one the shell
+   rendered inline. Which of the two it looks like is the CONTAINER's business
+   and lives in ranker.css.
+
+   `data-key` is the composite "{media}:{match_source}:{match_id}" the API names
+   items by; it is what the client reads back out of the DOM when it builds a
+   save. Everything interpolated here is third-party text and is escaped by the
+   template engine — nothing on this page builds a row by string concatenation
+   without going through esc().
+
+   `data-ref` carries the whole title, because undoing a removal has to put back
+   what was there rather than an approximation of it — the row is the only copy
+   the browser has once the database no longer holds it. The attribute is
+   SINGLE-quoted deliberately: tojson escapes the quote character it would
+   otherwise close a single-quoted attribute with, and does not escape the
+   double one. #}
+<div class="ranker-item" data-key="{{ item.key }}" data-media="{{ item.media }}"
+     data-tmdb="{{ item.tmdb or '' }}" data-title="{{ item.title }}"
+     data-ref='{{ item | tojson }}'
+     tabindex="0" role="listitem">
+    <span class="ranker-grip" aria-hidden="true">⠿</span>
+    {# width/height and loading="lazy" on every poster, so the browser's own
+       deferral backs up the fragment-level laziness and the row reserves its
+       space before the image lands. A title with no tmdb has no artwork to ask
+       for at all and renders the empty frame directly. #}
+    {% if item.tmdb %}
+    <img class="ranker-thumb" width="46" height="69" loading="lazy" alt=""
+         src="/api/rankings/poster?media={{ item.media }}&amp;tmdb={{ item.tmdb }}"
+         onerror="this.classList.add('is-missing'); this.removeAttribute('src');">
+    {% else %}
+    <span class="ranker-thumb is-missing" aria-hidden="true"></span>
+    {% endif %}
+    <span class="ranker-name">
+        <span class="ranker-title">{{ item.title or "Untitled" }}</span>
+        {% if item.year %}<span class="ranker-year">{{ item.year }}</span>{% endif %}
+    </span>
+    <span class="ranker-facts">
+        {% if item.season_count %}<span class="ranker-fact">{{ item.season_count }}S</span>{% endif %}
+        {% if item.episode_count %}<span class="ranker-fact">{{ item.episode_count }}E</span>{% endif %}
+        {% if item.runtime %}<span class="ranker-fact">{{ item.runtime }}m</span>{% endif %}
+        {% if item.network %}<span class="ranker-fact network">{{ item.network }}</span>{% endif %}
+        {% if item.user_rating %}<span class="ranker-fact rating">★{{ item.user_rating }}</span>{% endif %}
+    </span>
+    {# Every reorder a drag can do is also reachable from here. That is what
+       makes the vendored drag library low-stakes: touch, mouse and keyboard all
+       arrive at the same two operations, and if the library ever has to go the
+       feature still works. #}
+    <span class="ranker-actions">
+        <button type="button" class="ranker-act" title="Move up" aria-label="Move up"
+                onclick="nudgeItem(this, -1)">▲</button>
+        <button type="button" class="ranker-act" title="Move down" aria-label="Move down"
+                onclick="nudgeItem(this, 1)">▼</button>
+        <button type="button" class="ranker-act" title="Move to tier" aria-label="Move to tier"
+                onclick="openMoveMenu(this)">⇄</button>
+        <button type="button" class="ranker-act danger" title="Remove from board"
+                aria-label="Remove from board" onclick="removeItem(this)">✕</button>
+    </span>
+</div>

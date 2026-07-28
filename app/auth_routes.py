@@ -32,11 +32,12 @@ import logging
 from pathlib import Path
 from urllib.parse import quote
 
+import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, calendar_state, db, trakt_auth
+from . import assets, auth, authz, calendar_state, db, trakt_auth, user_images
 from .auth import AuthLevel
 from .config import load_settings, save_settings
 
@@ -139,7 +140,8 @@ async def onboarding_create(request: Request):
         user_id = auth.insert_user(
             conn, username=username.lower(), password_hash=password_hash,
             is_admin=True, is_bootstrap=True, calendar_approved=True,
-            distrakt_approved=True, timezone=settings.timezone or None,
+            distrakt_approved=True, ranker_approved=True,
+            timezone=settings.timezone or None,
         )
         # Seeded from settings.json so an upgraded instance's calendar renders
         # exactly as it did before there were accounts — filters included, which
@@ -392,10 +394,11 @@ async def register(request: Request):
             # registration — it just doesn't grant anything either.
             row = candidate if usable else None
         grants_calendar = bool(row["grants_calendar_on_accept"]) if row else False
+        grants_ranker = bool(row["grants_ranker_on_accept"]) if row else False
         user_id = auth.insert_user(
             conn, username=username_lower, password_hash=password_hash,
             calendar_approved=grants_calendar, distrakt_approved=False,
-            timezone=settings.timezone or None,
+            ranker_approved=grants_ranker, timezone=settings.timezone or None,
         )
         auth.insert_user_prefs(conn, user_id, settings)
         if row is not None:
@@ -580,6 +583,7 @@ async def me_page(request: Request):
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
+        "has_avatar": user_images.has_avatar(user.user_id),
         # Cache-busting token for the shared header's script/stylesheet, the same
         # one every other page uses.
         "asset_v": assets.ASSET_VERSION,
@@ -703,6 +707,126 @@ async def set_own_password(request: Request):
 
 
 # ---------------------------------------------------------------------------
+# avatar & saved images
+# ---------------------------------------------------------------------------
+# `private`: these images are per-account, so a shared cache in front of the
+# app has no business holding a copy.
+_PRIVATE_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
+
+
+@guard.post("/api/me/avatar", AuthLevel.SESSION)
+async def upload_avatar(request: Request):
+    user = await auth.require_session(request)
+    data = await _json_body(request)
+    try:
+        await user_images.save_avatar(user.user_id, str(data.get("image_b64") or ""))
+    except user_images.ValidationError as exc:
+        return _error(str(exc))
+    return JSONResponse({"ok": True})
+
+
+@guard.delete("/api/me/avatar", AuthLevel.SESSION)
+async def remove_avatar(request: Request):
+    user = await auth.require_session(request)
+    await _json_body(request)
+    user_images.delete_avatar(user.user_id)
+    return JSONResponse({"ok": True})
+
+
+@guard.get("/api/me/avatar", AuthLevel.SESSION)
+async def get_avatar(request: Request):
+    """The signed-in account's own avatar. `size` resizes the 512x512 master on
+    the fly — see user_images.py for why that beats caching a second file per
+    size."""
+    user = await auth.require_session(request)
+    path = user_images.avatar_path(user.user_id)
+    if not path.exists():
+        return Response(status_code=404)
+    size_param = request.query_params.get("size")
+    if size_param is None:
+        return FileResponse(path, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+    try:
+        size = int(size_param)
+    except ValueError:
+        return _error("`size` must be a whole number.")
+    if not 16 <= size <= user_images.MASTER_SIZE:
+        return _error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
+    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+
+
+@guard.post("/api/me/images", AuthLevel.SESSION)
+async def upload_saved_image(request: Request):
+    """Add a saved image (an alternative grid-header icon to the avatar),
+    capped at user_images.MAX_IMAGES_PER_USER per account."""
+    user = await auth.require_session(request)
+    data = await _json_body(request)
+    try:
+        uid = await user_images.add_image(
+            user.user_id, str(data.get("image_b64") or ""), str(data.get("name") or ""))
+    except user_images.TooManyImages:
+        return _error(
+            f"You can save up to {user_images.MAX_IMAGES_PER_USER} images. Delete one first.", 409,
+        )
+    except user_images.ValidationError as exc:
+        return _error(str(exc))
+    return JSONResponse({"ok": True, "uid": uid})
+
+
+@guard.get("/api/me/images", AuthLevel.SESSION)
+async def list_saved_images(request: Request):
+    """This account's saved images as {uid, name}, oldest first — enough for a
+    picker to render a named thumbnail of each through the route below."""
+    user = await auth.require_session(request)
+    return JSONResponse({
+        "ok": True,
+        "images": user_images.describe_images(user.user_id),
+        "max": user_images.MAX_IMAGES_PER_USER,
+        "max_name": user_images.MAX_IMAGE_NAME,
+    })
+
+
+@guard.patch("/api/me/images/{image_uid}", AuthLevel.SESSION)
+async def rename_saved_image(image_uid: str, request: Request):
+    """Name or rename one saved image. An empty name clears it, and the image
+    falls back to its positional default rather than being left blank."""
+    user = await auth.require_session(request)
+    data = await _json_body(request)
+    try:
+        name = user_images.clean_name(data.get("name"))
+    except user_images.ValidationError as exc:
+        return _error(str(exc))
+    if not user_images.set_image_name(user.user_id, image_uid, name):
+        return _error("No such image.", 404)
+    return JSONResponse({"ok": True, "name": name})
+
+
+@guard.get("/api/me/images/{image_uid}", AuthLevel.SESSION)
+async def get_saved_image(image_uid: str, request: Request):
+    """One saved image's bytes.
+
+    THE UID IS CHECKED AGAINST WHAT THIS ACCOUNT ACTUALLY HAS before it becomes a
+    path segment. It is server-issued at upload, but it arrives back here from a
+    client, and a membership test answers both questions at once: that the shape
+    is one we produced, and that this caller owns it.
+    """
+    user = await auth.require_session(request)
+    if image_uid not in user_images.list_images(user.user_id):
+        return Response(status_code=404)
+    return FileResponse(user_images.image_path(user.user_id, image_uid),
+                        media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+
+
+@guard.delete("/api/me/images/{image_uid}", AuthLevel.SESSION)
+async def remove_saved_image(image_uid: str, request: Request):
+    user = await auth.require_session(request)
+    await _json_body(request)
+    if not user_images.delete_image(user.user_id, image_uid):
+        return _error("No such image.", 404)
+    return JSONResponse({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # admin: issue an invite
 # ---------------------------------------------------------------------------
 # One endpoint — enough to mint a token and exercise registration end to end.
@@ -737,5 +861,6 @@ async def admin_create_invite(request: Request):
     invite = await auth.create_invite(
         created_by=admin.user_id, label=label, expires_at=expires_at, max_uses=max_uses,
         grants_calendar_on_accept=bool(data.get("grants_calendar_on_accept", True)),
+        grants_ranker_on_accept=bool(data.get("grants_ranker_on_accept", True)),
     )
     return JSONResponse({"ok": True, **invite})

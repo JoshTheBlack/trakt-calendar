@@ -1,0 +1,10 @@
+{# One tier's rows and nothing else, swapped into the accordion body the first
+   time that tier is opened. Same unit as the shell renders inline, so a tier
+   whose rows arrived late is indistinguishable from one that came with the
+   document — including to the drag machinery, which re-initializes over
+   whatever htmx just put on the page.
+
+   An empty tier renders EMPTY on purpose: the body simply has nothing in it,
+   which is what an empty tier should look like and is also a valid drop target
+   for the first title dragged into it. #}
+{% for item in items %}{% include "_ranker_row.html" %}{% endfor %}
