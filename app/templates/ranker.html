@@ -23,33 +23,20 @@
     <script src="/static/js/sortable.min.js?v={{ asset_v }}" defer></script>
     <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
     <script src="/static/js/ranker.js?v={{ asset_v }}" defer></script>
+    {% include '_nav_head.html' %}
 </head>
 <body class="has-nav ranker-page">
 
-<header class="hero">
-    <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
-        <h1>Rankings</h1>
-    </div>
-    <div class="hero-actions">
+{% import '_nav.html' as site_nav %}
+{% call site_nav.navbar(title='Rankings',
+                        calendar_available=calendar_available,
+                        ranker_available=ranker_available, is_admin=is_admin) %}
         <span class="ranker-save-state" id="saveState" data-state="idle"></span>
         {% if board %}
         <button type="button" class="pill-btn" onclick="openExportModal()">🖼️ Export</button>
         {% endif %}
         <button type="button" class="pill-btn" onclick="openBackupModal()">🗄️ Backup</button>
-        <details class="nav-menu">
-            <summary title="Account and settings">☰ Menu</summary>
-            <div class="nav-menu-items">
-                <a href="/me">👤 Account</a>
-                {% if is_admin %}
-                <a href="/admin">🛠️ Admin</a>
-                {% endif %}
-                <button type="button" onclick="signOut()">🚪 Sign out</button>
-            </div>
-        </details>
-        <a class="pill-btn" href="/calendar">📅 Calendar</a>
-    </div>
-</header>
+{% endcall %}
 
 {# Everything the client needs about THIS board that the markup cannot carry:
    the version a save has to echo back, every tier's settings, and the item keys

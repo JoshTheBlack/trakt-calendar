@@ -23,17 +23,7 @@
        that swapped region would be re-fetched and re-executed on every nav —
        re-declaring every top-level const and double-binding every listener.
        In <head> they load exactly once and survive the swaps. #}
-    {# Inline and synchronous, before any body content is parsed, so the header
-       renders once and correctly. The deferred bundle below runs after first
-       paint; deciding this there means the header repaints and shifts sideways.
-       Kept a local-storage read rather than a server-rendered flag on purpose:
-       the response stays identical for every account, so it discloses nothing
-       about which of them have found this. #}
-    <script>
-        try {
-            if (localStorage.getItem('distraktRevealed') === '1') document.documentElement.classList.add('has-distrakt');
-        } catch (e) {}
-    </script>
+    {% include '_nav_head.html' %}
     <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
     <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
     <script src="/static/js/app.js?v={{ asset_v }}" defer></script>
@@ -63,9 +53,11 @@
     </symbol>
 </svg>
 
-<header class="hero">
-    <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
+{# Aliased `site_nav`, not `nav`: this page's own context already binds `nav` to
+   the previous/next month numbers. #}
+{% import '_nav.html' as site_nav %}
+
+{% macro hero_lead() %}
         <div class="month-nav">
             <a class="month-nav-btn prev" hx-boost="true" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
@@ -77,9 +69,9 @@
                 <img src="/static/images/arrow-right.png" alt="Next month">
             </a>
         </div>
-    </div>
+{% endmacro %}
 
-    <div class="hero-controls">
+{% macro hero_controls() %}
         {# A boosted GET form so switching the calendar is an AJAX body-swap (CSS
            and JS stay resident, no re-flash) with htmx managing history the same
            way the month arrows do. Hidden month/year hold the current position;
@@ -124,9 +116,13 @@
             </select>
             <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
         </div>
-    </div>
+{% endmacro %}
 
-    <div class="hero-actions">
+{% call site_nav.navbar(lead=hero_lead, controls=hero_controls,
+                   settings_button=true,
+                   distrakt_href='/distrakt?year=' ~ year ~ '&month=' ~ month,
+                   calendar_available=calendar_available,
+                   ranker_available=ranker_available, is_admin=is_admin) %}
         <span class="hero-meta" title="{{ endpoint.description }}">📊 {{ total }} · 🕒 {{ generated }}</span>
         {# In the bar rather than behind the ☰ menu, and lit up while a filter is
            set. A filter REMOVES shows, so a calendar quietly missing something
@@ -150,32 +146,7 @@
         </button>
         {% endif %}
         <button type="button" class="pill-btn" onclick="openShare()">🔗 Share</button>
-        {# One pill instead of three. An admin's bar carried Account + Settings +
-           Admin on top of everything else, which pushed the header onto a second
-           row; these are destinations rather than controls, so they collapse
-           together well. #}
-        <details class="nav-menu">
-            <summary title="Account and settings">☰ Menu</summary>
-            <div class="nav-menu-items">
-                <a href="/me">👤 Account</a>
-                {% if ranker_available %}
-                <a href="/rankings">🏆 Rankings</a>
-                {% endif %}
-                {% if is_admin %}
-                <button type="button" onclick="closeNavMenus(); openSettings()">⚙️ Settings</button>
-                <a href="/admin">🛠️ Admin</a>
-                {% endif %}
-                <button type="button" onclick="signOut()">🚪 Sign out</button>
-            </div>
-        </details>
-        {# Visibility is decided by the <html> class the head script sets, not by a
-           `hidden` attribute cleared after load: app.js is deferred, so clearing it
-           there lands after first paint and the link pops into the header a beat
-           late, shifting the bar. CSS also beats `hidden` inconsistently for screen
-           readers, so the attribute is gone rather than overridden. #}
-        <a id="distraktNav" class="distrakt-nav-link" href="/distrakt?year={{ year }}&amp;month={{ month }}" title="Open Distrakt (Discord thread tracker)">🧵 Distrakt</a>
-    </div>
-</header>
+{% endcall %}
 
 {# Every number here is the server's, computed over the whole month before the
    page was sent. The client only moves them when the viewer toggles something. #}
@@ -312,6 +283,45 @@
                             <option value="never">Never — plain-HTTP LAN only</option>
                         </select>
                         <span class="hint" id="s_cookie_hint" data-base="The session cookie's Secure flag. &quot;Always&quot; is right for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself sees plain HTTP.">The session cookie's Secure flag. "Always" is right for any HTTPS deployment, including behind a TLS-terminating proxy where the app itself sees plain HTTP.</span>
+                    </div>
+
+                    {# Beside the cookie setting because they are the same KIND of
+                       setting: the two that persist to data/settings.json rather
+                       than the database, so an operator locked out of this screen
+                       can still hand-edit them. Editing here writes the same file,
+                       so that recovery path is unaffected.
+
+                       Off by default and worth being deliberate about: with no
+                       invite required, anyone who can reach the instance can make
+                       an account. They still land unapproved — the calendar and
+                       every other feature stay behind an administrator's grant —
+                       so this opens the door to the waiting room, not to the data. #}
+                    <div class="field">
+                        <label for="s_open_registration">Account registration</label>
+                        <select id="s_open_registration" name="allow_open_registration" onchange="updateRegistrationHint()">
+                            <option value="false">Invite only — an administrator mints a link</option>
+                            <option value="true">Open — anyone who can reach this instance can sign up</option>
+                        </select>
+                        <span class="hint" id="s_registration_hint" data-base="Whether /register accepts a sign-up without an invite token. New accounts still arrive unapproved and need an administrator before they can reach anything.">Whether /register accepts a sign-up without an invite token. New accounts still arrive unapproved and need an administrator before they can reach anything.</span>
+                    </div>
+
+                    {# A SEPARATE switch from the one above, on purpose. Who may
+                       create an account and who may see the data are two
+                       different decisions, and folding the second into the first
+                       would mean opening sign-ups silently opened the calendar.
+                       Apart, they also allow the useful middle setting: open
+                       sign-up with a human still reviewing each account.
+
+                       Applies to invite sign-ups too, so it is the way to
+                       approve on accept regardless of a given invite's grant.
+                       distrakt and the ranker are untouched — those stay manual. #}
+                    <div class="field">
+                        <label for="s_auto_approve">New accounts</label>
+                        <select id="s_auto_approve" name="auto_approve_calendar" onchange="updateRegistrationHint()">
+                            <option value="false">Await approval — an administrator approves each one</option>
+                            <option value="true">Approved automatically — calendar access on sign-up</option>
+                        </select>
+                        <span class="hint" id="s_auto_approve_hint" data-base="Whether a new account gets calendar access immediately. Rankings and everything else stay manual grants either way.">Whether a new account gets calendar access immediately. Rankings and everything else stay manual grants either way.</span>
                     </div>
 
                     {# At-rest encryption for the stored credentials and per-user

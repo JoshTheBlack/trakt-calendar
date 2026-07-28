@@ -402,6 +402,77 @@ RESERVED_IDENTIFIERS = frozenset({
 MIN_PASSWORD_LENGTH = 8
 
 
+# ---------------------------------------------------------------------------
+# display names
+# ---------------------------------------------------------------------------
+# A username and a display name are different things and are validated by
+# different rules on purpose. The username above is an IDENTIFIER: lowercased,
+# unique, and the basis of /u/<name> share links. The display name is a LABEL:
+# it is shown, never looked up, so it may carry capitals and spaces and need not
+# be unique.
+
+# Comfortably under the ranker export's own 80-character ceiling for the name it
+# draws on the image, so a name that saves here always fits there.
+DISPLAY_NAME_MAX = 32
+
+# Anything that would let a name lie about its own shape. C0/C1 controls cover
+# newlines and NULs; the rest are the bidi controls and the invisible
+# separators/joiners, which can reorder or hide the text rendered beside them.
+#
+# Written as CODE POINTS, never as literal characters: a source file containing
+# the very characters it rejects cannot be reviewed by reading it, and a stray
+# NUL in one stops the module compiling at all.
+_DISPLAY_NAME_BANNED = frozenset(
+    [chr(c) for c in range(0x00, 0x20)]          # C0 controls, incl. NUL and newline
+    + [chr(0x7F)]                                # DEL
+    + [chr(c) for c in range(0x80, 0xA0)]        # C1 controls
+    + [chr(c) for c in range(0x200B, 0x2010)]    # ZWSP/ZWNJ/ZWJ and the bidi marks
+    + [chr(c) for c in range(0x202A, 0x2030)]    # bidi embedding/override, separators
+    + [chr(c) for c in range(0x2060, 0x206A)]    # word joiner, invisibles, bidi isolates
+    + [chr(0xFEFF)]                              # BOM / zero-width no-break space
+)
+
+
+def normalize_display_name(value: str | None) -> str | None:
+    """The form a display name is stored in, or None for "no name chosen".
+
+    Outer whitespace is stripped and internal runs are collapsed to single
+    spaces, so ``Josh   Black `` and ``Josh Black`` cannot be told apart on
+    screen yet stored differently. CASE IS PRESERVED EXACTLY — that is the whole
+    point of the column, so nothing here lowercases or title-cases.
+    """
+    text = " ".join((value or "").split())
+    return text or None
+
+
+def display_name_error(value: str | None) -> str | None:
+    """None when `value` is a usable display name, otherwise why not.
+
+    An empty value is NOT an error: it means "clear it and go back to my
+    username", which is a thing the account page offers.
+    """
+    name = normalize_display_name(value)
+    if name is None:
+        return None
+    if len(name) > DISPLAY_NAME_MAX:
+        return f"Display names can be at most {DISPLAY_NAME_MAX} characters."
+    if any(ch in _DISPLAY_NAME_BANNED for ch in name):
+        return "That display name contains characters that aren't allowed."
+    return None
+
+
+async def set_display_name(user_id: int, value: str | None) -> str | None:
+    """Store this account's display name (None clears it). Returns what was
+    stored, so a caller can echo back the normalized form rather than the raw
+    text it was handed."""
+    name = normalize_display_name(value)
+    await db.execute(
+        "UPDATE users SET display_name = ?, updated_at = ? WHERE id = ?",
+        (name, db.now(), user_id),
+    )
+    return name
+
+
 def identifier_error(value: str) -> str | None:
     """None when `value` is a usable username or slug, otherwise why not.
 
@@ -787,6 +858,10 @@ class CurrentUser:
     user_id: int
     session_id: str
     username: str | None
+    # The chosen label, or None when none is set. Display only — never look an
+    # account up by it. Use `.label` rather than reading this directly when what
+    # you want is "what to call this person on screen".
+    display_name: str | None
     is_admin: bool
     calendar_approved: bool
     distrakt_approved: bool
@@ -802,6 +877,13 @@ class CurrentUser:
     has_trakt_identity: bool
     expires_at: int
     absolute_expires_at: int
+
+    @property
+    def label(self) -> str:
+        """What to call this person on screen: their chosen display name, else
+        their username, else nothing. One place so every surface agrees, rather
+        than each one spelling out its own `or` chain and drifting."""
+        return self.display_name or self.username or ""
 
 
 async def create_session(
@@ -831,6 +913,7 @@ SELECT s.id                AS session_id,
        s.absolute_expires_at AS absolute_expires_at,
        s.last_seen_at      AS last_seen_at,
        u.username          AS username,
+       u.display_name      AS display_name,
        u.is_admin          AS is_admin,
        u.calendar_approved AS calendar_approved,
        u.distrakt_approved AS distrakt_approved,
@@ -888,6 +971,7 @@ async def validate_session(
             user_id=int(row["user_id"]),
             session_id=str(row["session_id"]),
             username=row["username"],
+            display_name=row["display_name"],
             is_admin=bool(row["is_admin"]),
             calendar_approved=bool(row["calendar_approved"]),
             distrakt_approved=bool(row["distrakt_approved"]),
@@ -1326,7 +1410,13 @@ async def login_with_provider_identity(
             # Under open registration a stale token doesn't block the
             # registration; it just doesn't grant anything either.
             row = candidate if usable else None
-        grants_calendar = bool(row["grants_calendar_on_accept"]) if row is not None else False
+        # The invite's own grant, OR the instance-wide "approve new accounts
+        # automatically" setting. Either is a deliberate administrator decision;
+        # the setting just makes it once instead of per invite, and is what lets
+        # open registration hand out a working account without one.
+        grants_calendar = (
+            bool(row["grants_calendar_on_accept"]) if row is not None else False
+        ) or cfg.auto_approve_calendar
         grants_ranker = bool(row["grants_ranker_on_accept"]) if row is not None else False
         # No username and no password: this account's only credential is the
         # provider identity below. One can be added later from the account page.
@@ -1737,10 +1827,18 @@ async def list_users_overview() -> list[dict]:
     for u in users:
         uid = int(u["id"])
         idents = by_user.get(uid, [])
+        # DELIBERATELY NOT users.display_name. Three different things are called
+        # a display name around here, and this is the third: the admin screen's
+        # unambiguous LABEL for an account, which is also what an admin must type
+        # back to confirm a deletion. The chosen display name is free text and
+        # not unique, so two accounts could offer the identical confirmation
+        # string — this stays on the username, which cannot.
         display = u["username"] or next((i["display_name"] for i in idents if i["display_name"]), None) or f"user #{uid}"
         overview.append({
             "id": uid,
             "username": u["username"],
+            # The account's chosen name, or None. Separate from the label above.
+            "chosen_name": u["display_name"],
             "display_name": display,
             "providers": [i["provider"] for i in idents],
             "is_admin": bool(u["is_admin"]),
@@ -1759,7 +1857,11 @@ async def list_users_overview() -> list[dict]:
 async def display_name_for(user_id: int) -> str | None:
     """The same display name list_users_overview() computes, for one account —
     what an admin must type back to confirm deleting it. None when the account
-    doesn't exist."""
+    doesn't exist.
+
+    Ignores users.display_name for the reason given there: a chosen name is free
+    text and not unique, so it cannot be a safe confirmation string.
+    """
     user = await get_user(user_id)
     if user is None:
         return None

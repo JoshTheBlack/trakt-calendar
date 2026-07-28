@@ -12,6 +12,7 @@
     <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
+    {% include '_nav_head.html' %}
     <style>
         /* No 100vh now that a header sits above it: the panel centres in what is
            left rather than pushing the page taller than the viewport. */
@@ -36,14 +37,10 @@
     </style>
 </head>
 <body>
-    {# The calendar's own header, same markup and same stylesheet, so the bar is
-       identical across the site. The view controls (card style, day packing,
-       timezone) are deliberately absent — nothing rendered here reacts to them. #}
-    <header class="hero">
-        <div class="hero-lead">
-            <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
-        </div>
-        <div class="hero-controls">
+    {# The shared header. The view controls (card style, day packing, timezone)
+       are deliberately absent — nothing rendered here reacts to them. #}
+    {% import '_nav.html' as site_nav %}
+    {% macro hero_controls() %}
             <div class="control" title="{{ endpoint.description }}">
                 <label for="endpointSelect">📡</label>
                 <select id="endpointSelect" onchange="switchPickEndpoint(this.value)">
@@ -52,20 +49,11 @@
                     {% endfor %}
                 </select>
             </div>
-        </div>
-        <div class="hero-actions">
-            <details class="nav-menu">
-                <summary title="Account and settings">☰ Menu</summary>
-                <div class="nav-menu-items">
-                    <a href="/me">👤 Account</a>
-                    {% if is_admin %}
-                    <a href="/admin">🛠️ Admin</a>
-                    {% endif %}
-                    <button type="button" onclick="signOut()">🚪 Sign out</button>
-                </div>
-            </details>
-        </div>
-    </header>
+    {% endmacro %}
+    {% call site_nav.navbar(controls=hero_controls,
+                            calendar_available=calendar_available,
+                            ranker_available=ranker_available, is_admin=is_admin) %}
+    {% endcall %}
 
     <div class="pick-wrap">
         <div class="pick-panel">

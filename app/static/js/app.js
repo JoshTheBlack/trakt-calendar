@@ -552,6 +552,14 @@ async function openSettings() {
         updateProxyHint(s);
         document.getElementById('s_cookie_secure').value = (s.cookie_secure || 'always').toLowerCase();
         updateCookieHint(s);
+        // A <select> of two strings rather than a checkbox, so the two states
+        // both say what they mean — "off" for a security setting is exactly the
+        // kind of thing worth spelling out rather than leaving to a cleared box.
+        document.getElementById('s_open_registration').value =
+            s.allow_open_registration ? 'true' : 'false';
+        document.getElementById('s_auto_approve').value =
+            s.auto_approve_calendar ? 'true' : 'false';
+        updateRegistrationHint();
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
         applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
@@ -978,6 +986,11 @@ async function saveSettings(event) {
         public_base_url: document.getElementById('s_base_url').value.trim(),
         trusted_proxy_ips: document.getElementById('s_trusted_proxies').value.trim(),
         cookie_secure: document.getElementById('s_cookie_secure').value,
+        // A real boolean, not the select's string: the server coerces either way
+        // (config._as_bool), but sending the wrong type and relying on that is
+        // how "false" ends up truthy somewhere later.
+        allow_open_registration: document.getElementById('s_open_registration').value === 'true',
+        auto_approve_calendar: document.getElementById('s_auto_approve').value === 'true',
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
@@ -1307,6 +1320,44 @@ function updateCookieHint(s) {
     }
     hint.textContent = text || hint.dataset.base || '';
     hint.classList.toggle('warn', !!text);
+}
+
+// The same in-place warning pattern as updateCookieHint, for the two settings
+// that decide who can get in. Both are read together because it is the PAIR that
+// matters: either alone is ordinary, while open registration plus automatic
+// approval means anyone who can reach the instance gets working calendar access
+// with nobody in the loop. That is worth saying at the moment the choice is
+// made, not after the save.
+function updateRegistrationHint() {
+    const openSelect = document.getElementById('s_open_registration');
+    const autoSelect = document.getElementById('s_auto_approve');
+    const openHint = document.getElementById('s_registration_hint');
+    const autoHint = document.getElementById('s_auto_approve_hint');
+    if (!openSelect || !autoSelect || !openHint || !autoHint) return;
+    const open = openSelect.value === 'true';
+    const auto = autoSelect.value === 'true';
+
+    let openText = '';
+    if (open && auto) {
+        openText = 'Anyone who can reach this instance can create an account AND will have '
+            + 'calendar access immediately, with no administrator involved. Only do this on '
+            + 'an instance you are happy to have open.';
+    } else if (open) {
+        openText = 'Anyone who can reach this instance will be able to create an account '
+            + 'without an invite. They arrive unapproved and can see nothing until an '
+            + 'administrator approves them.';
+    }
+    openHint.textContent = openText || openHint.dataset.base || '';
+    openHint.classList.toggle('warn', !!openText);
+
+    // Flagged on this field only when registration is open; with invites still
+    // required, approving on arrival is a normal convenience — somebody was
+    // already trusted enough to be handed a link.
+    const autoText = (auto && open)
+        ? 'Combined with open registration, this hands calendar access to anyone who signs up.'
+        : '';
+    autoHint.textContent = autoText || autoHint.dataset.base || '';
+    autoHint.classList.toggle('warn', !!autoText);
 }
 
 function stopDeviceAuthPolling() {

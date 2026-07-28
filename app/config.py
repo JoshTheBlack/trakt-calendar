@@ -158,6 +158,20 @@ class Settings:
     # open instance would sit open to anyone on the internet. An operator who
     # wants that trades it on deliberately.
     allow_open_registration: bool = False
+    # Whether a newly registered account is calendar-approved on arrival, instead
+    # of waiting for an administrator.
+    #
+    # DELIBERATELY INDEPENDENT of allow_open_registration rather than implied by
+    # it. Those are two different decisions — who may create an account, and who
+    # may see the data — and collapsing them means opening sign-ups silently
+    # opens the calendar to anyone who can reach the instance. Keeping them apart
+    # also allows the useful middle setting: open sign-up with a human still
+    # reviewing each account.
+    #
+    # Applies to every registration path, so it is also the way to make invites
+    # approve on accept regardless of what a particular invite granted. NOT
+    # extended to distrakt or the ranker: those stay manual grants.
+    auto_approve_calendar: bool = False
     # The origin browsers reach this instance on, e.g. https://shows.example.com.
     # EVERY absolute URL the app generates is built from this and never from the
     # Host header, which makes the app structurally immune to Host-header
@@ -189,6 +203,8 @@ class Settings:
             clean["hide_not_watching"] = _as_bool(clean["hide_not_watching"])
         if "allow_open_registration" in clean:
             clean["allow_open_registration"] = _as_bool(clean["allow_open_registration"])
+        if "auto_approve_calendar" in clean:
+            clean["auto_approve_calendar"] = _as_bool(clean["auto_approve_calendar"])
         if "calendar_prewarm_enabled" in clean:
             clean["calendar_prewarm_enabled"] = _as_bool(clean["calendar_prewarm_enabled"])
         # Normalized on the way in as well as validated on save, so a

@@ -40,18 +40,13 @@ header.hero {
 .hero-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hero-meta { color: var(--text-faint); font-size: 0.76rem; white-space: nowrap; }
 
-/* Shared by the header link and the return link on the page it opens. */
-.distrakt-nav-link {
-    text-decoration: none; white-space: nowrap;
-    padding: 6px 12px; border-radius: 8px; font-weight: 700; font-size: 0.8rem; color: #fff;
-    background: linear-gradient(45deg, #ED1C24, #7C3AED); border: 1px solid rgba(255,255,255,0.16);
-}
-.distrakt-nav-link:hover { filter: brightness(1.12); }
-/* The header link only: shown once the easter egg has been used. The class is set
-   by an inline head script from local storage, so the link is either in the header
-   or absent from the very first paint — never added to it a beat afterwards. */
+/* The menu item only: shown once the easter egg has been used. The class is set
+   by an inline head script from local storage, so the item is either in the menu
+   or absent from the very first paint — never added to it a beat afterwards.
+   Revealed as `flex`, not `inline-block`: it lives among .nav-menu-items now,
+   whose rows are flex so the emoji and the label align with every other item. */
 #distraktNav { display: none; }
-html.has-distrakt #distraktNav { display: inline-block; }
+html.has-distrakt #distraktNav { display: flex; }
 
 .hero-lead img.brand-logo { height: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55)); }
 .month-nav { display: flex; align-items: center; gap: 8px; }
@@ -319,7 +314,17 @@ body.card-horizontal .trakt-btn img { height: 13px; }
     body.pack-packed .grid { grid-template-columns: repeat(auto-fill, minmax(min(var(--card-w), 100%), 1fr)); }
     body.card-horizontal { --card-w: 100%; }
     body.card-horizontal .card { height: auto; }
-    body.card-horizontal .poster-wrap { flex-basis: 40%; width: 40%; }
+    /* The card's height is the TEXT column's height here, not the fixed 300px it
+       is on a wide screen — so the poster box must not take its height from the
+       card. Left to `height: 100%` against a stretched flex row it became as tall
+       as the description, and `object-fit: cover` then cropped the sides off a
+       2:3 poster; the narrower the viewport the taller the text and the worse the
+       crop, which is why it only showed up in portrait. Pinning the ratio back
+       and refusing the stretch gives the image a box the shape it already is. */
+    body.card-horizontal .poster-wrap {
+        flex: 0 0 40%; width: 40%;
+        height: auto; aspect-ratio: 2/3; align-self: flex-start;
+    }
 }
 
 .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 14px; overflow: hidden; position: relative; transition: all .22s ease; display: flex; flex-direction: column; cursor: pointer; }

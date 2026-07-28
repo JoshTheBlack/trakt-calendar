@@ -988,6 +988,24 @@ ALTER TABLE login_attempts_new RENAME TO login_attempts;
 CREATE INDEX ix_login_attempts_lookup ON login_attempts(key_type, key_value, attempted_at);
 """
 
+# Migration 15 — a chosen display name, separate from the username.
+#
+# The username stays what it has always been: the login identifier, NOCASE and
+# UNIQUE, and what /u/<name> share links are built from. It could never carry a
+# capital letter or a space without either breaking that case-insensitive
+# identity or changing what a share URL means.
+#
+# So this is a SEPARATE column rather than a relaxation of that one, and it is
+# deliberately the opposite in all three respects: case-SENSITIVE (no NOCASE, so
+# `Josh Black` is stored and shown exactly as typed), NOT unique (two people may
+# call themselves the same thing — nothing keys off this), and NULLABLE, where
+# NULL means "no name chosen, fall back to the username". Nothing may be looked
+# up by it; it is display only, the same rule linked_identities.display_name
+# already carries.
+MIGRATION_15 = """
+ALTER TABLE users ADD COLUMN display_name TEXT;
+"""
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -1006,6 +1024,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (12, MIGRATION_12),
     (13, MIGRATION_13),
     (14, MIGRATION_14),
+    (15, MIGRATION_15),
 ]
 
 

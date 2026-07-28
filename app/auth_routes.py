@@ -37,7 +37,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, calendar_state, db, trakt_auth, user_images
+from . import assets, auth, authz, calendar_state, db, nav, trakt_auth, user_images
 from .auth import AuthLevel
 from .config import load_settings, save_settings
 
@@ -393,7 +393,12 @@ async def register(request: Request):
             # Under open registration a stray/expired token doesn't block
             # registration — it just doesn't grant anything either.
             row = candidate if usable else None
-        grants_calendar = bool(row["grants_calendar_on_accept"]) if row else False
+        # The invite's own grant, OR the instance-wide "approve new accounts
+        # automatically" setting — the same rule the provider-identity
+        # registration path in auth.py applies, so both doors behave alike.
+        grants_calendar = (
+            bool(row["grants_calendar_on_accept"]) if row else False
+        ) or settings.auto_approve_calendar
         grants_ranker = bool(row["grants_ranker_on_accept"]) if row else False
         user_id = auth.insert_user(
             conn, username=username_lower, password_hash=password_hash,
@@ -571,6 +576,12 @@ async def me_page(request: Request):
     account = await auth.get_user(user.user_id)
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
+        # is_admin, calendar_available and ranker_available for the shared header.
+        **nav.nav_context(user),
+        # This page gates the tracker's menu item server-side rather than leaving
+        # it to CSS — it must not mention the tracker at all to an account without
+        # the grant. Same two conditions the tracker's own access level enforces.
+        "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
         "user": user,
         "linked": linked,
         "trakt_login_configured": settings.trakt_login_configured,
@@ -583,6 +594,7 @@ async def me_page(request: Request):
         # whether the "a password is your way back in" nudge is shown.
         "has_password": bool(account and account["password_hash"]),
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
+        "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": user_images.has_avatar(user.user_id),
         # Cache-busting token for the shared header's script/stylesheet, the same
         # one every other page uses.
@@ -652,6 +664,30 @@ async def set_own_username(request: Request):
         # column is the real arbiter, exactly as registration treats it.
         return _error("That username is taken.")
     return JSONResponse({"ok": True, "username": username})
+
+
+@guard.post("/api/me/display-name", AuthLevel.SESSION)
+async def set_own_display_name(request: Request):
+    """Set or clear the signed-in account's display name.
+
+    Freely changeable, unlike the username above — and that difference is the
+    reason the two are separate columns. A username is a public identifier that
+    /u/<name> share links are built from, so changing one breaks links and frees
+    a name for somebody else to claim; a display name is a label nothing keys
+    off, so changing it costs nothing and needs no administrator.
+
+    Sending an empty value clears it, and the account goes back to being shown
+    by its username.
+    """
+    user = await auth.require_session(request)
+    data = await _json_body(request)
+    raw = data.get("display_name")
+    if err := auth.display_name_error(raw):
+        return _error(err)
+    stored = await auth.set_display_name(user.user_id, raw)
+    # Echo the NORMALIZED form, not what was sent: the client should show what
+    # was actually stored once the collapsing of whitespace has been applied.
+    return JSONResponse({"ok": True, "display_name": stored})
 
 
 @guard.post("/api/me/password", AuthLevel.SESSION)

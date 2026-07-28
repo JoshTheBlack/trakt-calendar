@@ -13,26 +13,15 @@
   <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
+  {% include '_nav_head.html' %}
 </head>
 <body>
 
-<header class="hero">
-    <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
-        <h1>Admin</h1>
-    </div>
-    <div class="hero-actions">
-        <a class="pill-btn" href="/calendar">📅 Calendar</a>
-        <details class="nav-menu">
-            <summary title="Account and settings">☰ Menu</summary>
-            <div class="nav-menu-items">
-                <a href="/me">👤 Account</a>
-                <a href="/admin">🛠️ Admin</a>
-                <button type="button" onclick="signOut()">🚪 Sign out</button>
-            </div>
-        </details>
-    </div>
-</header>
+{% import '_nav.html' as site_nav %}
+{% call site_nav.navbar(title='Admin',
+                        calendar_available=calendar_available,
+                        ranker_available=ranker_available, is_admin=is_admin) %}
+{% endcall %}
 
 <div class="admin-shell">
 

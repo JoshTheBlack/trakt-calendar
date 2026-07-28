@@ -1,0 +1,15 @@
+{# Inline and synchronous, before any body content is parsed, so the header
+   renders once and correctly. A deferred bundle runs after first paint; deciding
+   this there means the menu repaints with an extra item a beat later.
+
+   Kept a local-storage read rather than a server-rendered flag on purpose: the
+   response stays identical for every account, so it discloses nothing about
+   which of them have found this.
+
+   Included by every page carrying the shared header — the item is in the menu
+   now, so the reveal has to hold everywhere the menu does. #}
+<script>
+    try {
+        if (localStorage.getItem('distraktRevealed') === '1') document.documentElement.classList.add('has-distrakt');
+    } catch (e) {}
+</script>

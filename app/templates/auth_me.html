@@ -13,41 +13,35 @@
   <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
+  {# Gated for the same reason the menu item is: without the grant this page must
+     not mention the tracker at all, and the script names it. Nothing to reveal
+     here anyway when the item itself was not rendered. #}
+  {% if distrakt_available %}{% include '_nav_head.html' %}{% endif %}
 </head>
 {# `has-nav` swaps the centred sign-in layout for a header above centred content.
    The signed-out pages (login, register, onboarding) keep the plain .auth-page
    centring — there is nowhere for a nav to take you before you sign in. #}
 <body class="auth-page has-nav">
 
-<header class="hero">
-    <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
-        <h1>Account</h1>
-    </div>
-    <div class="hero-actions">
-        {% if user.calendar_approved %}
-        <a class="pill-btn" href="/calendar">📅 Calendar</a>
-        {% endif %}
-        {% if user.ranker_approved %}
-        <a class="pill-btn" href="/rankings">🏆 Rankings</a>
-        {% endif %}
-        <details class="nav-menu">
-            <summary title="Account and settings">☰ Menu</summary>
-            <div class="nav-menu-items">
-                <a href="/me">👤 Account</a>
-                {% if user.is_admin %}
-                <a href="/admin">🛠️ Admin</a>
-                {% endif %}
-                <button type="button" onclick="signOut()">🚪 Sign out</button>
-            </div>
-        </details>
-    </div>
-</header>
+{% import '_nav.html' as site_nav %}
+{# The one page that gates the tracker's menu item server-side rather than
+   leaving it to CSS: this page must not mention the tracker at all to an account
+   without the grant. See _nav.html. #}
+{% call site_nav.navbar(title='Account',
+                        calendar_available=calendar_available,
+                        ranker_available=ranker_available, is_admin=is_admin,
+                        distrakt_available=distrakt_available) %}
+{% endcall %}
 
 <div class="auth-page-inner">
 <div class="auth-shell">
   <div class="auth-card">
-    <h1>{{ user.username or "Your account" }}</h1>
+    {# The chosen name leads, falling back to the username and then to a generic
+       label for an account that has neither yet (one made through Plex or Trakt
+       before claiming a username). The username itself is still on the page, in
+       its own row below — this heading is what you call yourself, not what you
+       sign in as, and both are worth being able to see. #}
+    <h1>{{ user.display_name or user.username or "Your account" }}</h1>
 
     {% if not user.calendar_approved %}
     <p class="auth-notice"><strong>Your account is awaiting admin approval.</strong>
@@ -106,6 +100,36 @@
       </div>
     </div>
     <p class="auth-error" id="imageError" role="alert"></p>
+
+    {# The two names, together, because the whole point of having both is that
+       they differ: one is what you sign in with, the other is what people see.
+       Shown next to each other so it is obvious which is which. #}
+    <div class="auth-list">
+      <div class="row">
+        <span class="label">Username</span>
+        <span class="auth-badge off">{{ user.username or "Not set" }}</span>
+      </div>
+      <div class="row">
+        <span class="label">Display name</span>
+        <span class="auth-badge {{ 'ok' if user.display_name else 'off' }}" id="displayNameBadge">
+          {{ user.display_name or "Using your username" }}
+        </span>
+      </div>
+      <form class="auth-inline-form" id="displayNameForm">
+        <label for="newDisplayName">Change your display name</label>
+        {# Capitals and spaces are the reason this field exists, so nothing here
+           lowercases or strips them. Left empty, it clears the name and the
+           account goes back to being shown by its username. #}
+        <input type="text" id="newDisplayName" name="display_name"
+               value="{{ user.display_name or '' }}"
+               maxlength="{{ display_name_max }}" autocomplete="nickname"
+               placeholder="{{ user.username or 'Your name' }}">
+        <button class="btn-ghost tiny" type="submit">Save</button>
+      </form>
+      <p class="auth-sub">Shown on your account and used by default on ranker exports.
+        Leave it empty to go back to your username.</p>
+    </div>
+    <p class="auth-error" id="displayNameError" role="alert"></p>
 
     <div class="auth-list">
       <div class="row">
@@ -300,6 +324,42 @@ const passwordForm = document.getElementById('passwordForm');
 passwordForm.addEventListener('submit', (e) => {
   e.preventDefault();
   submitCredentialForm(passwordForm, '/api/me/password', 'Could not change your password.');
+});
+
+// Its own submit rather than submitCredentialForm's: that helper reloads on
+// success, and reloading to change one heading throws away anything else in
+// progress on this page. The two places the name appears are updated in place
+// instead, and the field is refilled from the stored (whitespace-collapsed)
+// value so what is on screen is what was actually saved.
+const displayNameForm = document.getElementById('displayNameForm');
+displayNameForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const err = document.getElementById('displayNameError');
+  const input = document.getElementById('newDisplayName');
+  const badge = document.getElementById('displayNameBadge');
+  const heading = document.querySelector('.auth-card h1');
+  err.textContent = '';
+  try {
+    const resp = await fetch('/api/me/display-name', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({display_name: input.value}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      err.textContent = data.error || 'Could not save that display name.';
+      return;
+    }
+    const name = data.display_name || '';
+    input.value = name;
+    // textContent, never innerHTML: this string is whatever the account typed.
+    badge.textContent = name || 'Using your username';
+    badge.classList.toggle('ok', !!name);
+    badge.classList.toggle('off', !name);
+    heading.textContent = name || {{ (user.username or "Your account") | tojson }};
+  } catch (e) {
+    err.textContent = 'Could not reach the server.';
+  }
 });
 
 // Signing out is the header menu's job now — see nav.js — so this page no longer

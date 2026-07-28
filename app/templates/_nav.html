@@ -1,0 +1,107 @@
+{# The site-wide header, defined once. Every signed-in page calls this macro
+   rather than hand-rolling its own bar, which is how the six copies that came
+   before it had drifted into six different orderings of the same links.
+
+   The shape is fixed everywhere: brand on the far left, the page's own controls
+   in the middle, the ☰ menu hard against the right edge. What changes per page
+   is only what goes in the middle.
+
+   Every page's menu carries the same entries in the same order, gated only by
+   what the account may actually reach — never by which page you are on.
+
+   Three slots, because the middle is two different things:
+     lead      - optional macro, extra markup beside the brand (a month nav)
+     controls  - optional macro, the .hero-controls group (selects)
+     caller()  - the action pills, immediately left of the menu
+
+   `lead` and `controls` are passed as macros, so a page defines them next to the
+   markup they belong with. Import this file as `site_nav` rather than `nav` --
+   the calendar and the tracker already bind `nav` to their month numbers:
+
+       import '_nav.html' as site_nav
+       macro controls() ... endmacro
+       call site_nav.navbar(title="Rankings", controls=controls) ... endcall
+
+   The example above is written without its delimiters ON PURPOSE. Jinja comments
+   do NOT nest and the lexer ends this block at the FIRST `#}` it sees, so a real
+   tag written out here does not stay inert -- it becomes live template code, and
+   an `import` of this very file recurses until the interpreter gives up.
+
+   The cross-page destinations (Calendar, Rankings, Distrakt, Admin) all live in
+   the menu now. They used to be loose pills, which is what made the bar's width
+   — and so the whole header's line count — depend on which page you were on. #}
+
+{% macro navbar(title=None, brand='trakt', lead=None, controls=None,
+                settings_button=false, calendar_href='/calendar', distrakt_href='/distrakt',
+                calendar_available=false, ranker_available=false, is_admin=false,
+                distrakt_available=None) %}
+<header class="hero">
+    <div class="hero-lead">
+        {% if brand == 'distrakt' %}
+        <a class="distrakt-brand" href="{{ distrakt_href }}" title="Discord thread tracker">
+            <svg class="distrakt-mark" viewBox="0 0 256 199" aria-hidden="true">
+                <defs>
+                    <linearGradient id="distraktGrad" x1="0" y1="1" x2="1" y2="0">
+                        <stop offset="0" stop-color="#ED1C24"/>
+                        <stop offset="1" stop-color="#7C3AED"/>
+                    </linearGradient>
+                </defs>
+                <path fill="url(#distraktGrad)" d="M216.856 16.597A208.502 208.502 0 0 0 164.042 0c-2.275 4.113-4.933 9.645-6.766 14.046-19.692-2.961-39.203-2.961-58.533 0-1.832-4.4-4.55-9.933-6.846-14.046a207.809 207.809 0 0 0-52.855 16.638C5.618 67.147-3.443 116.4 1.087 164.956c22.169 16.555 43.653 26.612 64.775 33.193 5.216-7.177 9.848-14.826 13.836-22.883-7.596-2.885-14.87-6.446-21.746-10.583 1.823-1.335 3.606-2.732 5.325-4.169 42.122 19.702 87.89 19.702 129.51 0 1.735 1.437 3.519 2.834 5.324 4.169-6.895 4.157-14.19 7.719-21.785 10.603 3.988 8.037 8.6 15.707 13.816 22.884 21.142-6.58 42.646-16.637 64.815-33.213 5.316-56.288-9.081-105.09-38.056-148.36ZM85.474 135.095c-12.645 0-23.015-11.805-23.015-26.18s10.148-26.2 23.015-26.2c12.867 0 23.236 11.804 23.015 26.2.02 14.375-10.148 26.18-23.015 26.18Zm85.051 0c-12.645 0-23.014-11.805-23.014-26.18s10.148-26.2 23.014-26.2c12.867 0 23.236 11.804 23.015 26.2 0 14.375-10.148 26.18-23.015 26.18Z"/>
+            </svg>
+            <span>Distrakt</span>
+        </a>
+        {% else %}
+        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
+        {% endif %}
+        {% if title %}<h1>{{ title }}</h1>{% endif %}
+        {% if lead %}{{ lead() }}{% endif %}
+    </div>
+
+    {% if controls %}
+    <div class="hero-controls">{{ controls() }}</div>
+    {% endif %}
+
+    <div class="hero-actions">
+        {{ caller() }}
+        <details class="nav-menu">
+            <summary title="Account and settings">☰ Menu</summary>
+            <div class="nav-menu-items">
+                {# Account and Admin are offered on every page INCLUDING the one
+                   you are on. Suppressing the current page's own entry was tried
+                   and reverted: it makes the menu a different length per page,
+                   which is the drift this macro exists to end. #}
+                <a href="/me">👤 Account</a>
+                {% if calendar_available %}
+                <a href="{{ calendar_href }}">📅 Calendar</a>
+                {% endif %}
+                {% if ranker_available %}
+                <a href="/rankings">🏆 Rankings</a>
+                {% endif %}
+                {# `distrakt_available` unset (the default) renders the item for
+                   everyone and lets CSS decide: the markup is then identical for
+                   every account, so the response discloses nothing about who has
+                   found the tracker, and visibility comes from the `has-distrakt`
+                   class the head script sets from local storage before first
+                   paint. See _nav_head.html and style.css.
+
+                   /me passes the real flag instead, because that page carries a
+                   stricter rule: it must not mention the tracker AT ALL to an
+                   account without the grant, and it already discloses that same
+                   account's own grant elsewhere on the page. #}
+                {% if distrakt_available is none or distrakt_available %}
+                <a id="distraktNav" href="{{ distrakt_href }}" title="Open Distrakt (Discord thread tracker)">🧵 Distrakt</a>
+                {% endif %}
+                {# Only the calendar defines openSettings(); everywhere else the
+                   button would be a no-op, so it isn't rendered. #}
+                {% if settings_button and is_admin %}
+                <button type="button" onclick="closeNavMenus(); openSettings()">⚙️ Settings</button>
+                {% endif %}
+                {% if is_admin %}
+                <a href="/admin">🛠️ Admin</a>
+                {% endif %}
+                <button type="button" onclick="signOut()">🚪 Sign out</button>
+            </div>
+        </details>
+    </div>
+</header>
+{% endmacro %}

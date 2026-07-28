@@ -111,9 +111,14 @@ class RankerTestCase(unittest.TestCase):
 
 
 class SchemaTests(RankerTestCase):
+    # Derived rather than hardcoded: what these assert is "the runner lands on
+    # the newest migration", not "the newest migration is number 14", and a
+    # literal here means every later migration breaks this file for no reason.
+    LATEST = max(version for version, _ in db.MIGRATIONS)
+
     def test_migration_is_idempotent_through_the_runner(self):
-        self.assertEqual(asyncio.run(db.migrate()), 14)
-        self.assertEqual(asyncio.run(db.migrate()), 14)
+        self.assertEqual(asyncio.run(db.migrate()), self.LATEST)
+        self.assertEqual(asyncio.run(db.migrate()), self.LATEST)
 
     def test_the_new_tables_exist(self):
         names = {row["name"] for row in self.rows(
@@ -153,7 +158,7 @@ class SchemaTests(RankerTestCase):
         admin_id = asyncio.run(db.run(lambda conn: _legacy_user(conn, "legacy_admin", True)))
         plain_id = asyncio.run(db.run(lambda conn: _legacy_user(conn, "legacy_plain", False)))
 
-        self.assertEqual(asyncio.run(db.migrate()), 14)
+        self.assertEqual(asyncio.run(db.migrate()), self.LATEST)
         self.assertEqual(
             self.value("SELECT ranker_approved FROM users WHERE id = ?", (admin_id,)), 1)
         self.assertEqual(

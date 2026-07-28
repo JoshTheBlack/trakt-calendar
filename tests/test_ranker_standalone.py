@@ -30,6 +30,7 @@ Run: ./.venv/Scripts/python.exe -m unittest tests.test_ranker_standalone -v
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import sys
@@ -139,6 +140,31 @@ class StandaloneTestCase(unittest.TestCase):
             "SELECT COUNT(*) FROM distrakt_shows WHERE user_id = ?", (self.user_id,)), 0)
         self.assertEqual(self.value(
             "SELECT COUNT(*) FROM linked_identities WHERE user_id = ?", (self.user_id,)), 0)
+
+
+class ExportNameDefaultTests(StandaloneTestCase):
+    """The export dialog prefills the name it draws on the image. It should
+    offer the account's chosen display name when there is one — that is what
+    somebody wants on a poster they are going to share — and fall back to the
+    username otherwise."""
+
+    def _prefilled_name(self):
+        """What the page hands the export dialog, out of the JSON island the
+        ranker page embeds for its own script."""
+        body = self.client.get("/rankings").text
+        blob = body.split('id="rankerData"', 1)[1].split(">", 1)[1].split("</script>", 1)[0]
+        return json.loads(blob)["username"]
+
+    def test_it_falls_back_to_the_username(self):
+        self.assertEqual(self._prefilled_name(), "just_the_ranker")
+
+    def test_the_display_name_is_preferred_once_set(self):
+        asyncio.run(auth.set_display_name(self.user_id, "Josh Black"))
+        self.assertEqual(self._prefilled_name(), "Josh Black")
+
+    # That this is only a DEFAULT and not a lock — the dialog's field stays
+    # editable and a one-off name is accepted — is already covered by
+    # JourneyTests, which exports with a username of its own choosing.
 
 
 class JourneyTests(StandaloneTestCase):

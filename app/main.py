@@ -46,6 +46,7 @@ from . import encryption_flow
 from . import encryption_routes
 from . import logos
 from . import artwork
+from . import nav as nav_ctx
 from . import plex_auth
 from . import plex_routes
 from . import posters
@@ -90,7 +91,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
-VERSION = "1.1.3"  # keep in sync with CHANGELOG.md
+VERSION = "1.1.4"  # keep in sync with CHANGELOG.md
 # Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
 BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 COMMIT = os.environ.get("APP_COMMIT", "").strip()
@@ -421,7 +422,7 @@ def _picker_context(request: Request, settings, year: int, endpoint, user=None):
         # landing page people arrive on directly, and having no way from here to
         # the account or admin screens made those reachable only by typing a URL.
         "endpoints": endpoint_choices(),
-        "is_admin": bool(user and user.is_admin),
+        **nav_ctx.nav_context(user),
         "months": [{"num": m, "name": calendar.month_name[m]} for m in range(1, 13)],
         "current_month": today.month if year == today.year else None,
         "today_month": today.month,
@@ -715,17 +716,15 @@ async def calendar_page(request: Request):
         # administrator's affordance. The buttons and health state are left out
         # of the page entirely for everyone else rather than rendered into a
         # guaranteed 403.
-        "is_admin": is_admin,
+        # is_admin, calendar_available and ranker_available for the shared header.
+        **nav_ctx.nav_context(user),
         # The same two conditions the tracker's own access level enforces, asked
         # here so the easter egg knows whether it has anywhere to send this
         # person. Resolved from the session rather than probed over HTTP: an
         # endpoint answering "may I?" is itself a disclosure that there is
-        # something to be allowed into.
+        # something to be allowed into. Note this gates the REVEAL, not the menu
+        # item — see _nav.html.
         "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
-        # The ranker is a normal, visible feature, so unlike the easter egg above
-        # its link is simply present or absent according to the grant — there is
-        # nothing to keep quiet about.
-        "ranker_available": bool(user and user.ranker_approved),
         "integrations": INTEGRATION_HEALTH if is_admin else {},
         "version": VERSION,
         "build": BUILD_LABEL,
@@ -873,13 +872,12 @@ async def distrakt(request: Request):
         # For the announcement post's "which calendar view does the embedded link
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
-        "is_admin": bool(user and user.is_admin),
+        **nav_ctx.nav_context(user),
         # This user's OWN map — it renders into their Discord posts and nobody
         # else's. Rendered in rather than fetched because the roster rows fall
         # back to these emoji whenever a network has no logo.
         "network_emojis": network_emojis,
         "default_network_emoji": default_network_emoji,
-        "ranker_available": bool(user and user.ranker_approved),
         "version": VERSION,
         "build": BUILD_LABEL,
         "asset_v": ASSET_VERSION,

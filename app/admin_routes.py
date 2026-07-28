@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz
+from . import assets, auth, authz, nav
 from .auth import AuthLevel
 
 router = APIRouter()
@@ -59,6 +59,10 @@ async def admin_page(request: Request):
     retired = await auth.list_retired_identifiers()
     return templates.TemplateResponse(request, "admin.html", {
         "request": request,
+        # is_admin, calendar_available and ranker_available for the shared header.
+        # Reaching this route at all means is_admin, but the header asks for the
+        # flag by name rather than assuming it.
+        **nav.nav_context(me),
         "me": me,
         "users": users,
         "invites": invites,

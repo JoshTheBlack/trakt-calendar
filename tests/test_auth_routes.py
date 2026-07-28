@@ -13,6 +13,7 @@ Run: ./.venv/Scripts/python.exe -m unittest tests.test_auth_routes -v
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
@@ -27,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, auth_routes, db  # noqa: E402
+from app import auth, auth_routes, config, db  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -435,6 +436,253 @@ class RegistrationTests(RouteTestCase):
         invite = self._make_invite()
         resp = self.client.get(f"/register?invite={invite['token']}")
         self.assertIn("Create your account", resp.text)
+
+
+class DisplayNameTests(RouteTestCase):
+    """A display name is a LABEL, not an identifier. The username stays the
+    lowercase, unique, case-insensitive thing you sign in with and that share
+    links are built from; this is the free-text thing you are called on screen.
+    The two must not become each other."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()  # bootstrap admin "josh", already signed in
+
+    def _set(self, value):
+        return self.client.post("/api/me/display-name", json={"display_name": value})
+
+    def _stored(self):
+        return asyncio.run(auth.find_user_by_username("josh"))["display_name"]
+
+    def test_a_new_account_has_no_display_name(self):
+        self.assertIsNone(self._stored())
+
+    def test_case_is_preserved_exactly(self):
+        """The whole reason the column is separate from username, which is
+        NOCASE and would treat these as the same string."""
+        self.assertEqual(self._set("JoSh BlAck").status_code, 200)
+        self.assertEqual(self._stored(), "JoSh BlAck")
+
+    def test_spaces_are_allowed(self):
+        self.assertEqual(self._set("Josh Black").status_code, 200)
+        self.assertEqual(self._stored(), "Josh Black")
+
+    def test_surrounding_and_repeated_whitespace_is_collapsed(self):
+        """Two names that are indistinguishable on screen must not be stored as
+        different strings."""
+        resp = self._set("  Josh   Black  ")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["display_name"], "Josh Black")
+        self.assertEqual(self._stored(), "Josh Black")
+
+    def test_an_empty_value_clears_it(self):
+        self._set("Josh Black")
+        resp = self._set("")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIsNone(resp.json()["display_name"])
+        self.assertIsNone(self._stored())
+
+    def test_it_is_length_capped(self):
+        resp = self._set("x" * (auth.DISPLAY_NAME_MAX + 1))
+        self.assertEqual(resp.status_code, 400)
+        self.assertIsNone(self._stored())
+
+    def test_control_and_bidi_characters_are_refused(self):
+        """A name that can reorder or hide the text rendered beside it.
+
+        Written as escapes, not literals, so this file stays reviewable and
+        cannot pick up a stray NUL that would stop it compiling.
+        """
+        for label, bad in (("RLO", "Josh\u202eBlack"),
+                           ("NUL", "Josh\x00Black"),
+                           ("ZWSP", "Josh\u200bBlack"),
+                           ("word joiner", "Josh\u2060Black"),
+                           ("BOM", "Josh\ufeffBlack")):
+            with self.subTest(character=label):
+                self.assertEqual(self._set(bad).status_code, 400)
+                self.assertIsNone(self._stored())
+
+    def test_a_newline_is_collapsed_rather_than_refused(self):
+        """Unlike the invisibles above. A newline is ordinary whitespace to the
+        normalizer, so it becomes a space \u2014 and what matters is the property that
+        the STORED value can never contain one, not that the request is refused.
+        """
+        self.assertEqual(self._set("Josh\nBlack").status_code, 200)
+        self.assertEqual(self._stored(), "Josh Black")
+
+    def test_it_does_not_have_to_be_unique(self):
+        """Unlike the username. Nothing keys off a display name, so two people
+        may call themselves the same thing."""
+        asyncio.run(auth.create_user(username="bob", password="hunter2hunter2",
+                                     settings=Settings(), calendar_approved=True))
+        self._set("Josh Black")
+        self.client.cookies.clear()
+        self.client.post("/login", json={"username": "bob", "password": "hunter2hunter2"})
+        self.assertEqual(self._set("Josh Black").status_code, 200)
+        self.assertEqual(
+            asyncio.run(auth.find_user_by_username("bob"))["display_name"], "Josh Black")
+
+    def test_it_does_not_change_what_you_sign_in_with(self):
+        self._set("Josh Black")
+        self.client.cookies.clear()
+        # The display name is not a login identifier...
+        self.assertEqual(
+            self.client.post("/login", json={"username": "Josh Black",
+                                             "password": "hunter2hunter2"}).status_code, 401)
+        # ...and the username still is.
+        self.assertEqual(
+            self.client.post("/login", json={"username": "josh",
+                                             "password": "hunter2hunter2"}).status_code, 200)
+
+    def test_the_account_page_shows_both_names(self):
+        self._set("Josh Black")
+        body = self.client.get("/me").text
+        self.assertIn("Josh Black", body)      # the display name
+        self.assertIn(">josh<", body)          # and the username, in its own row
+
+    def _card_heading(self):
+        """The account card's own <h1>, not the shared header's — that one says
+        "Account" on every page and is a different element entirely."""
+        body = self.client.get("/me").text
+        card = body.split('class="auth-card"', 1)[1]
+        return card.split("<h1>", 1)[1].split("</h1>", 1)[0].strip()
+
+    def test_the_display_name_is_the_account_page_heading(self):
+        self._set("Josh Black")
+        self.assertEqual(self._card_heading(), "Josh Black")
+
+    def test_the_heading_falls_back_to_the_username(self):
+        self.assertEqual(self._card_heading(), "josh")
+
+    def test_it_needs_a_session(self):
+        self.client.cookies.clear()
+        self.assertEqual(self._set("Nobody").status_code, 401)
+
+
+class OpenRegistrationSettingTests(RouteTestCase):
+    """Open registration had no way in but hand-editing settings.json. It is now
+    on the Settings screen — but it is still a RECOVERY FIELD, so saving it from
+    the UI must keep writing the file an operator can edit to get back in."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()  # bootstrap admin "josh", already signed in
+
+    def _save(self, value):
+        return self.client.post("/api/settings", json={"allow_open_registration": value})
+
+    def test_it_defaults_to_invite_only(self):
+        self.assertFalse(load_settings().allow_open_registration)
+        self.assertFalse(self.client.get("/api/settings").json()["allow_open_registration"])
+
+    def test_an_admin_can_turn_it_on_and_off_again(self):
+        self.assertEqual(self._save(True).status_code, 200)
+        self.assertTrue(load_settings().allow_open_registration)
+        self.assertTrue(self.client.get("/api/settings").json()["allow_open_registration"])
+
+        self.assertEqual(self._save(False).status_code, 200)
+        self.assertFalse(load_settings().allow_open_registration)
+
+    def test_it_still_persists_to_the_settings_file(self):
+        """The whole point of a recovery field: an operator locked out of this
+        screen can still reach the value with a text editor."""
+        self._save(True)
+        # Asked of config rather than rebuilt from TMP: the module resolves its
+        # data directory once at import, and whichever test module imported last
+        # decides it for the whole run — so a path reassembled here is right
+        # alone and wrong in the full suite.
+        written = json.loads(config.SETTINGS_FILE.read_text(encoding="utf-8"))
+        self.assertTrue(written["allow_open_registration"])
+
+    def test_turning_it_on_actually_opens_registration(self):
+        """The setting is only worth a control if it reaches the gate."""
+        self.client.cookies.clear()
+        self.assertEqual(
+            self.client.post("/register", json={
+                "username": "walkup", "password": "hunter2hunter2",
+                "password_confirm": "hunter2hunter2"}).status_code, 400)
+
+        self.client.post("/login", json={"username": "josh", "password": "hunter2hunter2"})
+        self._save(True)
+        self.client.cookies.clear()
+        resp = self.client.post("/register", json={
+            "username": "walkup", "password": "hunter2hunter2",
+            "password_confirm": "hunter2hunter2"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        # Open to signing up is NOT open to the data: approval is still required.
+        self.assertFalse(
+            asyncio.run(auth.find_user_by_username("walkup"))["calendar_approved"])
+
+    def test_a_non_admin_cannot_change_it(self):
+        asyncio.run(auth.create_user(username="bob", password="hunter2hunter2",
+                                     settings=Settings(), calendar_approved=True))
+        self.client.cookies.clear()
+        self.client.post("/login", json={"username": "bob", "password": "hunter2hunter2"})
+        self.assertEqual(self._save(True).status_code, 403)
+        self.assertFalse(load_settings().allow_open_registration)
+
+
+class AutoApproveSettingTests(RouteTestCase):
+    """Approving new accounts automatically is its OWN setting, independent of
+    open registration. The two are different decisions — who may create an
+    account, and who may see the data — and the pairing is what these pin down.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()  # bootstrap admin "josh", already signed in
+
+    def _configure(self, *, open_reg, auto):
+        resp = self.client.post("/api/settings", json={
+            "allow_open_registration": open_reg, "auto_approve_calendar": auto})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.client.cookies.clear()
+
+    def _register(self, username):
+        return self.client.post("/register", json={
+            "username": username, "password": "hunter2hunter2",
+            "password_confirm": "hunter2hunter2"})
+
+    def _approved(self, username):
+        return bool(asyncio.run(auth.find_user_by_username(username))["calendar_approved"])
+
+    def test_it_defaults_off(self):
+        self.assertFalse(load_settings().auto_approve_calendar)
+
+    def test_open_registration_alone_does_not_approve(self):
+        """The reason it is a separate switch: opening sign-ups must not
+        silently open the calendar."""
+        self._configure(open_reg=True, auto=False)
+        self.assertEqual(self._register("waiting").status_code, 200)
+        self.assertFalse(self._approved("waiting"))
+
+    def test_open_registration_with_auto_approve_grants_the_calendar(self):
+        self._configure(open_reg=True, auto=True)
+        self.assertEqual(self._register("welcomed").status_code, 200)
+        self.assertTrue(self._approved("welcomed"))
+
+    def test_it_applies_to_invite_sign_ups_too(self):
+        """So it is also the way to approve on accept regardless of what a
+        particular invite happened to grant."""
+        invite = self.client.post("/api/admin/invites", json={
+            "grants_calendar_on_accept": False}).json()
+        self.client.post("/api/settings", json={"auto_approve_calendar": True})
+        self.client.cookies.clear()
+        resp = self.client.post(f"/register?invite={invite['token']}", json={
+            "username": "invited", "password": "hunter2hunter2",
+            "password_confirm": "hunter2hunter2"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertTrue(self._approved("invited"))
+
+    def test_it_does_not_hand_out_the_other_grants(self):
+        """Calendar only. distrakt and the ranker stay manual."""
+        self._configure(open_reg=True, auto=True)
+        self._register("calendar_only")
+        row = asyncio.run(auth.find_user_by_username("calendar_only"))
+        self.assertTrue(row["calendar_approved"])
+        self.assertFalse(row["distrakt_approved"])
+        self.assertFalse(row["ranker_approved"])
+        self.assertFalse(row["is_admin"])
 
 
 class AdminInviteEndpointTests(RouteTestCase):
