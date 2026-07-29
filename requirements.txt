@@ -19,6 +19,11 @@ cairosvg==2.9.0
 # at rest in the DB. Ships manylinux and Windows wheels, so it resolves in both
 # the .venv and the Docker build without a compiler.
 cryptography==49.0.0
+# Renders CHANGELOG.md for the in-app changelog modal (app/changelog.py). Chosen
+# over a hand-rolled renderer because the changelog is hand-authored: the day
+# somebody adds a table or a nested list, a regex renderer mangles it silently.
+# CommonMark-compliant, pure Python, one dependency of its own (mdurl).
+markdown-it-py==4.0.0
 # Loads a local .env file for `python run.py` (non-Docker dev), so ENCRYPTION_KEY
 # and friends can be set once in a gitignored file instead of the shell profile.
 # Docker deployments set real environment variables and never touch this.

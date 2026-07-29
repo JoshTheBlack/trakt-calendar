@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.1.6] - Unreleased
+
+### Look and feel
+- 🍿 **A mistyped address now gets an intermission.** A wrong link used to land on a plain card; it now opens on a cinema curtain with a marching line of concession-stand snacks and the lobby jingle waiting behind a play button. It says exactly what the old page said about where you are and how to get back — a dead end is just the one place with room to be charming about it.
+
+### What's new
+- 📜 **The changelog is readable from inside the app.** The ☰ menu has a *What's new* entry on every page, opening this file rendered properly — one collapsible section per release, newest already open. It is the same `CHANGELOG.md` that lives in the repository, rendered on the way past rather than copied, so what you read here cannot drift from what was actually written.
+
 ## 🏷️ [1.1.5] - 2026-07-28
 
 ### Sharing

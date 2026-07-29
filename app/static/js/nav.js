@@ -81,6 +81,47 @@ function confirmInline(trigger, message, onConfirm, opts) {
     pop._dismiss = dismiss;
 }
 
+/* The changelog modal, shared by every page carrying the header.
+
+   Plain fetch rather than htmx: htmx is only loaded by the calendar and the
+   ranker, and this entry sits in the menu on all six pages. Fetched once and
+   left in the DOM — the changelog cannot change under a running server, since a
+   new one only arrives with a new container. */
+let changelogLoaded = false;
+
+async function openChangelog() {
+    const modal = document.getElementById('changelogModal');
+    if (!modal) return;
+    modal.classList.add('open');
+    if (changelogLoaded) return;
+    const body = document.getElementById('changelogBody');
+    try {
+        const resp = await fetch('/api/changelog', { headers: { 'Accept': 'text/html' } });
+        if (!resp.ok) throw new Error(resp.status);
+        // Server-rendered first-party markup from CHANGELOG.md, with raw HTML
+        // dropped at render time (see app/changelog.py). Nothing here is user
+        // input, which is what makes innerHTML the right tool rather than a
+        // hazard — cf. confirmInline() above, where the message IS untrusted.
+        body.innerHTML = await resp.text();
+        changelogLoaded = true;
+    } catch (e) {
+        body.innerHTML = '';
+        const p = document.createElement('p');
+        p.className = 'hint';
+        p.textContent = "Couldn't load the changelog.";
+        body.appendChild(p);
+    }
+}
+
+function closeChangelog() {
+    const modal = document.getElementById('changelogModal');
+    if (modal) modal.classList.remove('open');
+}
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeChangelog();
+});
+
 async function signOut() {
     try {
         const resp = await fetch('/logout', {

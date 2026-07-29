@@ -39,6 +39,7 @@ from . import authz
 from . import cache
 from . import calendar_cache
 from . import calendar_state
+from . import changelog
 from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
@@ -411,6 +412,18 @@ def _nav(year: int, month: int) -> dict:
 @guard.get("/healthz", AuthLevel.PUBLIC)
 async def healthz():
     return {"ok": True}
+
+
+# SESSION rather than PUBLIC: release notes are not sensitive, but they are a
+# feature inventory and a version history, and handing that to an unauthenticated
+# visitor is a small gift to somebody probing the instance. Any signed-in account
+# may read them, approved for anything or not — the menu entry sits on every page
+# and gating it further would make the header a different shape per account.
+@guard.get("/api/changelog", AuthLevel.SESSION)
+async def api_changelog(request: Request):
+    """The modal's body, as an HTML fragment. Fetched once on first open."""
+    return templates.TemplateResponse(
+        request, "_changelog.html", {"releases": changelog.releases()})
 
 
 def _month_valid(value) -> bool:

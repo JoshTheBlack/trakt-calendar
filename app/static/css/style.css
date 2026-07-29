@@ -608,3 +608,51 @@ body.hide-not-watching .card.not-watching { display: none; }
 .ep-row .ep-rating { color: var(--gold-soft); font-size: 0.76rem; }
 .d-empty { color: var(--text-faint); font-size: 0.84rem; }
 @media (max-width: 520px) { .details-hero img { width: 90px; } }
+
+/* Changelog modal ---------------------------------------------------------
+   Rendered from CHANGELOG.md (app/changelog.py) into one <details> per release.
+   Styled with the app's own tokens rather than an imported GitHub stylesheet:
+   the point is that it reads as part of the app, not as an embedded web page. */
+#changelogBody { gap: 0; padding-top: 8px; padding-bottom: 8px; }
+.release { border-bottom: 1px solid var(--card-border); }
+.release:last-child { border-bottom: none; }
+.release > summary { display: flex; align-items: baseline; gap: 10px; padding: 12px 4px; cursor: pointer; list-style: none; user-select: none; }
+/* The default disclosure triangle is replaced by the rotating caret below, so
+   both the WebKit and the standard marker have to go. */
+.release > summary::-webkit-details-marker { display: none; }
+.release > summary::marker { content: ''; }
+.release > summary::before { content: '▶'; color: var(--text-faint); font-size: 0.7rem; transition: transform .15s ease; display: inline-block; }
+.release[open] > summary::before { transform: rotate(90deg); }
+.release > summary:hover .release-version { color: var(--gold); }
+.release-version { font-family: 'Bebas Neue', sans-serif; font-size: 1.15rem; letter-spacing: 1px; color: var(--gold-soft); }
+.release-date { color: var(--text-faint); font-size: 0.78rem; margin-left: auto; }
+.release-tag { background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 999px; color: var(--text-dim); font-size: 0.68rem; font-weight: 700; padding: 2px 9px; text-transform: uppercase; letter-spacing: 0.06em; }
+.release-tag.unreleased { border-color: var(--gold); color: var(--gold); }
+.release-body { padding: 2px 4px 18px 20px; }
+
+/* The rendered markdown itself. Only the elements the changelog actually uses
+   are styled, plus tables and code blocks -- those two are enabled in the
+   renderer and would otherwise land unstyled the first time somebody writes one. */
+.markdown-body { color: var(--text-dim); font-size: 0.86rem; line-height: 1.65; }
+.markdown-body > *:first-child { margin-top: 0; }
+.markdown-body h3 { font-family: 'Bebas Neue', sans-serif; font-size: 1.05rem; letter-spacing: 1px; color: var(--text); margin: 18px 0 6px; }
+.markdown-body h4 { font-size: 0.84rem; font-weight: 700; color: var(--text); margin: 14px 0 4px; }
+.markdown-body p { margin: 8px 0; }
+.markdown-body ul, .markdown-body ol { margin: 6px 0; padding-left: 20px; }
+.markdown-body li { margin: 5px 0; }
+.markdown-body li > strong:first-child { color: var(--text); }
+.markdown-body a { color: var(--accent-blue); }
+.markdown-body code { font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 0.82em; background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 4px; padding: 0 4px; color: var(--gold-soft); }
+.markdown-body pre { background: var(--bg-input, #12151c); border: 1px solid var(--card-border); border-radius: 8px; padding: 10px 12px; overflow-x: auto; }
+.markdown-body pre code { background: none; border: none; padding: 0; color: var(--text-dim); }
+.markdown-body blockquote { border-left: 2px solid var(--card-border); margin: 8px 0; padding-left: 12px; color: var(--text-faint); }
+.markdown-body hr { border: none; border-top: 1px solid var(--card-border); margin: 14px 0; }
+/* Wide content scrolls inside its own box rather than widening the modal. */
+.markdown-body table { display: block; overflow-x: auto; border-collapse: collapse; margin: 10px 0; }
+.markdown-body th, .markdown-body td { border: 1px solid var(--card-border); padding: 6px 10px; text-align: left; }
+.markdown-body th { background: var(--bg-input, #12151c); color: var(--text); }
+@media (max-width: 520px) {
+  .release-date { margin-left: 0; }
+  .release > summary { flex-wrap: wrap; }
+  .release-body { padding-left: 8px; }
+}

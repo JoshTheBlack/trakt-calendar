@@ -1,0 +1,28 @@
+{# The body of the changelog modal, fetched on first open and left in the DOM.
+
+   One <details> per release, newest expanded. Native rather than scripted: it
+   expands, collapses, takes the keyboard and reads correctly to a screen reader
+   with no JavaScript at all, which is the whole reason this feature ships
+   without a line of client-side state.
+
+   `release.html` is rendered from CHANGELOG.md by app/changelog.py and is marked
+   safe deliberately — it is first-party markdown from the repository, and the
+   renderer is configured to drop raw HTML in the source (see that module), so
+   the only tags reaching here are ones markdown-it itself emitted. #}
+{% if not releases %}
+  <p class="hint">The changelog isn't available in this build.</p>
+{% endif %}
+{% for release in releases %}
+<details class="release"{% if loop.first %} open{% endif %}>
+  <summary>
+    <span class="release-version">🏷️ {{ release.version }}</span>
+    <span class="release-date">{{ release.date }}</span>
+    {% if release.is_unreleased %}
+    <span class="release-tag unreleased">in progress</span>
+    {% elif loop.first %}
+    <span class="release-tag">latest</span>
+    {% endif %}
+  </summary>
+  <div class="release-body markdown-body">{{ release.html | safe }}</div>
+</details>
+{% endfor %}

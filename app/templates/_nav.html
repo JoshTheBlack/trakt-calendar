@@ -99,9 +99,27 @@
                 {% if is_admin %}
                 <a href="/admin">🛠️ Admin</a>
                 {% endif %}
+                {# No gate: any signed-in account may read the release notes, so
+                   the entry is the same on every page for every account. #}
+                <button type="button" onclick="closeNavMenus(); openChangelog()">📜 What's new</button>
                 <button type="button" onclick="signOut()">🚪 Sign out</button>
             </div>
         </details>
     </div>
 </header>
+
+{# Lives in the macro rather than in each page so it reaches all six of them
+   through the one insertion point the header already is. The body is empty
+   until first open — see openChangelog() in nav.js, which fetches it once. #}
+<div id="changelogModal" class="modal-overlay" onclick="if(event.target===this) closeChangelog()">
+    <div class="modal wide">
+        <div class="modal-head">
+            <h2>What's new</h2>
+            <button type="button" class="modal-close" onclick="closeChangelog()">&times;</button>
+        </div>
+        <div class="modal-body" id="changelogBody">
+            <p class="hint">Loading…</p>
+        </div>
+    </div>
+</div>
 {% endmacro %}

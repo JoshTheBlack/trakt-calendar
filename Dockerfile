@@ -36,6 +36,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
+# Not documentation in the image — the app SERVES this. app/changelog.py reads it
+# from the project root (BASE_DIR.parent, which is /app here) and renders it into
+# the "What's new" modal, so there is only ever one copy of the release notes.
+# Dropping this line does not fail the build or the healthcheck; the modal just
+# comes up empty.
+COPY CHANGELOG.md .
+
 # Runtime data (settings.json, state_*.json) lives on a volume so it persists.
 RUN mkdir -p /data
 VOLUME ["/data"]
