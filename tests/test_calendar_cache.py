@@ -34,6 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import cache, calendar_cache, calendar_filter, db, trakt  # noqa: E402
 from app.config import Settings  # noqa: E402
+from app.providers import base  # noqa: E402
 from app.endpoints import ENDPOINTS, get_endpoint  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
@@ -135,32 +136,46 @@ class PruneTests(unittest.TestCase):
 
     def test_pruner_keeps_every_field_the_normalizer_reads(self):
         """The strongest possible statement of the pruner's contract: a raw entry
-        and its pruned form normalize to the identical Item, apart from the ids
-        the cache is deliberately not storing.
+        and its pruned form normalize to the byte-identical Item.
 
-        The one exception is imdb, which _MEDIA_ID_KEYS does not carry (see
-        test_pruner_drops_the_bulky_unused_fields, which asserts that directly).
-        Nothing reads it today, so it is not stored; asserting the gap here means
-        the day something does read it, this test says so rather than an item
-        silently arriving without it on the cached path only."""
+        No permitted gap. A field the normalizer reads but the pruner drops means
+        the same show renders one way on a cache miss and another on a hit, which
+        is a bug that only appears once a window has been stored — so it is
+        caught here instead."""
         tz = ZoneInfo("America/New_York")
         pruned = calendar_cache.prune_entry(self.RICH, "show")
-        from_raw = trakt.normalize(self.RICH, SHOWS, tz)
-        from_pruned = trakt.normalize(pruned, SHOWS, tz)
-
         self.assertEqual(
-            set(from_raw.ids) - set(from_pruned.ids), {"imdb"},
-            "the cached path lost an id other than the imdb one it is known to drop",
+            trakt.normalize(self.RICH, SHOWS, tz),
+            trakt.normalize(pruned, SHOWS, tz),
         )
-        from_raw.ids.pop("imdb")
-        self.assertEqual(from_raw, from_pruned)
+
+    def test_pruner_keeps_every_id_the_item_can_carry(self):
+        """The invariant behind the test above, stated directly: an id namespace
+        the Item declares and the source supplied must survive into the cache.
+        Anything else is an id present on a miss and missing on a hit."""
+        pruned = calendar_cache.prune_entry(self.RICH, "show")
+        supplied = {k for k in self.RICH["show"]["ids"] if k in base.ID_KEYS}
+        self.assertEqual(set(pruned["show"]["ids"]), supplied)
+
+    def test_a_window_cached_before_an_id_key_existed_still_reads(self):
+        """A stored window predating a new _MEDIA_ID_KEYS entry simply lacks the
+        key. It must normalize rather than raise, and the id must come back
+        ABSENT rather than None — nothing invalidates the cache on a format
+        change, so old rows keep being served until their TTL expires."""
+        legacy = calendar_cache.prune_entry(self.RICH, "show")
+        del legacy["show"]["ids"]["imdb"]
+        item = trakt.normalize(legacy, SHOWS, ZoneInfo("UTC"))
+        self.assertNotIn("imdb", item.ids)
+        self.assertEqual(item.ids["tmdb"], 789)
 
     def test_pruner_drops_the_bulky_unused_fields(self):
         pruned = calendar_cache.prune_entry(self.RICH, "show")
         self.assertNotIn("fanart", pruned["show"]["images"])
         self.assertNotIn("logo", pruned["show"]["images"])
-        self.assertNotIn("imdb", pruned["show"]["ids"])
         self.assertNotIn("unused_field", pruned["show"])
+        # An id namespace the Item does not declare is still dropped — the cache
+        # stores what the record can carry, not everything the source sent.
+        self.assertNotIn("unused", pruned["show"]["ids"])
 
     def test_pruner_keeps_certification(self):
         """Needed for the per-user and instance-floor certification filters to

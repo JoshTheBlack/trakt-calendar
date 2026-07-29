@@ -180,8 +180,20 @@ def cache_key(endpoint_key: str, start: date) -> str:
 # pruning — keep only what the normalizer and the filters read
 # ---------------------------------------------------------------------------
 
-# The immutable ids the normalizer emits (slug, trakt, tvdb, tmdb).
-_MEDIA_ID_KEYS = ("slug", "trakt", "tvdb", "tmdb")
+# The immutable ids the normalizer emits. This tuple must stay a superset of
+# what a normalized Item can carry, or the SAME show comes out of a cache hit
+# differently from a cache miss — which is why imdb is here despite nothing
+# reading it yet: the Item carries it, so the cache has to.
+#
+# imdb earns its bytes as a MATCHING id rather than a display one. Measured
+# 2026-07-29: Trakt supplies it on 80.6% of show/movie records, and it is the
+# second chance at recognizing the same title across services when tmdb is
+# absent on one side of the comparison.
+#
+# `mal` and `plex` are deliberately NOT here. Trakt emits mal zero times across
+# 15,701 id blocks, so the key would be permanently empty; plex is a nested
+# object rather than a scalar id and nothing downstream could match on it.
+_MEDIA_ID_KEYS = ("slug", "trakt", "tvdb", "tmdb", "imdb")
 # Every scalar the normalizer or the genre/country/certification filter reads
 # off the media object. `genres`, `country`, and `certification` feed the
 # filter; the rest are display fields.
