@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import db
+from .providers.base import Media
 
 # Caps. Every one of these is enforced by rejecting the whole request, never by
 # quietly truncating: a user who pasted a 90-character board name should be told
@@ -53,8 +54,12 @@ MAX_CATEGORIES_PER_BOARD = 30
 MAX_ITEMS_PER_BOARD = 1000
 MAX_UID_LENGTH = 64
 
-MEDIA_VALUES = frozenset({"show", "movie"})
-MEDIA_SCOPES = frozenset({"show", "movie", "mixed"})
+# Both derived from the app's one media vocabulary rather than restated. A scope
+# is "one of the media kinds, or both at once", which is a statement ABOUT that
+# set — so writing the members out again here would be a second copy that goes
+# quietly stale rather than loudly wrong.
+MEDIA_VALUES = frozenset(Media)
+MEDIA_SCOPES = MEDIA_VALUES | {"mixed"}
 # The identity waterfall, in preference order. A row's match_source is whichever
 # of these was the first shared id available when the title was resolved.
 MATCH_SOURCES = ("tmdb", "tvdb", "imdb", "mal")

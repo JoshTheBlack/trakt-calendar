@@ -30,6 +30,7 @@ import re
 from datetime import date
 
 from . import calendar_state, db
+from .providers.base import Item, Media
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -637,16 +638,21 @@ async def stamp_refreshed(user_id: int, month_key: str) -> None:
     )
 
 
-def _calendar_record(item: dict) -> dict:
-    """Identity record from a normalized calendar item (app/trakt.normalize)."""
+def _calendar_record(item: Item) -> dict:
+    """Identity record from a normalized calendar item.
+
+    The tracker's rows are keyed on Trakt's own id, so this reaches into
+    `item.ids` for it rather than taking whatever the item's display id happens
+    to be — those are different questions, and the display id is a slug.
+    """
     return {
-        "trakt_id": int(item["trakt_id"]),
-        "tmdb": item.get("tmdb"),
-        "slug": str(item.get("trakt_slug") or ""),
-        "media": "show",
-        "title": str(item.get("title") or ""),
-        "season": int(item.get("season") or 1),
-        "network": str(item.get("network") or ""),
+        "trakt_id": int(item.ids["trakt"]),
+        "tmdb": item.ids.get("tmdb"),
+        "slug": str(item.ids.get("slug") or ""),
+        "media": Media.SHOW,
+        "title": str(item.title or ""),
+        "season": int(item.season or 1),
+        "network": str(item.network or ""),
     }
 
 
@@ -686,13 +692,13 @@ async def _premiere_records(user_id: int, settings, year: int, month: int) -> li
     out: list[dict] = []
     new_keys: set[tuple[int, int]] = set()
     for item in new_items:
-        tid, season = item.get("trakt_id"), item.get("season")
+        tid, season = item.ids.get("trakt"), item.season
         if tid is None or season is None:
             continue
         new_keys.add((int(tid), int(season)))
         out.append(_calendar_record(item))
     for item in prem_items:
-        tid, season = item.get("trakt_id"), item.get("season")
+        tid, season = item.ids.get("trakt"), item.season
         if tid is None or season is None:
             continue
         if (int(tid), int(season)) in new_keys:
@@ -776,7 +782,7 @@ async def is_calendar_premiere(user_id: int, month_key: str, settings,
     Answers False rather than raising if Trakt is unreachable: not knowing means
     not marking, which is the conservative half — the row simply comes back.
     """
-    if not (settings and getattr(settings, "configured", False)):
+    if not (settings and getattr(settings, "trakt_configured", False)):
         return False
     year, month = int(month_key[:4]), int(month_key[5:7])
     try:
@@ -871,12 +877,12 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
     # Freeze the prior month only once THIS month has actually begun (not during a
     # pre-1st preview). Skip when accessing an already-closed month (settled).
-    if settings and getattr(settings, "configured", False) and (existing is None or not existing.get("closed")):
+    if settings and getattr(settings, "trakt_configured", False) and (existing is None or not existing.get("closed")):
         await maybe_freeze_prior(user_id, month_key, settings, today)
 
     if existing is not None:
         return await load_month(user_id, month_key)
-    if not (settings and getattr(settings, "configured", False)):
+    if not (settings and getattr(settings, "trakt_configured", False)):
         # Initialization needs Trakt (premieres + history); without credentials
         # return a transient, UNPERSISTED empty doc so a proper init still happens
         # once Trakt is configured (rather than baking in an empty month).

@@ -1,8 +1,9 @@
 """Async Trakt API client + response normalizer.
 
 Fetches a month of calendar items for the selected endpoint and normalizes the
-(differently-shaped) show/movie responses into one uniform `Item` dict the
-template can render regardless of endpoint.
+(differently-shaped) show/movie responses into the uniform `Item` every calendar
+source produces, so the template renders one shape regardless of endpoint — or,
+once there is a second source, of who supplied it.
 """
 from __future__ import annotations
 
@@ -19,8 +20,10 @@ import httpx
 
 from . import cache
 from . import calendar_filter
+from . import providers
 from .config import Settings
-from .endpoints import Endpoint
+from .endpoints import ENDPOINTS, Endpoint
+from .providers.base import Capabilities, Item, Media, Source, collect_ids
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
@@ -68,17 +71,30 @@ def _headers(settings: Settings, paginate: bool = True) -> dict:
     return headers
 
 
+def calendar_path(endpoint: Endpoint) -> str:
+    """This endpoint's Trakt path segment, the part after /calendars/all/.
+
+    THE TRANSLATION FROM THE APP'S ENDPOINT KEY TO TRAKT'S OWN URL, and the only
+    place it happens. The keys and the paths coincide today, which is precisely
+    why this needs to be a function and not an assumption: another source spells
+    the same five calendars completely differently, and a caller that formatted
+    `endpoint.key` into a URL would look correct right up until it was asked to
+    do it for somebody else.
+    """
+    return endpoint.key
+
+
 def _build_url(endpoint: Endpoint, settings: Settings, start_date: str, days: int) -> str:
     # genres/countries are NOT sent as query params any more: the calendar cache
     # stores the complete unfiltered result and those become read-time per-user
     # filters, so one viewer can include JP/KR shows and another exclude them from
     # the same cached data. The equivalent filtering is reproduced client-side in
     # fetch_calendar (and the cached read path) via app/calendar_filter.py.
-    path = f"{API_BASE}/calendars/all/{endpoint.path}/{start_date}/{days}"
+    path = f"{API_BASE}/calendars/all/{calendar_path(endpoint)}/{start_date}/{days}"
     return f"{path}?{urlencode({'extended': 'full,images'})}"
 
 
-async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, month: int) -> list[dict]:
+async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, month: int) -> list[Item]:
     """Fetch and normalize a month of calendar items for the given endpoint."""
     days = calendar.monthrange(year, month)[1]
     start_date = f"{year:04d}-{month:02d}-01"
@@ -114,15 +130,15 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
 
     tz = ZoneInfo(settings.timezone)
     items = [normalize(entry, endpoint, tz) for entry in raw]
-    items = [i for i in items if i and start_date <= i["air_date"] <= end_date]
+    items = [i for i in items if i and start_date <= i.air_date <= end_date]
 
     # Network filter: an operator-configured allow-list, matched case-sensitively
     # against Trakt's own network naming.
     if settings.network_filter:
         allow = set(settings.network_filter)
-        items = [i for i in items if i["network"] in allow]
+        items = [i for i in items if i.network in allow]
 
-    items.sort(key=lambda i: i["air_ts"])
+    items.sort(key=lambda i: i.air_ts)
     return items
 
 
@@ -137,7 +153,7 @@ def _poster(media: dict) -> str | None:
     return None
 
 
-def normalize(entry: dict, endpoint: Endpoint, tz: ZoneInfo) -> dict | None:
+def normalize(entry: dict, endpoint: Endpoint, tz: ZoneInfo) -> Item | None:
     """Turn a raw Trakt calendar entry into the uniform Item shape."""
     media = entry.get(endpoint.media) or {}
     aired_raw = entry.get("first_aired") or entry.get("released")
@@ -164,39 +180,37 @@ def normalize(entry: dict, endpoint: Endpoint, tz: ZoneInfo) -> dict | None:
     # Full overview is sent; cards clamp it via CSS, the poster-only panel scrolls it.
     overview = (media.get("overview") or "").strip()
 
-    return {
-        "media": endpoint.media,
-        "id": ids.get("slug") or str(ids.get("trakt") or ""),
-        "trakt_slug": ids.get("slug") or "",
-        "trakt_id": ids.get("trakt"),
-        "tvdb": ids.get("tvdb"),
-        "tmdb": ids.get("tmdb"),
-        "title": media.get("title") or "Untitled",
-        "year": media.get("year") or "",
-        "network": media.get("network") or "",
-        "country": (media.get("country") or "").upper(),
-        "language": (media.get("language") or "").upper(),
-        "runtime": media.get("runtime"),
-        "status": media.get("status") or "",
-        "rating": round(float(media["rating"]), 1) if media.get("rating") else None,
-        "genres": [g.replace("-", " ").title() for g in (media.get("genres") or [])],
-        "certification": (media.get("certification") or "").upper(),
-        "overview": overview,
-        "poster": _poster(media),
-        "air_date": dt.strftime("%Y-%m-%d"),
-        "air_ts": dt.timestamp(),
-        "air_display": dt.strftime("%d %b %Y"),
-        "air_time": dt.strftime("%H:%M"),
-        "day_of_week": dt.strftime("%A"),
-        "episode_label": ep_label,
-        "episode_title": episode.get("title") or "",
-        "season": int(ep_season) if ep_season is not None else None,
-        "episode_number": int(ep_number) if ep_number is not None else None,
-        "trakt_url": (
-            f"https://trakt.tv/{'movies' if endpoint.media == 'movie' else 'shows'}/{ids.get('slug')}"
+    return Item(
+        source=Source.TRAKT,
+        media=endpoint.media,
+        id=ids.get("slug") or str(ids.get("trakt") or ""),
+        ids=collect_ids(ids),
+        detail_url=(
+            f"https://trakt.tv/{'movies' if endpoint.media == Media.MOVIE else 'shows'}/{ids.get('slug')}"
             if ids.get("slug") else "https://trakt.tv"
         ),
-    }
+        title=media.get("title") or "Untitled",
+        year=media.get("year") or "",
+        network=media.get("network") or "",
+        country=(media.get("country") or "").upper(),
+        language=(media.get("language") or "").upper(),
+        runtime=media.get("runtime"),
+        status=media.get("status") or "",
+        rating=round(float(media["rating"]), 1) if media.get("rating") else None,
+        genres=[g.replace("-", " ").title() for g in (media.get("genres") or [])],
+        certification=(media.get("certification") or "").upper(),
+        overview=overview,
+        poster=_poster(media),
+        air_date=dt.strftime("%Y-%m-%d"),
+        air_ts=dt.timestamp(),
+        air_display=dt.strftime("%d %b %Y"),
+        air_time=dt.strftime("%H:%M"),
+        day_of_week=dt.strftime("%A"),
+        episode_label=ep_label,
+        episode_title=episode.get("title") or "",
+        season=int(ep_season) if ep_season is not None else None,
+        episode_number=int(ep_number) if ep_number is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -863,7 +877,7 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     return out
 
 
-SEARCH_MEDIA = ("show", "movie")
+SEARCH_MEDIA = tuple(Media)
 
 
 def ids_map(media: dict) -> dict:
@@ -980,3 +994,40 @@ async def fetch_ratings(settings: Settings) -> list[dict]:
     entries = data if isinstance(data, list) else []
     logger.info("fetch_ratings -> %d rated item(s)", len(entries))
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Registration as a calendar source.
+# ---------------------------------------------------------------------------
+
+class _TraktProvider:
+    """Trakt as the registry sees it: an id, a label, what it can answer, and
+    the one calendar call. Everything else this module exposes is still called
+    directly by the code that needs Trakt specifically (the detail modal, the
+    tracker's private reads) — the Protocol stays narrow on purpose, and this
+    class is not a facade over the module."""
+
+    source = Source.TRAKT
+    label = "Trakt"
+    capabilities = Capabilities(
+        endpoints=frozenset(ENDPOINTS),
+        # Trakt's calendar endpoints accept any start date and any day count —
+        # measured live back to 2010 and forward past the announced schedule —
+        # so there is no window to declare.
+        days_before=None,
+        days_after=None,
+        # The token belongs to a person: /users/me/history, the per-show progress
+        # records and /sync/ratings are all reachable, which is what lets the
+        # tracker and the ranker's ratings import be backed by this source.
+        private_user_data=True,
+    )
+
+    def is_configured(self, settings: Settings) -> bool:
+        return settings.trakt_configured
+
+    async def fetch_calendar(self, endpoint: Endpoint, settings: Settings,
+                             year: int, month: int) -> list[Item]:
+        return await fetch_calendar(endpoint, settings, year, month)
+
+
+providers.register(_TraktProvider())

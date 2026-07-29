@@ -342,7 +342,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
         settings = asyncio.run(main._distrakt_settings(user_id))
         self.assertEqual(settings.trakt_access_token, "")
-        self.assertFalse(settings.configured)
+        self.assertFalse(settings.trakt_configured)
 
         recorder = RecordingClient()
         self.sign_in_as(user_id)

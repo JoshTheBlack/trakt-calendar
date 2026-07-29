@@ -56,6 +56,7 @@ from zoneinfo import ZoneInfo
 from . import artwork, calendar_filter, db, trakt
 from .cache import COMPRESS_LEVEL
 from .endpoints import ENDPOINTS, Endpoint
+from .providers.base import Item
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger app/trakt.py's _cached_get already uses for its own
@@ -261,7 +262,7 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
     handing the page duplicate cards for every one of them.
     """
     url = (
-        f"{trakt.API_BASE}/calendars/all/{endpoint.path}/{start.isoformat()}/{WINDOW_DAYS}"
+        f"{trakt.API_BASE}/calendars/all/{trakt.calendar_path(endpoint)}/{start.isoformat()}/{WINDOW_DAYS}"
         f"?{urlencode({'extended': 'full,images'})}"
     )
     t0 = _time.perf_counter()
@@ -518,29 +519,29 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     certifications = show_certifications if endpoint.media == "show" else movie_certifications
     kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries, certifications)
 
-    items: list[dict] = []
+    items: list[Item] = []
     for entry in kept:
         item = trakt.normalize(entry, endpoint, tz)
         if item is None:
             continue
-        air_day = date.fromisoformat(item["air_date"])  # already in the viewer's tz
+        air_day = date.fromisoformat(item.air_date)  # already in the viewer's tz
         if start_date <= air_day <= end_date:
             items.append(item)
 
     if network_filter:
         allow = set(network_filter)
-        items = [i for i in items if i["network"] in allow]
-    items.sort(key=lambda i: i["air_ts"])
+        items = [i for i in items if i.network in allow]
+    items.sort(key=lambda i: i.air_ts)
 
     grouped = [
         {"date": day,
          "label": day_label(date.fromisoformat(day)),
          "items": list(rows)}
-        for day, rows in groupby(items, key=lambda i: i["air_date"])
+        for day, rows in groupby(items, key=lambda i: i.air_date)
     ]
 
     nw = not_watching_ids or set()
-    not_watching_count = sum(1 for i in items if i["id"] in nw)
+    not_watching_count = sum(1 for i in items if i.id in nw)
     meta = {
         "total": len(items),
         "watching": len(items) - not_watching_count,
@@ -548,7 +549,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # De-duped, first-airing order: one show airing a dozen times in a month
         # is one show as far as "which of these is new since last time" goes, and
         # this list is stored per user per view.
-        "show_ids": list(dict.fromkeys(i["id"] for i in items)),
+        "show_ids": list(dict.fromkeys(i.id for i in items)),
         "as_of": as_of,
         "partial": partial,
     }
@@ -559,7 +560,7 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
                      genres: str = "", countries: str = "",
                      show_certifications: str = "", movie_certifications: str = "",
                      network_filter=None,
-                     allow_fetch: bool = True, now: int | None = None) -> tuple[list[dict], int | None]:
+                     allow_fetch: bool = True, now: int | None = None) -> tuple[list[Item], int | None]:
     """One viewer's normalized, filtered, month-trimmed calendar items, as a flat
     (items, as_of) pair — the shape the calendar route, the share pages, and the
     distrakt import already unpack.

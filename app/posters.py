@@ -36,6 +36,7 @@ from . import artwork, trakt
 from . import tmdb as tmdb_client
 from .config import DATA_DIR
 from .perftrace import span
+from .providers.base import Media
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,9 @@ JPEG_QUALITY = 88
 # way. No legitimate poster is anywhere near this large.
 MAX_SOURCE_DIMENSION = 6000
 
-MEDIA_VALUES = ("show", "movie")
+# Read from the app's own media vocabulary rather than restated, so a third kind
+# of title would not need this module to be remembered.
+MEDIA_VALUES = tuple(Media)
 
 _FAN_OUT = 8
 

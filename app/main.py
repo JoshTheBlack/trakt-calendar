@@ -482,7 +482,7 @@ def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
     land where the day really is) if it knows how many rows of cards are coming."""
     cap = _COLUMN_CAPS.get(card_style, _COLUMN_CAP_DEFAULT)
     for group in grouped:
-        visible = sum(1 for item in group["items"] if item["id"] not in not_watching)
+        visible = sum(1 for item in group["items"] if item.id not in not_watching)
         shown = visible if hide_not_watching else len(group["items"])
         group["cols"] = max(1, min(shown, cap))
         group["collapsed"] = hide_not_watching and visible == 0
@@ -584,7 +584,7 @@ async def calendar_page(request: Request):
     history: list[dict] = []
     show_counts: dict[str, int] = {}
     error: str | None = None
-    if not settings.configured:
+    if not settings.calendar_source_configured:
         error = "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
     else:
         try:
@@ -614,7 +614,7 @@ async def calendar_page(request: Request):
             # keep counting correctly when one toggle flips a show that airs on a
             # dozen days — without asking the DOM, which only ever knows about the
             # cards it currently holds.
-            show_counts = Counter(item["id"] for group in grouped for item in group["items"])
+            show_counts = Counter(item.id for group in grouped for item in group["items"])
             # The is-new diff and its baseline commit belong to whoever produced
             # the cards, over the SERVER's full id list. Skipped on the error
             # paths below: committing an empty month as the baseline would make
@@ -635,7 +635,7 @@ async def calendar_page(request: Request):
     # offer to scroll somewhere blank. app.js keeps this in step when the viewer
     # toggles hiding or marks a show without reloading.
     shown_by_date = {
-        group["date"]: sum(1 for item in group["items"] if item["id"] not in not_watching)
+        group["date"]: sum(1 for item in group["items"] if item.id not in not_watching)
         for group in grouped
     } if prefs["hide_not_watching"] else counts_by_date
 
@@ -813,7 +813,7 @@ async def calendar_day(request: Request):
     day = _month_date(request.query_params.get("date"), year, month)
     if day is None:
         return JSONResponse({"ok": False, "error": "Invalid date"}, status_code=400)
-    if not settings.configured:
+    if not settings.calendar_source_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
 
     tz = _resolve_viewer_tz(user, settings)
@@ -919,7 +919,7 @@ def _season_param(value) -> int | None:
 async def api_tile(request: Request):
     """Compact season info for a tile."""
     settings = load_settings()
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
     trakt_id = request.query_params.get("id")
@@ -938,7 +938,7 @@ async def api_tile(request: Request):
 async def api_details(request: Request):
     """Full detail payload for the modal."""
     settings = load_settings()
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
     trakt_id = request.query_params.get("id")
@@ -1715,7 +1715,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     existing = await distrakt_store.load_month(user_id, month_key)
     if existing is None:
         blocked = await distrakt_store.is_backfill_blocked(user_id, month_key)
-        if blocked or not settings.configured:
+        if blocked or not settings.trakt_configured:
             # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
             # persisted, no Trakt call. `readonly` hides the add/edit affordances.
             return _empty_month_payload(
@@ -1749,16 +1749,16 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         # A PREVIEW month (before the 1st) keeps auto-populating from premieres so the
         # roster tracks the calendar (and un-not-watching re-adds a previously excluded
         # premiere). A COMMITTED month is stable — premieres only re-import on demand.
-        if not committed and settings.configured:
+        if not committed and settings.trakt_configured:
             await distrakt_store.import_premieres(user_id, month_key, settings)
             doc = await distrakt_store.load_month(user_id, month_key) or doc
 
         records = doc.get("shows", [])
-        if records and not settings.configured:
+        if records and not settings.trakt_configured:
             return {"ok": False, "error": "Not configured"}, 400
         # Backfill tmdb on records added before we stored it (one-time; self-limiting)
         # so the network-logo <img> gets a tmdb to generate from on this same load.
-        if records and settings.configured:
+        if records and settings.trakt_configured:
             with span("payload.backfill_tmdb"):
                 doc = await distrakt_store.backfill_tmdb(user_id, month_key, settings) or doc
             records = doc.get("shows", [])
@@ -1775,7 +1775,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         watched_lookup: dict = {}
         completed_lookup: dict = {}
         movies: list[dict] = []
-        if settings.configured:
+        if settings.trakt_configured:
             with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
                 state = await watch_history.sync_and_baseline(
                     settings, user_id, [r["trakt_id"] for r in records], force=force_fresh, today=today,
@@ -1803,7 +1803,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
         # backfilled, so a show manually added before logos existed doesn't depend on
         # some OTHER show requesting its network's logo first (see logos.ensure_logos).
         # Best-effort and self-limiting: a no-op once each network's tile is on disk.
-        if shows and settings.configured:
+        if shows and settings.trakt_configured:
             with span("payload.ensure_logos"):
                 await logos.ensure_logos(settings, [(s.get("network"), s.get("tmdb")) for s in shows])
 
@@ -1884,7 +1884,7 @@ async def api_distrakt_import(request: Request):
     Returns the same shape as GET /api/distrakt/month."""
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     try:
         data = await request.json()
@@ -1944,7 +1944,7 @@ async def api_distrakt_details(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     trakt_id = request.query_params.get("trakt_id")
     season = _season_param(request.query_params.get("season"))
@@ -2098,7 +2098,7 @@ async def api_distrakt_remove(request: Request):
 @guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_search(request: Request):
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
     try:
@@ -2114,7 +2114,7 @@ async def api_distrakt_search_movie(request: Request):
     flag on the show search, because what comes back is a different shape with
     no seasons in it and the caller does something else entirely with it."""
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
     try:
@@ -2236,7 +2236,7 @@ async def api_distrakt_seasons(request: Request):
     """Aired seasons for a show (add-flow season picker) — required so the
     browser can call fetch_show_seasons()."""
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     trakt_id = request.query_params.get("id")
     if not trakt_id:
@@ -2265,7 +2265,7 @@ async def api_distrakt_add(request: Request):
     baseline their watch history, and register its network in the emoji map."""
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     try:
         data = await request.json()
@@ -2330,7 +2330,7 @@ async def api_distrakt_add_completed(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     try:
         data = await request.json()
@@ -2411,7 +2411,7 @@ async def api_distrakt_backfill_survey(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.configured:
+    if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     try:
         data = await request.json()
@@ -2479,7 +2479,7 @@ async def api_distrakt_abandon(request: Request):
             None,
         )
         settings = await _distrakt_settings(user_id)
-        if rec is not None and settings.configured:
+        if rec is not None and settings.trakt_configured:
             try:
                 watched_lookup, detail = await asyncio.gather(
                     fetch_watched_map(settings, [trakt_id]),

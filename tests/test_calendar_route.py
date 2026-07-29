@@ -42,7 +42,7 @@ ORIGIN = "https://testserver"
 
 
 def _configured_settings() -> Settings:
-    """`settings.configured` gates the whole read path in index() — without
+    """`settings.calendar_source_configured` gates the whole read path in index() — without
     credentials it never calls calendar_cache.read_month at all."""
     return Settings(trakt_client_id="test-client-id", trakt_access_token="test-access-token")
 

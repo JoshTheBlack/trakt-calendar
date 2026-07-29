@@ -1,19 +1,29 @@
-"""Registry of the switchable Trakt calendar endpoints.
+"""Registry of the switchable calendar endpoints.
 
-Each endpoint knows how to build its Trakt API path and which media key its
-response items carry ("show" or "movie"), so the normalizer can adapt.
+DELIBERATELY SOURCE-NEUTRAL. An endpoint here is the app's own idea of a
+calendar — "season premieres", "movie premieres" — named by a key that reaches
+the ?endpoint= query param, the api_cache rows and the per-user view state. How
+a particular service is asked for that calendar is the PROVIDER's knowledge:
+each one translates this key into its own request (see the Trakt provider's
+calendar_path). Keeping the translation there is what lets a second source
+answer the same dropdown without the dropdown, the cache keys or anyone's saved
+preference having to change.
+
+`media` says which kind of title each entry wraps, which is also the key the
+response object hangs under, so the normalizer and the filters can adapt.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from .providers.base import Media
 
 
 @dataclass(frozen=True)
 class Endpoint:
     key: str            # stable id used in the ?endpoint= param / state filenames
     label: str          # human label shown in the dropdown
-    path: str           # Trakt path segment after /calendars/all/
-    media: str          # "show" or "movie" — which object each item wraps
+    media: Media        # which object each item wraps
     has_episode: bool   # whether items include an "episode" object (SxxEyy)
     description: str
 
@@ -23,40 +33,35 @@ ENDPOINTS: dict[str, Endpoint] = {
     "shows/new": Endpoint(
         key="shows/new",
         label="Series Premieres",
-        path="shows/new",
-        media="show",
+        media=Media.SHOW,
         has_episode=True,
         description="Brand-new shows premiering their very first episode.",
     ),
     "shows/premieres": Endpoint(
         key="shows/premieres",
         label="Season Premieres",
-        path="shows/premieres",
-        media="show",
+        media=Media.SHOW,
         has_episode=True,
         description="Season premieres (episode 1 of any season).",
     ),
     "shows/finales": Endpoint(
         key="shows/finales",
         label="Season Finales",
-        path="shows/finales",
-        media="show",
+        media=Media.SHOW,
         has_episode=True,
         description="Season/series finales airing this month.",
     ),
     "shows": Endpoint(
         key="shows",
         label="All Episodes",
-        path="shows",
-        media="show",
+        media=Media.SHOW,
         has_episode=True,
         description="Every episode of every show airing this month.",
     ),
     "movies": Endpoint(
         key="movies",
         label="Movie Premieres",
-        path="movies",
-        media="movie",
+        media=Media.MOVIE,
         has_episode=False,
         description="Theatrical / streaming movie premieres this month.",
     ),

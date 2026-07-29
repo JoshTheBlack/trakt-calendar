@@ -135,13 +135,25 @@ class PruneTests(unittest.TestCase):
 
     def test_pruner_keeps_every_field_the_normalizer_reads(self):
         """The strongest possible statement of the pruner's contract: a raw entry
-        and its pruned form normalize to the byte-identical Item."""
+        and its pruned form normalize to the identical Item, apart from the ids
+        the cache is deliberately not storing.
+
+        The one exception is imdb, which _MEDIA_ID_KEYS does not carry (see
+        test_pruner_drops_the_bulky_unused_fields, which asserts that directly).
+        Nothing reads it today, so it is not stored; asserting the gap here means
+        the day something does read it, this test says so rather than an item
+        silently arriving without it on the cached path only."""
         tz = ZoneInfo("America/New_York")
         pruned = calendar_cache.prune_entry(self.RICH, "show")
+        from_raw = trakt.normalize(self.RICH, SHOWS, tz)
+        from_pruned = trakt.normalize(pruned, SHOWS, tz)
+
         self.assertEqual(
-            trakt.normalize(self.RICH, SHOWS, tz),
-            trakt.normalize(pruned, SHOWS, tz),
+            set(from_raw.ids) - set(from_pruned.ids), {"imdb"},
+            "the cached path lost an id other than the imdb one it is known to drop",
         )
+        from_raw.ids.pop("imdb")
+        self.assertEqual(from_raw, from_pruned)
 
     def test_pruner_drops_the_bulky_unused_fields(self):
         pruned = calendar_cache.prune_entry(self.RICH, "show")
@@ -242,7 +254,7 @@ class InstanceFloorTests(CacheTestCase):
         with patch("app.trakt.shared_client", return_value=client):
             items, _ = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=1000)
-        ids = {i["id"] for i in items}
+        ids = {i.id for i in items}
         self.assertIn("kept-drama", ids)
         self.assertNotIn("excluded-anime", ids)
 
@@ -300,7 +312,7 @@ class WindowOverrunTests(CacheTestCase):
             allow_fetch=False, now=now,
         )
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["episode_label"], "S03E03")
+        self.assertEqual(items[0].episode_label, "S03E03")
 
     async def test_the_request_is_the_documented_shape_for_every_endpoint(self):
         """/calendars/{target}/{path}/{start_date}/{days}. The overrun is Trakt's
@@ -312,7 +324,7 @@ class WindowOverrunTests(CacheTestCase):
                     await calendar_cache.fetch_window_raw(endpoint, self.settings, date(2026, 7, 6))
                 path, _, query = client.url.partition("?")
                 self.assertTrue(
-                    path.endswith(f"/calendars/all/{endpoint.path}/2026-07-06/7"), path)
+                    path.endswith(f"/calendars/all/{trakt.calendar_path(endpoint)}/2026-07-06/7"), path)
                 self.assertIn("extended=full", query)
 
     async def test_movies_are_trimmed_on_released_not_first_aired(self):
@@ -415,7 +427,7 @@ class ReadPathTests(CacheTestCase):
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
             items, _ = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo(tz_name), year=year, month=month)
-        return {i["id"] for i in items}
+        return {i.id for i in items}
 
     async def test_month_boundary_is_the_viewers(self):
         # 02:00 UTC on 1 Mar is 18:00 28 Feb in Los_Angeles (UTC-8, pre-DST) ...
@@ -485,7 +497,7 @@ class AssembleRangeTests(CacheTestCase):
                 SHOWS, self.settings, tz=tz,
                 start_date=date(2026, 7, 13), end_date=date(2026, 7, 13))
         self.assertEqual([g["date"] for g in grouped], ["2026-07-13"])
-        self.assertEqual({i["id"] for i in grouped[0]["items"]},
+        self.assertEqual({i.id for i in grouped[0]["items"]},
                          {"before-boundary", "after-boundary"})
         self.assertFalse(meta["partial"])
 
@@ -514,7 +526,7 @@ class AssembleRangeTests(CacheTestCase):
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
         items = [i for g in grouped for i in g["items"]]
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["title"], "from the earlier window")
+        self.assertEqual(items[0].title, "from the earlier window")
 
     async def test_a_single_failed_window_renders_the_rest_and_flags_partial(self):
         """RESILIENT BUT LOUD: one window's fetch failing (nothing cached to fall
@@ -534,7 +546,7 @@ class AssembleRangeTests(CacheTestCase):
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
         items = [i for g in grouped for i in g["items"]]
-        self.assertEqual({i["id"] for i in items}, {"good"})
+        self.assertEqual({i.id for i in items}, {"good"})
         self.assertTrue(meta["partial"])
 
     async def test_every_window_failing_raises(self):
@@ -583,7 +595,7 @@ class AssembleRangeTests(CacheTestCase):
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
             items, _as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7)
-        self.assertEqual({i["id"] for i in items}, {"good"})
+        self.assertEqual({i.id for i in items}, {"good"})
 
 
 # ---------------------------------------------------------------------------

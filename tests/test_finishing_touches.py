@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, cache, calendar_cache, calendar_state, db, distrakt as distrakt_store, share_code, share_links, trakt  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
+from app.providers.base import Item, Media, Source  # noqa: E402
 from app.main import app  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
@@ -41,10 +42,20 @@ ORIGIN = "https://testserver"
 def _fake_premiere_read(trakt_id: int, season: int):
     """Stand in for the shared calendar cache with exactly one premiere in it —
     both halves of the tracker's premiere read (shows/new and shows/premieres)
-    see the same month."""
+    see the same month.
+
+    A real Item, so this double satisfies the same construction rules the live
+    normalizer does rather than only the fields the tracker happens to read."""
     async def read_month(endpoint, settings, **kw):
-        return [{"trakt_id": trakt_id, "trakt_slug": f"slug-{trakt_id}",
-                 "title": f"Show {trakt_id}", "season": season, "network": "Net"}], None
+        item = Item(
+            source=Source.TRAKT, media=Media.SHOW, id=f"slug-{trakt_id}",
+            ids={"trakt": trakt_id, "slug": f"slug-{trakt_id}"},
+            detail_url=f"https://trakt.tv/shows/slug-{trakt_id}",
+            air_date="2026-08-01", air_ts=0.0, air_display="01 Aug 2026",
+            air_time="20:00", day_of_week="Saturday",
+            title=f"Show {trakt_id}", season=season, network="Net",
+        )
+        return [item], None
     return read_month
 
 

@@ -33,9 +33,10 @@ os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import auth, calendar_state, db, distrakt, watch_history  # noqa: E402
+from app.providers.base import Item, Media, Source  # noqa: E402
 
 TMP = Path(_TMP_DATA)
-SETTINGS = SimpleNamespace(configured=True, network_emojis={}, default_network_emoji=":tv:",
+SETTINGS = SimpleNamespace(trakt_configured=True, network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 
 
@@ -76,8 +77,20 @@ async def _fake_sync_and_baseline(settings, user_id, roster_trakt_ids, force=Fal
 
 
 def _cal_item(tid, season, title, network="Net"):
-    return {"trakt_id": tid, "trakt_slug": f"slug-{tid}", "title": title,
-            "season": season, "network": network}
+    """One calendar item as the shared cache hands it to the tracker's import.
+
+    A real Item rather than a dict shaped like one: the tracker reads it through
+    the same attributes the live read path produces, so a field renamed out from
+    under this fake fails here instead of passing and then failing in production.
+    """
+    return Item(
+        source=Source.TRAKT, media=Media.SHOW, id=f"slug-{tid}",
+        ids={"trakt": tid, "slug": f"slug-{tid}"},
+        detail_url=f"https://trakt.tv/shows/slug-{tid}",
+        air_date="2026-08-01", air_ts=0.0, air_display="01 Aug 2026",
+        air_time="20:00", day_of_week="Saturday",
+        title=title, season=season, network=network,
+    )
 
 
 def _raw_entry(tid, season, title, *, first_aired, certification=None, network="Net"):
@@ -240,7 +253,7 @@ class RolloverTests(RolloverTestCase):
         prog.assert_not_called()
 
     async def test_unconfigured_month_not_persisted(self):
-        out = await distrakt.ensure_month(self.user_id, 2026, 9, SimpleNamespace(configured=False))
+        out = await distrakt.ensure_month(self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False))
         self.assertEqual(out["shows"], [])
         self.assertIsNone(await distrakt.load_month(self.user_id, "2026-09"))  # nothing written
 

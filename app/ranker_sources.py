@@ -30,35 +30,17 @@ import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any, Protocol
 
 from . import trakt, trakt_routes
 from .config import Settings, load_settings
+# Re-exported deliberately: `ranker_sources.Media` and `ranker_sources.parse_media`
+# are what the ranker's routes and data layer already import, and the vocabulary
+# they name is the app's, not this feature's — the calendar and the tracker deal
+# in the same two kinds of title. One definition, read from where it lives.
+from .providers.base import Media, parse_media  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-
-class Media(StrEnum):
-    """The two kinds of title this feature ranks.
-
-    A StrEnum rather than bare strings so the closed set is stated once, while
-    each member still IS the string the database column and the JSON payloads
-    hold — no conversion layer, and no way to store `Media.SHOW` by accident.
-    """
-    SHOW = "show"
-    MOVIE = "movie"
-
-
-def parse_media(value: Any, default: Media | None = None) -> Media:
-    """A client-supplied media type, or a raised refusal. `default` applies only
-    when the value is absent entirely, never when it is present and wrong."""
-    if value in (None, "") and default is not None:
-        return default
-    try:
-        return Media(value)
-    except ValueError:
-        raise ValueError(f"Unknown media type {value!r}.") from None
 
 
 # The identity waterfall, first shared non-empty id wins. tmdb leads because it
@@ -245,7 +227,7 @@ class TraktSearchSource:
 
     @property
     def configured(self) -> bool:
-        return bool(self._settings.configured)
+        return bool(self._settings.trakt_configured)
 
     async def search(self, query: str, media: Media) -> list[TitleRef]:
         with _translating_failures():

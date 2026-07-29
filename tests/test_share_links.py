@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, calendar_cache, db, share_links  # noqa: E402
+from app import auth, calendar_cache, calendar_state, db, share_links  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.endpoints import get_endpoint  # noqa: E402
 from app.main import app  # noqa: E402
@@ -213,6 +213,48 @@ class NeverFetchTests(ShareTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Show A", resp.text)
         self.assertIn("Data as of", resp.text)
+
+
+class OwnerMarksOnTheSharePageTests(ShareTestCase):
+    """A share page renders the OWNER's not-watching marks — the visitor is
+    looking at that person's calendar, so a show they have marked reads as
+    marked here too, and hiding is the owner's setting rather than the
+    visitor's to discover."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("marks_owner")
+        self.share = self._enable_all_and_set_slug(self.user_id, "marks-slug")
+        self.client.cookies.clear()
+        self._seed_window(
+            get_endpoint("shows/new").key, date(2026, 7, 15),
+            [_entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
+             _entry("show-b", "Show B", "2026-07-16T20:00:00Z")],
+        )
+        asyncio.run(calendar_state.set_not_watching(self.user_id, "show-a", True))
+
+    # The class as it appears on a card. Matched in full rather than as the bare
+    # word, which also occurs in the page's own "Hiding not-watching" control and
+    # in every card's (CSS-hidden) ribbon.
+    MARKED = 'class="card not-watching"'
+
+    def _page(self, **params):
+        query = "".join(f"&{k}={v}" for k, v in params.items())
+        return self.client.get(f"/s/{self.share['token']}?year=2026&month=7{query}").text
+
+    def test_the_marked_show_and_only_it_carries_the_class(self):
+        """Per-card, not per-page: a page that marked every card would look the
+        same as this one whenever the owner happens to have marked everything."""
+        page = self._page(hidenw=0)
+        self.assertIn("Show A", page)
+        self.assertIn("Show B", page)
+        self.assertEqual(page.count(self.MARKED), 1)
+
+    def test_hiding_drops_the_marked_show_entirely(self):
+        page = self._page(hidenw=1)
+        self.assertNotIn("Show A", page)
+        self.assertIn("Show B", page)
+        self.assertNotIn(self.MARKED, page)
 
 
 # ---------------------------------------------------------------------------

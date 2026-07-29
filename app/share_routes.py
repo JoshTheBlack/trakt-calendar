@@ -213,7 +213,7 @@ async def _render(request: Request, share_row) -> Response:
 
     items: list[dict] = []
     as_of: int | None = None
-    if settings.configured:
+    if settings.calendar_source_configured:
         # allow_fetch=False is the whole point of a public share page: a
         # visitor is served whatever is already cached, even stale, even
         # nothing, and never triggers a Trakt call that would spend the
@@ -226,18 +226,16 @@ async def _render(request: Request, share_row) -> Response:
             network_filter=network_filter, allow_fetch=False,
         )
 
+    # The owner's marks travel to the template as a SET, the same way the
+    # signed-in calendar's own card partial reads them, rather than being copied
+    # onto each item as a field. One less per-item copy, and one answer to "is
+    # this marked" instead of two spellings of it.
     nw_ids = await calendar_state.not_watching_ids(owner_id)
-    visible: list[dict] = []
-    for item in items:
-        item = dict(item)
-        item["not_watching"] = item["id"] in nw_ids
-        if hide_not_watching and item["not_watching"]:
-            continue
-        visible.append(item)
+    visible = [i for i in items if not (hide_not_watching and i.id in nw_ids)]
 
     grouped = [
         {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
-        for day, rows in groupby(visible, key=lambda i: i["air_date"])
+        for day, rows in groupby(visible, key=lambda i: i.air_date)
     ]
     as_of_label = datetime.fromtimestamp(as_of, tz=tz).strftime("%Y-%m-%d %H:%M %Z") if as_of else None
 
@@ -264,6 +262,7 @@ async def _render(request: Request, share_row) -> Response:
         "month_label": _calendar.month_name[month],
         "nav": _nav(year, month),
         "grouped": grouped,
+        "not_watching": nw_ids,
         "total": len(visible),
         "view": {"card_style": card_style, "day_packing": day_packing},
         "as_of": as_of_label,

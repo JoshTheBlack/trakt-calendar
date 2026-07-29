@@ -202,7 +202,7 @@ async def _completed_in(user_id: int, month: str, closed: bool) -> list[dict[str
         return [dict(row) for row in rows if row["bucket"] == "completed"]
 
     settings = await ranker_sources.user_trakt_settings(user_id)
-    if settings is None or not settings.configured:
+    if settings is None or not settings.trakt_configured:
         logger.info("tracker import: skipping open month %s for user %s — no usable credential",
                     month, user_id)
         return []

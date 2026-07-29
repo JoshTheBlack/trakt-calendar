@@ -140,8 +140,8 @@
                    identity the fetch needs plus a title/poster to show instantly
                    while it loads. A JS enhancement: with it off, the poster's own
                    Trakt link still reaches the full details. #}
-                <div class="card{% if item.not_watching %} not-watching{% endif %}"
-                     data-trakt-id="{{ item.trakt_id if item.trakt_id is not none else '' }}"
+                <div class="card{% if item.id in not_watching %} not-watching{% endif %}"
+                     data-trakt-id="{{ item.ids.get('trakt') or '' }}"
                      data-media="{{ item.media }}"
                      data-season="{{ item.season if item.season is not none else '' }}"
                      data-title="{{ item.title }}"
@@ -173,7 +173,7 @@
                             <span class="time">{{ item.air_time }}</span>
                         </div>
                         <div class="links-row">
-                            <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" title="View on Trakt">
+                            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" title="View on Trakt">
                                 <img src="/static/images/traktlogo.png" alt="Trakt">
                             </a>
                         </div>
