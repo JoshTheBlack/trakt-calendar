@@ -888,8 +888,43 @@ class ErrorPageTests(FinishingTestCase):
         resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
         self.assertEqual(resp.status_code, 404)
         self.assertIn("text/html", resp.headers["content-type"])
-        self.assertIn("error-card", resp.text)
+        self.assertIn("Let's all go to the lobby", resp.text)
         self.assertIn("Back to the calendar", resp.text)
+
+    def test_the_lobby_page_carries_our_own_favicon(self):
+        """The page came from somewhere else. Its own icon did not come with it."""
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertIn("/static/images/favicon.ico", resp.text)
+
+    def test_the_lobby_page_stands_up_without_the_stylesheet(self):
+        """Styles are inline on purpose: the page that renders when something is
+        already wrong cannot depend on a second request succeeding."""
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertNotIn("css/style.css", resp.text)
+
+    def test_a_refused_page_keeps_the_plain_card(self):
+        """403 is not a place to be charming. It also keeps error.html wired to
+        something, so the fallback cannot rot unnoticed while the lobby page is
+        the one everybody looks at.
+
+        Driven through the handler rather than a URL because the routes that
+        refuse a signed-in reader answer by rendering their own page, not by
+        raising — there is no request that reaches this branch with a 403.
+        """
+        from fastapi import Request
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+
+        from app.main import handle_http_exception
+
+        request = Request({"type": "http", "method": "GET", "path": "/nope",
+                           "headers": [(b"accept", b"text/html")],
+                           "query_string": b"", "app": app})
+        resp = asyncio.run(handle_http_exception(
+            request, StarletteHTTPException(status_code=403)))
+        self.assertEqual(resp.status_code, 403)
+        body = resp.body.decode()
+        self.assertIn("error-card", body)
+        self.assertNotIn("Let's all go to the lobby", body)
 
     def test_a_script_still_gets_json(self):
         """fetch() sends Accept: */*, and a caller that parses the body has to

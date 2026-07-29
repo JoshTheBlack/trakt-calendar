@@ -349,10 +349,16 @@ authz.install(app)
 # {"detail": "Not Found"} JSON. Deliberately short: a wrong URL and a refused one
 # are what a person typing in the address bar actually hits. Everything else
 # keeps the default, because an unexpected status is worth seeing raw.
-_ERROR_PAGES: dict[int, tuple[str, str]] = {
-    404: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped."),
-    403: ("Not allowed", "Your account can't open this. If that seems wrong, ask an administrator to check your access."),
-    405: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped."),
+#
+# The third field is the template. A mistyped address gets the intermission
+# page — a dead end is the one place there is room to be charming. A 403 keeps
+# the plain card: somebody who has just been told no is not in the mood, and the
+# two pages stay deliberately similar in what they SAY (see below). Swapping
+# error_lobby.html back to error.html here is the whole rollback.
+_ERROR_PAGES: dict[int, tuple[str, str, str]] = {
+    404: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped.", "error_lobby.html"),
+    403: ("Not allowed", "Your account can't open this. If that seems wrong, ask an administrator to check your access.", "error.html"),
+    405: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped.", "error_lobby.html"),
 }
 
 
@@ -370,9 +376,9 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
         detail = exc.detail if isinstance(exc.detail, dict) else {"error": str(exc.detail)}
         return JSONResponse({"ok": False, **detail}, status_code=exc.status_code,
                             headers=getattr(exc, "headers", None))
-    title, message = page
+    title, message, template = page
     return templates.TemplateResponse(
-        request, "error.html",
+        request, template,
         {"status": exc.status_code, "title": title, "message": message,
          "asset_v": ASSET_VERSION},
         status_code=exc.status_code,

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  {# Parsed before first paint, so the gap before the stylesheet applies
+     is the page's own dark rather than the browser's default white. #}
+  <meta name="color-scheme" content="dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ status }} {{ title }} &ndash; Trakt New Shows</title>
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
+  {# Styles and behaviour are inline rather than in /static/css. An error page is
+     the one page that has to render when something else is already wrong, and a
+     404 for the stylesheet would leave a white screen and no way home. It also
+     keeps this page out of assets.py's cache-busting list, which only tracks
+     files a browser caches separately. #}
+  <style>
+    @font-face {
+      font-family: 'Bebas Neue'; font-style: normal; font-weight: 400; font-display: swap;
+      src: url('/static/fonts/bebas-neue-v16-latin-400.woff2') format('woff2');
+    }
+    @font-face {
+      font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap;
+      src: url('/static/fonts/inter-v20-latin-400.woff2') format('woff2');
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      /* The curtain fills the window. Everything below is derived from this, so
+         it stays a variable rather than a hardcoded 100vh. */
+      --curtain-h: 100vh;
+      /* The curtain art is 596x667 with the stage floor as its bottom 16%, so
+         the floor's back edge — where it meets the hem — is this far up. */
+      --floor: calc(var(--curtain-h) * 0.16);
+      /* Where the feet land, measured up from the bottom of the window. Inside
+         the floor band rather than at its back edge: standing at --floor puts
+         them against the curtain, and a little forward is what reads as ON the
+         stage. This is the number to nudge if they sit high or low. */
+      --feet: calc(var(--curtain-h) * 0.11);
+      /* Height of one tile of the animation, whose canvas is 624x190. This is
+         the knob for how big the snacks are — the parade spans the screen by
+         REPEATING at this size, not by stretching, so shrinking it makes them
+         smaller without giving up the full-width line. */
+      --parade-h: 18.7vh;
+      /* That canvas leaves 70px of empty room under the feet — headroom for the
+         walk cycle's bob. Backing it out is what lands them on the floor rather
+         than hovering over it. */
+      --parade-pad: calc(var(--parade-h) * 70 / 190);
+    }
+
+    body {
+      color: #eef0f4; font-family: 'Inter', sans-serif;
+      min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      /* Keeps the text clear of the stage, which the parade owns. */
+      gap: 18px; padding: 32px 20px calc(var(--floor) + 20vh); text-align: center;
+      /* Not `overflow: hidden` — a short viewport (a phone held sideways) still
+         has to be able to reach the way home. */
+      overflow-x: hidden;
+
+      /* Tiled sideways rather than `cover`-stretched: it pins the curtain's own
+         height to --curtain-h, so the floor is always the bottom --floor no
+         matter the window shape, and a wide monitor repeats the pleats instead
+         of smearing a 596px texture across 2560. The seam falls inside a
+         vertical fold pattern and does not read. */
+      background: #000 url('/static/images/lobby/curtain.png') repeat-x center bottom;
+      background-size: auto var(--curtain-h);
+      background-attachment: fixed;
+    }
+
+    /* The vignette is a white-centred mask, so multiply leaves the middle alone
+       and only pulls the corners down — a projected image falling off at the
+       edges of the screen. */
+    .vignette {
+      position: fixed; inset: 0; z-index: 5; pointer-events: none;
+      background-image: url('/static/images/lobby/vignette.png');
+      background-size: 100% 100%; mix-blend-mode: multiply;
+    }
+
+    /* A curtain is a busy, mid-grey backdrop. The scrim is what keeps body text
+       readable against it without painting a card over the artwork. */
+    .marquee {
+      position: relative; z-index: 2; padding: 20px 28px;
+      background: radial-gradient(ellipse at center,
+                  rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0.45) 55%, rgba(0, 0, 0, 0) 78%);
+    }
+    /* Neutral greys, not the app's gold and its blue-tinted text: the artwork on
+       this page is greyscale throughout and a warm headline sat outside it. The
+       glow is white for the same reason — it reads as stage light rather than as
+       a brand colour. */
+    .marquee .code {
+      font-family: 'Bebas Neue', sans-serif; font-size: 0.72rem; letter-spacing: 0.4em;
+      color: #9a9a9a; margin-bottom: 4px;
+    }
+    .marquee h1 {
+      font-family: 'Bebas Neue', sans-serif; font-weight: 400;
+      font-size: clamp(1.5rem, 4vw, 2.6rem); letter-spacing: 1.5px; line-height: 1;
+      color: #ededed; text-shadow: 0 2px 4px rgba(0, 0, 0, 0.9), 0 0 26px rgba(255, 255, 255, 0.24);
+    }
+    .marquee p {
+      margin: 10px auto 0; max-width: 42ch; font-size: 0.79rem; line-height: 1.6;
+      color: #c6c6c6; text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+    }
+
+    /* The animation loops horizontally by construction — a figure walking off
+       the right edge of the 624px canvas is the same one re-entering at the
+       left, and they sit exactly 104px apart, six to a tile. So repeat-x tiles
+       it into one continuous marching line at any window width, with no seam
+       and no stretching. Scaling a single copy up to span the screen is what
+       makes the snacks huge; this keeps them small.
+
+       Out of the flow, so the text above centres in the curtain without the
+       animation's empty canvas shoving it around. */
+    .parade {
+      position: fixed; z-index: 2; left: 0; right: 0;
+      bottom: calc(var(--feet) - var(--parade-pad));
+      height: var(--parade-h);
+      background: url('/static/images/lobby/parade.png') repeat-x left bottom;
+      background-size: auto 100%;
+      /* No drop-shadow here. It would be recomputed against all 48 frames as
+         they play, and the stage floor already reads as ground without it. */
+    }
+
+    .home {
+      position: relative; z-index: 2; text-decoration: none;
+      /* The app's gold-to-crimson pill, drained to match the artwork. Kept light
+         on dark so it still reads as the one thing to press. */
+      background: linear-gradient(90deg, #e9e9e9, #b0b0b0); color: #0d0d0d;
+      padding: 8px 18px; border-radius: 7px; font-weight: 700; font-size: 0.78rem;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
+    }
+
+    /* In a corner rather than under the button row: it is a preference, not a
+       step, and nobody should read it as the way out of here. */
+    .sound {
+      position: fixed; right: 20px; bottom: 20px; z-index: 6;
+      background: none; border: 0; padding: 6px; cursor: pointer; line-height: 0;
+      opacity: 0.72; transition: opacity .18s ease;
+    }
+    .sound:hover, .sound:focus-visible { opacity: 1; }
+    .sound[data-playing="true"] { opacity: 1; }
+    .sound img {
+      width: 64px; height: auto;
+      /* The glyph is black artwork — 992 of its 1316 opaque pixels — which is
+         all but invisible against a dark curtain. Inverting it to white and
+         warming it with the page's gold is what makes it findable; the glow is
+         doing the work the original's lighter backdrop used to. */
+      filter: invert(1) drop-shadow(0 0 7px rgba(232, 181, 69, 0.75))
+                        drop-shadow(0 0 16px rgba(232, 181, 69, 0.35));
+    }
+    /* Autoplay is refused by default in every current browser, so the button
+       is the actual start control far more often than it is a mute. Nudge it
+       until it has been used once. */
+    .sound[data-playing="false"] img { animation: throb 2.6s ease-in-out infinite; }
+    @keyframes throb { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.16); } }
+
+    @media (prefers-reduced-motion: reduce) {
+      .sound[data-playing="false"] img { animation: none; }
+    }
+  </style>
+</head>
+<body>
+
+<div class="marquee">
+  <div class="code" aria-hidden="true">{{ status }}</div>
+  <h1>Let's all go to the lobby</h1>
+  {# The wording says nothing about whether the address exists for somebody
+     else — a 404 that reads differently for a real-but-forbidden URL is an
+     inventory of what is there. #}
+  <p>{{ message }}</p>
+</div>
+
+{# Home only. A "go back" would send them to whatever produced the dead link. #}
+<a class="home" href="/calendar">Back to the calendar</a>
+
+{# Decorative: the message above already says everything a screen reader needs,
+   and "an animation of snacks marching" is not it. #}
+<div class="parade" aria-hidden="true"></div>
+
+<div class="vignette" aria-hidden="true"></div>
+
+<button class="sound" id="sound_toggle" type="button" data-playing="false"
+        aria-pressed="false" aria-label="Play the intermission music" title="Intermission music">
+  <img src="/static/images/lobby/play.png" alt="">
+</button>
+
+<audio id="lobby_audio" src="/static/audio/lobby.mp3" loop preload="none"></audio>
+
+<script>
+(function () {
+  var audio = document.getElementById("lobby_audio");
+  var button = document.getElementById("sound_toggle");
+
+  function mark(playing) {
+    button.dataset.playing = playing ? "true" : "false";
+    button.setAttribute("aria-pressed", playing ? "true" : "false");
+    button.setAttribute("aria-label", playing ? "Stop the intermission music"
+                                             : "Play the intermission music");
+  }
+
+  function start() {
+    var attempt = audio.play();
+    // Older browsers return nothing from play(); there the optimistic mark is
+    // the best available answer.
+    if (!attempt || !attempt.catch) { mark(true); return; }
+    attempt.then(function () { mark(true); }).catch(function () { mark(false); });
+  }
+
+  button.addEventListener("click", function () {
+    if (audio.paused) { start(); } else { audio.pause(); mark(false); }
+  });
+
+  // Browsers refuse this without a prior interaction on the origin; the catch
+  // above is the normal path, not the exception.
+  audio.volume = 0.55;
+  start();
+})();
+</script>
+
+</body>
+</html>
