@@ -27,7 +27,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, db, encryption_flow, secrets_backfill, secrets_box
+from . import auth, authz, chrome, db, encryption_flow, secrets_backfill, secrets_box
 from .auth import AuthLevel
 
 logger = logging.getLogger(__name__)
@@ -179,12 +179,14 @@ async def recovery_page(request: Request):
         return RedirectResponse("/login", status_code=303)
     context = {
         "request": request,
-        "is_admin": user.is_admin,
+        # Only is_admin and asset_v are actually read by this page — it has no
+        # shared header to gate — but page_context is the one place that fact
+        # lives, so this reads from there rather than restating asset_v by hand.
+        **chrome.page_context(user),
         "health": health,
         "key_missing": health == encryption_flow.KEY_MISSING,
         "env_var": secrets_box.ENV_VAR,
         "confirm_phrase": RESET_CONFIRM_PHRASE,
-        "asset_v": assets.ASSET_VERSION,
     }
     return templates.TemplateResponse(request, "encryption_recovery.html", context)
 

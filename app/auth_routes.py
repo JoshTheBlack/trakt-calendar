@@ -37,7 +37,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, calendar_state, db, nav, trakt_auth, user_images
+from . import auth, authz, calendar_state, chrome, db, trakt_auth, user_images
 from .auth import AuthLevel
 from .config import load_settings, save_settings
 
@@ -576,8 +576,9 @@ async def me_page(request: Request):
     account = await auth.get_user(user.user_id)
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
-        # is_admin, calendar_available and ranker_available for the shared header.
-        **nav.nav_context(user),
+        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # for the shared header.
+        **chrome.page_context(user),
         # This page gates the tracker's menu item server-side rather than leaving
         # it to CSS — it must not mention the tracker at all to an account without
         # the grant. Same two conditions the tracker's own access level enforces.
@@ -596,9 +597,6 @@ async def me_page(request: Request):
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": user_images.has_avatar(user.user_id),
-        # Cache-busting token for the shared header's script/stylesheet, the same
-        # one every other page uses.
-        "asset_v": assets.ASSET_VERSION,
     })
 
 

@@ -29,7 +29,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import (assets, auth, authz, grid_builder, nav, posters, ranker, ranker_export,
+from . import (auth, authz, chrome, grid_builder, posters, ranker, ranker_export,
                ranker_import, ranker_sources, user_images)
 from .auth import AuthLevel
 from .config import load_settings
@@ -302,8 +302,9 @@ async def rankings_page(request: Request):
     tiered = sum(len(c["items"]) for c in board["categories"]) if board else 0
     context = {
         "request": request,
-        # is_admin, calendar_available and ranker_available for the shared header.
-        **nav.nav_context(user),
+        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # for the shared header.
+        **chrome.page_context(user),
         # The name the export dialog prefills with: the chosen display name if
         # there is one, else the username. Only a DEFAULT — the dialog's field
         # stays editable, so a one-off export can still say something else.
@@ -318,7 +319,6 @@ async def rankings_page(request: Request):
         "rows_open": tiered <= EAGER_ROW_LIMIT,
         "export_limits": _export_limits(),
         "tier_template": ranker.TIER_TEMPLATE,
-        "asset_v": assets.ASSET_VERSION,
     }
     if board:
         context.update(_pool_context(board, 0))

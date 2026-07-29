@@ -32,7 +32,6 @@ from starlette.middleware.gzip import GZipMiddleware
 
 from . import admin_routes
 from . import arr
-from . import assets
 from . import auth
 from . import auth_routes
 from . import authz
@@ -40,6 +39,7 @@ from . import cache
 from . import calendar_cache
 from . import calendar_state
 from . import changelog
+from . import chrome
 from . import db
 from . import discord_fmt
 from . import distrakt as distrakt_store
@@ -48,7 +48,6 @@ from . import encryption_flow
 from . import encryption_routes
 from . import logos
 from . import artwork
-from . import nav as nav_ctx
 from . import plex_auth
 from . import plex_routes
 from . import posters
@@ -94,12 +93,6 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 
-VERSION = "1.1.5"  # keep in sync with CHANGELOG.md
-# Build metadata injected at Docker build time (GitHub Actions); "dev" for local runs.
-BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
-COMMIT = os.environ.get("APP_COMMIT", "").strip()
-BUILD_LABEL = "dev" if BUILD == "dev" else f"build {BUILD}" + (f" · {COMMIT[:7]}" if COMMIT else "")
-
 BASE_DIR = Path(__file__).resolve().parent
 HEARTBEAT_SECONDS = 60
 
@@ -109,11 +102,6 @@ HEARTBEAT_SECONDS = 60
 # has to parse before it can show anything is what made the page slow, not the
 # cards further down it that nobody has scrolled to yet.
 INITIAL_DAY_BLOCKS = 5
-
-
-# Cache-busting token for every stylesheet and script. Lives in app/assets.py so
-# the route modules imported below can use it too without importing this one back.
-ASSET_VERSION = assets.ASSET_VERSION
 
 # In-memory Sonarr/Radarr health, refreshed by a background heartbeat + on save.
 INTEGRATION_HEALTH: dict[str, dict] = {
@@ -356,10 +344,13 @@ authz.install(app)
 # the plain card: somebody who has just been told no is not in the mood, and the
 # two pages stay deliberately similar in what they SAY (see below). Swapping
 # error_lobby.html back to error.html here is the whole rollback.
+_NOT_FOUND_PAGE = (
+    "Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped.", "error_lobby.html",
+)
 _ERROR_PAGES: dict[int, tuple[str, str, str]] = {
-    404: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped.", "error_lobby.html"),
+    404: _NOT_FOUND_PAGE,
+    405: _NOT_FOUND_PAGE,  # why: see handle_http_exception's docstring
     403: ("Not allowed", "Your account can't open this. If that seems wrong, ask an administrator to check your access.", "error.html"),
-    405: ("Not found", "There's nothing at this address. It may have moved, or the link may have been mistyped.", "error_lobby.html"),
 }
 
 
@@ -380,8 +371,10 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
     title, message, template = page
     return templates.TemplateResponse(
         request, template,
+        # No user to gate a header with — these pages have none — but asset_v
+        # comes from the one function that knows it, same as every other page.
         {"status": exc.status_code, "title": title, "message": message,
-         "asset_v": ASSET_VERSION},
+         **chrome.page_context(None)},
         status_code=exc.status_code,
     )
 
@@ -443,14 +436,11 @@ def _picker_context(request: Request, settings, year: int, endpoint, user=None):
         # landing page people arrive on directly, and having no way from here to
         # the account or admin screens made those reachable only by typing a URL.
         "endpoints": endpoint_choices(),
-        **nav_ctx.nav_context(user),
+        **chrome.page_context(user),
         "months": [{"num": m, "name": calendar.month_name[m]} for m in range(1, 13)],
         "current_month": today.month if year == today.year else None,
         "today_month": today.month,
         "today_year": today.year,
-        "version": VERSION,
-        "build": BUILD_LABEL,
-        "asset_v": ASSET_VERSION,
     }
 
 
@@ -740,8 +730,9 @@ async def calendar_page(request: Request):
         # administrator's affordance. The buttons and health state are left out
         # of the page entirely for everyone else rather than rendered into a
         # guaranteed 403.
-        # is_admin, calendar_available and ranker_available for the shared header.
-        **nav_ctx.nav_context(user),
+        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # for the shared header.
+        **chrome.page_context(user),
         # The same two conditions the tracker's own access level enforces, asked
         # here so the easter egg knows whether it has anywhere to send this
         # person. Resolved from the session rather than probed over HTTP: an
@@ -750,9 +741,6 @@ async def calendar_page(request: Request):
         # item — see _nav.html.
         "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
         "integrations": INTEGRATION_HEALTH if is_admin else {},
-        "version": VERSION,
-        "build": BUILD_LABEL,
-        "asset_v": ASSET_VERSION,
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of
     # turning the shell's cards into HTML — the other half of the server's blocking
@@ -896,15 +884,12 @@ async def distrakt(request: Request):
         # For the announcement post's "which calendar view does the embedded link
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
-        **nav_ctx.nav_context(user),
+        **chrome.page_context(user),
         # This user's OWN map — it renders into their Discord posts and nobody
         # else's. Rendered in rather than fetched because the roster rows fall
         # back to these emoji whenever a network has no logo.
         "network_emojis": network_emojis,
         "default_network_emoji": default_network_emoji,
-        "version": VERSION,
-        "build": BUILD_LABEL,
-        "asset_v": ASSET_VERSION,
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
 

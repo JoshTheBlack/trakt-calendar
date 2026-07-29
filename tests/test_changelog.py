@@ -121,6 +121,30 @@ class ChangelogParsingTests(unittest.TestCase):
         self.assertEqual(spy.call_count, 1)
 
 
+class CurrentVersionTests(unittest.TestCase):
+    """current_version() is what app/chrome.py puts in every page's context —
+    see tests/test_chrome.py for the merge itself."""
+
+    def test_the_newest_release_at_the_top_wins(self):
+        with patch.object(changelog, "releases", return_value=changelog.parse(SAMPLE)):
+            self.assertEqual(changelog.current_version(), "1.2.0")
+
+    def test_a_release_still_being_written_shows_its_real_version(self):
+        """The heading's date field is what says "Unreleased" — the version in
+        the brackets is real either way, so a reader always sees what the
+        running code actually is rather than a blank space until release day."""
+        releases = changelog.parse(SAMPLE)
+        self.assertTrue(releases[0].is_unreleased)
+        with patch.object(changelog, "releases", return_value=releases):
+            self.assertEqual(changelog.current_version(), releases[0].version)
+
+    def test_no_releases_gives_an_empty_string_not_an_exception(self):
+        """Mirrors releases()'s own missing-file fallback: a template renders
+        past a blank version the same way it renders past an empty changelog."""
+        with patch.object(changelog, "releases", return_value=[]):
+            self.assertEqual(changelog.current_version(), "")
+
+
 class RealChangelogTests(unittest.TestCase):
     """Guards the format the parser depends on against drift in the actual file.
 

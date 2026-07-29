@@ -2,8 +2,9 @@
 
 Every route here is `AuthLevel.ADMIN`. The business rules — the last-admin
 guards chief among them — live in app/auth.py; this module is just the HTTP
-surface over them, following the pattern chat C's minimal invite-mint endpoint
-(POST /api/admin/invites) already set for this URL prefix.
+surface over them, following the same shape as POST /api/admin/invites below:
+a thin route that validates the request and hands off, so the rule lives in
+one place no matter which URL prefix reaches it.
 
 Two of the destructive actions below are deliberately distinct and are NOT
 interchangeable — see admin_wipe_user and admin_delete_user.
@@ -17,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, nav
+from . import auth, authz, chrome
 from .auth import AuthLevel
 
 router = APIRouter()
@@ -59,15 +60,14 @@ async def admin_page(request: Request):
     retired = await auth.list_retired_identifiers()
     return templates.TemplateResponse(request, "admin.html", {
         "request": request,
-        # is_admin, calendar_available and ranker_available for the shared header.
-        # Reaching this route at all means is_admin, but the header asks for the
-        # flag by name rather than assuming it.
-        **nav.nav_context(me),
+        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # for the shared header. Reaching this route at all means is_admin, but
+        # the header asks for the flag by name rather than assuming it.
+        **chrome.page_context(me),
         "me": me,
         "users": users,
         "invites": invites,
         "retired": retired,
-        "asset_v": assets.ASSET_VERSION,
     })
 
 
@@ -274,8 +274,12 @@ async def admin_unlink_identity(user_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # invites
 # ---------------------------------------------------------------------------
-# Issuing one is chat C's POST /api/admin/invites, kept in app/auth_routes.py.
-# The rest of the screen — list, revoke, redemptions — extends the same prefix.
+# Issuing one is POST /api/admin/invites, kept in app/auth_routes.py — it was
+# built there first, minimal, just enough to mint a token and exercise
+# registration end to end, before this fuller screen existed. The rest of the
+# screen — list, revoke, redemptions — extends the same /api/admin/invites
+# prefix here, calling the same app.auth functions (create_invite,
+# list_invites, revoke_invite) the minimal endpoint already used.
 
 @guard.get("/api/admin/invites", AuthLevel.ADMIN)
 async def admin_list_invites():

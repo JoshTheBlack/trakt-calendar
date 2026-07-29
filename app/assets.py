@@ -29,7 +29,8 @@ _CACHED_ASSETS = (
     "static/js/plex-auth.js",
     "static/js/share.js",
     "static/js/ranker.js",
-    # Vendored third-party, so its mtime only moves when the pinned version does.
+    # Vendored third-party, so their mtime only moves when the pinned version does.
+    "static/js/htmx.min.js",
     "static/js/sortable.min.js",
 )
 

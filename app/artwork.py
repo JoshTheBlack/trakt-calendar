@@ -18,9 +18,9 @@ from . import db
 # fails; pruning them re-spends API calls already paid for. Three years.
 POSTER_URL_RETENTION_SECONDS = 3 * 365 * 24 * 3600
 
-# Preference order when picking a fallback URL from the registry (Step 3's
-# resolution chain, stage 4): TMDB is the artwork source itself, so its own URL
-# is trusted over a hotlinked one from elsewhere.
+# Preference order when picking a fallback URL from the registry: TMDB is the
+# artwork source itself, so its own URL is trusted over a hotlinked one from
+# elsewhere.
 SOURCE_PREFERENCE = ("tmdb", "trakt")
 
 # A registry URL that has failed this many times running is skipped in favour

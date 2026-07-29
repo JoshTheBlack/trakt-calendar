@@ -1,5 +1,4 @@
-"""The hardening pass over rate limiting, proxy configuration, and three narrower
-holes found while verifying the build against the plan.
+"""Rate limiting, proxy configuration, and three narrower security fixes.
 
 What this file pins down, and why each one matters:
 

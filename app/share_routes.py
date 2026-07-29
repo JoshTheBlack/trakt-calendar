@@ -1,12 +1,12 @@
 """Public calendar sharing: the read-only /s/, /u/, /c/ pages, and the
 owner-facing API the calendar's Share panel calls to manage them.
 
-The three public routes do the SAME read as the authenticated calendar (the
-per-(endpoint, 7-day window) cache chat G built, normalized into a viewer's
-timezone by chat H's read path), with the fetch branch permanently switched
-off: a public request serves whatever is cached — even stale, even nothing —
-and never spends the instance's Trakt rate limit. A visitor is never given a
-session, and nothing here writes anything on their behalf.
+The three public routes do the SAME read as the authenticated calendar —
+calendar_cache.read_month, the per-(endpoint, 7-day window) cache, normalized
+into a viewer's timezone the same way — with the fetch branch permanently
+switched off: a public request serves whatever is cached — even stale, even
+nothing — and never spends the instance's Trakt rate limit. A visitor is never
+given a session, and nothing here writes anything on their behalf.
 
 A miss is identical whatever the reason — an unknown token, a disabled
 account, or a retired username/slug — so a share link can never be used to
