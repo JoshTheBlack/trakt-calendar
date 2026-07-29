@@ -33,7 +33,9 @@ from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
 
 from app import auth, db, distrakt, posters, ranker, ranker_export  # noqa: E402
-from app import ranker_import, ranker_routes, ranker_sources, trakt  # noqa: E402
+from app import ranker_import, ranker_routes, ranker_sources  # noqa: E402
+from app.providers.trakt import TraktError  # noqa: E402
+from app.providers.trakt import detail as trakt_detail  # noqa: E402
 from app import user_images  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -1051,7 +1053,7 @@ class TrackerImportTests(RankerTestCase):
         summary = {"title": "A Film", "year": 2025, "runtime": 101,
                    "ids": {"trakt": 77, "tmdb": 550, "imdb": "tt0137523", "slug": ""},
                    "images": {"poster": ["image.tmdb.org/p/w500/x.jpg"]}}
-        with patched(trakt, "fetch_movie_summary", async_result(summary)):
+        with patched(trakt_detail, "fetch_movie_summary", async_result(summary)):
             ref, = self.finished(Media.MOVIE)
         self.assertEqual(ref.identity(), ("tmdb", "550"))
         self.assertEqual(ref.ids["imdb"], "tt0137523")
@@ -1064,9 +1066,9 @@ class TrackerImportTests(RankerTestCase):
         self.movie(77, "2026-03-04T00:00:00.000Z")
 
         async def _boom(*args, **kwargs):
-            raise trakt.TraktError("Could not reach Trakt", 502)
+            raise TraktError("Could not reach Trakt", 502)
 
-        with patched(trakt, "fetch_movie_summary", _boom):
+        with patched(trakt_detail, "fetch_movie_summary", _boom):
             ref, = self.finished(Media.MOVIE)
         # It keeps the id it had and simply has no artwork key, which the
         # renderer answers with a placeholder rather than a missing title.

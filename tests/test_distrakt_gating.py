@@ -294,7 +294,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         }))
         recorder = RecordingClient()
         self.sign_in_as(user_id)
-        with patch("app.trakt.shared_client", return_value=recorder):
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             resp = self.client.get("/api/distrakt/month?year=2026&month=7")
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(recorder.authorizations, "the month read made no Trakt call to inspect")
@@ -314,7 +314,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         for name, user_id in (("first", first), ("second", second)):
             recorder = RecordingClient()
             self.sign_in_as(user_id)
-            with patch("app.trakt.shared_client", return_value=recorder):
+            with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
                 self.client.get("/api/distrakt/month?year=2026&month=7")
             seen[name] = set(recorder.authorizations)
 
@@ -330,7 +330,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         for path in ("/api/distrakt/search?q=test", "/api/distrakt/seasons?id=7"):
             with self.subTest(path=path):
                 recorder = RecordingClient()
-                with patch("app.trakt.shared_client", return_value=recorder):
+                with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
                     self.client.get(path)
                 self.assertEqual(set(recorder.authorizations), {"Bearer LOOKUP-TOKEN"})
 
@@ -346,7 +346,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
         recorder = RecordingClient()
         self.sign_in_as(user_id)
-        with patch("app.trakt.shared_client", return_value=recorder):
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             resp = self.client.get("/api/distrakt/search?q=test")
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(recorder.authorizations, [])
@@ -355,13 +355,14 @@ class RequestingUsersTokenTests(DistraktTestCase):
         """The blob cache is keyed by URL and shared by the whole instance, so two
         people asking about the same show send the identical key. Watch progress
         must therefore never be stored there at all."""
-        from app import cache, trakt
+        from app import cache
+        from app.providers.trakt import sync as trakt_sync
 
         user_id = self.tracker_user(token="PRIVATE-TOKEN")
         recorder = RecordingClient()
         settings = asyncio.run(main._distrakt_settings(user_id))
-        with patch("app.trakt.shared_client", return_value=recorder):
-            asyncio.run(trakt.fetch_show_progress_detail(settings, 7))
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
+            asyncio.run(trakt_sync.fetch_show_progress_detail(settings, 7))
         self.assertTrue(recorder.urls)
         for url in recorder.urls:
             with self.subTest(url=url):

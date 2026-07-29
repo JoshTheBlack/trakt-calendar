@@ -15,7 +15,8 @@ from unittest.mock import patch
 os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="distrakt-logos-test-")
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
 
-from app import logos, trakt  # noqa: E402
+from app import logos  # noqa: E402
+from app.providers.trakt import sync as trakt_sync  # noqa: E402
 
 
 class PickNetworkTests(unittest.TestCase):
@@ -113,8 +114,8 @@ class FetchWatchedProgressTests(unittest.IsolatedAsyncioTestCase):
             {"type": "episode", "show": {"title": "S", "ids": {"trakt": 5}},
              "episode": {"season": 0, "number": 1}},  # special -> skipped
         ]
-        with patch("app.trakt.fetch_history", return_value=events):
-            out = await trakt.fetch_watched_progress(SimpleNamespace(), since_days=60)
+        with patch("app.providers.trakt.sync.fetch_history", return_value=events):
+            out = await trakt_sync.fetch_watched_progress(SimpleNamespace(), since_days=60)
         self.assertEqual(len(out), 1)
         rec = out[0]
         self.assertEqual((rec["trakt_id"], rec["season"], rec["watched"], rec["tmdb"]), (10, 1, 2, 111))

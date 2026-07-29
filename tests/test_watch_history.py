@@ -190,9 +190,9 @@ class SyncTests(WatchStateTestCase):
         la = {"episodes": {"watched_at": "T1", "removed_at": None},
               "movies": {"watched_at": "T1", "removed_at": None}}
         # First sync establishes the beacon + last_synced.
-        with patch("app.trakt.fetch_last_activities", return_value=la), \
-             patch("app.trakt.fetch_history", return_value=[_ep_event(101, 1, 1)]) as hist, \
-             patch("app.trakt.fetch_show_progress_detail", return_value={}):
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[_ep_event(101, 1, 1)]) as hist, \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value={}):
             # Seed a baselined show so the episode event is applied.
             st = await wh._load(self.user_id)
             st["shows"]["101"] = {"1": []}
@@ -201,9 +201,9 @@ class SyncTests(WatchStateTestCase):
             self.assertEqual(hist.call_count, 1)
 
         # Second sync with the SAME beacon -> no history pull.
-        with patch("app.trakt.fetch_last_activities", return_value=la), \
-             patch("app.trakt.fetch_history", return_value=[]) as hist2, \
-             patch("app.trakt.fetch_show_progress_detail", return_value={}):
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist2, \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value={}):
             await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
             hist2.assert_not_called()
 
@@ -213,11 +213,11 @@ class SyncTests(WatchStateTestCase):
                                       "beacons": {"ep_watched": "OLD"}})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "NEW", "removed_at": None}}
-        with patch("app.trakt.fetch_last_activities", return_value=la), \
-             patch("app.trakt.fetch_history",
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history",
                    return_value=[_ep_event(101, 1, 2),
                                  _mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")]), \
-             patch("app.trakt.fetch_show_progress_detail", return_value={}):
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value={}):
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
         self.assertEqual(sorted(state["shows"]["101"]["1"]), ["1", "2"])
         self.assertIn("9", state["movies"])
@@ -233,16 +233,16 @@ class SyncTests(WatchStateTestCase):
                                "last_synced": "2026-07-01", "beacons": None})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "NEW", "removed_at": None}}
-        with patch("app.trakt.fetch_last_activities", return_value=la), \
-             patch("app.trakt.fetch_history", return_value=[_ep_event(101, 1, 7)]), \
-             patch("app.trakt.fetch_show_progress_detail", return_value={}):
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[_ep_event(101, 1, 7)]), \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value={}):
             await wh.sync(SETTINGS, other, today=date(2026, 7, 20))
         self.assertEqual(list((await wh._load(other))["shows"]["101"]["1"]), ["7"])
         self.assertEqual(list((await wh._load(self.user_id))["shows"]["101"]["1"]), ["1"])
 
     async def test_baseline_show_lands_on_the_named_user(self):
         other = await _make_user("other")
-        with patch("app.trakt.fetch_show_progress_detail",
+        with patch("app.providers.trakt.sync.fetch_show_progress_detail",
                    return_value={1: {1: "2026-07-01T00:00:00Z", 2: "", 3: ""}}):
             await wh.baseline_show(SETTINGS, self.user_id, 404)
         self.assertEqual(wh.watched_map(await wh._load(self.user_id)), {(404, 1): 3})

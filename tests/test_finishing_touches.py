@@ -30,7 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, cache, calendar_cache, calendar_state, db, distrakt as distrakt_store, share_code, share_links, trakt  # noqa: E402
+from app import auth, cache, calendar_cache, calendar_state, db, distrakt as distrakt_store, share_code, share_links  # noqa: E402
+from app.providers.trakt import TraktError  # noqa: E402
+from app.providers.trakt import transport as trakt_transport  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
 from app.providers.base import Item, Media, Source  # noqa: E402
 from app.main import app  # noqa: E402
@@ -297,7 +299,7 @@ class LegacyRowRemovalTests(FinishingTestCase):
         """Not knowing means not marking: the row comes back, which is annoying
         and undoable, where a wrong mark hides a show the user still wants."""
         async def boom(endpoint, settings, **kw):
-            raise trakt.TraktError("unreachable")
+            raise TraktError("unreachable")
 
         self._add_legacy(909, "slug-909")
         with patch("app.calendar_cache.read_month", side_effect=boom):
@@ -583,7 +585,7 @@ class SharePageDetailsModalTests(FinishingTestCase):
         """Write the raw Trakt payloads the OWNER's own detail view would have
         cached, at the exact URLs fetch_details reads."""
         from urllib.parse import urlencode
-        base = f"{trakt.API_BASE}"
+        base = f"{trakt_transport.API_BASE}"
         ext = urlencode({"extended": "full"})
         asyncio.run(cache.set(f"{base}/shows/123?{ext}", {
             "title": "Test Show", "year": 2026, "overview": "Full overview.",
@@ -601,7 +603,7 @@ class SharePageDetailsModalTests(FinishingTestCase):
         class _Boom:
             async def get(self, *a, **k):
                 raise AssertionError("share details must not call Trakt")
-        return patch("app.trakt.shared_client", return_value=_Boom())
+        return patch("app.providers.trakt.transport.shared_client", return_value=_Boom())
 
     def test_the_page_wires_cards_to_the_modal(self):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7").text

@@ -33,7 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, calendar_cache, calendar_state, db, main, trakt  # noqa: E402
+from app import auth, calendar_cache, calendar_state, db, main  # noqa: E402
+from app.providers.trakt import TraktError  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -437,7 +438,7 @@ class PartialDataBannerTests(CalendarRouteTestCase):
 
         async def fake(endpoint, settings, start):
             if start == boom_window:
-                raise trakt.TraktError("Trakt unreachable", 503)
+                raise TraktError("Trakt unreachable", 503)
             if start == good_window:
                 return [_entry("show-good", "Good Show", "2026-07-08T20:00:00Z")]
             return []
@@ -454,7 +455,7 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         """No window loaded and nothing cached: there is nothing to show, so the
         month falls to the hard error banner, not the partial warning."""
         async def fake(endpoint, settings, start):
-            raise trakt.TraktError("Trakt unreachable", 503)
+            raise TraktError("Trakt unreachable", 503)
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
             resp = self.client.get("/?year=2026&month=7")
@@ -578,7 +579,7 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self._seed_baseline(last_show_ids=["show-a", "show-b", "show-c"], last_count=4)
 
         async def boom(endpoint, settings, start):
-            raise trakt.TraktError("Trakt unreachable", 503)
+            raise TraktError("Trakt unreachable", 503)
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=boom):
             resp = self.client.get(self.PAGE)
@@ -936,7 +937,7 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         couldn't be loaded is a gap, not a broken page — and it must not sit there
         looking like it is still loading."""
         async def fake(endpoint, settings, start):
-            raise trakt.TraktError("Trakt unreachable", 503)
+            raise TraktError("Trakt unreachable", 503)
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
             resp = self.client.get(self.DAY)
@@ -960,7 +961,7 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
 
         async def fake(endpoint, settings, start):
             if start == boom:
-                raise trakt.TraktError("Trakt unreachable", 503)
+                raise TraktError("Trakt unreachable", 503)
             return [_entry("the-late", "The Late", "2026-07-13T20:00:00Z")]
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):

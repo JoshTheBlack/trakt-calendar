@@ -2,7 +2,7 @@
 
 Pure, offline functions — no I/O, no Trakt calls, no persistence. Callers
 (app/main.py) merge each show's stored record (app/distrakt.py, identity +
-`abandoned`/`abandoned_form`) with its live Trakt-derived fields (app/trakt.py
+`abandoned`/`abandoned_form`) with its live Trakt-derived fields (app/providers/trakt/
 `fetch_watched_shows` + `fetch_season_detail`) into one flat dict before calling
 anything here.
 

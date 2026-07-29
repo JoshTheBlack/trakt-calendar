@@ -48,9 +48,9 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .trakt import API_BASE, TraktRateLimitError, _send
+from .providers.trakt.transport import API_BASE, TraktRateLimitError, _send
 
-# Same "app.perf" DEBUG channel app/trakt.py's _cached_get and
+# Same "app.perf" DEBUG channel the Trakt transport's _cached_get and
 # app/calendar_cache.py's fetch_window_raw log their own outbound calls to —
 # one place to watch every Trakt request, OAuth included. Never logs a body:
 # these calls carry client_secret/tokens, so only the path and outcome go out.

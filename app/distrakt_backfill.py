@@ -141,7 +141,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
 
     # ONE paged history sweep for the whole range, read twice — once for the
     # seasons, once for the films.
-    from .trakt import fetch_history, watched_progress_from
+    from .providers.trakt.sync import fetch_history, watched_progress_from
     start_day = date(int(months[0][:4]), int(months[0][5:7]), 1)
     events = await fetch_history(settings, start_at=start_day.isoformat())
     films, films_known = await _split_films(user_id, events, set(months))
@@ -360,7 +360,8 @@ async def _progress_by_show(settings, show_ids: list[int]) -> dict[int, dict]:
     watched in December and whose last one landed in January IS finished in
     January, and counting only what the sweep saw would miss it.
     """
-    from .trakt import fetch_show_progress_detail, shared_client
+    from .providers.trakt.sync import fetch_show_progress_detail
+    from .providers.trakt.transport import shared_client
     if not show_ids:
         return {}
     client = shared_client()
@@ -379,7 +380,8 @@ async def _progress_by_show(settings, show_ids: list[int]) -> dict[int, dict]:
 async def _season_totals(settings, keys: list[tuple[int, int]]) -> dict[tuple[int, int], dict]:
     """{(trakt_id, season): season detail} — the episode total that decides
     whether a season is finished, plus the dates a frozen row carries."""
-    from .trakt import fetch_season_detail, shared_client
+    from .providers.trakt.detail import fetch_season_detail
+    from .providers.trakt.transport import shared_client
     if not keys:
         return {}
     client = shared_client()

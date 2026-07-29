@@ -26,7 +26,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 
-from . import auth, calendar_cache, calendar_state, share_code, share_links, trakt
+from . import auth, calendar_cache, calendar_state, share_code, share_links
+from .providers.trakt import detail as trakt_detail
 from .auth import AuthLevel
 from .authz import Guard
 from .config import load_settings
@@ -349,7 +350,7 @@ async def _details(request: Request, share_row) -> Response:
     if not trakt_id:
         return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
     season = _season_param(request.query_params.get("season"))
-    details = await trakt.fetch_details(settings, media, trakt_id, season, cache_only=True)
+    details = await trakt_detail.fetch_details(settings, media, trakt_id, season, cache_only=True)
     return JSONResponse({"ok": True, **details})
 
 

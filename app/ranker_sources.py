@@ -32,7 +32,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from . import trakt, trakt_routes
+from . import trakt_routes
+from .providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from .config import Settings, load_settings
 # Re-exported deliberately: `ranker_sources.Media` and `ranker_sources.parse_media`
 # are what the ranker's routes and data layer already import, and the vocabulary
@@ -215,7 +216,7 @@ def _translating_failures():
     of the implementation and nowhere else."""
     try:
         yield
-    except trakt.TraktError as exc:
+    except TraktError as exc:
         raise SourceUnavailable(str(exc), getattr(exc, "status", None)) from exc
 
 
@@ -231,7 +232,7 @@ class TraktSearchSource:
 
     async def search(self, query: str, media: Media) -> list[TitleRef]:
         with _translating_failures():
-            entries = await trakt.search_titles(self._settings, str(media), query)
+            entries = await trakt_detail.search_titles(self._settings, str(media), query)
         return [_ref_from_search(entry, media) for entry in entries]
 
 
@@ -265,7 +266,7 @@ class TraktRatingsSource:
             # cannot read with somebody else's credential.
             raise NoLinkedIdentity("No linked account to read ratings from.")
         with _translating_failures():
-            entries = await trakt.fetch_ratings(settings)
+            entries = await trakt_sync.fetch_ratings(settings)
         rated = []
         for entry in entries:
             media_key = entry.get("type")
@@ -275,7 +276,7 @@ class TraktRatingsSource:
                 continue
             media = Media(media_key)
             item = entry.get(media_key) or {}
-            ids = trakt.ids_map(item) if isinstance(item, dict) else {}
+            ids = trakt_detail.ids_map(item) if isinstance(item, dict) else {}
             score = int_or_none(entry.get("rating"))
             if not ids or score is None:
                 continue

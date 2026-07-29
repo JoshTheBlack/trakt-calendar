@@ -24,7 +24,7 @@ async def get_json(settings, path: str, label: str) -> dict | None:
     """GET a TMDB API path (auth via v4 bearer or v3 api_key). Returns parsed
     JSON, or None on any failure — network error, non-200, or an unparsable
     body — so a caller can degrade rather than raise."""
-    from .trakt import shared_client
+    from .providers.trakt.transport import shared_client
     key = (settings.tmdb_api_key or "").strip()
     headers, params = {}, {}
     if _is_v4_token(key):
@@ -52,7 +52,7 @@ async def download(url: str) -> bytes | None:
     """GET raw bytes from any URL — a TMDB image, or a previously-recorded
     registry URL from another provider. No auth: TMDB's image CDN and Trakt's
     poster URLs are both unauthenticated. None on any failure."""
-    from .trakt import shared_client
+    from .providers.trakt.transport import shared_client
     with span("tmdb.download") as sp:
         try:
             resp = await shared_client().get(url)

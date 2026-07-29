@@ -32,8 +32,9 @@ from pathlib import Path
 import anyio.to_thread
 from PIL import Image
 
-from . import artwork, trakt
+from . import artwork
 from . import tmdb as tmdb_client
+from .providers.trakt import calendar as trakt_calendar, transport as trakt_transport
 from .config import DATA_DIR
 from .perftrace import span
 from .providers.base import Media
@@ -144,13 +145,13 @@ async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     up empty. Whatever URL this finds is recorded through app/artwork.py so the
     next poster this cold doesn't pay for the lookup twice."""
     media_type = "show" if media == "show" else "movie"
-    results = await trakt._cached_get(
-        trakt.shared_client(), settings, f"search/tmdb/{tmdb}",
+    results = await trakt_transport._cached_get(
+        trakt_transport.shared_client(), settings, f"search/tmdb/{tmdb}",
         {"type": media_type, "extended": "full,images"},
     )
     for entry in results if isinstance(results, list) else []:
         obj = entry.get(media_type) or {}
-        url = trakt._poster(obj)
+        url = trakt_calendar._poster(obj)
         if url:
             await artwork.record_poster_url(media, tmdb, "trakt", url)
             return url

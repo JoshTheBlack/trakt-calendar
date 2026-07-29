@@ -171,8 +171,8 @@ class RolloverTests(RolloverTestCase):
                      "slug": "slug-401", "title": "Backlog", "network": "Net"}]
 
         with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
-             patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
 
         self.assertFalse(doc["closed"])
@@ -191,8 +191,8 @@ class RolloverTests(RolloverTestCase):
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-202")
 
         with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
-             patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
 
         self.assertEqual(await self._keys(doc), {(201, 1)})
@@ -214,8 +214,8 @@ class RolloverTests(RolloverTestCase):
             return []
 
         with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
-             patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
             # today >= Aug 1 -> August has begun, so July freezes on this access.
             aug = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
@@ -246,7 +246,7 @@ class RolloverTests(RolloverTestCase):
         doc["closed"] = True
         await distrakt.save_month(self.user_id, doc)
         with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
-             patch("app.trakt.fetch_watched_progress", new=AsyncMock()) as prog:
+             patch("app.providers.trakt.sync.fetch_watched_progress", new=AsyncMock()) as prog:
             out = await distrakt.ensure_month(self.user_id, 2026, 5, SETTINGS)
         self.assertTrue(out["closed"])
         cal.assert_not_called()
@@ -264,7 +264,7 @@ class RolloverTests(RolloverTestCase):
         # July is earlier than the only tracked month (Aug) -> blocked.
         self.assertTrue(await distrakt.is_backfill_blocked(self.user_id, "2026-07"))
         with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
-             patch("app.trakt.fetch_watched_progress", new=AsyncMock()) as prog:
+             patch("app.providers.trakt.sync.fetch_watched_progress", new=AsyncMock()) as prog:
             out = await distrakt.ensure_month(self.user_id, 2026, 7, SETTINGS)
         self.assertEqual(out["shows"], [])
         self.assertIsNone(await distrakt.load_month(self.user_id, "2026-07"))  # not written
@@ -284,8 +284,8 @@ class RolloverTests(RolloverTestCase):
             return []
 
         with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
-             patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
             aug = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
                                               today=date(2026, 7, 20))
@@ -371,7 +371,7 @@ class DistraktImportFilterTests(RolloverTestCase):
         await _seed_user_prefs(self.user_id, show_certifications="-tv-ma")
         await self._open_month("2026-08")
 
-        with patch("app.trakt.shared_client", return_value=_FixedClient(entries)):
+        with patch("app.providers.trakt.transport.shared_client", return_value=_FixedClient(entries)):
             await distrakt.import_premieres(self.user_id, "2026-08", self.settings)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
@@ -392,7 +392,7 @@ class DistraktImportFilterTests(RolloverTestCase):
         # No per-user filter set at all — the floor alone must do the work.
         await self._open_month("2026-08")
 
-        with patch("app.trakt.shared_client", return_value=_FixedClient(entries)):
+        with patch("app.providers.trakt.transport.shared_client", return_value=_FixedClient(entries)):
             await distrakt.import_premieres(self.user_id, "2026-08", floored_settings)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
@@ -448,8 +448,8 @@ class PerUserIsolationTests(RolloverTestCase):
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-201")
 
         with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
-             patch("app.trakt.fetch_watched_progress", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             mine = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
             theirs = await distrakt.ensure_month(self.other_id, 2026, 8, SETTINGS)
 
@@ -472,8 +472,8 @@ class PerUserIsolationTests(RolloverTestCase):
 
         patches = (
             patch("app.calendar_cache.read_month", side_effect=fake_read_month),
-            patch("app.trakt.fetch_watched_progress", side_effect=fake_progress),
-            patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail),
+            patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress),
+            patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail),
             patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline),
         )
         with patches[0], patches[1], patches[2], patches[3]:
@@ -610,10 +610,10 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         # fields the rest of this file's SETTINGS stand-in has never needed.
         settings = SimpleNamespace(**vars(SETTINGS), public_base_url="")
 
-        with patch("app.trakt.fetch_show_progress_detail", return_value=progress), \
-             patch("app.trakt.fetch_last_activities", return_value={}), \
-             patch("app.trakt.fetch_history", return_value=[]), \
-             patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail), \
+        with patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value=progress), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar_cache.read_month", side_effect=no_premieres), \
              patch("app.logos.ensure_logos", new=AsyncMock(return_value=None)):
             payload, status = await main._distrakt_month_payload(self.user_id, 2026, 8, settings)
@@ -632,7 +632,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
 
         # 102's season has 8 episodes; one of them is watched.
         records = [{"trakt_id": 102, "season": 1, "title": "Half", "slug": "s"}]
-        with patch("app.trakt.fetch_season_detail", side_effect=_fake_season_detail):
+        with patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             shows = await distrakt.compute_live_shows(
                 self.user_id, records, SETTINGS,
                 watched_lookup={(102, 1): 1},

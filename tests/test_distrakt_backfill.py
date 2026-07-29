@@ -114,9 +114,9 @@ class BackfillTestCase(unittest.IsolatedAsyncioTestCase):
         async def fake_season(settings, trakt_id, season, fresh=False, client=None):
             return totals.get((int(trakt_id), int(season)), {"total": 0})
 
-        with patch("app.trakt.fetch_history", side_effect=fake_history), \
-             patch("app.trakt.fetch_show_progress_detail", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=fake_season):
+        with patch("app.providers.trakt.sync.fetch_history", side_effect=fake_history), \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season):
             return await backfill.survey(self.user_id, SETTINGS, start, end,
                                          today=date(2026, 7, 28))
 
@@ -710,9 +710,9 @@ class RemovingAFilmTests(unittest.TestCase):
         async def no_events(settings, start_at=None, limit=100, max_pages=50):
             return []
 
-        with patch("app.trakt.fetch_last_activities", return_value={}), \
-             patch("app.trakt.fetch_history", side_effect=no_events), \
-             patch("app.trakt.fetch_show_progress_detail", return_value={}):
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", side_effect=no_events), \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value={}):
             asyncio.run(watch_history.sync(SETTINGS, self.user_id, today=date(2026, 7, 28)))
 
         state = asyncio.run(watch_history.load_state(self.user_id))
@@ -755,9 +755,9 @@ class BackfillRouteTests(unittest.TestCase):
         async def fake_season(settings, trakt_id, season, fresh=False, client=None):
             return {"total": 2}
 
-        with patch("app.trakt.fetch_history", side_effect=fake_history), \
-             patch("app.trakt.fetch_show_progress_detail", side_effect=fake_progress), \
-             patch("app.trakt.fetch_season_detail", side_effect=fake_season):
+        with patch("app.providers.trakt.sync.fetch_history", side_effect=fake_history), \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season):
             return self.client.post("/api/distrakt/backfill/survey",
                                     json={"start": "2026-01", "end": "2026-06"})
 

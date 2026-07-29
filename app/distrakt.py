@@ -372,7 +372,7 @@ async def remove_show(user_id: int, month: str, trakt_id, season) -> bool:
 # ===========================================================================
 # Lazy month rollover, prior-month freeze, and totals staleness. This is the
 # orchestrator layer on top of the pure store above; it is the only part that
-# reaches out to Trakt (via app/trakt.py) and reads the per-user main-calendar
+# reaches out to Trakt (via app/providers/trakt/) and reads the per-user main-calendar
 # not-watching store (app/calendar_state.py).
 # ===========================================================================
 
@@ -476,7 +476,8 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
 
     from . import discord_fmt, watch_history
     from .perftrace import span
-    from .trakt import fetch_season_detail, shared_client
+    from .providers.trakt.detail import fetch_season_detail
+    from .providers.trakt.transport import shared_client
     logger = logging.getLogger(__name__)
     if not records:
         return []
@@ -796,7 +797,8 @@ async def backfill_tmdb(user_id: int, month_key: str, settings) -> dict | None:
     """Fill in `tmdb` for records added before it was stored (one-time per show).
     Resolves tmdb from the trakt_id via Trakt, dedup by show, persists if changed."""
     from .perftrace import span
-    from .trakt import fetch_show_tmdb, shared_client
+    from .providers.trakt.detail import fetch_show_tmdb
+    from .providers.trakt.transport import shared_client
     doc = await load_month(user_id, month_key)
     if doc is None:
         return None
@@ -823,7 +825,8 @@ async def _history_records(settings, present: set[tuple[int, int]]) -> list[dict
     """In-progress-but-unfinished shows from recent watch history not already in
     the roster. A candidate is dropped if its season is fully watched (completed)
     or has zero watched episodes (nothing in progress)."""
-    from .trakt import fetch_season_detail, fetch_watched_progress
+    from .providers.trakt.detail import fetch_season_detail
+    from .providers.trakt.sync import fetch_watched_progress
     progress = await fetch_watched_progress(settings, since_days=WATCHED_RECENCY_DAYS)
     candidates = [
         p for p in progress

@@ -4,7 +4,7 @@ The unit and boundary tests elsewhere (test_secrets_box, test_sealing,
 test_encryption_flow, test_encryption_routes) each prove one layer in isolation.
 This file proves the layers actually compose: that a per-user identity created
 today reads back through the real Trakt-call path with the plaintext token on the
-wire; that the app-wide Trakt credential app/trakt.py uses on every calendar fetch
+wire; that the app-wide Trakt credential the Trakt client uses on every calendar fetch
 does the same; and that a full enable -> encrypt -> lose-the-key -> recover cycle
 leaves every one of those call paths working at the far end.
 
@@ -29,7 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cryptography.fernet import Fernet  # noqa: E402
 
-from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box, trakt, trakt_routes  # noqa: E402
+from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box, trakt_routes  # noqa: E402
+from app.providers.trakt import calendar as trakt_calendar  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
 from app.endpoints import get_endpoint  # noqa: E402
 
@@ -120,11 +121,11 @@ class IdentityToProviderCallTests(EncryptionIntegrationTestCase):
         self.assertEqual(asyncio.run(trakt_routes.stored_access_token(user_id)), "alice-token")
 
         # And a settings object built from it (the shape main._distrakt_settings
-        # hands to app/trakt.py) puts that plaintext token on the wire.
+        # hands to the Trakt client) puts that plaintext token on the wire.
         settings = dataclasses.replace(load_settings(), trakt_access_token=token)
         recorder = _RecordingClient()
-        with patch("app.trakt.shared_client", return_value=recorder):
-            asyncio.run(trakt.fetch_calendar(SHOWS, settings, 2026, 7))
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
+            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
         self.assertEqual(recorder.authorizations, ["Bearer alice-token"])
 
 
@@ -148,8 +149,8 @@ class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
         self.assertEqual(settings.trakt_access_token, "operator-token")
 
         recorder = _RecordingClient()
-        with patch("app.trakt.shared_client", return_value=recorder):
-            asyncio.run(trakt.fetch_calendar(SHOWS, settings, 2026, 7))
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
+            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
         self.assertEqual(recorder.authorizations, ["Bearer operator-token"])
 
     def test_with_no_key_the_same_fetch_still_carries_the_plaintext_token(self):
@@ -159,8 +160,8 @@ class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
         save_settings(Settings(trakt_client_id="client-id", trakt_access_token="plain-token"))
         settings = load_settings()
         recorder = _RecordingClient()
-        with patch("app.trakt.shared_client", return_value=recorder):
-            asyncio.run(trakt.fetch_calendar(SHOWS, settings, 2026, 7))
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
+            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
         self.assertEqual(recorder.authorizations, ["Bearer plain-token"])
 
 
@@ -171,8 +172,8 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
     def _calendar_call_uses(self, expected_token: str) -> None:
         settings = load_settings()
         recorder = _RecordingClient()
-        with patch("app.trakt.shared_client", return_value=recorder):
-            asyncio.run(trakt.fetch_calendar(SHOWS, settings, 2026, 7))
+        with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
+            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
         self.assertEqual(recorder.authorizations, [f"Bearer {expected_token}"])
 
     def test_enable_encrypt_lose_key_restore_key_door_one(self):

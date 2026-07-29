@@ -339,7 +339,7 @@ async def forget_movie_watch(user_id: int, trakt_id) -> str | None:
 
 async def baseline_show(settings, user_id: int, trakt_id) -> None:
     """Baseline one show from progress/watched (called when it enters the roster)."""
-    from .trakt import fetch_show_progress_detail
+    from .providers.trakt.sync import fetch_show_progress_detail
     detail = await fetch_show_progress_detail(settings, trakt_id)
     state = await _load(user_id)
     _set_show_baseline(state, trakt_id, detail)
@@ -353,7 +353,7 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
     Change path: re-baseline on unwatch/force, then fold in new history events.
     """
     from .perftrace import span
-    from .trakt import fetch_history, fetch_last_activities, fetch_show_progress_detail
+    from .providers.trakt.sync import fetch_history, fetch_last_activities, fetch_show_progress_detail
     today = today or datetime.now(timezone.utc).date()
     state = await _load(user_id)
     with span("wh.last_activities"):
@@ -365,7 +365,7 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
         return state  # nothing changed since last sync -> serve cache
 
     if force or _removed_changed(state.get("beacons"), beacons):
-        from .trakt import shared_client
+        from .providers.trakt.transport import shared_client
         cached_ids = [int(t) for t in (state.get("shows") or {}).keys()]
         with span("wh.rebaseline", n=len(cached_ids), reason="force" if force else "unwatch"):
             client = shared_client()
@@ -397,7 +397,8 @@ async def sync_and_baseline(settings, user_id: int, roster_trakt_ids, force: boo
     counts on first view). Returns the state; read counts via `watched_map` and
     movies via `movies_in_range`."""
     from .perftrace import span
-    from .trakt import fetch_show_progress_detail, shared_client
+    from .providers.trakt.sync import fetch_show_progress_detail
+    from .providers.trakt.transport import shared_client
     state = await sync(settings, user_id, force=force, today=today)
     missing = list(dict.fromkeys(
         int(t) for t in roster_trakt_ids if t is not None and str(int(t)) not in (state.get("shows") or {})

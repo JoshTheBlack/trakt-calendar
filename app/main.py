@@ -65,17 +65,16 @@ from .perftrace import span
 from .config import SECRET_FIELDS, Settings, apply_update, load_settings, public_base_url_error, save_settings
 from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
-from .trakt import (
-    TraktError,
-    TraktRateLimitError,
+from .providers.trakt import TraktError, TraktRateLimitError
+from .providers.trakt.detail import (
     fetch_details,
     fetch_season_detail,
     fetch_show_seasons,
     fetch_tile_info,
-    fetch_watched_map,
     search_shows,
     search_titles,
 )
+from .providers.trakt.sync import fetch_watched_map
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +83,7 @@ logger = logging.getLogger(__name__)
 # app.* diagnostics and Trakt-call tracing as the dev runner, instead of
 # Python's silent WARNING-only default. LOG_LEVEL controls the app's own
 # loggers (including "app.perf", which every outbound Trakt call logs a line
-# to at DEBUG — see app/trakt.py, app/calendar_cache.py, app/trakt_auth.py);
+# to at DEBUG — see app/providers/trakt/, app/calendar_cache.py, app/trakt_auth.py);
 # third-party libraries stay at WARNING regardless, since their own DEBUG
 # output is rarely what anyone actually wants. basicConfig() only attaches a
 # handler if the root logger doesn't already have one, so when run.py has
@@ -273,8 +272,8 @@ async def lifespan(_app: FastAPI):
         yield
     finally:
         task.cancel()
-        import app.trakt as _trakt
-        await _trakt.aclose_shared_client()
+        from .providers.trakt import transport as _trakt_transport
+        await _trakt_transport.aclose_shared_client()
 
 
 # Every load carries app.js/style.css/fonts plus (mostly) whatever asset_v was

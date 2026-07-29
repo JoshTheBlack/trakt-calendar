@@ -26,7 +26,8 @@ import asyncio
 import logging
 from typing import Any
 
-from . import artwork, auth, db, distrakt, ranker_sources, trakt
+from . import artwork, auth, db, distrakt, ranker_sources
+from .providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
 from .config import load_settings
 from .ranker_sources import Media, TitleRef, int_or_none
 
@@ -292,18 +293,18 @@ async def _movie_ref(settings, row) -> tuple[TitleRef, tuple | None]:
     ids: dict[str, Any] = {"trakt": trakt_id}
     title, year, runtime, poster = row["title"] or "", int_or_none(row["year"]), None, None
     try:
-        summary = await trakt.fetch_movie_summary(settings, trakt_id)
-    except trakt.TraktError as exc:
+        summary = await trakt_detail.fetch_movie_summary(settings, trakt_id)
+    except TraktError as exc:
         logger.info("tracker import: no summary for movie %s (%s)", trakt_id, exc)
         summary = None
     if summary:
-        ids = trakt.ids_map(summary) or ids
+        ids = trakt_detail.ids_map(summary) or ids
         title = summary.get("title") or title
         year = int_or_none(summary.get("year")) or year
         runtime = int_or_none(summary.get("runtime"))
         # The same extraction the calendar's own recording path uses, so a URL
         # observed here is stored identically to one observed there.
-        poster = trakt._poster(summary)
+        poster = trakt_calendar._poster(summary)
     tmdb = int_or_none(ids.get("tmdb"))
     sighting = ("movie", tmdb, "trakt", poster) if (tmdb and poster) else None
     return TitleRef(media=Media.MOVIE, title=title, ids=ids, year=year, runtime=runtime), sighting

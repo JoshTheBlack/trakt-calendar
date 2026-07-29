@@ -130,7 +130,7 @@ def _rasterize_svg(svg_bytes: bytes) -> bytes | None:
 
 
 async def _download(url: str) -> bytes | None:
-    from .trakt import shared_client
+    from .providers.trakt.transport import shared_client
     with span("logo.download") as sp:
         try:
             resp = await shared_client().get(url)

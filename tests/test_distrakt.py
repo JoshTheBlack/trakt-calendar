@@ -25,7 +25,7 @@ os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import db, distrakt  # noqa: E402
-from app.trakt import _derive_season  # noqa: E402
+from app.providers.trakt.detail import _derive_season  # noqa: E402
 
 TMP = Path(_TMP_DATA)
 UTC = ZoneInfo("UTC")

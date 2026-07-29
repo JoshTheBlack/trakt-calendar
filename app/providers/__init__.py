@@ -47,7 +47,7 @@ def _load_builtins() -> None:
     if _loaded:
         return
     _loaded = True
-    from .. import trakt  # noqa: F401  — registers itself on import
+    from . import trakt  # noqa: F401  — registers itself on import
 
 
 def get(source: Source | str) -> Provider:

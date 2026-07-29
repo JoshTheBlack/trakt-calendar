@@ -45,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, db, ranker_routes, ranker_sources  # noqa: E402
-from app import trakt, trakt_routes  # noqa: E402
+from app import trakt_routes  # noqa: E402
+from app.providers.trakt import detail as trakt_detail, sync as trakt_sync  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 from app.ranker_sources import Media, RatedTitle, TitleRef  # noqa: E402
@@ -249,7 +250,7 @@ class AbsenceTests(StandaloneTestCase):
 
     def test_the_ratings_seed_refuses_when_there_is_no_linked_account(self):
         self.client.post("/api/rankings/boards", json={"uid": "b1"})
-        with mock.patch.object(trakt, "fetch_ratings",
+        with mock.patch.object(trakt_sync, "fetch_ratings",
                                exploding("ratings were read without a linked account")):
             resp = self.client.post("/api/rankings/boards/b1/seed/ratings", json={"commit": True})
         self.assertEqual(resp.status_code, 404)
@@ -268,7 +269,7 @@ class CredentialTests(StandaloneTestCase):
 
         # The real Trakt adapter runs here — only the call at its edge is
         # replaced — so this pins what the adapter actually reaches for.
-        with mock.patch.object(trakt, "search_titles", _search), \
+        with mock.patch.object(trakt_detail, "search_titles", _search), \
              mock.patch.object(trakt_routes, "access_token_for_user",
                                exploding("a search reached for the caller's token")):
             resp = self.client.post("/api/rankings/search", json={"query": "test"})
@@ -285,7 +286,7 @@ class CredentialTests(StandaloneTestCase):
         self.client.post("/api/rankings/boards", json={"uid": "b1"})
         with mock.patch.object(trakt_routes, "access_token_for_user",
                                _token_for(USER_TOKEN)), \
-             mock.patch.object(trakt, "fetch_ratings", _ratings):
+             mock.patch.object(trakt_sync, "fetch_ratings", _ratings):
             resp = self.client.post("/api/rankings/boards/b1/seed/ratings", json={})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(seen["token"], USER_TOKEN)
@@ -310,7 +311,7 @@ class ProtocolTests(StandaloneTestCase):
     def test_a_fake_source_drives_search_with_no_provider_call(self):
         source = FakeSearchSource([a_show(1396, "Breaking Bad")])
         with mock.patch.object(ranker_sources, "search_source", lambda: source), \
-             mock.patch.object(trakt, "search_titles", exploding("the provider was called")):
+             mock.patch.object(trakt_detail, "search_titles", exploding("the provider was called")):
             resp = self.client.post("/api/rankings/search", json={"query": "brea"})
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(source.calls, [("brea", Media.SHOW)])
@@ -323,7 +324,7 @@ class ProtocolTests(StandaloneTestCase):
         self.client.post("/api/rankings/boards", json={"uid": "b1"})
         with mock.patch.object(ranker_sources, "ratings_source", lambda: source), \
              mock.patch.object(ranker_sources, "ratings_available", _true()), \
-             mock.patch.object(trakt, "fetch_ratings", exploding("the provider was called")):
+             mock.patch.object(trakt_sync, "fetch_ratings", exploding("the provider was called")):
             preview = self.client.post("/api/rankings/boards/b1/seed/ratings", json={}).json()
             committed = self.client.post("/api/rankings/boards/b1/seed/ratings",
                                          json={"commit": True}).json()

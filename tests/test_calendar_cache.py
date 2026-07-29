@@ -32,7 +32,9 @@ from zoneinfo import ZoneInfo
 os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-calcache-test-")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import cache, calendar_cache, calendar_filter, db, trakt  # noqa: E402
+from app import cache, calendar_cache, calendar_filter, db  # noqa: E402
+from app.providers.trakt import TraktError  # noqa: E402
+from app.providers.trakt import calendar as trakt_calendar  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.providers import base  # noqa: E402
 from app.endpoints import ENDPOINTS, get_endpoint  # noqa: E402
@@ -145,8 +147,8 @@ class PruneTests(unittest.TestCase):
         tz = ZoneInfo("America/New_York")
         pruned = calendar_cache.prune_entry(self.RICH, "show")
         self.assertEqual(
-            trakt.normalize(self.RICH, SHOWS, tz),
-            trakt.normalize(pruned, SHOWS, tz),
+            trakt_calendar.normalize(self.RICH, SHOWS, tz),
+            trakt_calendar.normalize(pruned, SHOWS, tz),
         )
 
     def test_pruner_keeps_every_id_the_item_can_carry(self):
@@ -164,7 +166,7 @@ class PruneTests(unittest.TestCase):
         change, so old rows keep being served until their TTL expires."""
         legacy = calendar_cache.prune_entry(self.RICH, "show")
         del legacy["show"]["ids"]["imdb"]
-        item = trakt.normalize(legacy, SHOWS, ZoneInfo("UTC"))
+        item = trakt_calendar.normalize(legacy, SHOWS, ZoneInfo("UTC"))
         self.assertNotIn("imdb", item.ids)
         self.assertEqual(item.ids["tmdb"], 789)
 
@@ -196,7 +198,7 @@ class FetchShapeTests(CacheTestCase):
         client = _CaptureClient([PruneTests.RICH])
         # The window RICH's 2026-07-15 air date actually belongs to — a fetch now
         # trims what falls outside the window it asked for.
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 13))
         self.assertNotIn("genres", client.url)
         self.assertNotIn("countries", client.url)
@@ -208,7 +210,7 @@ class FetchShapeTests(CacheTestCase):
 
     async def test_pagination_header_on_a_calendar_response_is_logged(self):
         client = _CaptureClient([], headers={"x-pagination-page-count": "3"})
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             with self.assertLogs("app.calendar_cache", level="WARNING") as logged:
                 await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
@@ -227,7 +229,7 @@ class InstanceFloorTests(CacheTestCase):
         kept = _entry("kept-drama", "2026-07-06T12:00:00Z", genres=["drama"])
         excluded = _entry("excluded-anime", "2026-07-06T12:00:00Z", genres=["anime"])
         client = _CaptureClient([kept, excluded])
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         slugs = {e["show"]["ids"]["slug"] for e in entries}
         self.assertEqual(slugs, {"kept-drama"})
@@ -239,7 +241,7 @@ class InstanceFloorTests(CacheTestCase):
         excluded = _entry("excluded-tvma", "2026-07-06T12:00:00Z")
         excluded["show"]["certification"] = "TV-MA"
         client = _CaptureClient([kept, excluded])
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         slugs = {e["show"]["ids"]["slug"] for e in entries}
         self.assertEqual(slugs, {"kept-tv14"})
@@ -253,7 +255,7 @@ class InstanceFloorTests(CacheTestCase):
         excluded = {"released": "2026-07-06", "movie": {
             "title": "Excluded", "certification": "R", "ids": {"slug": "excluded-r", "trakt": 2}}}
         client = _CaptureClient([kept, excluded])
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             entries = await calendar_cache.fetch_window_raw(movies, self.settings, date(2026, 7, 6))
         slugs = {e["movie"]["ids"]["slug"] for e in entries}
         self.assertEqual(slugs, {"kept-pg"})
@@ -266,7 +268,7 @@ class InstanceFloorTests(CacheTestCase):
         kept = _entry("kept-drama", "2026-07-06T12:00:00Z", genres=["drama"])
         excluded = _entry("excluded-anime", "2026-07-06T12:00:00Z", genres=["anime"])
         client = _CaptureClient([kept, excluded])
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             items, _ = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=1000)
         ids = {i.id for i in items}
@@ -297,7 +299,7 @@ class WindowOverrunTests(CacheTestCase):
             _entry("months-later", "2026-09-05T12:00:00Z"),  # the real overrun
         ]
         client = _CaptureClient(body)
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         self.assertEqual([e["show"]["ids"]["slug"] for e in entries],
                          ["first-day", "last-day"])
@@ -307,7 +309,7 @@ class WindowOverrunTests(CacheTestCase):
         airing to, exactly one window keeps it."""
         shared = _entry("house-of-the-dragon", "2026-07-06T01:00:00Z", season=3, number=3)
         client = _CaptureClient([shared])
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             earlier = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 6, 29))
             owning = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         self.assertEqual(earlier, [])
@@ -335,11 +337,11 @@ class WindowOverrunTests(CacheTestCase):
         for key, endpoint in ENDPOINTS.items():
             with self.subTest(endpoint=key):
                 client = _CaptureClient([])
-                with patch("app.trakt.shared_client", return_value=client):
+                with patch("app.providers.trakt.transport.shared_client", return_value=client):
                     await calendar_cache.fetch_window_raw(endpoint, self.settings, date(2026, 7, 6))
                 path, _, query = client.url.partition("?")
                 self.assertTrue(
-                    path.endswith(f"/calendars/all/{trakt.calendar_path(endpoint)}/2026-07-06/7"), path)
+                    path.endswith(f"/calendars/all/{trakt_calendar.calendar_path(endpoint)}/2026-07-06/7"), path)
                 self.assertIn("extended=full", query)
 
     async def test_movies_are_trimmed_on_released_not_first_aired(self):
@@ -352,7 +354,7 @@ class WindowOverrunTests(CacheTestCase):
             {"released": "2026-07-30", "movie": {"title": "Overrun", "ids": {"slug": "overrun", "trakt": 2}}},
         ]
         client = _CaptureClient(body)
-        with patch("app.trakt.shared_client", return_value=client):
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
             entries = await calendar_cache.fetch_window_raw(movies, self.settings, date(2026, 7, 6))
         self.assertEqual([e["movie"]["title"] for e in entries], ["In Range"])
 
@@ -553,7 +555,7 @@ class AssembleRangeTests(CacheTestCase):
 
         async def fake(endpoint, settings, start):
             if start == boom_window:
-                raise trakt.TraktError("Trakt unreachable", 503)
+                raise TraktError("Trakt unreachable", 503)
             return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
@@ -568,10 +570,10 @@ class AssembleRangeTests(CacheTestCase):
         """A span where nothing loaded and nothing was cached has nothing to
         show, so it surfaces as a hard error rather than a silent empty month."""
         async def fake(endpoint, settings, start):
-            raise trakt.TraktError("Trakt unreachable", 503)
+            raise TraktError("Trakt unreachable", 503)
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
-            with self.assertRaises(trakt.TraktError):
+            with self.assertRaises(TraktError):
                 await calendar_cache.assemble_range(
                     SHOWS, self.settings, tz=ZoneInfo("UTC"),
                     start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
@@ -604,7 +606,7 @@ class AssembleRangeTests(CacheTestCase):
 
         async def fake(endpoint, settings, start):
             if start == boom_window:
-                raise trakt.TraktError("Trakt unreachable", 503)
+                raise TraktError("Trakt unreachable", 503)
             return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
 
         with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
@@ -670,7 +672,7 @@ class PrewarmTests(CacheTestCase):
         self.settings.calendar_prewarm_enabled = True
         self.settings.calendar_cache_ttl_minutes = 1440
         with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
-            mocked.side_effect = trakt.TraktError("Trakt unreachable", 503)
+            mocked.side_effect = TraktError("Trakt unreachable", 503)
             await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)  # must not raise
 
 

@@ -19,7 +19,8 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from app import providers, trakt
+from app import providers
+from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.endpoints import ENDPOINTS, get_endpoint
 from app.providers.base import Capabilities, Item, Media, Source, collect_ids
@@ -54,7 +55,7 @@ class TestCollectIds:
 
 class TestNormalizeProducesAnItem:
     def test_provenance_is_source_ids_and_detail_url(self):
-        item = trakt.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
+        item = trakt_calendar.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
         assert item.source == Source.TRAKT
         assert item.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
                             "tmdb": 789, "imdb": "tt42"}
@@ -65,14 +66,14 @@ class TestNormalizeProducesAnItem:
         URL for a movie 404s rather than failing visibly here."""
         entry = {"released": "2026-07-15",
                  "movie": {"title": "A Film", "ids": {"slug": "a-film", "trakt": 9}}}
-        item = trakt.normalize(entry, MOVIES, ZoneInfo("UTC"))
+        item = trakt_calendar.normalize(entry, MOVIES, ZoneInfo("UTC"))
         assert item.detail_url == "https://trakt.tv/movies/a-film"
 
     def test_media_is_the_enum_and_still_equals_its_string(self):
         """Templates, DB columns and the response keys all hold the plain
         string; the enum has to stay interchangeable with it or every one of
         those boundaries grows a conversion."""
-        item = trakt.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
+        item = trakt_calendar.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
         assert item.media is Media.SHOW
         assert item.media == "show"
 
@@ -138,4 +139,4 @@ class TestEndpointTranslation:
 
     def test_every_endpoint_translates_to_a_trakt_path(self):
         for key, endpoint in ENDPOINTS.items():
-            assert trakt.calendar_path(endpoint) == key
+            assert trakt_calendar.calendar_path(endpoint) == key

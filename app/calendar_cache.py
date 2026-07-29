@@ -53,13 +53,14 @@ from itertools import groupby
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-from . import artwork, calendar_filter, db, trakt
+from . import artwork, calendar_filter, db
 from .cache import COMPRESS_LEVEL
 from .endpoints import ENDPOINTS, Endpoint
 from .providers.base import Item
+from .providers.trakt import calendar as trakt_calendar, transport as trakt_transport
 
 logger = logging.getLogger(__name__)
-# Same "app.perf" logger app/trakt.py's _cached_get already uses for its own
+# Same "app.perf" logger the Trakt transport's _cached_get already uses for its own
 # netGET/cacheHIT lines — one DEBUG channel for every outbound Trakt call,
 # regardless of which module made it. Enable it with LOG_LEVEL=DEBUG.
 _perf = logging.getLogger("app.perf")
@@ -220,7 +221,7 @@ def _poster_sighting(media: dict, media_key: str):
     """(media_key, tmdb, 'trakt', url) for one pruned media object, or None when
     it lacks either id — the pair the ranker's poster registry is keyed on."""
     tmdb_id = (media.get("ids") or {}).get("tmdb")
-    poster = trakt._poster(media)
+    poster = trakt_calendar._poster(media)
     if not tmdb_id or not poster:
         return None
     return (media_key, int(tmdb_id), "trakt", poster)
@@ -274,19 +275,19 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
     handing the page duplicate cards for every one of them.
     """
     url = (
-        f"{trakt.API_BASE}/calendars/all/{trakt.calendar_path(endpoint)}/{start.isoformat()}/{WINDOW_DAYS}"
+        f"{trakt_transport.API_BASE}/calendars/all/{trakt_calendar.calendar_path(endpoint)}/{start.isoformat()}/{WINDOW_DAYS}"
         f"?{urlencode({'extended': 'full,images'})}"
     )
     t0 = _time.perf_counter()
-    resp = await trakt._send(trakt.shared_client(), "GET", url, headers=trakt._headers(settings, paginate=False))
+    resp = await trakt_transport._send(trakt_transport.shared_client(), "GET", url, headers=trakt_transport._headers(settings, paginate=False))
     _perf.debug("netGET    calendar/%s/%s -> %s  %.0fms", endpoint.key, start.isoformat(),
                 resp.status_code, (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 401:
-        raise trakt.TraktError(
+        raise trakt_transport.TraktError(
             "Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401,
         )
     if resp.status_code != 200:
-        raise trakt.TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+        raise trakt_transport.TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
     if resp.headers.get("x-pagination-page-count"):
         # Calendar endpoints have never paginated (verified live); if that ever
         # changes this window is silently truncated, so make it loud.
@@ -298,13 +299,13 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
     try:
         raw = resp.json()
     except ValueError:
-        raise trakt.TraktError("Trakt API returned an unreadable response.")
+        raise trakt_transport.TraktError("Trakt API returned an unreadable response.")
     if not isinstance(raw, list):
         return []
     # The instance-wide content floor: an operator who excludes a genre,
     # country, or certification here means it never enters the shared cache for
     # ANY viewer, not just their own — applied on the raw entries, before
-    # pruning, the same way trakt.py's uncached fetch path already reproduces
+    # pruning, the same way the Trakt client's uncached fetch path already reproduces
     # Trakt's old server-side genre/country filtering (see calendar_filter.py).
     certifications = (
         settings.show_certifications if endpoint.media == "show" else settings.movie_certifications
@@ -387,7 +388,7 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
         return [], None
     try:
         entries = await fetch_window_raw(endpoint, settings, start)
-    except trakt.TraktError:
+    except trakt_transport.TraktError:
         if cached is not None:  # serve the stale copy rather than nothing
             return cached
         raise
@@ -498,9 +499,9 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     entries: list[dict] = []
     as_of: int | None = None
     errored = 0
-    first_error: trakt.TraktError | None = None
+    first_error: trakt_transport.TraktError | None = None
     for result in results:
-        if isinstance(result, trakt.TraktError):
+        if isinstance(result, trakt_transport.TraktError):
             # load_window already served a stale copy when it had one, so getting
             # here means this window had nothing cached AND its fetch failed.
             errored += 1
@@ -533,7 +534,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 
     items: list[Item] = []
     for entry in kept:
-        item = trakt.normalize(entry, endpoint, tz)
+        item = trakt_calendar.normalize(entry, endpoint, tz)
         if item is None:
             continue
         air_day = date.fromisoformat(item.air_date)  # already in the viewer's tz
