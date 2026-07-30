@@ -33,7 +33,7 @@ os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app import auth, calendar_state, db, distrakt, watch_history  # noqa: E402
-from app.providers.base import Item, Media, Source  # noqa: E402
+from app.providers.base import Item, ItemKey, Media, Source  # noqa: E402
 
 TMP = Path(_TMP_DATA)
 SETTINGS = SimpleNamespace(trakt_configured=True, network_emojis={}, default_network_emoji=":tv:",
@@ -65,15 +65,31 @@ async def _fake_season_detail(settings, trakt_id, season, fresh=False, client=No
     return dict(_DETAILS[int(trakt_id)], season=int(season))
 
 
-async def _fake_sync_and_baseline(settings, user_id, roster_trakt_ids, force=False, today=None):
+async def _fake_sync_and_baseline(settings, user_id, roster, force=False, today=None):
     """Stand-in for the watch-history cache: build a state whose watched_map()
-    yields _WATCHED (filtered to the requested roster ids)."""
-    ids = {int(t) for t in roster_trakt_ids}
+    yields _WATCHED (filtered to the roster records it was handed).
+
+    Takes the records the real one takes, and files its entries under the same
+    shared identity, so a change to how a season is named fails here rather than
+    passing with a lookup that quietly matches nothing.
+    """
+    wanted = {int((rec.get("ids") or {}).get("tmdb") or 0) for rec in roster}
     shows: dict = {}
     for (tid, season), cnt in _WATCHED.items():
-        if tid in ids:
-            shows.setdefault(str(tid), {})[str(season)] = list(range(cnt))
+        if tid in wanted:
+            entry = shows.setdefault(_key(tid), {"ids": _ids(tid), "seasons": {}})
+            entry["seasons"][str(season)] = list(range(cnt))
     return {"shows": shows, "movies": {}, "last_synced": "2026-01-01", "beacons": None}
+
+
+def _key(tid) -> str:
+    """The item key a fixture's numeric id resolves to (its tmdb wins the
+    waterfall), so a test can name a row without spelling the triple out."""
+    return f"show:tmdb:{int(tid)}"
+
+
+def _ids(tid) -> dict:
+    return {"trakt": int(tid), "tmdb": int(tid), "slug": f"slug-{int(tid)}"}
 
 
 def _cal_item(tid, season, title, network="Net"):
@@ -85,7 +101,7 @@ def _cal_item(tid, season, title, network="Net"):
     """
     return Item(
         source=Source.TRAKT, media=Media.SHOW, id=f"slug-{tid}",
-        ids={"trakt": tid, "slug": f"slug-{tid}"},
+        ids={"trakt": tid, "tmdb": tid, "slug": f"slug-{tid}"},
         detail_url=f"https://trakt.tv/shows/slug-{tid}",
         air_date="2026-08-01", air_ts=0.0, air_display="01 Aug 2026",
         air_time="20:00", day_of_week="Saturday",
@@ -102,7 +118,7 @@ def _raw_entry(tid, season, title, *, first_aired, certification=None, network="
     return {
         "show": {
             "title": title, "network": network, "certification": certification,
-            "ids": {"slug": f"slug-{tid}", "trakt": tid},
+            "ids": {"slug": f"slug-{tid}", "trakt": tid, "tmdb": tid},
         },
         "first_aired": first_aired,
         "episode": {"season": season, "number": 1, "title": "Pilot"},
@@ -148,7 +164,10 @@ class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
         db.close_thread_connection()
 
     async def _keys(self, doc):
-        return {(s["trakt_id"], s["season"]) for s in doc["shows"]}
+        """(numeric id, season) pairs. The fixtures' tmdb ids are what the rows
+        are keyed on, so this reads the stored identity rather than a second field
+        that might happen to agree with it."""
+        return {(int(s["match_id"]), s["season"]) for s in doc["shows"]}
 
     async def _mark_not_watching(self, user_id, year, month, item_id,
                                  endpoint="shows/new"):
@@ -167,8 +186,8 @@ class RolloverTests(RolloverTestCase):
             return [_cal_item(201, 1, "New One"), _cal_item(301, 2, "Returner")], None
 
         async def fake_progress(settings, since_days=60):
-            return [{"trakt_id": 401, "season": 1, "watched": 3,
-                     "slug": "slug-401", "title": "Backlog", "network": "Net"}]
+            return [{"ids": _ids(401), "season": 1, "watched": 3,
+                     "title": "Backlog", "network": "Net"}]
 
         with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
@@ -202,9 +221,9 @@ class RolloverTests(RolloverTestCase):
         # Seed an OPEN July with an active, a completed, and an abandoned show.
         for tid, title in ((101, "Active"), (102, "Done"), (103, "Gone")):
             await distrakt.add_show(self.user_id, "2026-07", {
-                "trakt_id": tid, "season": 1, "title": title,
-                "network": "Net", "slug": f"slug-{tid}"})
-        await distrakt.set_abandoned(self.user_id, "2026-07", 103, 1, True,
+                "ids": _ids(tid), "season": 1, "title": title,
+                "network": "Net"})
+        await distrakt.set_abandoned(self.user_id, "2026-07", ItemKey("show", "tmdb", "103"), 1, True,
                                      abandoned_form="`Gone S01 (0/6)`")
 
         async def fake_read_month(endpoint, settings, **kw):
@@ -225,7 +244,7 @@ class RolloverTests(RolloverTestCase):
         july = await distrakt.load_month(self.user_id, "2026-07")
         self.assertTrue(july["closed"])
         self.assertIsNotNone(july["totals_refreshed_at"])
-        by_id = {s["trakt_id"]: s for s in july["shows"]}
+        by_id = {s["ids"]["trakt"]: s for s in july["shows"]}
         self.assertEqual(by_id[101]["bucket"], "keepup")
         self.assertEqual(by_id[102]["bucket"], "completed")
         self.assertEqual(by_id[103]["bucket"], "abandoned")
@@ -234,14 +253,14 @@ class RolloverTests(RolloverTestCase):
 
         # August: dropped 102 (completed) + 103 (abandoned); kept 101; added 201.
         self.assertEqual(await self._keys(aug), {(101, 1), (201, 1)})
-        carried = next(s for s in aug["shows"] if s["trakt_id"] == 101)
+        carried = next(s for s in aug["shows"] if s["key"] == _key(101))
         self.assertFalse(carried["abandoned"])
         self.assertIsNone(carried["abandoned_form"])
 
     async def test_frozen_month_returns_untouched(self):
         """An already-closed month is returned as-is with no Trakt calls."""
         await distrakt.add_show(self.user_id, "2026-05",
-                                {"trakt_id": 900, "season": 1, "title": "X", "slug": "slug-900"})
+                                {"ids": _ids(900), "season": 1, "title": "X"})
         doc = await distrakt.load_month(self.user_id, "2026-05")
         doc["closed"] = True
         await distrakt.save_month(self.user_id, doc)
@@ -260,7 +279,7 @@ class RolloverTests(RolloverTestCase):
     async def test_backward_nav_does_not_backfill(self):
         """Navigating to a never-tracked PAST month must NOT create it."""
         await distrakt.add_show(self.user_id, "2026-08",
-                                {"trakt_id": 700, "season": 1, "title": "Seed", "slug": "slug-700"})
+                                {"ids": _ids(700), "season": 1, "title": "Seed"})
         # July is earlier than the only tracked month (Aug) -> blocked.
         self.assertTrue(await distrakt.is_backfill_blocked(self.user_id, "2026-07"))
         with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
@@ -274,8 +293,8 @@ class RolloverTests(RolloverTestCase):
     async def test_preview_does_not_freeze_prior(self):
         """Accessing August BEFORE Aug 1 must NOT freeze July (still current)."""
         await distrakt.add_show(self.user_id, "2026-07", {
-            "trakt_id": 101, "season": 1, "title": "Active",
-            "network": "Net", "slug": "slug-101"})
+            "ids": _ids(101), "season": 1, "title": "Active",
+            "network": "Net"})
 
         async def fake_read_month(endpoint, settings, **kw):
             return [], None  # no August premieres in this scenario
@@ -296,7 +315,7 @@ class RolloverTests(RolloverTestCase):
 
     async def test_import_premieres_merges_skipping_existing_and_not_watching(self):
         await distrakt.add_show(self.user_id, "2026-08",
-                                {"trakt_id": 201, "season": 1, "title": "Already", "slug": "slug-201"})
+                                {"ids": _ids(201), "season": 1, "title": "Already"})
 
         async def fake_read_month(endpoint, settings, **kw):
             return [_cal_item(201, 1, "Already"), _cal_item(202, 1, "Fresh"), _cal_item(203, 1, "Skip")], None
@@ -307,18 +326,18 @@ class RolloverTests(RolloverTestCase):
             await distrakt.import_premieres(self.user_id, "2026-08", SETTINGS)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
-        keys = {(s["trakt_id"], s["season"]) for s in doc["shows"]}
+        keys = {(int(s["match_id"]), s["season"]) for s in doc["shows"]}
         self.assertEqual(keys, {(201, 1), (202, 1)})  # 201 not duplicated, 203 excluded
 
     async def test_remove_show(self):
         await distrakt.add_show(self.user_id, "2026-06",
-                                {"trakt_id": 55, "season": 1, "title": "Oops", "slug": "slug-55"})
+                                {"ids": _ids(55), "season": 1, "title": "Oops"})
         await distrakt.add_show(self.user_id, "2026-06",
-                                {"trakt_id": 66, "season": 2, "title": "Keep", "slug": "slug-66"})
-        self.assertTrue(await distrakt.remove_show(self.user_id, "2026-06", 55, 1))
-        self.assertFalse(await distrakt.remove_show(self.user_id, "2026-06", 55, 1))  # already gone
+                                {"ids": _ids(66), "season": 2, "title": "Keep"})
+        self.assertTrue(await distrakt.remove_show(self.user_id, "2026-06", ItemKey("show", "tmdb", "55"), 1))
+        self.assertFalse(await distrakt.remove_show(self.user_id, "2026-06", ItemKey("show", "tmdb", "55"), 1))  # already gone
         doc = await distrakt.load_month(self.user_id, "2026-06")
-        self.assertEqual({(s["trakt_id"], s["season"]) for s in doc["shows"]}, {(66, 2)})
+        self.assertEqual({(int(s["match_id"]), s["season"]) for s in doc["shows"]}, {(66, 2)})
 
 
 class _Resp:
@@ -408,27 +427,27 @@ class PerUserIsolationTests(RolloverTestCase):
 
     async def test_two_users_rosters_are_independent_in_both_directions(self):
         await distrakt.add_show(self.user_id, "2026-08",
-                                {"trakt_id": 111, "season": 1, "title": "Mine", "slug": "slug-111"})
+                                {"ids": _ids(111), "season": 1, "title": "Mine"})
         await distrakt.add_show(self.other_id, "2026-08",
-                                {"trakt_id": 222, "season": 1, "title": "Theirs", "slug": "slug-222"})
+                                {"ids": _ids(222), "season": 1, "title": "Theirs"})
 
         mine = await distrakt.load_month(self.user_id, "2026-08")
         theirs = await distrakt.load_month(self.other_id, "2026-08")
-        self.assertEqual({s["trakt_id"] for s in mine["shows"]}, {111})
-        self.assertEqual({s["trakt_id"] for s in theirs["shows"]}, {222})
+        self.assertEqual({s["ids"]["trakt"] for s in mine["shows"]}, {111})
+        self.assertEqual({s["ids"]["trakt"] for s in theirs["shows"]}, {222})
 
         # A mutation on one side is invisible on the other, both ways round.
-        await distrakt.set_abandoned(self.user_id, "2026-08", 111, 1, True, abandoned_form="`f`")
+        await distrakt.set_abandoned(self.user_id, "2026-08", ItemKey("show", "tmdb", "111"), 1, True, abandoned_form="`f`")
         self.assertFalse((await distrakt.load_month(self.other_id, "2026-08"))["shows"][0]["abandoned"])
-        self.assertIsNone(await distrakt.set_abandoned(self.other_id, "2026-08", 111, 1, True))
+        self.assertIsNone(await distrakt.set_abandoned(self.other_id, "2026-08", ItemKey("show", "tmdb", "111"), 1, True))
 
         # Deleting the other user's only show leaves this user's roster intact.
-        self.assertTrue(await distrakt.remove_show(self.other_id, "2026-08", 222, 1))
-        self.assertFalse(await distrakt.remove_show(self.other_id, "2026-08", 111, 1))
+        self.assertTrue(await distrakt.remove_show(self.other_id, "2026-08", ItemKey("show", "tmdb", "222"), 1))
+        self.assertFalse(await distrakt.remove_show(self.other_id, "2026-08", ItemKey("show", "tmdb", "111"), 1))
         self.assertEqual(len((await distrakt.load_month(self.user_id, "2026-08"))["shows"]), 1)
 
     async def test_month_lists_and_backfill_gates_are_per_user(self):
-        await distrakt.add_show(self.user_id, "2026-08", {"trakt_id": 1, "season": 1})
+        await distrakt.add_show(self.user_id, "2026-08", {"ids": _ids(1), "season": 1})
         self.assertEqual(await distrakt.list_months(self.user_id), ["2026-08"])
         self.assertEqual(await distrakt.list_months(self.other_id), [])
         # A month that is backward/blocked for one user is a clean first seed for
@@ -461,8 +480,8 @@ class PerUserIsolationTests(RolloverTestCase):
         user's July stays open until THEY first access August."""
         for uid in (self.user_id, self.other_id):
             await distrakt.add_show(uid, "2026-07", {
-                "trakt_id": 101, "season": 1, "title": "Active",
-                "network": "Net", "slug": "slug-101"})
+                "ids": _ids(101), "season": 1, "title": "Active",
+                "network": "Net"})
 
         async def fake_read_month(endpoint, settings, **kw):
             return [], None
@@ -556,7 +575,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
 
     async def _roster(self, month: str, *, completed_on: str) -> list[dict]:
         await distrakt.add_show(self.user_id, month, {
-            "trakt_id": 700, "season": 1, "slug": "slug-700", "title": "Finished",
+            "ids": _ids(700), "season": 1, "title": "Finished",
             "network": "Net", "media": "show",
         })
         doc = await distrakt.load_month(self.user_id, month)
@@ -573,7 +592,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
 
     async def test_a_season_finished_this_month_stays(self):
         kept = await self._roster("2026-08", completed_on="2026-08-01")
-        self.assertEqual([s["trakt_id"] for s in kept], [700])
+        self.assertEqual([s["key"] for s in kept], [_key(700)])
 
     async def test_a_future_month_does_not_inherit_it_either(self):
         """September opened in July showed the same rows for the same reason."""
@@ -583,7 +602,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         """A show whose history has not been re-baselined yet has no date to
         judge by, and guessing would silently delete a roster row."""
         kept = await self._roster("2026-08", completed_on="")
-        self.assertEqual([s["trakt_id"] for s in kept], [700])
+        self.assertEqual([s["key"] for s in kept], [_key(700)])
 
     async def test_the_whole_path_from_watch_history_to_the_month_payload(self):
         """The reported bug, through the real machinery: watch history says the
@@ -596,8 +615,8 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         from app import distrakt_routes
 
         await distrakt.add_show(self.user_id, "2026-08", {
-            "trakt_id": 102, "season": 1, "slug": "slug-102", "title": "Finished In July",
-            "network": "Net", "media": "show", "tmdb": 1,
+            "ids": _ids(102), "season": 1, "title": "Finished In July",
+            "network": "Net", "media": "show",
         })
         # 8 of 8 episodes, the last of them watched on 30 July.
         progress = {1: {n: f"2026-07-{n + 10:02d}T00:00:00Z" for n in range(1, 8)}}
@@ -610,7 +629,8 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         # fields the rest of this file's SETTINGS stand-in has never needed.
         settings = SimpleNamespace(**vars(SETTINGS), public_base_url="")
 
-        with patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value=progress), \
+        with patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={102: progress}), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
@@ -627,15 +647,17 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         watched season is just "last time I watched something" — compute_live_shows
         keeps it only for a season it has bucketed as completed, so a half-watched
         show can never be dropped by this rule."""
-        state = {"shows": {"102": {"1": {"1": "2026-07-02T00:00:00Z"}}}}
-        self.assertEqual(watch_history.season_completed_map(state), {(102, 1): "2026-07-02"})
+        state = {"shows": {_key(102): {"ids": _ids(102),
+                                       "seasons": {"1": {"1": "2026-07-02T00:00:00Z"}}}}}
+        self.assertEqual(watch_history.season_completed_map(state),
+                         {(_key(102), 1): "2026-07-02"})
 
         # 102's season has 8 episodes; one of them is watched.
-        records = [{"trakt_id": 102, "season": 1, "title": "Half", "slug": "s"}]
+        records = [{"ids": _ids(102), "season": 1, "title": "Half"}]
         with patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             shows = await distrakt.compute_live_shows(
                 self.user_id, records, SETTINGS,
-                watched_lookup={(102, 1): 1},
+                watched_lookup={(_key(102), 1): 1},
                 completed_lookup=watch_history.season_completed_map(state),
             )
         self.assertNotEqual(shows[0]["bucket"], "completed")

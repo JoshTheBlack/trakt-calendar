@@ -953,18 +953,26 @@ class TrackerImportTests(RankerTestCase):
 
     def show(self, month: str, trakt_id: int, season: int, *, watched: int, total: int,
              bucket: str | None = None, title: str = "A Show", tmdb: int | None = 100) -> None:
+        """A roster row, written as the tracker writes one: keyed on the shared id
+        (tmdb here), with Trakt's own id kept beside it as an attribute."""
         asyncio.run(db.execute(
-            "INSERT INTO distrakt_shows (user_id, month, trakt_id, tmdb, slug, title, season, "
+            "INSERT INTO distrakt_shows (user_id, month, media, match_source, match_id, "
+            "trakt_id, tmdb, slug, title, season, "
             "network, watched, total, bucket, started_airing, finished_airing) "
-            "VALUES (?, ?, ?, ?, 'a-show', ?, ?, 'HBO', ?, ?, ?, 1, 1)",
-            (self.user_id, month, trakt_id, tmdb, title, season, watched, total, bucket),
+            "VALUES (?, ?, 'show', 'tmdb', ?, ?, ?, 'a-show', ?, ?, 'HBO', ?, ?, ?, 1, 1)",
+            (self.user_id, month, str(tmdb), trakt_id, tmdb, title, season,
+             watched, total, bucket),
         ))
 
-    def movie(self, trakt_id: int, watched_at: str, title: str = "A Film") -> None:
+    def movie(self, trakt_id: int, watched_at: str, title: str = "A Film",
+              tmdb: int | None = None) -> None:
+        """A watched-film row. Its shared id is whatever the play named — often
+        only the provider's own, which is why the import still looks a film up."""
         asyncio.run(db.execute(
-            "INSERT INTO distrakt_movie_watches (user_id, trakt_id, watched_at, title, year) "
-            "VALUES (?, ?, ?, ?, 2026)",
-            (self.user_id, trakt_id, watched_at, title),
+            "INSERT INTO distrakt_movie_watches (user_id, media, match_source, match_id, "
+            "trakt_id, watched_at, title, year) "
+            "VALUES (?, 'movie', 'tmdb', ?, ?, ?, ?, 2026)",
+            (self.user_id, str(tmdb or trakt_id), trakt_id, watched_at, title),
         ))
 
     def finished(self, media=Media.SHOW, year=None):
@@ -981,8 +989,8 @@ class TrackerImportTests(RankerTestCase):
         """A frozen month's counts stopped being refreshed the moment it froze,
         so recomputing from them would silently unfinish finished shows."""
         self.month("2026-01", closed=True)
-        self.show("2026-01", 10, 1, watched=0, total=0, bucket="completed")
-        self.show("2026-01", 11, 1, watched=0, total=0, bucket="cleanup")
+        self.show("2026-01", 10, 1, watched=0, total=0, bucket="completed", tmdb=100)
+        self.show("2026-01", 11, 1, watched=0, total=0, bucket="cleanup", tmdb=101)
         self.assertEqual([ref.ids["trakt"] for ref in self.finished()], [10])
 
     def test_an_open_month_is_worked_out_the_same_way_the_other_feature_does_it(self):
@@ -994,13 +1002,17 @@ class TrackerImportTests(RankerTestCase):
         work the month out instead — one rule, one answer.
         """
         self.month("2026-07")
-        self.show("2026-07", 10, 1, watched=0, total=0, title="Finished")
-        self.show("2026-07", 11, 1, watched=0, total=0, title="Halfway")
+        self.show("2026-07", 10, 1, watched=0, total=0, title="Finished", tmdb=100)
+        self.show("2026-07", 11, 1, watched=0, total=0, title="Halfway", tmdb=101)
         live = [
-            {"trakt_id": 10, "season": 1, "title": "Finished", "network": "HBO",
-             "tmdb": 100, "slug": "a-show", "total": 8, "bucket": "completed"},
-            {"trakt_id": 11, "season": 1, "title": "Halfway", "network": "HBO",
-             "tmdb": 101, "slug": "b-show", "total": 8, "bucket": "keepup"},
+            {"media": "show", "match_source": "tmdb", "match_id": "100", "season": 1,
+             "title": "Finished", "network": "HBO",
+             "ids": {"trakt": 10, "tmdb": 100, "slug": "a-show"},
+             "total": 8, "bucket": "completed"},
+            {"media": "show", "match_source": "tmdb", "match_id": "101", "season": 1,
+             "title": "Halfway", "network": "HBO",
+             "ids": {"trakt": 11, "tmdb": 101, "slug": "b-show"},
+             "total": 8, "bucket": "keepup"},
         ]
         with self.linked_account(), patched(distrakt, "compute_live_shows", async_result(live)):
             refs = self.finished()
@@ -1040,15 +1052,18 @@ class TrackerImportTests(RankerTestCase):
     def test_the_year_filter_is_when_it_was_watched(self):
         self.month("2025-06", closed=True)
         self.month("2026-06", closed=True)
-        self.show("2025-06", 10, 1, watched=0, total=5, bucket="completed", title="Older")
-        self.show("2026-06", 11, 1, watched=0, total=5, bucket="completed", title="Newer")
+        self.show("2025-06", 10, 1, watched=0, total=5, bucket="completed", title="Older",
+                  tmdb=100)
+        self.show("2026-06", 11, 1, watched=0, total=5, bucket="completed", title="Newer",
+                  tmdb=101)
         self.assertEqual([r.title for r in self.finished(year=2026)], ["Newer"])
         self.assertEqual(
             asyncio.run(ranker_import.available_years(self.user_id, Media.SHOW)), [2026, 2025])
 
     def test_a_movie_is_resolved_to_a_real_id_map(self):
-        """Those records carry no tmdb, so each needs one summary lookup — and
-        the poster URL that comes back with it is kept for later."""
+        """Those records carry no runtime and often no artwork id, so each needs
+        one summary lookup — and the poster URL that comes back with it is kept
+        for later."""
         self.movie(77, "2026-03-04T00:00:00.000Z")
         summary = {"title": "A Film", "year": 2025, "runtime": 101,
                    "ids": {"trakt": 77, "tmdb": 550, "imdb": "tt0137523", "slug": ""},
@@ -1063,7 +1078,7 @@ class TrackerImportTests(RankerTestCase):
             "https://image.tmdb.org/p/w500/x.jpg")
 
     def test_a_movie_whose_lookup_fails_still_imports(self):
-        self.movie(77, "2026-03-04T00:00:00.000Z")
+        self.movie(77, "2026-03-04T00:00:00.000Z", tmdb=550)
 
         async def _boom(*args, **kwargs):
             raise TraktError("Could not reach Trakt", 502)
@@ -1072,8 +1087,11 @@ class TrackerImportTests(RankerTestCase):
             ref, = self.finished(Media.MOVIE)
         # It keeps the id it had and simply has no artwork key, which the
         # renderer answers with a placeholder rather than a missing title.
-        self.assertEqual(ref.ids, {"trakt": 77})
-        self.assertIsNone(ref.identity())
+        # It keeps exactly what the row was filed under, plus the id a lookup
+        # would have been placed with — so it still ranks, and still resolves to
+        # the same identity it was stored under.
+        self.assertEqual(ref.ids, {"tmdb": "550", "trakt": 77})
+        self.assertEqual(ref.identity(), ("tmdb", "550"))
 
     def test_the_import_route_adds_to_the_pool(self):
         self.month("2026-01", closed=True)

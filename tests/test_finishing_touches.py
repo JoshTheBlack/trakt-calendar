@@ -34,7 +34,7 @@ from app import auth, cache, calendar_cache, calendar_state, db, distrakt as dis
 from app.providers.trakt import TraktError  # noqa: E402
 from app.providers.trakt import transport as trakt_transport  # noqa: E402
 from app.config import Settings, load_settings, save_settings  # noqa: E402
-from app.providers.base import Item, Media, Source  # noqa: E402
+from app.providers.base import Item, ItemKey, Media, Source  # noqa: E402
 from app.main import app  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
@@ -51,7 +51,7 @@ def _fake_premiere_read(trakt_id: int, season: int):
     async def read_month(endpoint, settings, **kw):
         item = Item(
             source=Source.TRAKT, media=Media.SHOW, id=f"slug-{trakt_id}",
-            ids={"trakt": trakt_id, "slug": f"slug-{trakt_id}"},
+            ids={"trakt": trakt_id, "tmdb": trakt_id, "slug": f"slug-{trakt_id}"},
             detail_url=f"https://trakt.tv/shows/slug-{trakt_id}",
             air_date="2026-08-01", air_ts=0.0, air_display="01 Aug 2026",
             air_time="20:00", day_of_week="Saturday",
@@ -109,8 +109,8 @@ class BackupPanelTests(FinishingTestCase):
 
     def _add_show(self, user_id: int, title: str) -> None:
         asyncio.run(distrakt_store.add_show(user_id, "2026-07", {
-            "trakt_id": 11, "season": 1, "slug": "a-show", "title": title,
-            "network": "HBO", "media": "show", "tmdb": None,
+            "ids": {"trakt": 11, "tmdb": 11, "slug": "a-show"}, "season": 1, "title": title,
+            "network": "HBO", "media": "show",
         }))
 
     def test_the_page_offers_a_download_and_a_restore(self):
@@ -138,7 +138,8 @@ class BackupPanelTests(FinishingTestCase):
         self._add_show(self.user_id, "Kept Show")
         exported = self.client.get("/api/distrakt/export").json()
 
-        asyncio.run(distrakt_store.remove_show(self.user_id, "2026-07", 11, 1))
+        asyncio.run(distrakt_store.remove_show(
+            self.user_id, "2026-07", ItemKey("show", "tmdb", "11"), 1))
         self.assertEqual(self.client.get("/api/distrakt/list?year=2026&month=7").json()["shows"], [])
 
         resp = self.client.post("/api/distrakt/restore", json=exported)
@@ -181,20 +182,21 @@ class RemovingFromTheTrackerTests(FinishingTestCase):
         super().setUp()
         self.user_id = self.tracker_user()
         self.sign_in_as(self.user_id)
-        self._add(202, 1, "slug-202", distrakt_store.SOURCE_CALENDAR)
+        self._add(202, 1, "slug-202", distrakt_store.ADDED_BY_CALENDAR)
 
-    def _add(self, trakt_id, season, slug, source):
+    def _add(self, tid, season, slug, added_by):
         asyncio.run(distrakt_store.add_show(self.user_id, "2026-08", {
-            "trakt_id": trakt_id, "season": season, "slug": slug, "title": f"Show {trakt_id}",
-            "network": "Net", "media": "show", "source": source,
+            "ids": {"trakt": tid, "tmdb": tid, "slug": slug}, "season": season,
+            "title": f"Show {tid}",
+            "network": "Net", "media": "show", "added_by": added_by,
         }))
 
-    def _remove(self, trakt_id=202, season=1):
+    def _remove(self, tid=202, season=1):
         # The payload rebuild at the end of the route is a whole live month and
         # not what is under test; the removal itself is.
         with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/remove", json={
-                "year": 2026, "month": 8, "trakt_id": trakt_id, "season": season})
+                "year": 2026, "month": 8, "key": f"show:tmdb:{tid}", "season": season})
 
     def _marks(self) -> set:
         return asyncio.run(calendar_state.not_watching_ids(self.user_id))
@@ -208,8 +210,8 @@ class RemovingFromTheTrackerTests(FinishingTestCase):
     def test_removing_a_hand_added_row_leaves_the_calendar_alone(self):
         """THE POINT OF THE PROVENANCE COLUMN. Undoing a manual add is not a
         statement about watching, and must not take the show off the calendar."""
-        self._add(404, 1, "slug-404", distrakt_store.SOURCE_MANUAL)
-        resp = self._remove(trakt_id=404, season=1)
+        self._add(404, 1, "slug-404", distrakt_store.ADDED_BY_MANUAL)
+        resp = self._remove(tid=404, season=1)
         self.assertEqual(resp.status_code, 200)
         self.assertNotIn("slug-404", self._marks())
         self.assertFalse(resp.json()["hidden_on_calendar"])
@@ -217,8 +219,8 @@ class RemovingFromTheTrackerTests(FinishingTestCase):
     def test_removing_a_watch_history_row_leaves_the_calendar_alone(self):
         """Nor is dropping something the tracker picked up from watch history —
         it is not re-imported either, so removing it already sticks."""
-        self._add(505, 3, "slug-505", distrakt_store.SOURCE_HISTORY)
-        self._remove(trakt_id=505, season=3)
+        self._add(505, 3, "slug-505", distrakt_store.ADDED_BY_HISTORY)
+        self._remove(tid=505, season=3)
         self.assertNotIn("slug-505", self._marks())
 
     def test_the_removed_calendar_row_does_not_come_straight_back(self):
@@ -230,19 +232,21 @@ class RemovingFromTheTrackerTests(FinishingTestCase):
             asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
 
         doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
-        self.assertEqual([s["trakt_id"] for s in doc["shows"]], [])
+        self.assertEqual([s["key"] for s in doc["shows"]], [])
 
-    def test_a_row_with_no_slug_is_marked_by_its_trakt_id(self):
-        """The calendar keys an item by slug and falls back to the trakt id; a
-        mark written under the wrong key would silently match nothing."""
-        self._add(303, 2, "", distrakt_store.SOURCE_CALENDAR)
-        self._remove(trakt_id=303, season=2)
+    def test_a_row_with_no_slug_is_marked_by_its_source_id(self):
+        """The calendar keys an item by slug and falls back to the source's own
+        id; a mark written under the wrong one would silently match nothing. Note
+        that is NOT the id the tracker row is keyed on — the row is filed under
+        the shared id, and the mark has to be written in the calendar's terms."""
+        self._add(303, 2, "", distrakt_store.ADDED_BY_CALENDAR)
+        self._remove(tid=303, season=2)
         self.assertIn("303", self._marks())
 
     def test_a_row_that_was_never_there_marks_nothing(self):
         """A 404 must not leave a calendar mark behind for a show the tracker
         never held."""
-        resp = self._remove(trakt_id=999, season=1)
+        resp = self._remove(tid=999, season=1)
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(self._marks(), set())
 
@@ -252,8 +256,8 @@ class RemovingFromTheTrackerTests(FinishingTestCase):
         with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(606, 1)):
             asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
         doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
-        added = next(s for s in doc["shows"] if s["trakt_id"] == 606)
-        self.assertEqual(added["source"], distrakt_store.SOURCE_CALENDAR)
+        added = next(s for s in doc["shows"] if s["ids"]["trakt"] == 606)
+        self.assertEqual(added["added_by"], distrakt_store.ADDED_BY_CALENDAR)
 
 
 class LegacyRowRemovalTests(FinishingTestCase):
@@ -270,16 +274,16 @@ class LegacyRowRemovalTests(FinishingTestCase):
         self.user_id = self.tracker_user()
         self.sign_in_as(self.user_id)
 
-    def _add_legacy(self, trakt_id, slug):
+    def _add_legacy(self, tid, slug):
         asyncio.run(distrakt_store.add_show(self.user_id, "2026-08", {
-            "trakt_id": trakt_id, "season": 1, "slug": slug, "title": "Legacy",
-            "network": "Net", "media": "show",  # no source: the pre-column shape
+            "ids": {"trakt": tid, "tmdb": tid, "slug": slug}, "season": 1, "title": "Legacy",
+            "network": "Net", "media": "show",  # no added_by: the pre-column shape
         }))
 
-    def _remove(self, trakt_id):
+    def _remove(self, tid):
         with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/remove", json={
-                "year": 2026, "month": 8, "trakt_id": trakt_id, "season": 1})
+                "year": 2026, "month": 8, "key": f"show:tmdb:{tid}", "season": 1})
 
     def test_a_legacy_row_the_calendar_would_re_add_is_marked(self):
         self._add_legacy(707, "slug-707")

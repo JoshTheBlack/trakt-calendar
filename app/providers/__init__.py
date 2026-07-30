@@ -14,12 +14,22 @@ module happens to be loaded first.
 """
 from __future__ import annotations
 
-from .base import Capabilities, ID_KEYS, Item, Media, Provider, Source, collect_ids, parse_media
+from .base import (
+    ID_KEYS,
+    Capabilities,
+    Item,
+    Media,
+    Provider,
+    Source,
+    SyncPort,
+    collect_ids,
+    parse_media,
+)
 
 __all__ = [
-    "Capabilities", "ID_KEYS", "Item", "Media", "Provider", "Source",
+    "Capabilities", "ID_KEYS", "Item", "Media", "Provider", "Source", "SyncPort",
     "collect_ids", "parse_media",
-    "register", "get", "registered", "for_calendar",
+    "register", "get", "registered", "for_calendar", "for_tracker",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -77,4 +87,23 @@ def for_calendar(settings) -> Provider | None:
     for provider in _REGISTRY.values():
         if provider.is_configured(settings):
             return provider
+    return None
+
+
+def for_tracker() -> SyncPort | None:
+    """The port whose private, per-person reads back the tracker, or None when no
+    registered source has any.
+
+    NO `settings` ARGUMENT, unlike for_calendar. Whether a token happens to be
+    filled in does not change WHICH source the tracker reads — it changes whether
+    that source answers, which the port's own callers already degrade on (an
+    unreadable history serves the cache). With one private-data source registered
+    the answer does not depend on configuration at all; when there are two,
+    choosing between them becomes a stored preference, and this is the function
+    that grows the argument for it.
+    """
+    _load_builtins()
+    for provider in _REGISTRY.values():
+        if provider.capabilities.private_user_data and provider.sync_port is not None:
+            return provider.sync_port
     return None

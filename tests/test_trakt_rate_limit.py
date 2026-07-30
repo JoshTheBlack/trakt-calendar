@@ -207,14 +207,21 @@ class CachedGetContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _record(trakt_id, season, **over):
+    """A stored roster record. Its shared id is derived from the Trakt id so each
+    fixture is a distinct row, and `_key` names the same row back."""
     rec = {
-        "trakt_id": trakt_id, "season": season, "tmdb": 555, "slug": "s", "media": "show",
+        "media": "show", "ids": {"trakt": trakt_id, "tmdb": 500 + trakt_id, "slug": "s"},
+        "season": season,
         "title": f"Show {trakt_id}", "network": "HBO", "abandoned": False, "abandoned_form": None,
         "watched": 3, "total": 12, "cadence": "Mon", "premiere": "1/5", "finale": "3/1",
         "started_airing": True, "finished_airing": False, "bucket": "keepup",
     }
     rec.update(over)
     return rec
+
+
+def _key(trakt_id) -> str:
+    return f"show:tmdb:{500 + trakt_id}"
 
 
 class PerShowDegradeTests(unittest.IsolatedAsyncioTestCase):
@@ -228,19 +235,19 @@ class PerShowDegradeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_one_show_unavailable_rest_fine(self):
         records = [_record(1, 1), _record(2, 1)]
-        watched = {(1, 1): 4, (2, 1): 7}
+        watched = {(_key(1), 1): 4, (_key(2), 1): 7}
         with patch("app.providers.trakt.detail.fetch_season_detail", self._fake_fsd):
             shows = await distrakt_store.compute_live_shows(
                 0, records, FAKE_SETTINGS, watched_lookup=watched, allow_degrade=True)
-        by_id = {s["trakt_id"]: s for s in shows}
-        self.assertFalse(by_id[1]["unavailable"])
-        self.assertEqual(by_id[1]["total"], 10)  # live value used
-        self.assertTrue(by_id[2]["unavailable"])
-        self.assertEqual(by_id[2]["total"], 12)  # fell back to last-known stored total
+        by_key = {s["key"]: s for s in shows}
+        self.assertFalse(by_key[_key(1)]["unavailable"])
+        self.assertEqual(by_key[_key(1)]["total"], 10)  # live value used
+        self.assertTrue(by_key[_key(2)]["unavailable"])
+        self.assertEqual(by_key[_key(2)]["total"], 12)  # fell back to last-known stored total
 
     async def test_raises_when_not_degrading(self):
         records = [_record(1, 1), _record(2, 1)]
-        watched = {(1, 1): 4}
+        watched = {(_key(1), 1): 4}
         with patch("app.providers.trakt.detail.fetch_season_detail", self._fake_fsd):
             with self.assertRaises(TraktRateLimitError):
                 await distrakt_store.compute_live_shows(

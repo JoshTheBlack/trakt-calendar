@@ -244,15 +244,6 @@ async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: 
     return {"season": season, **_derive_season(episodes, tz)}
 
 
-async def fetch_show_tmdb(settings: Settings, trakt_id, client: httpx.AsyncClient | None = None) -> int | None:
-    """The TMDB id for a Trakt show (/shows/{id} -> ids.tmdb). Backfills distrakt
-    records added before tmdb was stored. Cached (ids never change)."""
-    c = client or transport.shared_client()
-    data = await transport._cached_get(c, settings, f"shows/{trakt_id}", {})
-    tmdb = ((data or {}).get("ids") or {}).get("tmdb")
-    return int(tmdb) if tmdb else None
-
-
 async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     """/shows/{id}/seasons?extended=full -> [{season, episode_count}] for
     seasons Trakt has actually populated with episodes (skips season 0/
@@ -339,23 +330,19 @@ async def search_titles(settings: Settings, media: str, query: str) -> list[dict
 
 
 async def search_shows(settings: Settings, query: str) -> list[dict]:
-    """/search/show?query=... -> compact [{trakt_id, slug, title, year, network}]
-    for the add-show flow. Empty query returns []."""
-    out = []
-    for entry in await search_titles(settings, "show", query):
-        ids = entry["ids"]
-        tid = ids.get("trakt")
-        if tid is None:
-            continue
-        out.append({
-            "trakt_id": int(tid),
-            "tmdb": ids.get("tmdb"),
-            "slug": ids.get("slug") or "",
-            "title": entry["title"],
-            "year": entry["year"],
-            "network": entry["network"],
-        })
-    return out
+    """/search/show?query=... -> compact [{ids, title, year, network}] for the
+    add-show flow. Empty query returns [].
+
+    Carries the whole id map rather than the two ids the add flow used to need:
+    the tracker files a row under whichever shared id it can, so a result that had
+    been flattened to a Trakt id could not be stored at all.
+    """
+    return [
+        {"ids": entry["ids"], "title": entry["title"], "year": entry["year"],
+         "network": entry["network"]}
+        for entry in await search_titles(settings, "show", query)
+        if entry["ids"].get("trakt") is not None
+    ]
 
 
 async def fetch_movie_summary(settings: Settings, trakt_id) -> dict | None:

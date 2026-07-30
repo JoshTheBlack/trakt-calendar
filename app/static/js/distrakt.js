@@ -57,7 +57,7 @@ function applyMonthResponse(d) {
     monthClosed = !!d.closed || !!d.readonly;
     // Build network -> tmdb from the roster so the emoji-map logos can generate/regen.
     networkTmdb = {};
-    (d.shows || []).forEach(s => { if (s.network && s.tmdb) networkTmdb[s.network] = s.tmdb; });
+    (d.shows || []).forEach(s => { const tmdb = (s.ids || {}).tmdb; if (s.network && tmdb) networkTmdb[s.network] = tmdb; });
     applyReadonlyState(monthClosed, d.closed ? 'frozen' : (d.readonly ? 'untracked' : ''));
     renderNotice(d);
     renderShowList(d.shows || [], d.movies || []);
@@ -129,10 +129,10 @@ async function importFromCalendar() {
 // for those rows, and stays quiet about the calendar for a row this page owns.
 // The server has the last word (`hidden_on_calendar`), since a row predating the
 // provenance column only finds out by asking the calendar.
-async function deleteShow(traktId, season, event, source) {
+async function deleteShow(key, season, event, addedBy) {
     // A closed month never touches the calendar, whatever the row says — see
     // api_distrakt_remove. Only an open month can, and only for a calendar row.
-    const hides = !monthClosed && (source === 'calendar' || !source);
+    const hides = !monthClosed && (addedBy === 'calendar' || !addedBy);
     confirmInline(event.currentTarget,
         hides
             ? 'Remove this show and mark it not-watching on your calendar? This cannot be undone.'
@@ -144,7 +144,7 @@ async function deleteShow(traktId, season, event, source) {
                 const res = await fetch('/api/distrakt/remove', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH, trakt_id: traktId, season })
+                    body: JSON.stringify({ year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH, key, season })
                 });
                 const d = await res.json();
                 if (!d.ok) throw new Error(d.error || 'failed');
@@ -344,10 +344,10 @@ function filmRow(m) {
             <span class="distrakt-network">Film</span>
             <span class="distrakt-counts">${esc(m.year || '')}</span>
             <span class="distrakt-dates">${esc(day)}</span>
-            <span class="distrakt-row-actions">${m.trakt_id ? `
+            <span class="distrakt-row-actions">${m.key ? `
                 <button type="button" class="btn-ghost small danger" title="Remove this film"
                         data-title="${esc(m.title || '')}"
-                        onclick="deleteFilm(${m.trakt_id}, this)">✕</button>` : ''}
+                        onclick="deleteFilm('${esc(m.key)}', this)">✕</button>` : ''}
             </span>
         </div>`;
 }
@@ -358,7 +358,7 @@ function filmRow(m) {
 // The title comes off the button rather than being interpolated into the onclick
 // attribute: a film called "Good Luck, Have Fun, Don't Die" carries both quote
 // characters, and either one ends the attribute early and kills the handler.
-async function deleteFilm(traktId, button) {
+async function deleteFilm(key, button) {
     const title = (button && button.dataset.title) || '';
     confirmInline(button,
         `Forget watching ${title || 'this film'}? It comes off every month and out of Rankings imports.`,
@@ -368,7 +368,7 @@ async function deleteFilm(traktId, button) {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        trakt_id: traktId,
+                        key,
                         year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
                     }),
                 });
@@ -398,18 +398,18 @@ function showRow(s) {
     // re-watched one episode of does not belong on its list), but its verdicts
     // were settled when it froze and are not up for re-deciding now.
     const remove = `
-            <button type="button" class="btn-ghost small danger" onclick="deleteShow(${s.trakt_id}, ${s.season}, event, '${s.source || ''}')" title="${monthClosed ? 'Remove from this month' : 'Remove from tracker'}">✕</button>`;
+            <button type="button" class="btn-ghost small danger" onclick="deleteShow('${esc(s.key)}', ${s.season}, event, '${esc(s.added_by || '')}')" title="${monthClosed ? 'Remove from this month' : 'Remove from tracker'}">✕</button>`;
     const actions = monthClosed ? remove : `
-            <button type="button" class="btn-ghost small" onclick="toggleAbandon(${s.trakt_id}, ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>` + remove;
+            <button type="button" class="btn-ghost small" onclick="toggleAbandon('${esc(s.key)}', ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>` + remove;
     const net = s.network || '';
     // Prefer the TMDB network logo (shared cache with the calendar); if it isn't
     // cached (404) fall back to the mapped emoji token.
     const badge = net
-        ? `<img class="distrakt-logo" src="/api/network-logo?name=${encodeURIComponent(net)}&tmdb=${s.tmdb || ''}" alt="" data-emoji="${esc(emojiFor(net))}" onerror="onLogoError(this)">`
+        ? `<img class="distrakt-logo" src="/api/network-logo?name=${encodeURIComponent(net)}&tmdb=${(s.ids || {}).tmdb || ''}" alt="" data-emoji="${esc(emojiFor(net))}" onerror="onLogoError(this)">`
         : esc(emojiFor(net));
     return `
         <div class="distrakt-show-row${s.abandoned ? ' abandoned' : ''}${s.unavailable ? ' unavailable' : ''}" title="${esc(net)}"
-             data-trakt-id="${s.trakt_id}" data-season="${s.season}" data-title="${esc(s.title)}"
+             data-key="${esc(s.key)}" data-season="${s.season}" data-title="${esc(s.title)}"
              onclick="openDistraktDetails(this, event)">
             <span class="distrakt-badge">${badge}</span>
             <span class="distrakt-title"><span class="tt">${esc(s.title)}</span></span>
@@ -433,7 +433,7 @@ function closeDistraktDetails() {
 async function openDistraktDetails(row, event) {
     // The row carries its own controls; clicking Abandon must not also open this.
     if (event && event.target.closest('button, a')) return;
-    const traktId = row.dataset.traktId;
+    const key = row.dataset.key;
     const season = row.dataset.season;
     const title = row.dataset.title || 'Details';
 
@@ -444,7 +444,7 @@ async function openDistraktDetails(row, event) {
     document.getElementById('distraktDetailsModal').classList.add('open');
 
     try {
-        const res = await fetch(`/api/distrakt/details?trakt_id=${encodeURIComponent(traktId)}`
+        const res = await fetch(`/api/distrakt/details?key=${encodeURIComponent(key)}`
             + `&season=${encodeURIComponent(season)}`);
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
@@ -572,12 +572,12 @@ function setupTitleScroll(host) {
     });
 }
 
-async function toggleAbandon(traktId, season, abandoned) {
+async function toggleAbandon(key, season, abandoned) {
     try {
         const res = await fetch('/api/distrakt/abandon', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH, trakt_id: traktId, season, abandoned })
+            body: JSON.stringify({ year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH, key, season, abandoned })
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
@@ -665,7 +665,7 @@ async function pickShow(i) {
     document.getElementById('addSeasonShowTitle').textContent = pickedShow.title;
     panel.hidden = false;
     list.innerHTML = '<div class="distrakt-empty">Loading seasons…</div>';
-    const url = `/api/distrakt/seasons?id=${encodeURIComponent(pickedShow.trakt_id)}`;
+    const url = `/api/distrakt/seasons?id=${encodeURIComponent(pickedShow.ids.trakt)}`;
     console.log('[distrakt] seasons ->', url);
     try {
         const res = await fetch(url);
@@ -704,7 +704,7 @@ async function addPickedShow(season) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
-                trakt_id: pickedShow.trakt_id, tmdb: pickedShow.tmdb, slug: pickedShow.slug,
+                ids: pickedShow.ids,
                 title: pickedShow.title, network: pickedShow.network, season
             })
         });
@@ -783,7 +783,7 @@ async function addPickedMovie(i) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                trakt_id: picked.trakt_id, title: picked.title, year: picked.year,
+                ids: picked.ids, title: picked.title, year: picked.year,
                 watched_on: document.getElementById('addMovieDate').value,
                 // Which month to re-render afterwards: the one on screen, which
                 // is not necessarily the one the film was filed under.

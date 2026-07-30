@@ -16,6 +16,7 @@ Run from the repo root:
 """
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -377,6 +378,29 @@ class RenderPost2Tests(unittest.TestCase):
         rendered = fmt.render_post2(shows, self.emoji, ":tv:")
         self.assertIn("**Completed**\n> :_nf: ~~`Ghosted S01`~~", rendered)
         self.assertIn("**Abandoned**\n> :_nf: ~~`Cancelled Show S01 (2/8)`~~", rendered)
+
+
+class BucketVocabularyTests(unittest.TestCase):
+    """The bucket names are read outside this module — stored on a frozen record,
+    shipped to the browser, and tested against by the rollover and the backfill —
+    so the closed set is stated once here."""
+
+    def test_a_bucket_is_the_string_it_has_always_been(self):
+        """No conversion at any boundary: the value goes into a database column
+        and a JSON payload as-is, which is what a StrEnum buys over a class of
+        constants."""
+        self.assertEqual(fmt.Bucket.COMPLETED, "completed")
+        self.assertEqual(f"{fmt.Bucket.KEEPUP}", "keepup")
+        self.assertEqual(json.dumps({"b": fmt.Bucket.CLEANUP}), '{"b": "cleanup"}')
+
+    def test_bucket_of_answers_with_a_member(self):
+        show = {"watched": 8, "total": 8, "started_airing": True}
+        self.assertIs(fmt.bucket_of(show, show), fmt.Bucket.COMPLETED)
+
+    def test_every_bucket_gets_a_group_whether_or_not_anything_lands_in_it(self):
+        """Callers read one bucket without first checking that it exists."""
+        groups = fmt._group_by_bucket([])
+        self.assertEqual(set(groups), set(fmt.Bucket))
 
 
 if __name__ == "__main__":

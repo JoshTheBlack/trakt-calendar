@@ -228,8 +228,8 @@ class AdmittedActorTests(DistraktTestCase):
         owner = self.tracker_user("owner", token="owner-token")
         other = self.tracker_user("other", token="other-token")
         asyncio.run(distrakt_routes.distrakt_store.add_show(owner, "2026-07", {
-            "trakt_id": 42, "season": 1, "slug": "secret-show", "title": "Secret Show",
-            "network": "HBO", "media": "show", "tmdb": None,
+            "ids": {"trakt": 42, "tmdb": 42, "slug": "secret-show"}, "season": 1,
+            "title": "Secret Show", "network": "HBO", "media": "show",
         }))
 
         self.sign_in_as(other)
@@ -289,8 +289,8 @@ class RequestingUsersTokenTests(DistraktTestCase):
     def test_every_trakt_call_a_month_read_makes_carries_the_users_token(self):
         user_id = self.tracker_user(token="USER-A-TOKEN")
         asyncio.run(distrakt_routes.distrakt_store.add_show(user_id, "2026-07", {
-            "trakt_id": 7, "season": 2, "slug": "show", "title": "Show",
-            "network": "HBO", "media": "show", "tmdb": 1,
+            "ids": {"trakt": 7, "tmdb": 1, "slug": "show"}, "season": 2, "title": "Show",
+            "network": "HBO", "media": "show",
         }))
         recorder = RecordingClient()
         self.sign_in_as(user_id)
@@ -306,8 +306,8 @@ class RequestingUsersTokenTests(DistraktTestCase):
         second = self.tracker_user("second", token="SECOND-TOKEN")
         for user_id in (first, second):
             asyncio.run(distrakt_routes.distrakt_store.add_show(user_id, "2026-07", {
-                "trakt_id": 7, "season": 2, "slug": "show", "title": "Show",
-                "network": "HBO", "media": "show", "tmdb": 1,
+                "ids": {"trakt": 7, "tmdb": 1, "slug": "show"}, "season": 2, "title": "Show",
+                "network": "HBO", "media": "show",
             }))
 
         seen = {}

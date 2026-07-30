@@ -76,6 +76,98 @@ def collect_ids(raw: Mapping[str, Any]) -> dict[str, Any]:
     return {key: raw[key] for key in ID_KEYS if raw.get(key) not in (None, "")}
 
 
+# ---------------------------------------------------------------------------
+# Cross-source title identity
+# ---------------------------------------------------------------------------
+# The identity waterfall, first shared non-empty id wins. tmdb leads because it
+# is the id both Trakt and Simkl expose AND the one that indexes TMDB artwork;
+# tvdb is strong for TV, imdb is near-universal but weakest to match on, and mal
+# is often the only id two services share for anime.
+#
+# THIS IS A SUBSET OF ID_KEYS, DELIBERATELY. `trakt`, `slug` and `simkl` are the
+# ids you need to CALL a service, and they are the ones a second service does not
+# have — so a row keyed on one of them would be two rows for one title the moment
+# the same title arrived from somewhere else. What is left is the ids that name a
+# title in a space nobody here owns, which is what makes them safe to key on.
+MATCH_SOURCES = ("tmdb", "tvdb", "imdb", "mal")
+
+
+def resolve_identity(ids: Mapping[str, Any]) -> tuple[str, str] | None:
+    """THE identity waterfall: (match_source, match_id) for the first of
+    MATCH_SOURCES this title is actually known in, or None when it is known in
+    none of them and so cannot be told apart from another title of the same name.
+
+    The id is stringified because imdb ids are not numbers and a column holding
+    both has to hold text.
+    """
+    for source in MATCH_SOURCES:
+        value = ids.get(source)
+        if value not in (None, "", 0):
+            return source, str(value)
+    return None
+
+
+@dataclass(frozen=True)
+class ItemKey:
+    """One title's identity, said without naming who told us about it.
+
+    The same triple two of this app's features key their rows on, and the reason
+    they can agree about what "the same title" means: whichever shared id space
+    the waterfall landed in, plus the id in it. `str()` gives the flat
+    "{media}:{match_source}:{match_id}" form used where one key has to travel as
+    a single string — a dict key, an HTML id, a client-supplied item reference.
+    """
+    media: str
+    match_source: str
+    match_id: str
+
+    def __str__(self) -> str:
+        return f"{self.media}:{self.match_source}:{self.match_id}"
+
+
+def item_key(media: str, match_source: str, match_id: str) -> str:
+    """The flat string form of an ItemKey."""
+    return str(ItemKey(media, match_source, match_id))
+
+
+def parse_item_key(value: Any) -> ItemKey:
+    """Parse a flat item key, raising rather than returning a sentinel a caller
+    could forget to check.
+
+    Split at most twice, because an imdb or mal id is opaque to us and may one day
+    contain the separator; media and match_source never can, since both come from
+    closed sets checked here.
+
+    RAISES ValueError, not any one feature's refusal type: the two features that
+    parse these keys answer a bad one differently (a board 400s with its own error
+    class, the tracker with its own), and the parsing is the same either way.
+    """
+    if not isinstance(value, str):
+        raise ValueError("Item keys must be strings.")
+    parts = value.split(":", 2)
+    if len(parts) != 3:
+        raise ValueError(f"Malformed item key: {value!r}.")
+    media, match_source, match_id = parts
+    if media not in frozenset(Media):
+        raise ValueError(f"Unknown media type {media!r}.")
+    if match_source not in MATCH_SOURCES:
+        raise ValueError(f"Unknown match source {match_source!r}.")
+    if not match_id:
+        raise ValueError("An item key needs a match id.")
+    return ItemKey(media, match_source, match_id)
+
+
+def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
+    """The ItemKey for a title known by `ids`, or None when the waterfall found
+    nothing to key on. Pairs the waterfall with the media type, because a TMDB id
+    is namespaced per media kind — movie 550 and TV 550 are different titles."""
+    identity = resolve_identity(ids)
+    if identity is None:
+        return None
+    match_source, match_id = identity
+    return ItemKey(str(media), match_source, match_id)
+
+
 @dataclass
 class Item:
     """One airing on the calendar, as any source must describe it.
@@ -169,18 +261,86 @@ class Capabilities:
         return True
 
 
+class SyncPort(Protocol):
+    """The private, per-person reads a source must answer before it can back the
+    tracker: what somebody has watched, when they watched it, and a cheap way to
+    tell whether any of that has changed since last time.
+
+    ITS OWN PROTOCOL, not part of `Provider`, because the consumer and the
+    failure story are different: the calendar degrades to "this month could not
+    be read", while a tracker that cannot read your history has nothing to count
+    at all. A source that only publishes a calendar implements none of this and
+    says so by declaring `private_user_data=False`.
+
+    THE SHOW ID THESE TAKE IS THE SOURCE'S OWN — the value a roster row carries
+    as `trakt_id`, and what a second source would carry as `simkl_id`. It is
+    deliberately NOT the shared match id the row is keyed on: you need the
+    source's id to place the call and the shared id to file the answer, and
+    conflating them is what makes a tracker single-source.
+
+    The event and candidate shapes below are still the source's own payloads
+    rather than a normalized record. Normalizing them is worth doing when there
+    is a second set to normalize against; inventing the neutral shape from one
+    example would be guessing.
+    """
+
+    async def fetch_last_activities(self, settings: Settings) -> dict:
+        """A small, fixed-size "last changed at" blob, independent of library
+        size, that a sync can gate on so an unchanged history costs one call."""
+        ...
+
+    async def fetch_history(self, settings: Settings, start_at: str | None = None) -> list[dict]:
+        """This person's watch EVENTS, optionally only those since `start_at`
+        (YYYY-MM-DD). Re-seeing an event already applied must be harmless."""
+        ...
+
+    async def fetch_progress_details(self, settings: Settings,
+                                     show_ids) -> dict[int, dict[int, dict[int, str]]]:
+        """{show_id: {season: {episode: watched_at}}} for several shows at once.
+
+        A batch call rather than one-per-show because pooling the connections is
+        the source's business, not its caller's — the tracker baselines a whole
+        roster at a time and should not have to hold a client to do it.
+        """
+        ...
+
+    async def fetch_watched_progress(self, settings: Settings,
+                                     since_days: int | None = None) -> list[dict]:
+        """Recently-active seasons, as candidates for "you seem to be watching
+        this". A recency signal, not a completion record."""
+        ...
+
+    def watched_progress_from(self, events: list[dict]) -> list[dict]:
+        """The same seasons, aggregated out of events the caller already has, as
+        [{ids, season, watched, title, network}]. Pure. Here so a caller that
+        needs both the seasons and the films from one window can sweep the history
+        once, and so reading a source's event shape stays the source's job."""
+        ...
+
+    def movie_plays_from(self, events: list[dict]) -> list[dict]:
+        """The film plays in those same events, as
+        [{ids, title, year, watched_at}]. Pure, for the same reason."""
+        ...
+
+
 class Provider(Protocol):
     """The whole of what the calendar route needs from a source.
 
-    KEPT THIS NARROW ON PURPOSE. Detail lookups, search and the private sync
-    reads are each a different consumer with a different degradation story, and
-    folding them in here would mean a source that only publishes a calendar
-    could not be registered at all. They become their own protocols when a
-    second source actually needs them.
+    KEPT NARROW ON PURPOSE. Detail lookups and search are each a different
+    consumer with a different degradation story, and folding them in here would
+    mean a source that only publishes a calendar could not be registered at all.
+    They become their own protocols when a second source actually needs them —
+    which is what `sync_port` below already is.
     """
     source: Source
     label: str
     capabilities: Capabilities
+    # The private reads, or None for a source that has none. Declared here rather
+    # than left to a getattr at the call site because it is how the tracker finds
+    # a source WITHOUT naming one, and a source claiming
+    # `capabilities.private_user_data` while carrying no port would be lying in a
+    # way nothing else can catch.
+    sync_port: SyncPort | None
 
     def is_configured(self, settings: Settings) -> bool:
         """Whether this source has the credentials it needs to be asked

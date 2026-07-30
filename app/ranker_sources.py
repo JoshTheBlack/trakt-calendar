@@ -39,16 +39,13 @@ from .config import Settings, load_settings
 # are what the ranker's routes and data layer already import, and the vocabulary
 # they name is the app's, not this feature's — the calendar and the tracker deal
 # in the same two kinds of title. One definition, read from where it lives.
-from .providers.base import Media, parse_media  # noqa: F401
+#
+# `resolve_identity` comes from there too, and is CALLED here rather than
+# re-exported: the tracker keys its own rows on the same waterfall's answer, so a
+# second copy would be two definitions of what makes two titles the same one.
+from .providers.base import Media, parse_media, resolve_identity  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-
-# The identity waterfall, first shared non-empty id wins. tmdb leads because it
-# is the id both Trakt and Simkl expose AND the one that indexes TMDB artwork;
-# tvdb is strong for TV, imdb is near-universal but weakest to match on, and mal
-# is often the only id two services share for anime.
-MATCH_SOURCES = ("tmdb", "tvdb", "imdb", "mal")
 
 
 @dataclass(frozen=True)
@@ -114,22 +111,6 @@ class RatedTitle:
     title: TitleRef
     rating: int
     rated_at: str | None = None
-
-
-def resolve_identity(ids: Mapping[str, Any]) -> tuple[str, str] | None:
-    """THE identity waterfall. One implementation; search, tracker import and the
-    ratings seed all come through here.
-
-    Returns (match_source, match_id) for the first of tmdb/tvdb/imdb/mal the
-    provider actually knew, or None when it knew none of them. The id is
-    stringified because imdb ids are not numbers and a column that holds both
-    has to hold text.
-    """
-    for source in MATCH_SOURCES:
-        value = ids.get(source)
-        if value not in (None, "", 0):
-            return source, str(value)
-    return None
 
 
 def int_or_none(value: Any) -> int | None:

@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ...config import Settings
+from ..base import collect_ids
 from . import transport
 from .transport import TraktError
 
@@ -109,6 +110,26 @@ async def fetch_show_progress_detail(settings: Settings, trakt_id,
     return out
 
 
+async def fetch_progress_details(settings: Settings,
+                                 show_ids) -> dict[int, dict[int, dict[int, str]]]:
+    """fetch_show_progress_detail for several shows at once, as
+    {trakt_id: {season: {episode: watched_at}}}.
+
+    The fan-out lives here rather than in the caller because the pooled client is
+    this package's business: the tracker baselines a whole roster in one go and
+    has no reason to hold an httpx client to do it. Ids are de-duplicated, so a
+    roster carrying two seasons of one show costs one call.
+    """
+    unique = list(dict.fromkeys(int(t) for t in show_ids if t is not None))
+    if not unique:
+        return {}
+    client = transport.shared_client()
+    details = await asyncio.gather(*(
+        fetch_show_progress_detail(settings, tid, client=client) for tid in unique
+    ))
+    return dict(zip(unique, details))
+
+
 async def fetch_history(settings: Settings, start_at: str | None = None,
                         limit: int = 100, max_pages: int = 50) -> list[dict]:
     """/users/me/history (ALL types) -> chronological watch EVENTS, newest first,
@@ -166,7 +187,7 @@ def _parse_watched_ts(value) -> datetime | None:
 
 async def fetch_watched_progress(settings: Settings, since_days: int | None = 60) -> list[dict]:
     """Recently-active seasons from watch HISTORY (/users/me/history), as
-    [{trakt_id, tmdb, season, watched, slug, title, network}].
+    [{ids, season, watched, title, network}].
 
     Uses the history event log rather than /sync/watched/shows — that aggregate
     returns show-level rows WITHOUT seasons for some accounts (the same bug that
@@ -185,11 +206,16 @@ async def fetch_watched_progress(settings: Settings, since_days: int | None = 60
 
 def watched_progress_from(events: list[dict]) -> list[dict]:
     """The aggregation half of fetch_watched_progress, over events already in
-    hand: [{trakt_id, tmdb, season, watched, slug, title, network}].
+    hand: [{ids, season, watched, title, network}].
 
     Split out so a caller that needs BOTH the seasons and the movies from one
     window (app/distrakt_backfill) can sweep the history once and read it twice,
     rather than paying for the same paged sweep twice over.
+
+    THE WHOLE ID MAP TRAVELS, not the two ids the first caller happened to need:
+    the tracker files a row under whichever shared id it can, so dropping the rest
+    here would decide that question on its behalf, and they cost nothing — Trakt
+    has already sent them.
     """
     agg: dict[tuple[int, int], dict] = {}
     for ev in events:
@@ -202,15 +228,35 @@ def watched_progress_from(events: list[dict]) -> list[dict]:
         if tid is None or season is None or int(season) == 0:  # skip specials
             continue
         rec = agg.setdefault((int(tid), int(season)), {
-            "eps": set(), "tmdb": ids.get("tmdb"), "slug": ids.get("slug") or "",
+            "eps": set(), "ids": collect_ids(ids),
             "title": show.get("title") or "", "network": show.get("network") or "",
         })
         if num is not None:
             rec["eps"].add(int(num))
     return [{
-        "trakt_id": tid, "tmdb": rec["tmdb"], "season": season, "watched": len(rec["eps"]),
-        "slug": rec["slug"], "title": rec["title"], "network": rec["network"],
-    } for (tid, season), rec in agg.items()]
+        "ids": rec["ids"], "season": season, "watched": len(rec["eps"]),
+        "title": rec["title"], "network": rec["network"],
+    } for (_tid, season), rec in agg.items()]
+
+
+def movie_plays_from(events: list[dict]) -> list[dict]:
+    """The film plays in a history sweep, as [{ids, title, year, watched_at}].
+
+    The film counterpart to watched_progress_from, and here for the same reason:
+    knowing which key of an event holds a film and where its ids sit is knowledge
+    about Trakt's payload, and the tracker should not have to carry it.
+    """
+    out: list[dict] = []
+    for event in events:
+        if event.get("type") != "movie":
+            continue
+        movie = event.get("movie") or {}
+        ids = collect_ids(movie.get("ids") or {})
+        if not ids:
+            continue
+        out.append({"ids": ids, "title": movie.get("title") or "",
+                    "year": movie.get("year"), "watched_at": str(event.get("watched_at") or "")})
+    return out
 
 
 async def fetch_ratings(settings: Settings) -> list[dict]:

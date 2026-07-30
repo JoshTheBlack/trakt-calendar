@@ -1042,6 +1042,176 @@ MIGRATION_17 = """
 DELETE FROM distrakt_show_progress;
 """
 
+# Migration 18 — the tracker's rows stop being keyed on one service's id.
+#
+# All three tracker tables were keyed on `trakt_id`, which makes the tracker
+# permanently single-source: the same season arriving from anywhere else would be
+# a second row forever, with no way to tell it was the same season. They are now
+# keyed on (media, match_source, match_id) — the id NAMESPACE the identity
+# waterfall landed in, plus the id in it (see app/providers/base.py's
+# MATCH_SOURCES). tmdb wins whenever it is present, which on real data is
+# essentially always, so the same title from two services is ONE row with no
+# merge step. The service's own id stays on the row as a plain attribute, because
+# it is still what you need to CALL that service — it is just no longer what
+# identifies the season.
+#
+# `distrakt_shows.source` becomes `added_by`. It always meant WHO PUT THE ROW ON
+# THE ROSTER ('calendar' | 'history' | 'manual' | ''), and "source" is the word
+# for WHICH SERVICE everywhere else; leaving the collision in place would have
+# been a trap for exactly the change that adds a second one.
+#
+# THE KEY COLUMNS ARE NOT NULL. The nullable `tmdb` they replace was vestigial —
+# residue from an era when tmdb was pruned during ingest — and carrying that
+# nullability into the key would recreate the ambiguity the waterfall exists to
+# remove.
+#
+# WHAT HAPPENS TO EXISTING ROWS, table by table, and why they differ:
+#   distrakt_shows is USER DATA — abandons, manual adds, hand-filled past months
+#     — so every row is carried across, with its key resolved from the ids it
+#     already holds. A row that resolves to NO id cannot be addressed by this
+#     app afterwards, and rather than invent a key or silently drop somebody's
+#     roster this REFUSES to migrate and says how many rows it found.
+#   distrakt_show_progress is a CACHE of the service's own answer, so its rows
+#     are resolved through the roster's ids where possible and dropped where not
+#     — watch_history re-baselines any roster season it finds no progress for.
+#   distrakt_movie_watches is a cache too, and the only one that cannot be
+#     resolved at all: nothing in this database has ever recorded a shared id for
+#     a film. It is emptied and `last_synced` cleared so the next sync re-seeds
+#     films from the start of the current month, exactly as a forced refresh
+#     does. Migration 17 discarded the same table's sibling for the same reason:
+#     re-fetching a cache is honest where migrating it into a shape it never had
+#     is guesswork. Films in months that are already FROZEN are unaffected —
+#     those live in distrakt_months.movies_json, which this does not touch.
+MIGRATION_18_SQL = """
+CREATE TABLE distrakt_show_progress_new (
+    user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media                 TEXT    NOT NULL,
+    match_source          TEXT    NOT NULL,
+    match_id              TEXT    NOT NULL,
+    season                INTEGER NOT NULL,
+    watched_episodes_json TEXT    NOT NULL DEFAULT '[]',
+    -- The service's own id, so the progress record can be refetched. Only the
+    -- ids a sync actually calls with live on a cache row; the shared ids the
+    -- waterfall did not pick are on the ROSTER row, which is where a later
+    -- resolution pass would read them.
+    trakt_id              INTEGER,
+    simkl_id              INTEGER,
+    PRIMARY KEY (user_id, media, match_source, match_id, season)
+);
+INSERT INTO distrakt_show_progress_new
+       (user_id, media, match_source, match_id, season, watched_episodes_json, trakt_id)
+    SELECT p.user_id, 'show', 'tmdb',
+           CAST((SELECT s.tmdb FROM distrakt_shows s
+                  WHERE s.trakt_id = p.trakt_id AND s.tmdb IS NOT NULL AND s.tmdb != 0
+                  LIMIT 1) AS TEXT),
+           p.season, p.watched_episodes_json, p.trakt_id
+      FROM distrakt_show_progress p
+     WHERE EXISTS (SELECT 1 FROM distrakt_shows s
+                    WHERE s.trakt_id = p.trakt_id AND s.tmdb IS NOT NULL AND s.tmdb != 0);
+DROP TABLE distrakt_show_progress;
+ALTER TABLE distrakt_show_progress_new RENAME TO distrakt_show_progress;
+
+CREATE TABLE distrakt_shows_new (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    month           TEXT    NOT NULL,
+    -- The identity: which kind of title, which shared id namespace, and the id.
+    media           TEXT    NOT NULL,
+    match_source    TEXT    NOT NULL,
+    match_id        TEXT    NOT NULL,
+    season          INTEGER NOT NULL,
+    -- Every id the row is known by, so a later pass can upgrade a season first
+    -- seen with only a weak id, and so a second service can be called about a
+    -- season this one put on the roster. None of these identifies the row.
+    trakt_id        INTEGER,
+    simkl_id        INTEGER,
+    tmdb            INTEGER,
+    tvdb            INTEGER,
+    imdb            TEXT,
+    mal             INTEGER,
+    -- Nullable like the ids beside it, and for the same reason: the row records
+    -- what the source actually named, and NULL says "it named none" where '' would
+    -- claim the source gave an empty slug. Readers collect the non-empty ones.
+    slug            TEXT,
+    title           TEXT    NOT NULL DEFAULT '',
+    network         TEXT    NOT NULL DEFAULT '',
+    abandoned       INTEGER NOT NULL DEFAULT 0,
+    abandoned_form  TEXT,
+    watched         INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    cadence         TEXT,
+    premiere        TEXT,
+    finale          TEXT,
+    bucket          TEXT,
+    started_airing  INTEGER NOT NULL DEFAULT 0,
+    finished_airing INTEGER NOT NULL DEFAULT 0,
+    -- Was `source`. Who put this row on the roster, which decides whether taking
+    -- it off says anything to the calendar; see distrakt_routes' remove route.
+    added_by        TEXT    NOT NULL DEFAULT '',
+    UNIQUE (user_id, month, media, match_source, match_id, season)
+);
+INSERT INTO distrakt_shows_new
+       (user_id, month, media, match_source, match_id, season, trakt_id, tmdb, slug,
+        title, network, abandoned, abandoned_form, watched, total, cadence,
+        premiere, finale, bucket, started_airing, finished_airing, added_by)
+    SELECT user_id, month, COALESCE(NULLIF(media, ''), 'show'), 'tmdb', CAST(tmdb AS TEXT),
+           season, trakt_id, tmdb, slug, title, network, abandoned, abandoned_form,
+           watched, total, cadence, premiere, finale, bucket, started_airing,
+           finished_airing, source
+      FROM distrakt_shows;
+DROP TABLE distrakt_shows;
+ALTER TABLE distrakt_shows_new RENAME TO distrakt_shows;
+
+CREATE TABLE distrakt_movie_watches_new (
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media        TEXT    NOT NULL,
+    match_source TEXT    NOT NULL,
+    match_id     TEXT    NOT NULL,
+    watched_at   TEXT,
+    title        TEXT    NOT NULL DEFAULT '',
+    year         INTEGER,
+    trakt_id     INTEGER,
+    simkl_id     INTEGER,
+    PRIMARY KEY (user_id, media, match_source, match_id)
+);
+DROP TABLE distrakt_movie_watches;
+ALTER TABLE distrakt_movie_watches_new RENAME TO distrakt_movie_watches;
+UPDATE distrakt_watch_state SET last_synced = NULL;
+"""
+
+
+def MIGRATION_18(conn: sqlite3.Connection) -> None:
+    # Counted BEFORE anything is rebuilt, because the answer decides whether the
+    # rebuild may happen at all. A roster row with no shared id is unaddressable
+    # after this change: every read path keys on the triple, so keeping it would
+    # leave a row nothing can reach and the export would carry it forward for
+    # ever. Refusing is the only option that neither destroys it nor pretends.
+    unkeyable = conn.execute(
+        "SELECT COUNT(*) FROM distrakt_shows WHERE tmdb IS NULL OR tmdb = 0"
+    ).fetchone()[0]
+    if unkeyable:
+        raise RuntimeError(
+            f"{unkeyable} tracker roster row(s) carry none of the shared ids the "
+            "tracker is now keyed on (tmdb/tvdb/imdb/mal), so they cannot be "
+            "migrated without inventing an identity for them. Nothing has been "
+            "changed. Fill in the missing ids, or delete those rows, and start "
+            "the app again."
+        )
+    dropped_progress = conn.execute(
+        "SELECT COUNT(*) FROM distrakt_show_progress p WHERE NOT EXISTS ("
+        "SELECT 1 FROM distrakt_shows s WHERE s.trakt_id = p.trakt_id "
+        "AND s.tmdb IS NOT NULL AND s.tmdb != 0)"
+    ).fetchone()[0]
+    dropped_movies = conn.execute("SELECT COUNT(*) FROM distrakt_movie_watches").fetchone()[0]
+    _run_script(conn, MIGRATION_18_SQL)
+    if dropped_progress or dropped_movies:
+        logger.info(
+            "Re-keyed the tracker onto shared title ids; discarded %d cached "
+            "progress row(s) whose show is on no roster month and %d cached film "
+            "watch(es). Both re-fetch on the next tracker load; frozen months "
+            "keep the films they snapshotted.",
+            dropped_progress, dropped_movies,
+        )
+
 
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
@@ -1064,6 +1234,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (15, MIGRATION_15),
     (16, MIGRATION_16),
     (17, MIGRATION_17),
+    (18, MIGRATION_18),
 ]
 
 

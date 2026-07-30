@@ -32,7 +32,8 @@ def _record(trakt_id: int, title: str, *, watched: int, total: int,
     """A stored record as a frozen month holds it: the counts and dates were
     persisted when the month closed, which is what lets it render with no Trakt."""
     return {
-        "trakt_id": trakt_id, "season": 1, "title": title, "slug": f"slug-{trakt_id}",
+        "ids": {"trakt": trakt_id, "tmdb": trakt_id, "slug": f"slug-{trakt_id}"},
+        "key": f"show:tmdb:{trakt_id}", "season": 1, "title": title,
         "network": "HBO", "media": "show", "watched": watched, "total": total,
         "cadence": "weekly", "premiere": "2026-03-01", "finale": "2026-03-29",
         "started_airing": True, "finished_airing": True, "bucket": bucket,
@@ -62,7 +63,7 @@ class ClosedMonthPayloadTests(unittest.TestCase):
 
     def test_the_months_films_travel_with_it_rather_than_only_inside_post_2(self):
         doc = {"month": "2026-03", "closed": True, "shows": [],
-               "movies": [{"trakt_id": 5, "title": "A Film", "year": 2011,
+               "movies": [{"key": "movie:tmdb:5", "title": "A Film", "year": 2011,
                            "watched_at": "2026-03-09T12:00:00Z"}]}
         payload = self._payload(doc)
         self.assertEqual([m["title"] for m in payload["movies"]], ["A Film"])

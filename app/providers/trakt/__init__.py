@@ -19,10 +19,41 @@ from ...config import Settings
 from ...endpoints import ENDPOINTS, Endpoint
 from .. import register
 from ..base import Capabilities, Item, Source
+from . import sync
 from .calendar import fetch_calendar
 from .transport import TraktError, TraktRateLimitError
 
 __all__ = ["TraktError", "TraktRateLimitError"]
+
+
+class _TraktSyncPort:
+    """Trakt's answers to the four private, per-person questions the tracker asks
+    (app/providers/base.py's SyncPort).
+
+    Thin by design: each method is one call into `sync`, THROUGH the module object
+    rather than through a name imported at class-definition time, so patching
+    app.providers.trakt.sync.<fn> still reaches what this calls. A name bound here
+    at import would quietly become a second, unpatchable reference.
+    """
+
+    async def fetch_last_activities(self, settings: Settings) -> dict:
+        return await sync.fetch_last_activities(settings)
+
+    async def fetch_history(self, settings: Settings, start_at: str | None = None) -> list[dict]:
+        return await sync.fetch_history(settings, start_at=start_at)
+
+    async def fetch_progress_details(self, settings: Settings, show_ids) -> dict:
+        return await sync.fetch_progress_details(settings, show_ids)
+
+    async def fetch_watched_progress(self, settings: Settings,
+                                     since_days: int | None = None) -> list[dict]:
+        return await sync.fetch_watched_progress(settings, since_days=since_days)
+
+    def watched_progress_from(self, events: list[dict]) -> list[dict]:
+        return sync.watched_progress_from(events)
+
+    def movie_plays_from(self, events: list[dict]) -> list[dict]:
+        return sync.movie_plays_from(events)
 
 
 class _TraktProvider:
@@ -46,6 +77,9 @@ class _TraktProvider:
         # tracker and the ranker's ratings import be backed by this source.
         private_user_data=True,
     )
+    # What makes that `private_user_data=True` checkable rather than a claim: the
+    # tracker asks the registry for this and never for Trakt by name.
+    sync_port = _TraktSyncPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured

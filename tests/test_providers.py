@@ -14,7 +14,9 @@ No network — the one normalizer test runs on a literal Trakt calendar entry.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import date
+from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -23,7 +25,16 @@ from app import providers
 from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.endpoints import ENDPOINTS, get_endpoint
-from app.providers.base import Capabilities, Item, Media, Source, collect_ids
+from app.providers.base import (
+    Capabilities,
+    Item,
+    Media,
+    Source,
+    collect_ids,
+    parse_item_key,
+    resolve_identity,
+    resolve_key,
+)
 
 SHOWS = get_endpoint("shows")
 MOVIES = get_endpoint("movies")
@@ -140,3 +151,87 @@ class TestEndpointTranslation:
     def test_every_endpoint_translates_to_a_trakt_path(self):
         for key, endpoint in ENDPOINTS.items():
             assert trakt_calendar.calendar_path(endpoint) == key
+
+
+class TestIdentityWaterfall:
+    """The one definition of "the same title", which the tier boards and the
+    tracker now both file their rows under."""
+
+    def test_tmdb_wins_when_it_is_there(self):
+        assert resolve_identity({"tvdb": 1, "tmdb": 2, "imdb": "tt3"}) == ("tmdb", "2")
+
+    def test_it_falls_down_the_rungs_in_order(self):
+        assert resolve_identity({"tvdb": 1, "imdb": "tt3"}) == ("tvdb", "1")
+        assert resolve_identity({"imdb": "tt3", "mal": 9}) == ("imdb", "tt3")
+        assert resolve_identity({"mal": 9}) == ("mal", "9")
+
+    def test_a_provider_id_is_not_something_to_key_on(self):
+        """trakt/slug/simkl are how you CALL a service, not how two services
+        agree about a title — keying on one would make the same title arriving
+        from somewhere else a second row for ever."""
+        assert resolve_identity({"trakt": 5, "slug": "a-show", "simkl": 7}) is None
+
+    def test_an_empty_id_is_not_an_id(self):
+        assert resolve_identity({"tmdb": None, "tvdb": 0, "imdb": "", "mal": 4}) == ("mal", "4")
+
+    def test_the_id_is_stringified_because_imdb_ids_are_not_numbers(self):
+        assert resolve_identity({"tmdb": 550})[1] == "550"
+
+    def test_a_key_pairs_the_waterfall_with_the_media_kind(self):
+        """A TMDB id is namespaced per kind: movie 550 and TV 550 are different
+        titles, so the media type is part of the identity."""
+        assert str(resolve_key(Media.SHOW, {"tmdb": 550})) == "show:tmdb:550"
+        assert str(resolve_key(Media.MOVIE, {"tmdb": 550})) == "movie:tmdb:550"
+
+    def test_a_title_with_nothing_shared_has_no_key(self):
+        assert resolve_key(Media.SHOW, {"trakt": 9}) is None
+
+    def test_the_flat_form_round_trips(self):
+        key = resolve_key(Media.MOVIE, {"imdb": "tt0137523"})
+        assert parse_item_key(str(key)) == key
+
+    def test_an_imdb_id_containing_the_separator_still_parses(self):
+        """Split at most twice: media and match_source come from closed sets and
+        can never contain a colon, but somebody else's id is opaque to us."""
+        assert parse_item_key("movie:imdb:tt:weird").match_id == "tt:weird"
+
+    @pytest.mark.parametrize("bad", [
+        None, 7, "", "show:tmdb", "book:tmdb:1", "show:trakt:1", "show:tmdb:",
+    ])
+    def test_a_malformed_key_raises_rather_than_returning_a_sentinel(self, bad):
+        with pytest.raises(ValueError):
+            parse_item_key(bad)
+
+
+class TestTrackerPort:
+    """The registry answering "who can read one person's own viewing", so the
+    tracker never has to name a service."""
+
+    def test_it_finds_the_source_that_reaches_private_data(self):
+        port = providers.for_tracker()
+        assert port is not None
+        assert port is providers.get(Source.TRAKT).sync_port
+
+    def test_only_a_source_that_declares_private_data_can_back_the_tracker(self):
+        for provider in providers.registered().values():
+            if provider.sync_port is not None:
+                assert provider.capabilities.private_user_data
+
+    def test_the_port_answers_every_question_the_protocol_names(self):
+        port = providers.for_tracker()
+        for name in ("fetch_last_activities", "fetch_history", "fetch_progress_details",
+                     "fetch_watched_progress", "watched_progress_from", "movie_plays_from"):
+            assert callable(getattr(port, name))
+
+    def test_the_port_calls_through_the_module_so_a_patch_still_reaches_it(self):
+        """The trap this whole branch keeps hitting: a name imported at class
+        definition time becomes a second reference that patching the module can no
+        longer reach, and the test then exercises the real call. Asserted directly
+        because a port that quietly stopped being patchable would show up as live
+        provider traffic, not as a failure."""
+        port = providers.for_tracker()
+        with patch("app.providers.trakt.sync.fetch_last_activities",
+                   new=AsyncMock(return_value={"episodes": {"watched_at": "T"}})) as spy:
+            answer = asyncio.run(port.fetch_last_activities(Settings()))
+        assert answer == {"episodes": {"watched_at": "T"}}
+        spy.assert_awaited_once()

@@ -811,20 +811,25 @@ class DistraktDetailsTests(HardeningTestCase):
             conn, user_id=user_id, provider="trakt", provider_user_id=f"uuid-{name}",
             access_token="user-token")))
         asyncio.run(distrakt.add_show(user_id, "2026-07", {
-            "trakt_id": 7, "season": 3, "title": "Silo", "slug": "silo",
-            "network": "Apple TV", "tmdb": 1, "media": "show",
+            "ids": {"trakt": 7, "tmdb": 1, "slug": "silo"}, "season": 3, "title": "Silo",
+            "network": "Apple TV", "media": "show",
         }))
         return user_id
+
+    # The roster row is keyed on its shared id (tmdb 1), which is also how a
+    # request names it — NOT by the Trakt id the lookup is then placed with.
+    KEY = "show:tmdb:1"
 
     def details(self, watched="[1,2,3]"):
         if watched is not None:
             asyncio.run(db.execute(
                 "INSERT OR REPLACE INTO distrakt_show_progress "
-                "(user_id, trakt_id, season, watched_episodes_json) VALUES (?,?,?,?)",
-                (self.user_id, 7, 3, watched)))
+                "(user_id, media, match_source, match_id, season, watched_episodes_json, "
+                "trakt_id) VALUES (?,?,?,?,?,?,?)",
+                (self.user_id, "show", "tmdb", "1", 3, watched, 7)))
         self.login("josh")
         with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
-            return self.client.get("/api/distrakt/details?trakt_id=7&season=3")
+            return self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3")
 
     def test_it_returns_the_episodes_and_this_users_watched_set(self):
         body = self.details().json()
@@ -840,7 +845,7 @@ class DistraktDetailsTests(HardeningTestCase):
         self.login("josh")
         with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
             spoofed = self.client.get(
-                "/api/distrakt/details?trakt_id=7&season=3&slug=evil").json()
+                f"/api/distrakt/details?key={self.KEY}&season=3&slug=evil").json()
         self.assertEqual(spoofed["slug"], "silo")
 
     def test_one_users_watched_set_is_invisible_to_another(self):
@@ -849,7 +854,7 @@ class DistraktDetailsTests(HardeningTestCase):
         other = self.tracker("other")
         self.login("other")
         with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
-            body = self.client.get("/api/distrakt/details?trakt_id=7&season=3").json()
+            body = self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").json()
         self.assertEqual(body["watched_episodes"], [])
 
     def test_no_progress_row_is_an_empty_set_not_an_error(self):
@@ -862,12 +867,13 @@ class DistraktDetailsTests(HardeningTestCase):
         self.make_user("plain", calendar_approved=True)
         self.login("plain")
         self.assertIn(
-            self.client.get("/api/distrakt/details?trakt_id=7&season=3").status_code, (401, 403))
+            self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").status_code,
+            (401, 403))
 
     def test_a_missing_season_is_refused(self):
         self.login("josh")
         self.assertEqual(
-            self.client.get("/api/distrakt/details?trakt_id=7").status_code, 400)
+            self.client.get(f"/api/distrakt/details?key={self.KEY}").status_code, 400)
 
 
 class SiteHeaderTests(HardeningTestCase):

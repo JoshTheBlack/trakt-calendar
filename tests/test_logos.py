@@ -118,7 +118,10 @@ class FetchWatchedProgressTests(unittest.IsolatedAsyncioTestCase):
             out = await trakt_sync.fetch_watched_progress(SimpleNamespace(), since_days=60)
         self.assertEqual(len(out), 1)
         rec = out[0]
-        self.assertEqual((rec["trakt_id"], rec["season"], rec["watched"], rec["tmdb"]), (10, 1, 2, 111))
+        self.assertEqual((rec["season"], rec["watched"]), (1, 2))
+        # The whole id map travels, because the caller decides which of them the
+        # row it writes is keyed on.
+        self.assertEqual(rec["ids"], {"trakt": 10, "tmdb": 111, "slug": "a"})
 
 
 if __name__ == "__main__":

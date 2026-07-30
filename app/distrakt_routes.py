@@ -34,6 +34,7 @@ from .auth import AuthLevel
 from .config import load_settings
 from .endpoints import endpoint_choices
 from .perftrace import span
+from .providers.base import ID_KEYS, ItemKey, Media, collect_ids, parse_item_key
 from .providers.trakt import TraktError, TraktRateLimitError
 from .providers.trakt.detail import (
     fetch_details,
@@ -50,9 +51,63 @@ router = APIRouter()
 guard = authz.Guard(router)
 templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
+# Which ids arriving in a request body are read as integers. imdb ids are not
+# numbers and slugs are words, so those stay text; everything else is a numeric id
+# in its own namespace and is coerced rather than stored as whatever the client
+# happened to send, or the same title would key differently on two adds.
+_NUMERIC_ID_KEYS = frozenset(ID_KEYS) - {"imdb", "slug"}
+
+
+class RequestError(ValueError):
+    """A request body the caller has to fix. Its message is what the client is
+    told, so it says what is wrong rather than naming a field type."""
+
 
 def _month_key(year: int, month: int) -> str:
     return f"{year:04d}-{month:02d}"
+
+
+def _client_ids(raw) -> dict:
+    """An id map out of a request body: known namespaces only, numbers as numbers.
+
+    The client supplies these on the add flows, which it always has — what is new
+    is that they decide which row the record becomes, so they are narrowed and
+    coerced here at the boundary rather than trusted into a key.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    cleaned = {}
+    for key, value in raw.items():
+        if key not in ID_KEYS or value in (None, ""):
+            continue
+        if key in _NUMERIC_ID_KEYS:
+            try:
+                cleaned[key] = int(value)
+            except (TypeError, ValueError):
+                continue  # a numeric namespace with a non-number in it names nothing
+        else:
+            cleaned[key] = str(value)
+    return collect_ids(cleaned)
+
+
+def _row_target(data: dict) -> tuple[ItemKey, int]:
+    """The (identity, season) a mutating request names, or a RequestError.
+
+    ONE parser for every route that changes a roster row, because they all address
+    a row the same way — the flat item key the month payload handed the client,
+    plus the season. The key is validated against the same closed sets the ranker's
+    is (see providers.base.parse_item_key), so a malformed one is refused here
+    rather than reaching a query.
+    """
+    try:
+        key = parse_item_key(data.get("key"))
+    except ValueError as exc:
+        raise RequestError(str(exc)) from None
+    try:
+        season = int(data["season"])
+    except (KeyError, TypeError, ValueError):
+        raise RequestError("Missing or invalid season.") from None
+    return key, season
 
 
 def _merge_live_show(rec: dict, watched_lookup: dict, detail: dict) -> dict:
@@ -62,7 +117,7 @@ def _merge_live_show(rec: dict, watched_lookup: dict, detail: dict) -> dict:
     `bucket` for the UI to group by."""
     show = {
         **rec,
-        "watched": watched_lookup.get((rec["trakt_id"], rec["season"]), 0),
+        "watched": watched_lookup.get(distrakt_store.live_key(rec), 0),
         "total": detail["total"],
         "cadence": detail["cadence"],
         "premiere": detail["premiere"],
@@ -188,7 +243,7 @@ async def _apply_not_watching(user_id: int, month_key: str,
         return shows
 
     def matched(s: dict) -> bool:
-        return str(s.get("slug") or "") in nw_ids or str(s.get("trakt_id")) in nw_ids
+        return distrakt_store.matches_not_watching(s, nw_ids)
 
     if not committed:
         return [s for s in shows if not matched(s)]
@@ -197,11 +252,13 @@ async def _apply_not_watching(user_id: int, month_key: str,
         if show.get("abandoned") or not matched(show):
             continue
         form = discord_fmt.freeze_form(show)
-        await distrakt_store.set_abandoned(user_id, month_key, show["trakt_id"], show["season"],
-                                           True, abandoned_form=form)
+        await distrakt_store.set_abandoned(
+            user_id, month_key, distrakt_store.record_key(show), show["season"],
+            True, abandoned_form=form,
+        )
         show["abandoned"] = True
         show["abandoned_form"] = form
-        show["bucket"] = "abandoned"
+        show["bucket"] = discord_fmt.Bucket.ABANDONED
     return shows
 
 
@@ -290,7 +347,7 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
     """
     with span("payload.watch_history_sync", roster=len(records), force=force_fresh) as sp:
         state = await watch_history.sync_and_baseline(
-            settings, user_id, [r["trakt_id"] for r in records], force=force_fresh, today=today,
+            settings, user_id, records, force=force_fresh, today=today,
         )
         watched_lookup = watch_history.watched_map(state)
         # When each season was finished, for the "Completed means completed THIS
@@ -324,12 +381,6 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     records = doc.get("shows", [])
     if records and not settings.trakt_configured:
         return {"ok": False, "error": "Not configured"}, 400
-    # Backfill tmdb on records added before we stored it (one-time; self-limiting)
-    # so the network-logo <img> gets a tmdb to generate from on this same load.
-    if records and settings.trakt_configured:
-        with span("payload.backfill_tmdb"):
-            doc = await distrakt_store.backfill_tmdb(user_id, month_key, settings) or doc
-        records = doc.get("shows", [])
 
     # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
     # stale load re-baseline the whole watch history):
@@ -359,13 +410,15 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
-    # Pre-warm the network-logo cache for the whole roster now that tmdb has been
-    # backfilled, so a show manually added before logos existed doesn't depend on
-    # some OTHER show requesting its network's logo first (see logos.ensure_logos).
-    # Best-effort and self-limiting: a no-op once each network's tile is on disk.
+    # Pre-warm the network-logo cache for the whole roster, so a show manually
+    # added before logos existed doesn't depend on some OTHER show requesting its
+    # network's logo first (see logos.ensure_logos). Best-effort and
+    # self-limiting: a no-op once each network's tile is on disk.
     if shows and settings.trakt_configured:
         with span("payload.ensure_logos"):
-            await logos.ensure_logos(settings, [(s.get("network"), s.get("tmdb")) for s in shows])
+            await logos.ensure_logos(settings, [
+                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
+            ])
 
     with span("payload.render"):
         post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
@@ -544,34 +597,38 @@ async def api_distrakt_details(request: Request):
     approved. It also answers a different question — which episodes this
     particular person has seen — that the calendar has no business knowing.
 
-    The slug comes from the user's own roster row, not the query string, so the
-    Trakt links this builds cannot be pointed somewhere else by the caller.
+    THE SOURCE ID AND THE SLUG BOTH COME FROM THE USER'S OWN ROSTER ROW, not from
+    the query string: the caller names a row it can already see, and everything
+    this looks up follows from that row. So the Trakt links it builds — and the
+    title it fetches — cannot be pointed somewhere else by the caller.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    trakt_id = request.query_params.get("trakt_id")
     season = route_params.season(request.query_params.get("season"))
-    if not trakt_id or season is None:
-        return JSONResponse({"ok": False, "error": "Missing trakt_id/season"}, status_code=400)
     try:
-        trakt_id_int = int(trakt_id)
-    except (TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Invalid trakt_id"}, status_code=400)
+        key = parse_item_key(request.query_params.get("key"))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+    if season is None:
+        return JSONResponse({"ok": False, "error": "Missing season"}, status_code=400)
 
+    row = await db.fetch_one(
+        "SELECT slug, trakt_id FROM distrakt_shows "
+        "WHERE user_id = ? AND media = ? AND match_source = ? AND match_id = ? LIMIT 1",
+        (user_id, key.media, key.match_source, key.match_id),
+    )
+    if row is None or row["trakt_id"] is None:
+        return JSONResponse({"ok": False, "error": "Not on your roster"}, status_code=404)
     try:
-        details = await fetch_details(settings, "show", trakt_id, season)
+        details = await fetch_details(settings, Media.SHOW, row["trakt_id"], season)
     except TraktError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    row = await db.fetch_one(
-        "SELECT slug FROM distrakt_shows WHERE user_id = ? AND trakt_id = ? LIMIT 1",
-        (user_id, trakt_id_int),
-    )
     progress = await db.fetch_one(
-        "SELECT watched_episodes_json FROM distrakt_show_progress "
-        "WHERE user_id = ? AND trakt_id = ? AND season = ?",
-        (user_id, trakt_id_int, season),
+        "SELECT watched_episodes_json FROM distrakt_show_progress WHERE user_id = ? "
+        "AND media = ? AND match_source = ? AND match_id = ? AND season = ?",
+        (user_id, key.media, key.match_source, key.match_id, season),
     )
     watched: list[int] = []
     if progress is not None:
@@ -583,7 +640,7 @@ async def api_distrakt_details(request: Request):
     return JSONResponse({
         "ok": True,
         **details,
-        "slug": (row["slug"] if row else "") or "",
+        "slug": row["slug"] or "",
         "season": season,
         "watched_episodes": watched,
     })
@@ -647,7 +704,7 @@ async def api_distrakt_remove(request: Request):
     came from their watch history: neither is re-imported, so removing them
     already sticks, and hiding a show on the calendar because someone undid a
     manual add would take away something they never said they weren't watching.
-    A row from before `source` was recorded is resolved by asking the calendar
+    A row from before provenance was recorded is resolved by asking the calendar
     whether it would hand that show straight back (see is_calendar_premiere).
 
     A CLOSED month never writes that mark, whatever the row says. Correcting what
@@ -665,33 +722,33 @@ async def api_distrakt_remove(request: Request):
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     try:
-        trakt_id = int(data["trakt_id"])
-        season = int(data["season"])
-    except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+        key, season = _row_target(data)
+    except RequestError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     month_key = _month_key(year, month)
     doc = await distrakt_store.load_month(user_id, month_key)
     if doc is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
-    # Read before removing: both the provenance and the key the mark is written
-    # under (slug, falling back to the trakt id, exactly as the calendar keys its
-    # own items) live on the record that is about to go.
+    # Read before removing: both the provenance and the id the mark is written
+    # under (slug, falling back to the source's own id, exactly as the calendar
+    # keys its own items) live on the record that is about to go.
     record = next((s for s in (doc.get("shows") or [])
-                   if int(s["trakt_id"]) == trakt_id and int(s["season"]) == season), None)
-    if not await distrakt_store.remove_show(user_id, month_key, trakt_id, season):
+                   if s["key"] == str(key) and int(s["season"]) == season), None)
+    if not await distrakt_store.remove_show(user_id, month_key, key, season):
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
 
     settings = await _distrakt_settings(user_id)
     closed = bool(doc.get("closed"))
-    source = str((record or {}).get("source") or "")
-    hide_on_calendar = not closed and source == distrakt_store.SOURCE_CALENDAR
-    if record is not None and not source and not closed:
+    added_by = str((record or {}).get("added_by") or "")
+    hide_on_calendar = not closed and added_by == distrakt_store.ADDED_BY_CALENDAR
+    if record is not None and not added_by and not closed:
         hide_on_calendar = await distrakt_store.is_calendar_premiere(
-            user_id, month_key, settings, trakt_id, season,
+            user_id, month_key, settings, key, season,
         )
     if hide_on_calendar:
+        ids = (record or {}).get("ids") or {}
         await calendar_state.set_not_watching(
-            user_id, str(record.get("slug") or trakt_id), True,
+            user_id, str(ids.get("slug") or ids.get("trakt") or key.match_id), True,
         )
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     # So the toast can say what actually happened rather than guessing.
@@ -723,11 +780,11 @@ async def api_distrakt_search_movie(request: Request):
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
     try:
-        found = await search_titles(settings, "movie", q)
+        found = await search_titles(settings, Media.MOVIE, q)
     except TraktError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
     results = [
-        {"trakt_id": entry["ids"]["trakt"], "title": entry["title"],
+        {"ids": entry["ids"], "title": entry["title"],
          "year": entry["year"], "runtime": entry.get("runtime")}
         for entry in found if (entry.get("ids") or {}).get("trakt")
     ]
@@ -753,10 +810,9 @@ async def api_distrakt_add_movie(request: Request):
         data = await request.json()
     except ValueError:
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
-    try:
-        trakt_id = int(data["trakt_id"])
-    except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id"}, status_code=400)
+    ids = _client_ids(data.get("ids"))
+    if not ids:
+        return JSONResponse({"ok": False, "error": "Missing or invalid film ids"}, status_code=400)
     day = str(data.get("watched_on") or "").strip()
     try:
         watched_on = date.fromisoformat(day)
@@ -765,12 +821,18 @@ async def api_distrakt_add_movie(request: Request):
     if watched_on > date.today():
         return JSONResponse({"ok": False, "error": "That day hasn't happened yet."}, status_code=400)
 
-    await watch_history.record_movie_watches(user_id, [{
-        "trakt_id": trakt_id,
+    recorded = await watch_history.record_movie_watches(user_id, [{
+        "ids": ids,
         "title": data.get("title") or "",
         "year": data.get("year"),
         "watched_at": f"{watched_on.isoformat()}T12:00:00Z",
     }])
+    if not recorded:
+        # The film named no shared id, so there is no identity to file the play
+        # under — see app/providers/base.py's MATCH_SOURCES.
+        return JSONResponse(
+            {"ok": False, "error": "That film has no id the tracker can file it under."},
+            status_code=400)
     await _resnapshot_if_closed(user_id, _month_key(watched_on.year, watched_on.month))
 
     today = date.today()
@@ -818,11 +880,11 @@ async def api_distrakt_remove_movie(request: Request):
     except ValueError:
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
     try:
-        trakt_id = int(data["trakt_id"])
-    except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id"}, status_code=400)
+        key = parse_item_key(data.get("key"))
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
 
-    watched_at = await watch_history.forget_movie_watch(user_id, trakt_id)
+    watched_at = await watch_history.forget_movie_watch(user_id, key)
     if watched_at is None:
         return JSONResponse({"ok": False, "error": "No such film on record."}, status_code=404)
 
@@ -883,19 +945,22 @@ async def api_distrakt_add(request: Request):
     month = route_params.valid_month(data.get("month"), today.month)
     try:
         show = {
-            "trakt_id": int(data["trakt_id"]),
-            "tmdb": data.get("tmdb"),
+            "media": Media.SHOW,
+            "ids": _client_ids(data.get("ids")),
             "season": int(data["season"]),
-            "slug": data.get("slug") or "",
             "title": data.get("title") or "",
             "network": data.get("network") or "",
-            "media": "show",
             # Added by hand, so removing it later says nothing about the
             # calendar — see api_distrakt_remove.
-            "source": distrakt_store.SOURCE_MANUAL,
+            "added_by": distrakt_store.ADDED_BY_MANUAL,
         }
+        # Resolved before anything is written, so a title with no shared id is
+        # refused here rather than at the insert, where the answer would be a 500.
+        key = distrakt_store.record_key(show)
+    except distrakt_store.UnkeyableRecord as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+        return JSONResponse({"ok": False, "error": "Missing or invalid ids/season"}, status_code=400)
     month_key = _month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key):
         # No backfill: refuse to create a never-tracked past/gap month even via a
@@ -908,13 +973,13 @@ async def api_distrakt_add(request: Request):
     await distrakt_store.add_show(user_id, month_key, show)
     await _register_networks(user_id, [show["network"]])
     try:  # baseline the show's watch history now so its counts are correct immediately
-        await watch_history.baseline_show(settings, user_id, show["trakt_id"])
+        await watch_history.baseline_show(settings, user_id, show)
     # Deliberately broad: this is a nicety, not the add. Whatever went wrong —
     # Trakt refusing, a malformed history row, a database hiccup — the row is
     # already stored and the next month load re-baselines it, so failing the
     # user's add over it would be the worse outcome.
     except Exception:
-        logger.warning("baseline_show failed for %s", show["trakt_id"], exc_info=True)
+        logger.warning("baseline_show failed for %s", key, exc_info=True)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     return JSONResponse(payload, status_code=status)
 
@@ -955,14 +1020,16 @@ async def api_distrakt_add_completed(request: Request):
         return JSONResponse(
             {"ok": False, "error": "Only a past month can be filled in by hand."},
             status_code=400)
+    ids = _client_ids(data.get("ids"))
     try:
-        trakt_id = int(data["trakt_id"])
         season = int(data["season"])
     except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+        return JSONResponse({"ok": False, "error": "Missing or invalid season"}, status_code=400)
+    if not ids.get("trakt"):
+        return JSONResponse({"ok": False, "error": "Missing or invalid ids"}, status_code=400)
 
     try:
-        detail = await fetch_season_detail(settings, trakt_id, season)
+        detail = await fetch_season_detail(settings, ids["trakt"], season)
     except TraktError as exc:
         return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
     total = int((detail or {}).get("total") or 0)
@@ -971,24 +1038,25 @@ async def api_distrakt_add_completed(request: Request):
             {"ok": False, "error": "Trakt lists no episodes for that season, so it cannot be recorded as finished."},
             status_code=400)
 
-    await distrakt_store.add_show(user_id, month_key, {
-        "trakt_id": trakt_id,
-        "tmdb": data.get("tmdb"),
-        "slug": data.get("slug") or "",
-        "title": data.get("title") or "",
-        "season": season,
-        "network": data.get("network") or "",
-        "media": "show",
-        "watched": total,
-        "total": total,
-        "cadence": (detail or {}).get("cadence"),
-        "premiere": (detail or {}).get("premiere"),
-        "finale": (detail or {}).get("finale"),
-        "started_airing": True,
-        "finished_airing": True,
-        "bucket": "completed",
-        "source": distrakt_store.SOURCE_MANUAL,
-    })
+    try:
+        await distrakt_store.add_show(user_id, month_key, {
+            "media": Media.SHOW,
+            "ids": ids,
+            "title": data.get("title") or "",
+            "season": season,
+            "network": data.get("network") or "",
+            "watched": total,
+            "total": total,
+            "cadence": (detail or {}).get("cadence"),
+            "premiere": (detail or {}).get("premiere"),
+            "finale": (detail or {}).get("finale"),
+            "started_airing": True,
+            "finished_airing": True,
+            "bucket": discord_fmt.Bucket.COMPLETED,
+            "added_by": distrakt_store.ADDED_BY_MANUAL,
+        })
+    except distrakt_store.UnkeyableRecord as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     # add_show leaves an existing month's `closed` alone and creates a new one
     # open; either way a hand-filled past month ends up closed, like every other
     # past month, so it renders and imports with no further Trakt calls.
@@ -1079,18 +1147,17 @@ async def api_distrakt_abandon(request: Request):
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     try:
-        trakt_id = int(data["trakt_id"])
-        season = int(data["season"])
-    except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid trakt_id/season"}, status_code=400)
+        key, season = _row_target(data)
+    except RequestError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     abandoned = bool(data.get("abandoned"))
     month_key = _month_key(year, month)
 
     abandoned_form = None
     if abandoned:
-        abandoned_form = await _freeze_abandon_form(user_id, month_key, trakt_id, season)
+        abandoned_form = await _freeze_abandon_form(user_id, month_key, key, season)
 
-    rec = await distrakt_store.set_abandoned(user_id, month_key, trakt_id, season, abandoned,
+    rec = await distrakt_store.set_abandoned(user_id, month_key, key, season, abandoned,
                                              abandoned_form=abandoned_form)
     if rec is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
@@ -1099,7 +1166,7 @@ async def api_distrakt_abandon(request: Request):
 
 
 async def _freeze_abandon_form(user_id: int, month_key: str,
-                               trakt_id: int, season: int) -> str | None:
+                               key: ItemKey, season: int) -> str | None:
     """The show's inline Discord form as it stands right now, so an abandoned line
     stays stable even after the show would otherwise have moved buckets.
 
@@ -1112,7 +1179,7 @@ async def _freeze_abandon_form(user_id: int, month_key: str,
     doc = await distrakt_store.load_month(user_id, month_key)
     rec = next(
         (r for r in (doc or {}).get("shows", [])
-         if r.get("trakt_id") == trakt_id and r.get("season") == season),
+         if r["key"] == str(key) and r.get("season") == season),
         None,
     )
     if rec is None:
@@ -1120,13 +1187,19 @@ async def _freeze_abandon_form(user_id: int, month_key: str,
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
         return None
+    source_id = (rec.get("ids") or {}).get("trakt")
+    if source_id is None:
+        return None
     try:
-        watched_lookup, detail = await asyncio.gather(
-            fetch_watched_map(settings, [trakt_id]),
-            fetch_season_detail(settings, trakt_id, season),
+        watched, detail = await asyncio.gather(
+            fetch_watched_map(settings, [source_id]),
+            fetch_season_detail(settings, source_id, season),
         )
     except TraktError:
         return None
+    # fetch_watched_map answers in Trakt's own (id, season) terms; the merge below
+    # reads the shared identity, so this one record's count is re-filed under it.
+    watched_lookup = {distrakt_store.live_key(rec): watched.get((int(source_id), season), 0)}
     return discord_fmt.freeze_form(_merge_live_show(rec, watched_lookup, detail))
 
 
