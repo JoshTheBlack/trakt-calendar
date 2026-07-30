@@ -181,6 +181,43 @@ async def handshake_start_limited(request: Request, settings: Settings | None = 
     return limited
 
 
+async def registration_rate_limited(ip: str, invite_token: str | None) -> bool:
+    """Whether this address has tried to create an account too many times.
+
+    TWO limits, because there are two things worth throttling and they have
+    different budgets: attempts to register at all, and attempts against an
+    invite. The second only applies when a token was actually presented — an
+    invite-less sign-up should not consume the invite budget.
+
+    ONE DEFINITION, because it is one rule. This is asked identically by
+    registration with a password and by every provider sign-in that can create an
+    account, and it was four copies of these six lines across three route modules
+    before it lived here — which meant a provider added later would have been a
+    fifth, and a change to either budget would have had to find all of them. It
+    belongs beside record_attempt and rate_limited, which it is built from, and
+    it names no provider, so a new one gets it by calling it.
+
+    VOLUME, NOT FAILURES: pair it with record_registration_attempt at the moment
+    a registration is actually decided, the same way handshake_start_limited and
+    the share-page limiter work.
+    """
+    if await rate_limited("register_ip", ip, max_attempts=REGISTER_MAX_ATTEMPTS,
+                          window_seconds=REGISTER_WINDOW_SECONDS):
+        return True
+    return bool(invite_token) and await rate_limited(
+        "invite_ip", ip, max_attempts=INVITE_MAX_ATTEMPTS,
+        window_seconds=INVITE_WINDOW_SECONDS,
+    )
+
+
+async def record_registration_attempt(ip: str, invite_token: str | None, succeeded: bool) -> None:
+    """Record one registration attempt against the same two keys
+    registration_rate_limited reads, so the pair cannot drift apart."""
+    await record_attempt("register_ip", ip, succeeded)
+    if invite_token:
+        await record_attempt("invite_ip", ip, succeeded)
+
+
 async def sweep_login_attempts(now: int | None = None) -> int:
     """Delete attempt rows old enough that no limiter still consults them. Run
     from the heartbeat loop alongside the session sweep."""

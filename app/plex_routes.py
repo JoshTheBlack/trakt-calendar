@@ -51,18 +51,6 @@ ALREADY_LINKED = "That Plex account is already linked to another user on this in
 UPSTREAM_FAILED = "Plex could not complete the sign-in. Please try again in a moment."
 
 
-def _error(message: str, status: int = 400, **extra) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
-
-
-async def _json_body(request: Request) -> dict:
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Malformed JSON body.")
-    return data if isinstance(data, dict) else {}
-
-
 TOO_MANY_STARTS = "Too many sign-in attempts from this address. Try again in a few minutes."
 
 
@@ -80,13 +68,13 @@ async def _begin(request: Request, *, purpose: str, session_id: str | None = Non
     limit it is a free way to make this instance hammer a third party.
     """
     if await auth.handshake_start_limited(request):
-        return _error(TOO_MANY_STARTS, 429)
+        return authz.error(TOO_MANY_STARTS, 429)
     client_id = await plex_auth.ensure_client_identifier()
     try:
         pin = await plex_auth.request_pin(client_id)
     except plex_auth.PinError as exc:
         logger.warning("Plex PIN request failed: %s", exc)
-        return _error(NOT_CONFIGURED, 503)
+        return authz.error(NOT_CONFIGURED, 503)
 
     state = await auth.create_handshake(
         provider=PROVIDER, purpose=purpose, session_id=session_id,
@@ -139,11 +127,11 @@ async def plex_poll(request: Request):
     reports the PIN approved.
     """
     settings = load_settings()
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     state = str(data.get("state") or "").strip()
 
     if not auth.handshake_cookie_matches(request, settings, state):
-        return _error(auth.HANDSHAKE_REJECTED, 400)
+        return authz.error(auth.HANDSHAKE_REJECTED, 400)
 
     current = await auth.current_user(request)
     try:
@@ -151,14 +139,14 @@ async def plex_poll(request: Request):
             state, provider=PROVIDER, session_id=current.session_id if current else None,
         )
     except auth.HandshakeError:
-        return _error(auth.HANDSHAKE_REJECTED, 400)
+        return authz.error(auth.HANDSHAKE_REJECTED, 400)
 
     client_id = await plex_auth.ensure_client_identifier()
     try:
         auth_token = await plex_auth.poll_pin(int(row["plex_pin_id"]), client_id)
     except plex_auth.PinError as exc:
         logger.warning("Plex PIN poll failed: %s", exc)
-        return _error(UPSTREAM_FAILED, 502)
+        return authz.error(UPSTREAM_FAILED, 502)
 
     if auth_token is None:
         return JSONResponse({"ok": True, "status": "pending"})
@@ -167,7 +155,7 @@ async def plex_poll(request: Request):
         account = await plex_auth.fetch_account(auth_token, client_id)
     except plex_auth.AccountLookupError as exc:
         logger.warning("Plex account lookup failed: %s", type(exc).__name__)
-        return _error(UPSTREAM_FAILED, 502)
+        return authz.error(UPSTREAM_FAILED, 502)
 
     try:
         handshake = await auth.consume_handshake(
@@ -176,7 +164,7 @@ async def plex_poll(request: Request):
     except auth.HandshakeError:
         # Expired, or another poll already finished this one — a real race, not
         # an attack, but there is nothing left to complete here either way.
-        return _error(auth.HANDSHAKE_REJECTED, 400)
+        return authz.error(auth.HANDSHAKE_REJECTED, 400)
 
     identity = auth.ProviderIdentity(
         provider=PROVIDER,
@@ -195,15 +183,15 @@ async def plex_poll(request: Request):
 
 async def _finish_link(request: Request, settings, identity: auth.ProviderIdentity, current):
     if current is None:  # pragma: no cover — consume_handshake already required it
-        return _error(auth.HANDSHAKE_REJECTED, 400)
+        return authz.error(auth.HANDSHAKE_REJECTED, 400)
     try:
         await auth.link_provider_identity(identity=identity, user_id=current.user_id)
     except auth.IdentityInUse:
-        return _error(ALREADY_LINKED, 409)
+        return authz.error(ALREADY_LINKED, 409)
     except auth.AccountUnavailable:
-        return _error(auth.HANDSHAKE_REJECTED, 403)
+        return authz.error(auth.HANDSHAKE_REJECTED, 403)
     except auth.IdentityWritesBlocked:
-        return _error(
+        return authz.error(
             "Stored secrets are encrypted, but the key is currently missing or wrong, "
             "so linking is refused rather than writing a fresh token in the clear. An "
             "administrator needs to restore ENCRYPTION_KEY before linking can continue.",
@@ -222,8 +210,8 @@ async def _finish_login(request: Request, settings, identity: auth.ProviderIdent
     # with a password, and throttling it would lock out a household sharing one
     # address.
     if await auth.find_identity(PROVIDER, identity.provider_user_id) is None:
-        if await _registration_rate_limited(ip, token):
-            return _error(
+        if await auth.registration_rate_limited(ip, token):
+            return authz.error(
                 "Too many sign-up attempts from this address. Try again later.", 429,
             )
     try:
@@ -231,17 +219,17 @@ async def _finish_login(request: Request, settings, identity: auth.ProviderIdent
             identity=identity, invite_token=token, ip_address=ip, settings=settings,
         )
     except auth.RegistrationRefused:
-        await _record_registration_attempt(ip, token, False)
-        return _error(INVALID_INVITE, 403)
+        await auth.record_registration_attempt(ip, token, False)
+        return authz.error(INVALID_INVITE, 403)
     except auth.IdentityInUse:  # pragma: no cover — needs a concurrent registration
-        return _error(ALREADY_LINKED, 409)
+        return authz.error(ALREADY_LINKED, 409)
     except auth.AccountUnavailable:
         # A disabled account, reported exactly like a failed password sign-in so
         # a Plex poll is not an oracle for account state.
-        return _error(INVALID_CREDENTIALS, 403)
+        return authz.error(INVALID_CREDENTIALS, 403)
 
     if outcome.kind == "registered":
-        await _record_registration_attempt(ip, token, True)
+        await auth.record_registration_attempt(ip, token, True)
 
     session_id = await auth.create_session(
         outcome.user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
@@ -255,17 +243,3 @@ async def _finish_login(request: Request, settings, identity: auth.ProviderIdent
     return response
 
 
-async def _registration_rate_limited(ip: str, token: str | None) -> bool:
-    if await auth.rate_limited("register_ip", ip, max_attempts=auth.REGISTER_MAX_ATTEMPTS,
-                               window_seconds=auth.REGISTER_WINDOW_SECONDS):
-        return True
-    return bool(token) and await auth.rate_limited(
-        "invite_ip", ip, max_attempts=auth.INVITE_MAX_ATTEMPTS,
-        window_seconds=auth.INVITE_WINDOW_SECONDS,
-    )
-
-
-async def _record_registration_attempt(ip: str, token: str | None, succeeded: bool) -> None:
-    await auth.record_attempt("register_ip", ip, succeeded)
-    if token:
-        await auth.record_attempt("invite_ip", ip, succeeded)

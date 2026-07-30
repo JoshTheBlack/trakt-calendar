@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, db, distrakt, share_links  # noqa: E402
+from app import auth, authz, db, distrakt, share_links, user_images  # noqa: E402
 from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,  # noqa: E402
                         save_settings)
 from app.main import app  # noqa: E402
@@ -1218,6 +1218,51 @@ class CacheIsOffTheEventLoopTests(HardeningTestCase):
         self.assertTrue(threads, "the cache never touched the database")
         for name in threads:
             self.assertNotEqual(name, loop_thread)
+
+
+class SharedBodyGuardTests(HardeningTestCase):
+    """The one guard every mutating route reads its body through.
+
+    It replaced six near-copies with five different contracts, so what matters is
+    that the rules now hold at EVERY route rather than at whichever ones happened
+    to inherit them. Each case below is asserted on a route from a DIFFERENT
+    module, chosen so a rule that quietly stopped applying somewhere would fail
+    here rather than in whichever module's tests happen to be thorough.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user = self.make_user(is_admin=True)
+        self.login()
+
+    def test_malformed_json_is_refused_everywhere(self):
+        for path in ("/api/admin/invites", "/api/state", "/api/settings"):
+            resp = self.client.post(path, content=b"{not json",
+                                    headers={"Content-Type": "application/json"})
+            self.assertEqual(resp.status_code, 400, path)
+
+    def test_a_body_that_is_not_an_object_is_refused_everywhere(self):
+        """A route reads its body with .get(); a list or a string has no .get,
+        and the copies that returned {} or None for one only moved the failure."""
+        for path in ("/api/admin/invites", "/api/state", "/api/settings"):
+            resp = self.client.post(path, json=[1, 2, 3])
+            self.assertEqual(resp.status_code, 400, path)
+
+    def test_the_size_cap_applies_outside_the_ranker(self):
+        """The cap used to exist in exactly one module. This asserts it on a
+        route in a different one, which is the whole point of merging them."""
+        oversize = b"x" * (authz.MAX_BODY_BYTES + 64)
+        resp = self.client.post("/api/state",
+                                content=b'{"pad": "' + oversize + b'"}',
+                                headers={"Content-Type": "application/json"})
+        self.assertEqual(resp.status_code, 413)
+
+    def test_the_cap_leaves_room_for_an_image_upload(self):
+        """/api/me/avatar and /api/me/images carry an image as base64 in the JSON
+        body, and user_images allows 4 MB DECODED — about 5.6 MB encoded. A cap
+        below that would refuse every ordinary upload with a 413 that says
+        nothing about images."""
+        self.assertGreater(authz.MAX_BODY_BYTES, user_images.MAX_UPLOAD_BYTES * 4 / 3)
 
 
 if __name__ == "__main__":  # pragma: no cover

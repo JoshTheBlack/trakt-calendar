@@ -24,9 +24,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import auth, calendar_cache, calendar_state, share_code, share_links
+from . import auth, calendar_cache, calendar_state, route_params, share_code, share_links
 from .providers.trakt import detail as trakt_detail
 from .auth import AuthLevel
+from . import authz
 from .authz import Guard
 from .config import load_settings
 from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
@@ -52,34 +53,8 @@ _CARRY_PARAMS = ("card", "packing", "hidenw", "tz", "networks", "endpoint")
 
 
 # ---------------------------------------------------------------------------
-# small page-local helpers.
-# TODO: these three now duplicate app/route_params.py's valid_year, valid_month
-# and adjacent_months. They were copied when the only other versions were
-# private helpers inside app/main.py, so reusing them would have meant reaching
-# into another route module's internals; route_params.py is a shared module with
-# no such problem, so fold these onto it and delete them.
+# small page-local helpers
 # ---------------------------------------------------------------------------
-
-def _valid_year(value, fallback: int) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _valid_month(value, fallback: int) -> int:
-    try:
-        m = int(value)
-        return m if 1 <= m <= 12 else fallback
-    except (TypeError, ValueError):
-        return fallback
-
-
-def _nav(year: int, month: int) -> dict:
-    prev_m, prev_y = (12, year - 1) if month == 1 else (month - 1, year)
-    next_m, next_y = (1, year + 1) if month == 12 else (month + 1, year)
-    return {"prev_month": prev_m, "prev_year": prev_y, "next_month": next_m, "next_year": next_y}
-
 
 def _carry_query(request: Request) -> str:
     parts = [
@@ -200,8 +175,8 @@ async def _render(request: Request, share_row) -> Response:
     owner_prefs = await auth.get_user_prefs(owner_id)
 
     today = date.today()
-    year = _valid_year(request.query_params.get("year"), today.year)
-    month = _valid_month(request.query_params.get("month"), today.month)
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
     endpoint = _resolve_endpoint(request, share_row, settings)
     tz = _resolve_tz(request, share_row, settings)
     card_style = _resolve_choice(
@@ -262,7 +237,7 @@ async def _render(request: Request, share_row) -> Response:
         "year": year,
         "month": month,
         "month_label": _calendar.month_name[month],
-        "nav": _nav(year, month),
+        "nav": route_params.adjacent_months(year, month),
         "grouped": grouped,
         "not_watching": nw_ids,
         "total": len(visible),
@@ -405,14 +380,6 @@ def _share_payload(row, username: str | None, settings) -> dict:
     }
 
 
-async def _json_body(request: Request) -> dict | None:
-    try:
-        data = await request.json()
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
-
-
 @guard.get("/api/me/share", AuthLevel.CALENDAR_APPROVED)
 async def get_share(request: Request):
     user = await auth.current_user(request)
@@ -423,8 +390,8 @@ async def get_share(request: Request):
 @guard.post("/api/me/share/enabled", AuthLevel.CALENDAR_APPROVED)
 async def post_share_enabled(request: Request):
     user = await auth.current_user(request)
-    data = await _json_body(request)
-    if data is None or data.get("kind") not in share_links.PREFERRED_KINDS:
+    data = await authz.json_body(request)
+    if data.get("kind") not in share_links.PREFERRED_KINDS:
         return JSONResponse({"ok": False, "error": "Expected {kind, enabled}"}, status_code=400)
     await share_links.set_enabled(user.user_id, data["kind"], bool(data.get("enabled")))
     row = await share_links.get(user.user_id)
@@ -440,8 +407,8 @@ async def post_share_active(request: Request):
     forms live at once; this is the one-link-at-a-time shape the UI presents.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
-    if data is None or data.get("kind") not in share_links.PREFERRED_KINDS:
+    data = await authz.json_body(request)
+    if data.get("kind") not in share_links.PREFERRED_KINDS:
         return JSONResponse({"ok": False, "error": "Expected {kind}"}, status_code=400)
     await share_links.set_active_kind(user.user_id, data["kind"])
     row = await share_links.get(user.user_id)
@@ -451,8 +418,8 @@ async def post_share_active(request: Request):
 @guard.post("/api/me/share/preferred", AuthLevel.CALENDAR_APPROVED)
 async def post_share_preferred(request: Request):
     user = await auth.current_user(request)
-    data = await _json_body(request)
-    if data is None or data.get("kind") not in share_links.PREFERRED_KINDS:
+    data = await authz.json_body(request)
+    if data.get("kind") not in share_links.PREFERRED_KINDS:
         return JSONResponse({"ok": False, "error": "Expected {kind}"}, status_code=400)
     await share_links.set_preferred_kind(user.user_id, data["kind"])
     row = await share_links.get(user.user_id)
@@ -462,8 +429,8 @@ async def post_share_preferred(request: Request):
 @guard.post("/api/me/share/slug", AuthLevel.CALENDAR_APPROVED)
 async def post_share_slug(request: Request):
     user = await auth.current_user(request)
-    data = await _json_body(request)
-    if data is None or "slug" not in data:
+    data = await authz.json_body(request)
+    if "slug" not in data:
         return JSONResponse({"ok": False, "error": "Expected {slug}"}, status_code=400)
     err = await share_links.set_custom_slug(user.user_id, data.get("slug"))
     if err:
@@ -493,8 +460,8 @@ async def post_share_view(request: Request):
     link and only the link.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
-    if data is None or "view" not in data:
+    data = await authz.json_body(request)
+    if "view" not in data:
         return JSONResponse({"ok": False, "error": "Expected {view}"}, status_code=400)
     view = data["view"]
     if view is not None and not isinstance(view, dict):

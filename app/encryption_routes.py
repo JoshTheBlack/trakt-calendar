@@ -43,22 +43,6 @@ RECOVERY_PATH = "/admin/encryption/recovery"
 RESET_CONFIRM_PHRASE = "reset encrypted secrets"
 
 
-def _error(message: str, status: int = 400, **extra) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
-
-
-async def _json_body(request: Request) -> dict:
-    if "application/json" not in (request.headers.get("content-type") or "").lower():
-        raise HTTPException(status_code=415, detail="Send application/json.")
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Malformed JSON body.")
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object.")
-    return data
-
-
 async def _secrets_present() -> bool:
     """Whether there is anything to protect yet: a stored app secret or a per-user
     token. Encryption on an instance with neither would seal nothing, so the consent
@@ -110,7 +94,7 @@ async def encryption_enable(request: Request):
     environment — move straight to the confirm step with no restart. A generated key
     is revealed exactly once here and never stored; the admin copies it into their
     environment."""
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     result = await encryption_flow.begin_enable(generate=bool(data.get("generate")))
     return JSONResponse({"ok": True, "phase": await encryption_flow.get_phase(), **result})
 
@@ -132,7 +116,7 @@ async def encryption_encrypt():
     encrypted. Refused without a valid key so a missing one cannot be mistaken for
     'nothing to do'."""
     if not secrets_box.is_enabled():
-        return _error(
+        return authz.error(
             "No valid encryption key is set in the environment yet. Set "
             f"{secrets_box.ENV_VAR} and restart before encrypting.", 409,
         )
@@ -210,13 +194,13 @@ async def recovery_reset(request: Request):
     endpoint). Only meaningful while the key is actually wrong; refused otherwise so
     it can never blank a healthy instance's values by mistake."""
     if encryption_flow.health() != encryption_flow.KEY_MISMATCH:
-        return _error(
+        return authz.error(
             "There is nothing to reset — the current key matches the stored secrets.",
             409,
         )
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     typed = str(data.get("confirm") or "").strip().lower()
     if typed != RESET_CONFIRM_PHRASE:
-        return _error(f'Type "{RESET_CONFIRM_PHRASE}" exactly to confirm the reset.')
+        return authz.error(f'Type "{RESET_CONFIRM_PHRASE}" exactly to confirm the reset.')
     result = await encryption_flow.destructive_reset()
     return JSONResponse({"ok": True, **result})

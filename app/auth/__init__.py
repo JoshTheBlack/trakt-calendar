@@ -52,6 +52,7 @@ from .lockout import (ATTEMPT_RETENTION_SECONDS, HANDSHAKE_MAX_ATTEMPTS, HANDSHA
                       LOGIN_MAX_ATTEMPTS, LOGIN_WINDOW_SECONDS, REGISTER_MAX_ATTEMPTS,
                       REGISTER_WINDOW_SECONDS, check_lockout, clear_attempts, cooldown_remaining,
                       handshake_start_limited, is_locked_out, rate_limited, record_attempt,
+                      record_registration_attempt, registration_rate_limited,
                       sweep_login_attempts)
 from .passwords import VerifyResult, burn_dummy_verify, hash_password, verify_password
 from .prefs import get_user_prefs, insert_user_prefs, set_user_timezone, update_user_prefs
@@ -91,7 +92,9 @@ __all__ = [
     "list_sessions", "list_users_overview", "login_with_provider_identity", "mark_logged_in",
     "normalize_display_name", "parse_trusted_networks", "peek_handshake",
     "peer_is_trusted_proxy", "rate_limited", "read_handshake_cookie", "read_session_cookie",
-    "record_attempt", "redeem_invite", "release_identity_refresh", "release_retired_identifier",
+    "record_attempt", "record_registration_attempt", "redeem_invite",
+    "registration_rate_limited", "release_identity_refresh",
+    "release_retired_identifier",
     "request_is_https", "require_admin", "require_calendar", "require_distrakt",
     "require_ranker", "require_session", "revoke_invite", "revoke_session",
     "revoke_user_session", "revoke_user_sessions", "session_cookie_name", "set_admin",

@@ -99,6 +99,23 @@ class UnkeyableRecord(ValueError):
     identity — see app/providers/base.py's MATCH_SOURCES."""
 
 
+def month_key(year: int, month: int) -> str:
+    """The key a month is stored and addressed under: zero-padded "YYYY-MM".
+
+    Here rather than in whichever caller needed one first, because the format is
+    a STORAGE fact — it is the key half of distrakt_months' identity, and
+    _MONTH_RE above is the same fact stated as a validator. It was spelled out
+    inline in the routes and again in the rollover logic, which is two places to
+    get the padding wrong.
+
+    THE ZERO-PADDING IS LOAD-BEARING, not cosmetic: several callers compare month
+    keys with `<` and `>=` to decide which months are past. String comparison
+    only agrees with chronological order while every key is the same width, so
+    "2026-7" would sort after "2026-12" and silently mis-file a month.
+    """
+    return f"{int(year):04d}-{int(month):02d}"
+
+
 def _validate_month(month: str) -> str:
     if not isinstance(month, str) or not _MONTH_RE.match(month):
         raise ValueError(f"month must be 'YYYY-MM', got {month!r}")

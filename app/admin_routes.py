@@ -24,28 +24,6 @@ router = APIRouter()
 guard = authz.Guard(router)
 
 
-def _error(message: str, status: int = 400, **extra) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
-
-
-async def _json_body(request: Request) -> dict:
-    """Require a JSON body, rejecting anything else with 415.
-
-    Every mutating route in this app enforces this the same way, so a
-    form-encoded cross-origin POST is never reachable with only SameSite
-    standing in the way.
-    """
-    if "application/json" not in (request.headers.get("content-type") or "").lower():
-        raise HTTPException(status_code=415, detail="Send application/json.")
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Malformed JSON body.")
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object.")
-    return data
-
-
 # ---------------------------------------------------------------------------
 # the page
 # ---------------------------------------------------------------------------
@@ -83,8 +61,8 @@ async def admin_set_approval(user_id: int, request: Request):
     """Toggle calendar, distrakt and/or ranker approval, independently — a
     request may include any of the keys, all of them, or none."""
     if await auth.get_user(user_id) is None:
-        return _error("No such account.", 404)
-    data = await _json_body(request)
+        return authz.error("No such account.", 404)
+    data = await authz.json_body(request)
     if "calendar" in data:
         await auth.set_calendar_approved(user_id, bool(data["calendar"]))
     if "distrakt" in data:
@@ -96,25 +74,25 @@ async def admin_set_approval(user_id: int, request: Request):
 
 @guard.post("/api/admin/users/{user_id}/admin", AuthLevel.ADMIN)
 async def admin_set_admin(user_id: int, request: Request):
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         await auth.set_admin(user_id, bool(data.get("is_admin")))
     except auth.UserNotFound:
-        return _error("No such account.", 404)
+        return authz.error("No such account.", 404)
     except auth.LastAdmin:
-        return _error("The last remaining administrator can't be demoted.", 409)
+        return authz.error("The last remaining administrator can't be demoted.", 409)
     return JSONResponse({"ok": True})
 
 
 @guard.post("/api/admin/users/{user_id}/disabled", AuthLevel.ADMIN)
 async def admin_set_disabled(user_id: int, request: Request):
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         await auth.set_disabled(user_id, bool(data.get("disabled")))
     except auth.UserNotFound:
-        return _error("No such account.", 404)
+        return authz.error("No such account.", 404)
     except auth.LastAdmin:
-        return _error("The last remaining administrator can't be disabled.", 409)
+        return authz.error("The last remaining administrator can't be disabled.", 409)
     return JSONResponse({"ok": True})
 
 
@@ -132,16 +110,16 @@ async def admin_reset_password(user_id: int, request: Request):
     """
     target = await auth.get_user(user_id)
     if target is None:
-        return _error("No such account.", 404)
-    data = await _json_body(request)
+        return authz.error("No such account.", 404)
+    data = await authz.json_body(request)
 
     username = str(data.get("username") or "").strip()
     if username and not target["username"]:
         if err := await auth.username_availability_error(username):
-            return _error(err)
+            return authz.error(err)
         await auth.admin_set_username(user_id, username)
     elif username and target["username"]:
-        return _error("That account already has a username.")
+        return authz.error("That account already has a username.")
 
     password = str(data.get("password") or "")
     generated = False
@@ -149,7 +127,7 @@ async def admin_reset_password(user_id: int, request: Request):
         password = secrets.token_urlsafe(9)
         generated = True
     elif len(password) < auth.MIN_PASSWORD_LENGTH:
-        return _error(f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
+        return authz.error(f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
 
     await auth.set_password(user_id, password)
     return JSONResponse({"ok": True, "password": password, "generated": generated})
@@ -160,11 +138,11 @@ async def admin_wipe_user(user_id: int, request: Request):
     """Reversible: clears the user's calendar/distrakt data and disables the
     account, but keeps the account, its identities, its username/slug, and its
     share links intact. Distinct from DELETE below, which is permanent."""
-    await _json_body(request)
+    await authz.json_body(request)
     try:
         await auth.wipe_user_data(user_id)
     except auth.UserNotFound:
-        return _error("No such account.", 404)
+        return authz.error("No such account.", 404)
     return JSONResponse({"ok": True})
 
 
@@ -173,21 +151,21 @@ async def admin_delete_user(user_id: int, request: Request):
     """Permanent. Requires typing the account's own display name back —
     exactly what the account list shows for it — as `confirm_username`."""
     me = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     confirm = str(data.get("confirm_username") or "").strip()
     expected = await auth.display_name_for(user_id)
     if expected is None:
-        return _error("No such account.", 404)
+        return authz.error("No such account.", 404)
     if confirm.lower() != expected.lower():
-        return _error("Type the account's name exactly to confirm deletion.")
+        return authz.error("Type the account's name exactly to confirm deletion.")
     try:
         await auth.delete_user(user_id, actor_user_id=me.user_id)
     except auth.CannotDeleteSelf:
-        return _error("You can't delete your own account.", 409)
+        return authz.error("You can't delete your own account.", 409)
     except auth.LastAdmin:
-        return _error("The last remaining administrator can't be deleted.", 409)
+        return authz.error("The last remaining administrator can't be deleted.", 409)
     except auth.UserNotFound:
-        return _error("No such account.", 404)
+        return authz.error("No such account.", 404)
     return JSONResponse({"ok": True})
 
 
@@ -216,18 +194,18 @@ async def admin_revoke_session(user_id: int, request: Request):
     is looking at one account's session list, and an id that isn't on it is a
     stale row or a mistake, not an instruction to log somebody else out.
     """
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     session_id = str(data.get("session_id") or "")
     if not session_id:
-        return _error("session_id is required.")
+        return authz.error("session_id is required.")
     if not await auth.revoke_user_session(user_id, session_id):
-        return _error("That session isn't on this account.", 404)
+        return authz.error("That session isn't on this account.", 404)
     return JSONResponse({"ok": True})
 
 
 @guard.post("/api/admin/users/{user_id}/sessions/revoke-all", AuthLevel.ADMIN)
 async def admin_revoke_all_sessions(user_id: int, request: Request):
-    await _json_body(request)
+    await authz.json_body(request)
     count = await auth.revoke_user_sessions(user_id)
     return JSONResponse({"ok": True, "revoked": count})
 
@@ -243,10 +221,10 @@ async def admin_unlink_identity(user_id: int, request: Request):
     confirms with `force`. A first request without it gets the same warning
     the self-service endpoint would have raised, so the admin UI can show it
     and ask before resubmitting with force=true."""
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
     if provider not in ("trakt", "plex"):
-        return _error("Unknown provider.")
+        return authz.error("Unknown provider.")
     force = bool(data.get("force"))
     from . import trakt_routes  # deferred: trakt_routes reads app.auth_routes
 
@@ -265,7 +243,7 @@ async def admin_unlink_identity(user_id: int, request: Request):
                       "identity is added. Send force=true to unlink anyway."),
         }, status_code=409)
     if not removed:
-        return _error("That account isn't linked.", 404)
+        return authz.error("That account isn't linked.", 404)
     return JSONResponse({"ok": True, "warning": await trakt_routes.revoke_token_value(token)})
 
 
@@ -299,9 +277,9 @@ async def admin_list_invites():
 
 @guard.post("/api/admin/invites/{invite_id}/revoke", AuthLevel.ADMIN)
 async def admin_revoke_invite(invite_id: int, request: Request):
-    await _json_body(request)
+    await authz.json_body(request)
     if not await auth.revoke_invite(invite_id):
-        return _error("No such invite.", 404)
+        return authz.error("No such invite.", 404)
     return JSONResponse({"ok": True})
 
 
@@ -332,13 +310,13 @@ async def admin_list_retired():
 
 @guard.post("/api/admin/retired/release", AuthLevel.ADMIN)
 async def admin_release_retired(request: Request):
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     kind = str(data.get("kind") or "").strip()
     value = str(data.get("value") or "").strip()
     if kind not in ("username", "slug"):
-        return _error("Only usernames and slugs can be released.")
+        return authz.error("Only usernames and slugs can be released.")
     if not value:
-        return _error("value is required.")
+        return authz.error("value is required.")
     if not await auth.release_retired_identifier(kind, value):
-        return _error("That identifier isn't retired.", 404)
+        return authz.error("That identifier isn't retired.", 404)
     return JSONResponse({"ok": True})

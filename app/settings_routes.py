@@ -171,12 +171,7 @@ async def post_settings(request: Request):
     render its credential inputs empty (it cannot read them back) without the
     first save wiping every credential the instance has.
     """
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
-    if not isinstance(data, dict):
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     # A credential save while the key is missing or wrong would seal a fresh value
     # over ciphertext the original key could still recover. Refuse it loudly and send
     # the admin to recovery, rather than let it silently overwrite. A save that only
@@ -220,10 +215,7 @@ async def auth_device_start(request: Request):
     """Begin Trakt's OAuth device-code flow. Accepts an in-progress (unsaved)
     client_id from the Settings form, falling back to the saved one — same
     pattern as /api/integrations/options for Sonarr/Radarr."""
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
+    data = await authz.json_body(request)
     settings = load_settings()
     client_id = (data.get("client_id") or "").strip() or settings.trakt_client_id
     if not client_id:
@@ -241,10 +233,7 @@ async def auth_device_poll(request: Request):
     persists client_id/client_secret + the new token pair to settings.json so
     the background auto-refresh (heartbeat) can pick it up without the user
     separately clicking "Save & reload" on the main Settings form."""
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     settings = load_settings()
     client_id = (data.get("client_id") or "").strip() or settings.trakt_client_id
     client_secret = (data.get("client_secret") or "").strip() or settings.trakt_client_secret

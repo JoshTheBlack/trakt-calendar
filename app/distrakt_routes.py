@@ -61,10 +61,6 @@ class RequestError(ValueError):
     told, so it says what is wrong rather than naming a field type."""
 
 
-def _month_key(year: int, month: int) -> str:
-    return f"{year:04d}-{month:02d}"
-
-
 def _client_ids(raw) -> dict:
     """An id map out of a request body: known namespaces only, numbers as numbers.
 
@@ -216,8 +212,8 @@ async def api_distrakt_list(request: Request):
     today = date.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
-    doc = await distrakt_store.load_month(user_id, _month_key(year, month))
-    return JSONResponse({"ok": True, "month": _month_key(year, month), "shows": (doc or {}).get("shows", [])})
+    doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
+    return JSONResponse({"ok": True, "month": distrakt_store.month_key(year, month), "shows": (doc or {}).get("shows", [])})
 
 
 async def _apply_not_watching(user_id: int, month_key: str,
@@ -453,7 +449,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     degrades the same way; only the notice wording differs.
     """
     today = date.today()
-    month_key = _month_key(year, month)
+    month_key = distrakt_store.month_key(year, month)
     link_url = await _distrakt_post_link(user_id, settings, year, month)
     # This user's own map, fetched once and handed to every render below. It is
     # not on `settings` any more — see _distrakt_settings.
@@ -508,10 +504,7 @@ async def api_distrakt_refresh(request: Request):
     totals_refreshed_at for the OPEN month, then return the same shape as GET
     /api/distrakt/month. CLOSED months are frozen (nothing to refresh)."""
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
@@ -526,7 +519,7 @@ async def api_distrakt_months(request: Request):
     current month (always navigable even before it has been initialized)."""
     user_id = await _distrakt_user_id(request)
     today = date.today()
-    current = _month_key(today.year, today.month)
+    current = distrakt_store.month_key(today.year, today.month)
     months = sorted(set(await distrakt_store.list_months(user_id)) | {current})
     return JSONResponse({"ok": True, "months": months, "current": current})
 
@@ -542,14 +535,11 @@ async def api_distrakt_import(request: Request):
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
-    month_key = _month_key(year, month)
+    month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key):
         return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
@@ -566,14 +556,11 @@ async def api_distrakt_backfill_networks(request: Request):
     """Register every network used by this month's roster into the emoji map
     (with the default emoji) so they all show up in the editor. Returns the map."""
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
-    doc = await distrakt_store.load_month(user_id, _month_key(year, month))
+    doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
     emojis = await _register_networks(
         user_id, [s.get("network") for s in (doc or {}).get("shows", [])],
     )
@@ -664,12 +651,7 @@ async def api_distrakt_set_emojis(request: Request):
     could edit what every user's posts looked like.
     """
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
-    if not isinstance(data, dict):
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     emojis = data.get("network_emojis")
     if not isinstance(emojis, dict):
         return JSONResponse(
@@ -712,10 +694,7 @@ async def api_distrakt_remove(request: Request):
     calendar today. The row goes; the month stays closed.
     """
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
@@ -723,7 +702,7 @@ async def api_distrakt_remove(request: Request):
         key, season = _row_target(data)
     except RequestError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    month_key = _month_key(year, month)
+    month_key = distrakt_store.month_key(year, month)
     doc = await distrakt_store.load_month(user_id, month_key)
     if doc is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
@@ -804,10 +783,7 @@ async def api_distrakt_add_movie(request: Request):
     today's date would file it under a month the user is not even looking at.
     """
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     ids = _client_ids(data.get("ids"))
     if not ids:
         return JSONResponse({"ok": False, "error": "Missing or invalid film ids"}, status_code=400)
@@ -831,7 +807,7 @@ async def api_distrakt_add_movie(request: Request):
         return JSONResponse(
             {"ok": False, "error": "That film has no id the tracker can file it under."},
             status_code=400)
-    await _resnapshot_if_closed(user_id, _month_key(watched_on.year, watched_on.month))
+    await _resnapshot_if_closed(user_id, distrakt_store.month_key(watched_on.year, watched_on.month))
 
     today = date.today()
     year = route_params.valid_year(data.get("year_view"), today.year)
@@ -873,10 +849,7 @@ async def api_distrakt_remove_movie(request: Request):
     film and offer it back — in a plan that has to be confirmed, not silently.
     """
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     try:
         key = parse_item_key(data.get("key"))
     except ValueError as exc:
@@ -934,10 +907,7 @@ async def api_distrakt_add(request: Request):
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
@@ -959,7 +929,7 @@ async def api_distrakt_add(request: Request):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid ids/season"}, status_code=400)
-    month_key = _month_key(year, month)
+    month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key):
         # No backfill: refuse to create a never-tracked past/gap month even via a
         # manual add (keeps a user's store growing forward-only, consistent with
@@ -1006,15 +976,12 @@ async def api_distrakt_add_completed(request: Request):
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
-    month_key = _month_key(year, month)
-    if month_key >= _month_key(today.year, today.month):
+    month_key = distrakt_store.month_key(year, month)
+    if month_key >= distrakt_store.month_key(today.year, today.month):
         return JSONResponse(
             {"ok": False, "error": "Only a past month can be filled in by hand."},
             status_code=400)
@@ -1090,17 +1057,7 @@ async def api_distrakt_backfill_survey(request: Request):
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    # Read but not returned: the survey summary says nothing about which months are
-    # already tracked. Left in place rather than dropped because removing a query
-    # is a behaviour change, and whether the summary SHOULD carry `tracked` (the
-    # /backfill range endpoint does) is a product question, not a cleanup.
-    tracked = await distrakt_store.list_months(user_id)  # noqa: F841
+    data = await authz.json_body(request)
     default_start, default_end = distrakt_backfill.default_range()
     start = distrakt_backfill.valid_month(data.get("start")) or default_start
     end = distrakt_backfill.valid_month(data.get("end")) or default_end
@@ -1137,10 +1094,7 @@ async def api_distrakt_abandon(request: Request):
     (distrakt_store.set_abandoned's job). If Trakt isn't configured (or the show
     isn't found), abandoned_form falls back to None."""
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     today = date.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
@@ -1149,7 +1103,7 @@ async def api_distrakt_abandon(request: Request):
     except RequestError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     abandoned = bool(data.get("abandoned"))
-    month_key = _month_key(year, month)
+    month_key = distrakt_store.month_key(year, month)
 
     abandoned_form = None
     if abandoned:
@@ -1225,10 +1179,7 @@ async def api_distrakt_restore(request: Request):
     into someone else's tracker. This is deliberately NOT the same thing as
     POST /api/distrakt/import, which pulls premieres in from the calendar."""
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     try:
         await distrakt_store.restore_user_data(user_id, data)
     except distrakt_store.RestoreError as exc:
@@ -1279,12 +1230,7 @@ async def api_distrakt_set_share_link(request: Request):
     back to whatever the owner's share defaults already resolve to.
     """
     user_id = await _distrakt_user_id(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
-    if not isinstance(data, dict):
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     kind = data["kind"] or None if "kind" in data else ...
     endpoint = data["endpoint"] or None if "endpoint" in data else ...
     if kind is ... and endpoint is ...:

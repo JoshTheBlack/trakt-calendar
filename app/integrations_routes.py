@@ -84,17 +84,14 @@ async def integrations_library():
 async def integrations_options(request: Request):
     """Quality profiles + root folders for the Settings dropdowns. Accepts the URL +
     API key from the (possibly unsaved) form, falling back to saved settings."""
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
+    data = await authz.json_body(request)
     kind = data.get("kind")
     if kind not in ("sonarr", "radarr"):
         return JSONResponse({"ok": False, "error": "Unknown service"}, status_code=400)
     url = (data.get("url") or "").strip()
     key = (data.get("api_key") or "").strip()
     if not (url and key):  # fall back to what's already saved
-        url, key = arr._base(kind, load_settings())
+        url, key = arr.credentials(kind, load_settings())
     if not (url and key):
         return JSONResponse({"ok": False, "error": "Enter the URL and API key first."}, status_code=400)
     try:
@@ -114,10 +111,7 @@ async def integrations_add(request: Request):
 
     Routed by `target`; falls back to the arr service implied by `media`.
     """
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     media = data.get("media")
     target = data.get("target") or ("radarr" if media == "movie" else "sonarr")
     settings = load_settings()

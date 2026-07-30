@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 from PIL import Image  # noqa: E402
 
-from app import auth, db, distrakt, posters, ranker, ranker_export  # noqa: E402
+from app import auth, authz, db, distrakt, posters, ranker, ranker_export  # noqa: E402
 from app import ranker_import, ranker_routes, ranker_sources  # noqa: E402
 from app.providers.trakt import TraktError  # noqa: E402
 from app.providers.trakt import detail as trakt_detail  # noqa: E402
@@ -536,10 +536,13 @@ class ValidationTests(RankerTestCase):
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_categories"), 0)
 
     def test_an_oversized_body_is_refused_before_it_is_parsed(self):
+        """Measured against the shared cap rather than a number written here, so
+        this keeps testing the rule and not a copy of it."""
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+        oversize = b"x" * (authz.MAX_BODY_BYTES + 64)
         resp = self.client.post(
             "/api/rankings/boards/b1/save",
-            content=b'{"version": 1, "pad": "' + b"x" * (1024 * 1024 + 64) + b'"}',
+            content=b'{"version": 1, "pad": "' + oversize + b'"}',
             headers={"Content-Type": "application/json"})
         self.assertEqual(resp.status_code, 413)
 

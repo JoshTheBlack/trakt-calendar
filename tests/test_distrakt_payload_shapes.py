@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-payload-"))
 
-from app import distrakt_routes, integrations_routes  # noqa: E402
+from app import distrakt, distrakt_routes, integrations_routes  # noqa: E402
 
 EMOJIS = {"HBO": "🟪"}
 DEFAULT_EMOJI = "📺"
@@ -112,10 +112,9 @@ class MonthKeyTests(unittest.TestCase):
     def test_it_zero_pads_so_month_keys_sort_and_compare_as_strings(self):
         """Several routes compare month keys with `>=` to tell a past month from
         the current one, which only works while every key is the same width."""
-        self.assertEqual(distrakt_routes._month_key(2026, 3), "2026-03")
-        self.assertEqual(distrakt_routes._month_key(2026, 12), "2026-12")
-        self.assertLess(distrakt_routes._month_key(2026, 3),
-                        distrakt_routes._month_key(2026, 12))
+        self.assertEqual(distrakt.month_key(2026, 3), "2026-03")
+        self.assertEqual(distrakt.month_key(2026, 12), "2026-12")
+        self.assertLess(distrakt.month_key(2026, 3), distrakt.month_key(2026, 12))
 
 
 class LibraryCacheTests(unittest.TestCase):

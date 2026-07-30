@@ -618,12 +618,7 @@ async def post_state(request: Request):
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     endpoint = get_endpoint(request.query_params.get("endpoint"))
-    try:
-        payload = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
-    if not isinstance(payload, dict):
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    payload = await authz.json_body(request)
 
     if "item_id" in payload:
         item_id = str(payload.get("item_id") or "")
@@ -718,12 +713,7 @@ async def post_me_prefs(request: Request):
     action (see app/share_links.py's module docstring).
     """
     user = await auth.current_user(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
-    if not isinstance(data, dict):
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
 
     updates: dict = {}
     if "card_style" in data and data["card_style"] in _CARD_STYLES:
@@ -761,10 +751,7 @@ async def post_me_timezone(request: Request):
     filling in Intl's resolved zone name before the same request fires.
     """
     user = await auth.current_user(request)
-    try:
-        data = await request.json()
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+    data = await authz.json_body(request)
     tz_name = str((data or {}).get("timezone") or "").strip()
     if not tz_name:
         return JSONResponse({"ok": False, "error": "Missing timezone"}, status_code=400)
@@ -807,17 +794,14 @@ async def api_network_logo(request: Request):
     if path is None or not path.exists():
         return Response(status_code=404, headers=_LOGO_CACHE_HEADERS)
     # ?download=1 -> attachment (for the emoji-map "download logo" button).
-    filename = f"{logos._slug(name)}.png" if request.query_params.get("download") else None
+    filename = f"{logos.slug(name)}.png" if request.query_params.get("download") else None
     return FileResponse(path, media_type="image/png", filename=filename, headers=_LOGO_CACHE_HEADERS)
 
 
 @guard.post("/api/network-logo/regenerate", AuthLevel.ADMIN)
 async def api_network_logo_regenerate(request: Request):
     """Drop a single network's cached logo and re-resolve it from TMDB."""
-    try:
-        data = await request.json()
-    except ValueError:
-        data = {}
+    data = await authz.json_body(request)
     name = (data.get("name") or "").strip()
     tmdb = data.get("tmdb")
     if not name:

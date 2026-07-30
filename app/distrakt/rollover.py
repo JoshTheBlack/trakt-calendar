@@ -15,7 +15,7 @@ from datetime import date
 
 from .. import calendar_state, db, discord_fmt
 from ..providers.base import Media, collect_ids
-from . import calendar_import
+from . import calendar_import, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
@@ -35,7 +35,7 @@ WATCHED_RECENCY_DAYS = 60      # only seed genuinely active shows from history
 
 def prev_month_key(month_key: str) -> str:
     year, month = (int(x) for x in month_key.split("-"))
-    return f"{year - 1:04d}-12" if month == 1 else f"{year:04d}-{month - 1:02d}"
+    return store.month_key(year - 1, 12) if month == 1 else store.month_key(year, month - 1)
 
 
 def month_committed(month_key: str, today: date | None = None) -> bool:
@@ -231,7 +231,7 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     freeze), so PAST months never re-run initialization.
     """
     today = today or date.today()
-    month_key = f"{int(year):04d}-{int(month):02d}"
+    month_key = store.month_key(year, month)
     existing = await load_month(user_id, month_key)
     configured = bool(settings and getattr(settings, "trakt_configured", False))
 
