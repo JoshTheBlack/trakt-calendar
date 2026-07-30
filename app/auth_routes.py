@@ -394,8 +394,8 @@ async def register(request: Request):
             # registration — it just doesn't grant anything either.
             row = candidate if usable else None
         # The invite's own grant, OR the instance-wide "approve new accounts
-        # automatically" setting — the same rule the provider-identity
-        # registration path in auth.py applies, so both doors behave alike.
+        # automatically" setting — the same rule auth.login_with_provider_identity
+        # applies when it registers, so both doors behave alike.
         grants_calendar = (
             bool(row["grants_calendar_on_accept"]) if row else False
         ) or settings.auto_approve_calendar

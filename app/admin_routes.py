@@ -1,7 +1,7 @@
 """The admin screen: accounts, invites, and retired identifiers.
 
 Every route here is `AuthLevel.ADMIN`. The business rules — the last-admin
-guards chief among them — live in app/auth.py; this module is just the HTTP
+guards chief among them — live in app/auth/admin.py; this module is just the HTTP
 surface over them, following the same shape as POST /api/admin/invites below:
 a thin route that validates the request and hands off, so the rule lives in
 one place no matter which URL prefix reaches it.

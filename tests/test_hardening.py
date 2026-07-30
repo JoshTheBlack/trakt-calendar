@@ -37,7 +37,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, db, distrakt, share_links  # noqa: E402
-from app.config import Settings, load_settings, save_settings  # noqa: E402
+from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,  # noqa: E402
+                        save_settings)
 from app.main import app  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
@@ -171,7 +172,7 @@ class ProxyDiagnosticsTests(HardeningTestCase):
         self.assertIn("detected_peer_ip", body)
         self.assertIn("forwarded_headers_present", body)
         self.assertIn("peer_is_trusted_proxy", body)
-        self.assertEqual(body["trusted_proxy_ips"], auth.TRUSTED_PROXY_IPS_DEFAULT)
+        self.assertEqual(body["trusted_proxy_ips"], TRUSTED_PROXY_IPS_DEFAULT)
 
     def test_forwarded_headers_from_an_untrusted_peer_are_reported(self):
         """The silent misconfiguration: headers arriving, peer not trusted, so

@@ -58,7 +58,7 @@ class AuthTestCase(unittest.IsolatedAsyncioTestCase):
         AuthTestCase._counter += 1
         db.set_db_path(TMP / f"auth-{AuthTestCase._counter}.db")
         await db.migrate()
-        auth._warned_default_proxy = False
+        auth.cookies._warned_default_proxy = False
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -435,7 +435,7 @@ class ClientIpTests(unittest.TestCase):
     UNTRUSTED = Settings(trusted_proxy_ips="")
 
     def setUp(self):
-        auth._warned_default_proxy = False
+        auth.cookies._warned_default_proxy = False
 
     def test_no_proxy_configured_ignores_forwarded_headers(self):
         """Trusting a header from an untrusted peer would let anyone claim any
@@ -498,7 +498,7 @@ class ClientIpTests(unittest.TestCase):
             auth.client_ip(request, default)
         self.assertIn("trusted_proxy_ips", captured.output[0])
         # Once, not on every request.
-        self.assertTrue(auth._warned_default_proxy)
+        self.assertTrue(auth.cookies._warned_default_proxy)
         with self.assertRaises(AssertionError):
             with self.assertLogs("app.auth", level="WARNING"):
                 auth.client_ip(request, default)

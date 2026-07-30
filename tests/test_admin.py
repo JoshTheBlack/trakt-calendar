@@ -1,5 +1,5 @@
 """Unit tests for the admin screen (app/admin_routes.py) and its business logic
-in app/auth.py.
+in app/auth/admin.py.
 
 Two things carry the most weight here and get the most direct coverage:
 

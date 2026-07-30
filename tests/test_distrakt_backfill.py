@@ -564,8 +564,28 @@ class FilmsAreVisibleTests(unittest.TestCase):
         self.assertEqual([m["title"] for m in body["movies"]], ["The Sixth Sense"])
 
     def test_a_month_with_nothing_still_answers_with_an_empty_list(self):
-        """The page reads this key unconditionally; a missing one is a crash."""
-        body = self.client.get("/api/distrakt/month?year=2020&month=5").json()
+        """The page reads this key unconditionally; a missing one is a crash.
+
+        An empty month has no stored snapshot, so the route builds it LIVE, and
+        that path reaches Trakt four separate ways: the month's premieres, recent
+        watch progress, the last-activities gate, and the history sweep behind
+        it. Every one of them needs patching. Unpatched they went to the real
+        Trakt, which 401s, and the transport swallows a 401 — so the empty list
+        this asserts on arrived for entirely the wrong reason, and only on a
+        machine with a network.
+        """
+        async def no_premieres(*args, **kwargs):
+            return [], None
+
+        async def no_events(settings, start_at=None, limit=100, max_pages=50):
+            return []
+
+        with patch("app.calendar_cache.read_month", side_effect=no_premieres), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", side_effect=no_events), \
+             patch("app.providers.trakt.sync.fetch_show_progress_detail", return_value={}):
+            body = self.client.get("/api/distrakt/month?year=2020&month=5").json()
         self.assertEqual(body["movies"], [])
 
 
