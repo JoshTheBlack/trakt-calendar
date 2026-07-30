@@ -11,6 +11,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 📜 **The changelog is readable from inside the app.** The ☰ menu has a *What's new* entry on every page, opening this file rendered properly — one collapsible section per release, newest already open. It is the same `CHANGELOG.md` that lives in the repository, rendered on the way past rather than copied, so what you read here cannot drift from what was actually written.
 
 ### Changed
+- 📡 **Networks can be left out as well as picked.** The Networks box, on both Settings and Filters, took a list of networks to keep and nothing else. Put a `-` in front of a name — `-Apple TV` — and it now excludes that one instead, which is how genres, countries and certifications have always worked. Names are still matched exactly as Trakt spells them, capitals and all: `tvN` and `TVN` really are two different networks.
 - 📆 **The month and year at the top of the calendar now takes you to the app's front page.** It used to go to a second address that showed the same month picker; you get the same screen, at the address you'd type or bookmark.
 
 ### Fixed

@@ -116,11 +116,10 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     items = [normalize(entry, endpoint, tz) for entry in raw]
     items = [i for i in items if i and start_date <= i.air_date <= end_date]
 
-    # Network filter: an operator-configured allow-list, matched case-sensitively
-    # against Trakt's own network naming.
-    if settings.network_filter:
-        allow = set(settings.network_filter)
-        items = [i for i in items if i.network in allow]
+    # Network filter: the operator-configured names, kept or excluded, matched
+    # case-sensitively against Trakt's own network naming (calendar_filter says
+    # why the case matters).
+    items = calendar_filter.filter_by_network(items, settings.network_filter)
 
     items.sort(key=lambda i: i.air_ts)
     return items

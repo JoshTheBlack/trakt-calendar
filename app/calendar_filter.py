@@ -1,4 +1,5 @@
-"""The read-time genre/country/certification filter for cached calendar data.
+"""The read-time genre/country/certification/network filter for cached calendar
+data.
 
 Trakt used to apply `genres` and `countries` as query parameters, so its
 calendar responses arrived already filtered server-side. The cache now stores
@@ -17,8 +18,15 @@ Certification is a third, independent dimension on the same media object. It
 is a scalar (one rating per item, like `country`, not a list like `genres`), so
 it gets the same exclude-then-include treatment as country rather than the
 set-intersection treatment genres gets.
+
+NETWORK IS THE FOURTH, and it is deliberately kept apart from the other three
+(parse_network_spec below says why). It also applies LATER: the three above run
+on the raw cached blob before normalization, while network runs on normalized
+items, because that is the shape both callers hold at the point they filter.
 """
 from __future__ import annotations
+
+from typing import Iterable, Protocol, Sequence, TypeVar
 
 
 def parse_spec(spec: str) -> tuple[set[str], set[str]]:
@@ -40,6 +48,77 @@ def parse_spec(spec: str) -> tuple[set[str], set[str]]:
         elif token:
             includes.add(token)
     return includes, excludes
+
+
+def parse_network_spec(networks: Iterable[str] | None) -> tuple[set[str], set[str]]:
+    """Split network names into (includes, excludes), CASE PRESERVED.
+
+    Same leading-'-' convention as parse_spec, and deliberately NOT the same
+    function. parse_spec lowercases both sides, which is right for the three
+    dimensions it serves: genre slugs, two-letter country codes and
+    certifications are closed vocabularies Trakt spells exactly one way.
+
+    A network name is free text, spelled however the network spells itself, and
+    the case carries meaning. A single week of the calendar came back holding
+    both 'TVN' and 'tvN' — a Polish broadcaster and a Korean one — alongside
+    'Discovery', 'Discovery Channel' and 'discovery+', and 'tv asahi' next to
+    'TV Tokyo'. Folding case would silently merge networks that are not the same
+    network, so matching stays exact, as it has since this filter was added.
+
+    Networks arrive as a LIST (the textarea's commas are split before storage,
+    see calendar_routes._network_list), which is why this takes an iterable
+    where parse_spec takes one string.
+    """
+    includes: set[str] = set()
+    excludes: set[str] = set()
+    for raw in networks or ():
+        name = str(raw).strip()
+        if not name:
+            continue
+        if name.startswith("-"):
+            bare = name[1:].strip()
+            if bare:
+                excludes.add(bare)
+        else:
+            includes.add(name)
+    return includes, excludes
+
+
+def keep_network(network: str, inc: set[str], exc: set[str]) -> bool:
+    """Whether one item's network survives the parsed network spec.
+
+    Exclude-first, like every other dimension here. An item with NO network is
+    KEPT under an exclude-only spec and DROPPED under an include spec, the same
+    way a missing country or certification behaves — and it is not a rare case:
+    Trakt's movie objects carry no network field at all, so every film answers
+    the empty string.
+    """
+    if exc and network in exc:
+        return False
+    if inc and network not in inc:
+        return False
+    return True
+
+
+class _HasNetwork(Protocol):
+    network: str
+
+
+ItemT = TypeVar("ItemT", bound=_HasNetwork)
+
+
+def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None) -> list[ItemT]:
+    """Keep the normalized `items` whose network survives `networks`.
+
+    Takes normalized items rather than raw entries because that is what both
+    callers hold when they filter — the instance-wide pass in the Trakt
+    provider's fetch_calendar, and the per-viewer pass in calendar_cache. An
+    empty spec is a pass-through.
+    """
+    inc, exc = parse_network_spec(networks)
+    if not (inc or exc):
+        return list(items)
+    return [item for item in items if keep_network(item.network, inc, exc)]
 
 
 def keep_media(media: dict, g_inc: set[str], g_exc: set[str],

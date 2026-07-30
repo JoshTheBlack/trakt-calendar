@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -507,6 +508,32 @@ class AssembleRangeTests(CacheTestCase):
                          {"before-boundary", "after-boundary"})
         self.assertFalse(meta["partial"])
 
+    async def test_the_network_filter_excludes_as_well_as_includes(self):
+        """The read path's own wiring, not just the predicate: one viewer's
+        network choice arrives here as the list the preferences hold, and a
+        leading '-' has to reach the same convention the genre, country and
+        certification specs use."""
+        entries = []
+        for slug, network in (("apple", "Apple TV"), ("flix", "Netflix"), ("hbo", "HBO")):
+            entry = _entry(slug, "2026-07-15T20:00:00Z")
+            entry["show"]["network"] = network
+            entries.append(entry)
+
+        async def read(networks):
+            with patch("app.calendar_cache.fetch_window_raw",
+                       AsyncMock(return_value=entries)):
+                grouped, _ = await calendar_cache.assemble_range(
+                    SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                    start_date=date(2026, 7, 15), end_date=date(2026, 7, 15),
+                    network_filter=networks)
+            return [item.id for group in grouped for item in group["items"]]
+
+        self.assertEqual(await read(["Apple TV"]), ["apple"])
+        self.assertEqual(sorted(await read(["-Apple TV"])), ["flix", "hbo"])
+        # Case still has to match exactly — see calendar_filter.parse_network_spec.
+        self.assertEqual(await read(["apple tv"]), [])
+        self.assertEqual(sorted(await read(None)), ["apple", "flix", "hbo"])
+
     async def test_overlapping_windows_dedupe_keeping_the_earlier_windows_copy(self):
         """gather loads the windows concurrently, but the results are stitched
         back in window order, so an airing two adjacent windows both return is
@@ -809,6 +836,54 @@ class FilterEdgeCaseTests(unittest.TestCase):
     def test_no_spec_is_a_pass_through(self):
         entries = [{"show": {"genres": ["anime"], "country": "kr"}}]
         self.assertEqual(calendar_filter.filter_entries(entries, "show", "", ""), entries)
+
+
+class NetworkFilterTests(unittest.TestCase):
+    """The fourth dimension. It takes the same leading-'-' convention as the
+    other three and, unlike them, matches with the case left alone."""
+
+    @staticmethod
+    def named(*networks):
+        """Stand-ins carrying only what the network filter reads."""
+        return [SimpleNamespace(network=name) for name in networks]
+
+    def kept(self, items, spec):
+        return [item.network for item in calendar_filter.filter_by_network(items, spec)]
+
+    def test_a_bare_name_keeps_only_that_network(self):
+        items = self.named("Apple TV", "Netflix", "HBO")
+        self.assertEqual(self.kept(items, ["Apple TV"]), ["Apple TV"])
+
+    def test_a_leading_dash_excludes_that_network(self):
+        items = self.named("Apple TV", "Netflix", "HBO")
+        self.assertEqual(self.kept(items, ["-Apple TV"]), ["Netflix", "HBO"])
+
+    def test_excludes_and_includes_compose_the_way_the_other_dimensions_do(self):
+        items = self.named("Apple TV", "Netflix", "HBO")
+        self.assertEqual(self.kept(items, ["Apple TV", "Netflix", "-Netflix"]), ["Apple TV"])
+
+    def test_matching_is_case_sensitive_in_both_directions(self):
+        """Trakt spells a network however the network spells itself, and one week
+        of the calendar carried both 'TVN' and 'tvN' — a Polish broadcaster and a
+        Korean one. Folding case would merge two different networks."""
+        items = self.named("tvN", "TVN")
+        self.assertEqual(self.kept(items, ["tvN"]), ["tvN"])
+        self.assertEqual(self.kept(items, ["-tvN"]), ["TVN"])
+        self.assertEqual(self.kept(items, ["apple tv"]), [])
+
+    def test_an_item_with_no_network_is_kept_by_an_exclude_and_dropped_by_an_include(self):
+        """Every film answers the empty string — Trakt's movie objects carry no
+        network field — so this is the common case, not an edge one. It follows
+        the country and certification precedent."""
+        items = self.named("", "HBO")
+        self.assertEqual(self.kept(items, ["-HBO"]), [""])
+        self.assertEqual(self.kept(items, ["HBO"]), ["HBO"])
+
+    def test_an_empty_spec_is_a_pass_through(self):
+        items = self.named("HBO", "")
+        for spec in (None, [], ["", "  "], ["-"]):
+            with self.subTest(spec=spec):
+                self.assertEqual(self.kept(items, spec), ["HBO", ""])
 
 
 if __name__ == "__main__":  # pragma: no cover

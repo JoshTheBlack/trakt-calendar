@@ -455,8 +455,10 @@
                     <label for="s_networks">Networks</label>
                     <textarea id="s_networks" name="network_filter" spellcheck="false"
                               placeholder="HBO, Netflix, BBC One"></textarea>
-                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them.
-                        Blank means every network is cached.</span>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells
+                        them &mdash; capitals included, because <code>tvN</code> and <code>TVN</code> are
+                        two different networks. Put a <code>-</code> in front of a name to exclude it
+                        instead (<code>-Netflix</code>). Blank means every network is cached.</span>
                 </div>
                 <div class="two-col">
                     <div class="field">
@@ -594,8 +596,10 @@
                     <label for="f_networks">Networks</label>
                     <textarea id="f_networks" name="network_filter" spellcheck="false"
                               placeholder="HBO, Netflix, BBC One"></textarea>
-                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them.
-                        Blank means every network.</span>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells
+                        them &mdash; capitals included, because <code>tvN</code> and <code>TVN</code> are
+                        two different networks. Put a <code>-</code> in front of a name to exclude it
+                        instead (<code>-Netflix</code>). Blank means every network.</span>
                 </div>
                 {# Genre and country filtering is a Trakt VIP feature only when
                    Trakt does it. This app filters the cached result itself, so
