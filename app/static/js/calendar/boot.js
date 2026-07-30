@@ -59,22 +59,18 @@ function applyViewStateTo(root) {
     updateEmptyDays();
 }
 
-// afterSwap fires only on AJAX swaps, never the initial paint, so the readyState
-// branch owns first load and afterSwap owns every subsequent boosted nav — each
-// runs initCalendarPage exactly once. This script is deferred, so by the time it
-// executes the document is parsed (readyState is past 'loading') and init runs now.
-// A boosted navigation replaces the whole <body> and so needs the full init; a
-// content swap only brings one day's cards, and must NOT re-run it (see
-// applyViewStateTo). The event is dispatched on what the swap PRODUCED, which for
-// a day block replacing its own placeholder (an outerHTML swap) is the new
-// section — detail.target is still the placeholder htmx just detached, so it is
-// the wrong thing to look inside.
+// A BOOSTED arrival is not handled here. static/js/boost.js owns those: it has to
+// load whichever of this page's scripts the session has not run yet, and only
+// then is there an init to call — so it calls the one registered below, on the
+// cold load and on every arrival alike.
+// What is left here is the CONTENT swap, which only brings one day's cards and
+// must NOT re-run the init (see applyViewStateTo). The event is dispatched on what
+// the swap PRODUCED, which for a day block replacing its own placeholder (an
+// outerHTML swap) is the new section — detail.target is still the placeholder htmx
+// just detached, so it is the wrong thing to look inside.
 document.addEventListener('htmx:afterSwap', (evt) => {
-    if (evt.detail && evt.detail.boosted) initCalendarPage();
-    else applyViewStateTo(evt.target);
+    if (evt.detail && evt.detail.boosted) return;
+    applyViewStateTo(evt.target);
 });
-if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initCalendarPage);
-} else {
-    initCalendarPage();
-}
+
+registerPage('calendar', initCalendarPage);

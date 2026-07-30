@@ -7,8 +7,8 @@
 // rather than merging into it. Hence the typed acknowledgement — a phrase that
 // has to be read and copied cannot be cleared by muscle memory the way a
 // confirm() can.
-const RESTORE_ACK = 'REPLACE MY DATA';
-let restorePayload = null;
+const TRACKER_RESTORE_ACK = 'REPLACE MY DATA';
+let trackerRestorePayload = null;
 
 function setRestoreStatus(message, ok) {
     const el = document.getElementById('restoreStatus');
@@ -17,7 +17,7 @@ function setRestoreStatus(message, ok) {
 }
 
 function resetRestore() {
-    restorePayload = null;
+    trackerRestorePayload = null;
     document.getElementById('restoreConfirm').hidden = true;
     document.getElementById('restoreAck').value = '';
     document.getElementById('restoreBtn').disabled = true;
@@ -31,26 +31,26 @@ async function onRestoreFileChosen() {
     // Parsed here, before anything is asked of the user: being told the file is
     // unreadable is better than typing a confirmation phrase and then finding out.
     try {
-        restorePayload = JSON.parse(await file.text());
+        trackerRestorePayload = JSON.parse(await file.text());
     } catch (e) {
         setRestoreStatus("That file isn't readable JSON.", false);
         input.value = '';
         return;
     }
-    const months = (restorePayload.distrakt_months || []).length;
-    const shows = (restorePayload.distrakt_shows || []).length;
+    const months = (trackerRestorePayload.distrakt_months || []).length;
+    const shows = (trackerRestorePayload.distrakt_shows || []).length;
     setRestoreStatus(`Ready to restore ${months} month(s) and ${shows} show row(s).`, true);
     document.getElementById('restoreConfirm').hidden = false;
 }
 
 function onRestoreAckInput() {
     const typed = document.getElementById('restoreAck').value.trim();
-    document.getElementById('restoreBtn').disabled = !restorePayload || typed !== RESTORE_ACK;
+    document.getElementById('restoreBtn').disabled = !trackerRestorePayload || typed !== TRACKER_RESTORE_ACK;
 }
 
-async function restoreBackup() {
-    if (!restorePayload) return;
-    if (document.getElementById('restoreAck').value.trim() !== RESTORE_ACK) return;
+async function restoreTrackerBackup() {
+    if (!trackerRestorePayload) return;
+    if (document.getElementById('restoreAck').value.trim() !== TRACKER_RESTORE_ACK) return;
     const btn = document.getElementById('restoreBtn');
     btn.disabled = true;
     setRestoreStatus('Restoring…', true);
@@ -58,7 +58,7 @@ async function restoreBackup() {
         const res = await fetch('/api/distrakt/restore', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(restorePayload),
+            body: JSON.stringify(trackerRestorePayload),
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');

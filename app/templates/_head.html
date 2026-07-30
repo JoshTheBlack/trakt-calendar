@@ -54,6 +54,14 @@
      htmx is first and is on every page: it is what boosting is, and a page that
      omitted it would be a one-way door out of the boosted session. #}
   <script src="{{ assets.url(assets.HTMX) }}" defer></script>
+  {# What a boosted arrival needs and cannot get for itself: the swap replaces the
+     body's children, so the page landed on has neither its own <body> classes nor
+     its own scripts. boost.js reads this map to fetch the ones this session has
+     not already run — once each, since re-running one would re-declare its
+     top-level const. On every page, ahead of the page's own scripts, because it
+     is what loads them on every arrival after the first. #}
+  <script id="pageScripts" type="application/json">{{ assets.page_script_urls() | tojson }}</script>
+  <script src="{{ assets.url(assets.BOOST) }}" defer></script>
   {# htmx does not swap a 4xx or 5xx response, so with every link boosted a click
      that lands on an error page would do nothing at all and read as ignored.
      This falls back to a real navigation, which renders that page in full with

@@ -49,12 +49,6 @@ async function openShareDetails(card, event) {
     }
 }
 
-// Extract a YouTube video id from the various URL shapes Trakt returns.
-function youTubeId(url) {
-    const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
-    return m ? m[1] : null;
-}
-
 function renderShareDetails(d, poster, media, season) {
     const chips = [];
     if (d.status) chips.push(`<span class="chip">${esc(d.status)}</span>`);

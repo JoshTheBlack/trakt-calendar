@@ -6,7 +6,7 @@
 // when that payload changes.
 
 // ---- Add-show modal: search -> pick show -> pick season -> POST add ----
-let searchTimer = null;
+let showSearchTimer = null;
 let searchResults = [];
 let pickedShow = null;
 
@@ -30,11 +30,11 @@ function closeAddShow() {
 }
 
 function onAddSearchInput() {
-    clearTimeout(searchTimer);
+    clearTimeout(showSearchTimer);
     const q = document.getElementById('addSearchInput').value.trim();
     document.getElementById('addSeasonPick').hidden = true;
     if (!q) { document.getElementById('addSearchResults').innerHTML = ''; return; }
-    searchTimer = setTimeout(() => runAddSearch(q), 300);
+    showSearchTimer = setTimeout(() => runAddSearch(q), 300);
 }
 
 async function runAddSearch(q) {

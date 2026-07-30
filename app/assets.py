@@ -25,8 +25,11 @@ STYLESHEET = "static/css/style.css"
 
 # On every page too, from the head macro rather than from any page's list below:
 # boosting IS htmx, so a page without it is a one-way door out of a boosted
-# session.
+# session. BOOST is what makes the rest of a boosted arrival work — a swap
+# replaces the body's children only, so the page arrived at has neither its own
+# <body> classes nor its own scripts until that file gives them to it.
 HTMX = "static/js/htmx.min.js"
+BOOST = "static/js/boost.js"
 
 # What each page loads, and IN WHAT ORDER, keyed by the page's own name. The
 # lists live here rather than in the templates for the reason the stylesheet does:
@@ -44,6 +47,13 @@ HTMX = "static/js/htmx.min.js"
 #     be declared in exactly ONE of a page's files. Two of them declaring the same
 #     one is a SyntaxError that stops the second file dead.
 # tests/test_page_head.py holds both of those to account.
+#
+# THE SAME LISTS ARE SHIPPED TO THE BROWSER, because a boosted navigation swaps
+# the body and never the <head>: the page arrived at has to fetch its own scripts,
+# and static/js/boost.js reads this map to know which. That is also why a name may
+# not be shared across two PAGES' lists — visit both in one session and the second
+# page's copy would be a re-declaration. Only ONE list, though: the head macro
+# serializes this dict, so the browser's copy cannot drift from it.
 PAGE_SCRIPTS = {
     "calendar": (
         "static/js/ui.js",
@@ -108,13 +118,13 @@ PAGE_SCRIPTS = {
 }
 
 # Every stylesheet and script served to a browser: the pages' own scripts, plus
-# the two files no page lists (the stylesheet, and htmx, which the head macro adds
-# to every page itself).
+# the three files no page lists (the stylesheet, and the two the head macro puts
+# on every page itself).
 # url() refuses a path that is not in here, which is what makes a `?v=` token a
 # promise rather than decoration: a script tag for an untracked file fails the
 # first time the page renders, instead of quietly serving a stale copy for as long
 # as a browser's cache holds it.
-_CACHED_ASSETS = (STYLESHEET, HTMX) + tuple(
+_CACHED_ASSETS = (STYLESHEET, HTMX, BOOST) + tuple(
     dict.fromkeys(name for scripts in PAGE_SCRIPTS.values() for name in scripts))
 
 # Preloaded by every page: these are the faces the shared header and body text
@@ -155,6 +165,17 @@ def url(name: str) -> str:
             f"{name} is not a tracked asset; add it to the page that loads it in "
             "assets.PAGE_SCRIPTS")
     return f"/{name}?v={ASSET_VERSION}"
+
+
+def page_script_urls() -> dict[str, list[str]]:
+    """PAGE_SCRIPTS as browser URLs, for static/js/boost.js to load from.
+
+    Serialized into every page's <head>, because a boosted navigation swaps the
+    body and leaves the head alone: the page arrived at has to fetch its own
+    scripts, and it can only do that if it knows what they are. Built from the
+    one dict above rather than restated, so the browser's copy cannot drift.
+    """
+    return {page: [url(name) for name in names] for page, names in PAGE_SCRIPTS.items()}
 
 
 def scripts(page: str) -> tuple[str, ...]:

@@ -24,9 +24,17 @@ document.addEventListener('keydown', (e) => {
     }
 });
 
-document.addEventListener('DOMContentLoaded', async () => {
+// The emoji map first and awaited: every row's network badge falls back to it, so
+// rendering the month before it has arrived draws the fallback emoji for shows
+// that have a mapping.
+async function initTrackerPage() {
     await loadEmojiMap();
     loadPostLink();
     loadMonthData();
     loadBackfillRange();
-});
+}
+
+// Registered rather than hung off DOMContentLoaded, which a boosted arrival does
+// not fire — that is static/js/boost.js's to call, once this page's scripts are
+// loaded, however the page was reached.
+registerPage('tracker', initTrackerPage);

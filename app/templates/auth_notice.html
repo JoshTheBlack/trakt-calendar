@@ -2,7 +2,14 @@
 <html lang="en">
 {% import '_head.html' as page with context %}
 {{ page.head(title, nav_head=false) }}
-<body class="auth-page" hx-boost="true">
+{%- set body_class %}auth-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-body-class="{{ body_class }}"></div>
 <div class="auth-shell">
   <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
   <div class="auth-card">

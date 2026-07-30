@@ -21,20 +21,18 @@ function boot() {
     if (tiered.length) warmPosters(tiered.slice(0, 250));
 }
 
-document.addEventListener('DOMContentLoaded', boot);
+// Registered rather than hung off DOMContentLoaded, which a boosted arrival does
+// not fire. static/js/boost.js calls it once this page's scripts are loaded — on
+// the cold load, on a boosted board switch, and on arriving here from any other
+// page, which are the same thing as far as this page is concerned.
+registerPage('rankings', boot);
 
-// A boosted board switch replaces the whole body, and a lazy fragment replaces
-// one container. Both land here. Re-reading the page data covers the first;
-// re-initializing covers both, and is safe when it was only a pool page that
-// arrived because binding an already-bound container is a no-op.
+// What is left here is the LAZY FRAGMENT: a tier's body or a page of the pool
+// replacing one container. Re-initializing is safe because binding an
+// already-bound container is a no-op.
 document.addEventListener('htmx:afterSwap', (event) => {
+    if (event.detail && event.detail.boosted) return;
     const swapped = (event.detail && event.detail.target) || event.target;
-    // A boosted board switch brings a whole new document body, page data and
-    // all; anything smaller is one container of an existing board.
-    if (swapped && swapped.querySelector && swapped.querySelector('#rankerData')) {
-        boot();
-        return;
-    }
     // Marked loaded only when rows actually arrived: a tier whose fragment
     // failed still holds its titles, and calling that container authoritative
     // would report it as empty.

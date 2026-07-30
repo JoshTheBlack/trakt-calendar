@@ -9,7 +9,14 @@
    <body> element that an innerHTML swap leaves in place. The per-PAGE context
    (month/year/endpoint/total) DOES change per nav, so it lives on #pageData
    below — inside the swapped region — where the new page's values replace it. #}
-<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}" hx-boost="true">
+{%- set body_class %}pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="calendar" data-body-class="{{ body_class }}"></div>
 <div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
 {# What the page knows about itself that the client still needs after paint: the
    month's per-show card counts (so a toggle can move the stat tiles without

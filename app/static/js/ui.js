@@ -15,6 +15,17 @@ function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+// The 11-character video id out of any of the URL shapes Trakt returns. Three
+// details modals embed a trailer — the calendar's, the tracker's and the share
+// page's — and each carried its own copy of this regex, one of them renamed only
+// to avoid a name clash. Now that a page's scripts stay loaded and a later page's
+// are added beside them, two copies of one function under one name is the last
+// one loaded quietly winning.
+function youTubeId(url) {
+    const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
+    return m ? m[1] : null;
+}
+
 function toast(message, ok) {
     let host = document.getElementById('toastHost');
     if (!host) { host = document.createElement('div'); host.id = 'toastHost'; document.body.appendChild(host); }

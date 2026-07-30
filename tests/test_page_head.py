@@ -107,7 +107,10 @@ class HeadMacroTests(unittest.TestCase):
         can arrive there boosted, but every link on it is then a full reload."""
         html = self.render(call="'Title', scripts=('static/js/ui.js',)")
         srcs = re.findall(r'<script src="([^"]+)"', html)
-        self.assertEqual(srcs, [assets.url(assets.HTMX), assets.url("static/js/ui.js")])
+        # htmx, then the loader that fetches a page's own scripts on a boosted
+        # arrival, then this page's.
+        self.assertEqual(srcs, [assets.url(assets.HTMX), assets.url(assets.BOOST),
+                                assets.url("static/js/ui.js")])
 
     def test_every_script_is_deferred(self):
         html = self.render(call="'Title', scripts=('static/js/nav.js',)")
@@ -284,10 +287,19 @@ class PageScriptTests(unittest.TestCase):
         return [n for n in assets.scripts(page)
                 if not n.endswith(VENDORED)]
 
+    def every_script(self) -> list[str]:
+        """Every first-party script, each once, plus the loader the head macro
+        puts on every page — it shares the same global scope as all of them."""
+        names = [assets.BOOST]
+        for page in assets.PAGE_SCRIPTS:
+            names.extend(n for n in self.page_scripts(page) if n not in names)
+        return names
+
     def test_every_script_on_disk_is_loaded_by_some_page(self):
         """A file nothing loads is dead code that still looks alive. Splitting a
         page script into a directory is exactly when one gets left behind."""
         loaded = {n for scripts in assets.PAGE_SCRIPTS.values() for n in scripts}
+        loaded.update({assets.HTMX, assets.BOOST})  # the head macro's own two
         for path in sorted(JS_DIR.rglob("*.js")):
             name = path.relative_to(assets.BASE_DIR).as_posix()
             if path.name in VENDORED:
@@ -306,20 +318,81 @@ class PageScriptTests(unittest.TestCase):
                 self.assertEqual(boots, [scripts[-1]],
                                  f"{page}: boot.js must be the last script")
 
-    def test_no_two_of_a_page_s_scripts_declare_the_same_name(self):
-        """Top-level `let`/`const` go into the global lexical scope, so a second
-        declaration of one is a SyntaxError that stops that whole file executing
-        — every function in it silently missing."""
+    def test_no_two_scripts_anywhere_declare_the_same_name(self):
+        """One name, one file — across every page, not just within one.
+
+        A boosted navigation leaves the scripts it has already run in place and
+        adds the next page's beside them, so any two pages can end up sharing one
+        global scope. A second top-level `let`/`const` of a name is then a
+        SyntaxError that stops that whole file executing, every function in it
+        silently missing; a second `function` of one is worse, because it is legal
+        — whichever page was visited last quietly owns the name, and the button
+        that calls it does the other page's job.
+        """
+        owner: dict[str, str] = {}
+        for name in self.every_script():
+            for declared in declares(js_source(name)):
+                with self.subTest(name=declared):
+                    # assertNotIn would print the whole name table.
+                    if declared in owner:
+                        self.fail(f"{declared} is declared at top level by both "
+                                  f"{owner[declared]} and {name}")
+                owner[declared] = name
+
+    def test_every_page_states_its_body_class_inside_its_body(self):
+        """A swap replaces the body's CHILDREN, so the <body> element keeps the
+        previous page's classes. #pageMeta is inside the swapped region and so
+        arrives with the new page; the class it carries has to be the one the
+        <body> tag renders, or a boosted arrival wears something the cold load
+        never would."""
+        for template in PAGES:
+            source = markup(template)
+            body = re.search(r"<body[^>]*>", source)
+            meta = re.search(r'<div id="pageMeta"[^>]*>', source)
+            with self.subTest(page=template):
+                self.assertIsNotNone(meta, f"{template} has no #pageMeta, so a "
+                                           "boosted arrival keeps the previous "
+                                           "page's body classes")
+                self.assertIn('class="{{ body_class }}"', body.group(0), template)
+                self.assertIn('data-body-class="{{ body_class }}"', meta.group(0), template)
+
+    def test_a_page_with_scripts_names_itself_on_its_meta_element(self):
+        """data-page is how a boosted arrival is told which scripts to load: the
+        <head> is never swapped, so the page landed on has to say what it needs
+        from inside the swapped region. A page whose template loads scripts but
+        does not name itself lands inert."""
+        for template in PAGES:
+            page = PAGE_KEY.search(read(template))
+            meta = re.search(r'<div id="pageMeta"[^>]*>', markup(template)).group(0)
+            declared = re.search(r'data-page="([^"]*)"', meta)
+            with self.subTest(page=template):
+                if not page:
+                    self.assertIsNone(declared, f"{template} names a page but loads "
+                                                "no scripts")
+                    continue
+                self.assertIsNotNone(declared, f"{template} loads scripts but its "
+                                               "#pageMeta carries no data-page")
+                self.assertEqual(declared.group(1), page.group(1),
+                                 f"{template} asks for one page's scripts and names "
+                                 "another")
+
+    def test_every_page_with_an_init_registers_it_with_the_loader(self):
+        """boot.js used to run its init from DOMContentLoaded, which a boosted
+        arrival never fires. The loader calls the registered init instead — on the
+        cold load and on every arrival — so a boot file that still waits for the
+        event would only ever run on a full page load."""
         for page in assets.PAGE_SCRIPTS:
-            owner: dict[str, str] = {}
-            for name in self.page_scripts(page):
-                for declared in declares(js_source(name)):
-                    with self.subTest(page=page, name=declared):
-                        # assertNotIn would print the whole page's name table.
-                        if declared in owner:
-                            self.fail(f"{page}: {declared} is declared at top level by "
-                                      f"both {owner[declared]} and {name}")
-                    owner[declared] = name
+            boots = [n for n in assets.scripts(page) if n.endswith("/boot.js")]
+            for name in boots:
+                # Comments stripped: both files explain in prose why they no
+                # longer wait for the event.
+                source = re.sub(r"//[^\n]*", "", js_source(name))
+                with self.subTest(page=page):
+                    self.assertIn(f"registerPage('{page}'", source,
+                                  f"{name} does not register an init for {page}")
+                    self.assertNotIn("DOMContentLoaded", source,
+                                     f"{name} still waits for DOMContentLoaded, which "
+                                     "a boosted arrival does not fire")
 
     def test_every_function_an_inline_handler_calls_is_on_that_page(self):
         """The markup calls these functions from onclick/onerror attributes, which

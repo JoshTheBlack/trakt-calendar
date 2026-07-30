@@ -9,7 +9,14 @@
      Integrity of the file as committed:
      sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU #}
 {% endcall %}
-<body class="has-nav ranker-page" hx-boost="true">
+{%- set body_class %}has-nav ranker-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="rankings" data-body-class="{{ body_class }}"></div>
 
 {% import '_nav.html' as site_nav %}
 {% call site_nav.navbar(title='Rankings',
@@ -275,7 +282,7 @@
         <div class="modal-foot">
             <button type="button" class="btn-ghost" onclick="closeBackupModal()">Close</button>
             <button type="button" class="btn-primary" id="backupGo"
-                    onclick="restoreBackup()" disabled>Replace my boards</button>
+                    onclick="restoreBoardsBackup()" disabled>Replace my boards</button>
         </div>
     </div>
 </div>

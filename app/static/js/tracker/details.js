@@ -30,14 +30,6 @@ async function openDistraktDetails(row, event) {
     }
 }
 
-// The 11-character video id out of any of YouTube's URL shapes. Its own copy
-// rather than a shared helper: the calendar's modal has the same three lines, and
-// the two have never had a reason to agree beyond both reading YouTube URLs.
-function distraktYouTubeId(url) {
-    const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
-    return m ? m[1] : null;
-}
-
 // https://app.trakt.tv/shows/<slug>?season=N&view=episode&episode=M
 function traktEpisodeUrl(slug, season, number) {
     if (!slug) return null;
@@ -69,7 +61,7 @@ function renderDistraktDetails(d) {
     // Trailer, same as the calendar's modal: embedded when it is a YouTube link
     // (which Trakt's are), otherwise a link out.
     if (d.trailer) {
-        const yt = distraktYouTubeId(d.trailer);
+        const yt = youTubeId(d.trailer);
         html += `<div class="details-section-title">▶️ Trailer</div>`;
         html += yt
             ? `<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/${esc(yt)}"

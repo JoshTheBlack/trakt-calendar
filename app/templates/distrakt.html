@@ -3,7 +3,14 @@
 {% import '_head.html' as page with context %}
 {{ page.head('Distrakt', scripts=assets.scripts('tracker'),
              site_suffix=false) }}
-<body class="distrakt-page" hx-boost="true">
+{%- set body_class %}distrakt-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="tracker" data-body-class="{{ body_class }}"></div>
 
 {# Aliased `site_nav`, not `nav`: this page's own context already binds `nav` to
    the previous/next month numbers. #}
@@ -119,7 +126,7 @@
                     <input type="text" id="restoreAck" spellcheck="false" autocomplete="off"
                            placeholder="REPLACE MY DATA" oninput="onRestoreAckInput()">
                     <button type="button" class="btn-ghost small btn-danger" id="restoreBtn"
-                            onclick="restoreBackup()" disabled>Replace my data</button>
+                            onclick="restoreTrackerBackup()" disabled>Replace my data</button>
                 </div>
                 <p class="distrakt-note" id="restoreStatus"></p>
             </div>

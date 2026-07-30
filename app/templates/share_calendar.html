@@ -6,7 +6,14 @@
   {{ page.og((owner_username or 'Shared calendar') ~ ' – ' ~ month_label ~ ' ' ~ year,
              "Shows I'm watching this month") }}
 {% endcall %}
-<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}" hx-boost="true">
+{%- set body_class %}pack-{{ view.day_packing }} card-{{ view.card_style }}{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="share" data-body-class="{{ body_class }}"></div>
 
 <header class="hero">
     <div class="hero-lead">

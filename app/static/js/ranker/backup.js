@@ -6,11 +6,11 @@
 // merging, so the file is parsed here (a broken one is caught before anything is
 // sent) and the button stays disabled until the acknowledgement is typed out.
 
-const RESTORE_ACK = 'REPLACE MY BOARDS';
-let restorePayload = null;
+const BOARDS_RESTORE_ACK = 'REPLACE MY BOARDS';
+let boardsRestorePayload = null;
 
 function openBackupModal() {
-    restorePayload = null;
+    boardsRestorePayload = null;
     document.getElementById('backupFile').value = '';
     document.getElementById('backupAck').value = '';
     document.getElementById('backupConfirm').hidden = true;
@@ -26,17 +26,17 @@ function closeBackupModal() {
 async function onBackupFileChosen(input) {
     const status = document.getElementById('backupStatus');
     const file = input.files && input.files[0];
-    restorePayload = null;
+    boardsRestorePayload = null;
     document.getElementById('backupConfirm').hidden = true;
     document.getElementById('backupGo').disabled = true;
     if (!file) { status.textContent = ''; return; }
     try {
-        restorePayload = JSON.parse(await file.text());
+        boardsRestorePayload = JSON.parse(await file.text());
     } catch (e) {
         status.textContent = 'That file is not readable as a backup.';
         return;
     }
-    const boards = (restorePayload && restorePayload.boards) || [];
+    const boards = (boardsRestorePayload && boardsRestorePayload.boards) || [];
     status.textContent = boards.length + ' board(s) in this file.';
     document.getElementById('backupConfirm').hidden = false;
     onBackupAckInput();
@@ -44,15 +44,15 @@ async function onBackupFileChosen(input) {
 
 function onBackupAckInput() {
     document.getElementById('backupGo').disabled =
-        !restorePayload || document.getElementById('backupAck').value.trim() !== RESTORE_ACK;
+        !boardsRestorePayload || document.getElementById('backupAck').value.trim() !== BOARDS_RESTORE_ACK;
 }
 
-async function restoreBackup() {
+async function restoreBoardsBackup() {
     const button = document.getElementById('backupGo');
     button.disabled = true;
     document.getElementById('backupStatus').textContent = 'Restoring…';
     try {
-        const data = await api('/api/rankings/restore', 'POST', restorePayload);
+        const data = await api('/api/rankings/restore', 'POST', boardsRestorePayload);
         // A full reload rather than a redraw: every board on the page, its
         // version and its tiers have just been replaced wholesale, and the
         // server's idea of them is the only correct one now.
