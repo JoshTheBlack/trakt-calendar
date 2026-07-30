@@ -1210,9 +1210,21 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
 .ranker-pool, .ranker-rows { display: flex; flex-direction: column; gap: 5px; min-height: 40px; }
 /* The scrolling part of the pinned column: it takes whatever height is left
    under the search box and the source buttons, so the pool is as tall as the
-   window allows rather than a fixed fraction of it. */
-.ranker-pool { flex: 1 1 auto; overflow-y: auto; padding-right: 4px; }
-@media (max-width: 900px) { .ranker-pool { max-height: 62vh; } }
+   window allows rather than a fixed fraction of it.
+
+   SCROLLING AND SORTING ARE TWO ELEMENTS. The paging sentinel has to live inside
+   whatever scrolls — an IntersectionObserver never fires for something already
+   permanently in view — and outside whatever Sortable rearranges, or a page
+   arriving mid-drag rewrites the list being dragged. One element cannot be both,
+   so the wrapper scrolls and the pool inside it is the drop target. The pool
+   still GROWS to fill the wrapper, because the blank space under the last row is
+   where a title dragged out of a tier gets dropped. */
+.ranker-pool-scroll {
+    flex: 1 1 auto; overflow-y: auto; padding-right: 4px;
+    display: flex; flex-direction: column;
+}
+@media (max-width: 900px) { .ranker-pool-scroll { max-height: 62vh; } }
+.ranker-pool { flex: 1 0 auto; }
 
 /* Height reserved from a count the server already knew, so a page of cards or a
    tier's rows slot into space made for them instead of shoving the page down. */

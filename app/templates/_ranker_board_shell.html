@@ -55,11 +55,18 @@
             <button type="button" class="btn-ghost small" onclick="clearSelection()">Clear</button>
         </div>
 
-        {# The first page inline, the rest behind the sentinel this page's own
-           fragment carries. `data-loaded` marks a container the DOM is
-           authoritative for at save time; the pool always is. #}
-        <div class="ranker-pool" id="rankerPool" data-loaded="1" role="list">
-            {% include "_ranker_pool_page.html" %}
+        {# The first page inline, the rest behind the sentinel below it.
+           TWO ELEMENTS, NOT ONE: the scroller is what the sentinel needs to be
+           inside of, and the pool is what Sortable rearranges — keeping them
+           apart is what stops a page arriving mid-drag from rewriting the list
+           being dragged (_ranker_pool_sentinel.html has the whole reason).
+           `data-loaded` marks a container the DOM is authoritative for at save
+           time; the pool always is. #}
+        <div class="ranker-pool-scroll">
+            <div class="ranker-pool" id="rankerPool" data-loaded="1" role="list">
+                {% include "_ranker_pool_rows.html" %}
+            </div>
+            {% include "_ranker_pool_sentinel.html" %}
         </div>
         {% if not board.pool %}
         <p class="ranker-empty" id="poolEmpty">Nothing waiting. Search above, or drag a

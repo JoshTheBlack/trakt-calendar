@@ -1,0 +1,5 @@
+{# One page of pool rows and nothing else. Its own file because two callers need
+   the rows WITHOUT the sentinel that follows them: the shell renders them inside
+   #rankerPool, and _ranker_pool_page.html sends them to be appended there. What
+   a pool row is, and in what order, is one fact either way. #}
+{% for item in items %}{% include "_ranker_row.html" %}{% endfor %}

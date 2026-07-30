@@ -1,21 +1,13 @@
-{# The response body of a pool-page request: some cards, and the sentinel that
-   asks for the page after them. No container and no page chrome — it swaps in
-   place of the sentinel that requested it (an outerHTML swap), so what lands is
-   what the shell would have rendered inline at that position.
+{# The response body of a pool-page request: some rows for the pool, and the
+   sentinel that asks for the page after them. No container and no page chrome.
 
-   `intersect once` rather than `revealed`, for the reason _day_skeleton.html
-   records: revealed reads getBoundingClientRect, which a display:none element
-   answers with zeros, so a sentinel inside a collapsed panel would count as
-   on-screen and fetch immediately. An IntersectionObserver never reports a
-   hidden element, and it fires when one BECOMES visible without waiting for a
-   scroll.
-
-   THE LAST PAGE CARRIES NO SENTINEL. That is what ends the chain — there is no
-   count for the client to keep and no off-by-one for it to get wrong. #}
-{% for item in items %}{% include "_ranker_row.html" %}{% endfor %}
-{% if next_url %}
-<div class="ranker-pool-sentinel" style="--skeleton-rows: {{ next_rows }}"
-     hx-get="{{ next_url }}" hx-trigger="intersect once" hx-swap="outerHTML">
-    <span class="ranker-sentinel-label">Loading more…</span>
-</div>
-{% endif %}
+   THE TWO PARTS LAND IN DIFFERENT PLACES, which is why the rows travel
+   out-of-band. The requesting sentinel is a SIBLING of #rankerPool (see
+   _ranker_pool_sentinel.html for why), so its own outerHTML swap replaces it
+   with the next sentinel — or, on the last page, with nothing at all. The rows
+   have to go INSIDE the pool, and appending them is the one mutation that cannot
+   disturb a drag in progress: it adds to the end and moves nothing already
+   there. htmx removes this wrapper from the response once it has appended the
+   rows, so the duplicate id never reaches the document. #}
+<div id="rankerPool" hx-swap-oob="beforeend">{% include "_ranker_pool_rows.html" %}</div>
+{% include "_ranker_pool_sentinel.html" %}
