@@ -629,12 +629,29 @@ class CalendarMarkupTests(CalendarRouteTestCase):
                          json={"item_id": "show-a", "not_watching": True})
         html = self.client.get(self.PAGE).text
         # 15 July is show-a's only day and show-a is hidden; 16 July still shows.
-        self.assertIn('<span class="day-chip empty" data-date="2026-07-15"', html)
+        self.assertIn('<a class="day-chip unreachable" data-date="2026-07-15"', html)
         self.assertIn('<a class="day-chip" data-date="2026-07-16"', html)
         # Showing everything again makes it a destination once more.
         self.client.post("/api/me/prefs", json={"hide_not_watching": False})
         shown = self.client.get(self.PAGE).text
         self.assertIn('<a class="day-chip" data-date="2026-07-15"', shown)
+
+    def test_a_hidden_days_chip_keeps_its_href_so_a_toggle_can_revive_it(self):
+        """The client toggles hiding without a reload and answers by adding or
+        removing a class, so a day that merely LOOKS empty to this viewer must
+        still be an <a> with its href — a class cannot restore one to a <span>.
+        Only a day holding nothing at all, which no toggle can change, is a
+        span."""
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": "show-a", "not_watching": True})
+        html = self.client.get(self.PAGE).text
+        self.assertIn('<a class="day-chip unreachable" data-date="2026-07-15" '
+                      'href="#day-2026-07-15"', html)
+        self.assertNotIn('<span class="day-chip empty" data-date="2026-07-15"', html)
+        # 1 July genuinely holds nothing: no section exists to link to, ever.
+        self.assertIn('<span class="day-chip empty" data-date="2026-07-01"', html)
+        self.assertNotIn('href="#day-2026-07-01"', html)
 
     def test_the_eye_icons_are_defined_once_and_referenced_per_card(self):
         html = self.client.get(self.PAGE).text

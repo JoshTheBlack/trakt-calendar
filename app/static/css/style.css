@@ -187,9 +187,12 @@ body.chips-tucked .day-chips:hover { transform: none; pointer-events: auto; tran
 @media (prefers-reduced-motion: reduce) { .day-chips { transition: none; } }
 .day-chip { min-width: 26px; text-align: center; padding: 3px 6px; border-radius: 7px; border: 1px solid var(--card-border); font-size: 0.72rem; line-height: 1.2; color: var(--gold-soft); text-decoration: none; transition: all .15s ease; }
 a.day-chip:hover { background: rgba(232,181,69,0.9); color: #12151c; border-color: var(--gold); }
-/* `empty` is the server's answer at render time, `unreachable` app.js's after a
-   toggle collapsed the day. Both mean the same thing to the viewer: there is
-   nothing to scroll to, so the chip is greyed and doesn't take the click. */
+/* `empty` marks a day holding nothing at all; `unreachable` marks a day holding
+   something this viewer is not being shown, set by the server at render time and
+   by calendar/layout.js on every toggle after it. Both mean the same thing to
+   the viewer: there is nothing to scroll to, so the chip is greyed and doesn't
+   take the click. The `unreachable` chip is still an <a> underneath, which is
+   what lets the toggle give it back. */
 .day-chip.empty, .day-chip.unreachable { color: #4b5261; border-color: #232734; pointer-events: none; }
 
 /* ---- Grid / cards ---- */

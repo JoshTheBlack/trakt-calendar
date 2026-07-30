@@ -162,9 +162,18 @@
    descendants — a catcher inside it would slide off-screen along with it. #}
 <div class="day-chips-peek" aria-hidden="true"></div>
 <nav class="day-chips" aria-label="Jump to a day">
+    {# WHICH ELEMENT a chip is renders from `count` — what the day HOLDS — and
+       never from `shown`, which is what this viewer sees of it. `shown` follows
+       hide-not-watching and a not-watching mark, both of which the header
+       changes client-side with no reload, and calendar/layout.js answers by
+       adding and removing a class. A class cannot turn a <span> back into an
+       <a>, so a day baked as a span while it was hidden could never become a
+       destination again. A day with items is therefore always an anchor, greyed
+       by `unreachable` when the viewer would see none of them; only a day
+       holding nothing at all — a fact no toggle can change — is a span. #}
     {% for chip in day_chips %}
-    {% if chip.shown %}<a class="day-chip" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
-    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="{% if chip.count %}Nothing shown on this day{% else %}Nothing on this day{% endif %}">{{ chip.day }}</span>{% endif %}
+    {% if chip.count %}<a class="day-chip{% if not chip.shown %} unreachable{% endif %}" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
+    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="Nothing on this day">{{ chip.day }}</span>{% endif %}
     {% endfor %}
 </nav>
 
