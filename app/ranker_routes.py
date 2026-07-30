@@ -142,6 +142,24 @@ def _refusal(exc: ranker.RankerError) -> JSONResponse:
 # closed tier fetches its rows, both through the same htmx idioms the calendar
 # uses, and neither is load-bearing for seeing what is on a board.
 
+def _tiers_by_priority(categories: list[dict]) -> list[dict]:
+    """A board's tiers in the order they are read in: highest priority first.
+
+    Priority is what a tier MEANS relative to the others, and it is already what
+    the ranking itself is built from — ranker_export orders by exactly this key.
+    Drawing the tiers in the order they happened to be CREATED in left the board
+    disagreeing with its own export, and left no way to move a tier at all,
+    since nothing reorders them by hand.
+
+    Sorted on the way to the page rather than written back, so changing a tier's
+    priority in its settings moves it on the next render and no stored order can
+    drift out of step with the priorities it is supposed to reflect. The sort is
+    stable, so tiers sharing a priority keep the order they already had instead
+    of reshuffling under the viewer.
+    """
+    return sorted(categories, key=lambda c: -int(c["rank_priority"] or 0))
+
+
 def _board_state(board: dict) -> dict:
     """What the client needs to build a save from, including the parts of the
     board it has not drawn.
@@ -273,6 +291,10 @@ async def rankings_page(request: Request):
             # a 404 page: somebody following a stale link still gets a working
             # switcher, which is what they need in order to go somewhere real.
             board = None
+    if board:
+        # Once, here, so the markup and the copy the client saves from (below)
+        # are built from the same ordering and cannot disagree about it.
+        board["categories"] = _tiers_by_priority(board["categories"])
 
     tiered = sum(len(c["items"]) for c in board["categories"]) if board else 0
     context = {

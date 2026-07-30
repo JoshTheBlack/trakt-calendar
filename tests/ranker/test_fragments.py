@@ -295,6 +295,39 @@ class BoostedFormTests(FragmentTestCase):
         self.assertRegex(html, r'<a class="ranker-board-link[^"]*"\s+href="/rankings\?board=')
 
 
+class TierOrderTests(FragmentTestCase):
+    """Tiers are drawn highest priority first, which is the order the ranking
+    they describe is already built in."""
+
+    def board_with_priorities(self, *priorities: tuple[str, int]) -> str:
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top 2026", year=2026))
+        fresh = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": fresh["version"],
+            "categories": [{"uid": f"tier-{label.lower()}", "label": label,
+                            "rank_priority": priority, "items": []}
+                           for label, priority in priorities],
+            "pool": [],
+        }))
+        return "b1"
+
+    def labels_in_order(self) -> list[str]:
+        html = self.client.get("/rankings").text
+        return re.findall(r'<span class="ranker-tier-label">([^<]*)</span>', html)
+
+    def test_the_board_draws_its_tiers_highest_priority_first(self):
+        """Created in the wrong order on purpose: nothing reorders tiers by hand,
+        so the order they were made in is not something a viewer can correct."""
+        self.board_with_priorities(("F", 10), ("S", 60), ("B", 40))
+        self.assertEqual(self.labels_in_order(), ["S", "B", "F"])
+
+    def test_tiers_sharing_a_priority_keep_the_order_they_had(self):
+        """A stable sort, so two tiers at the same priority do not swap places
+        between one render and the next."""
+        self.board_with_priorities(("First", 30), ("Second", 30), ("Top", 60))
+        self.assertEqual(self.labels_in_order(), ["Top", "First", "Second"])
+
+
 class DropTargetTests(FragmentTestCase):
     """A container is a drop target only once it holds what it claims to.
 
