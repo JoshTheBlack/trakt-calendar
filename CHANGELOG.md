@@ -10,7 +10,11 @@ All notable changes to this project are documented here. Format loosely follows 
 ### What's new
 - 📜 **The changelog is readable from inside the app.** The ☰ menu has a *What's new* entry on every page, opening this file rendered properly — one collapsible section per release, newest already open. It is the same `CHANGELOG.md` that lives in the repository, rendered on the way past rather than copied, so what you read here cannot drift from what was actually written.
 
+### Changed
+- 📆 **The month and year at the top of the calendar now takes you to the app's front page.** It used to go to a second address that showed the same month picker; you get the same screen, at the address you'd type or bookmark.
+
 ### Fixed
+- 🎨 **The month picker keeps its styling when you arrive from the calendar.** Clicking the month and year at the top of a calendar dropped you onto an unstyled page, while loading the same address fresh looked right. It now looks the same however you get to it.
 - 🖼️ **A too-big picture always says it's the picture that's too big.** Uploading an image past a certain size stopped naming the limit and fell back to "that request is too large", which tells you nothing you can do something about. Any image that's refused for its size now says so in the same words, with the size it has to come under.
 - 🪜 **A tier you haven't opened yet no longer disturbs a drag into the one below it.** On a board big enough that its tiers arrive closed, dragging a title into a tier could set the row it was displacing shuffling aside over and over — until you'd opened the tier above it once, after which the same drag was smooth. Tiers that haven't been opened now stay out of the way.
 - 🖱️ **Dragging in a long ranker pool no longer stutters, and nothing disappears.** On a pool big enough to load in pages, dragging a title out and back could set the row it was displacing shuffling over and over, and the title being dragged would vanish on drop until you reloaded. It was the next page of the pool arriving in the middle of the drag; it now arrives without disturbing what you're holding.

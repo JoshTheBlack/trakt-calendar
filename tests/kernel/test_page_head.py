@@ -163,6 +163,20 @@ class EveryPageAgreesTests(unittest.TestCase):
                 self.assertIn("page.head(", read(name),
                               f"{name} builds its own <head>")
 
+    def test_no_page_carries_styling_of_its_own_in_its_head(self):
+        """A page's own <style> applies only when that page is the one the
+        browser loaded cold. Reached by a click, the swap replaces <body> and
+        leaves <head> exactly as the session's first page left it — so the rules
+        never exist, and a page whose whole layout was in that block arrives with
+        no styling at all. Page CSS goes in the bundled stylesheet, which every
+        <head> links; error_lobby.html is the one exception and is excluded above
+        for a reason that does not generalize."""
+        for name in PAGES:
+            source = markup(name)
+            with self.subTest(page=name):
+                self.assertNotIn("<style", source[:source.index("<body")],
+                                 f"{name} carries CSS a boosted arrival will not apply")
+
     def test_no_page_writes_an_asset_path_of_its_own(self):
         """Asset filenames live in app/assets.py. A template restating one is a
         second place to edit when a file is renamed, and the copy does not
@@ -476,8 +490,11 @@ class BundledStylesheetTests(unittest.TestCase):
 
     def test_each_page_family_survived_the_merge(self):
         """One representative selector per merged file, so a section dropped
-        wholesale is caught rather than showing up as an unstyled page."""
-        for selector in (".auth-shell", ".distrakt-brand", ".ranker-shell", ".share-owner"):
+        wholesale is caught rather than showing up as an unstyled page.
+        `.month-grid` is the picker's, which reached the bundle later and by the
+        same argument: it was the last page styling itself in its own <head>."""
+        for selector in (".auth-shell", ".distrakt-brand", ".ranker-shell", ".share-owner",
+                         ".month-grid"):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.css)
 

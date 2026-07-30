@@ -45,7 +45,9 @@
             <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
             </a>
-            <a class="month-title-link" href="/pick?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
+            {# The picker at the app's root, so stepping back out of a month lands
+               on the address somebody would type or bookmark. #}
+            <a class="month-title-link" href="/?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
                 <h1>{{ month_label }} {{ year }}</h1>
             </a>
             <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">

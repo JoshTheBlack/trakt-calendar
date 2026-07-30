@@ -653,6 +653,12 @@ class CalendarMarkupTests(CalendarRouteTestCase):
         self.assertIn('<span class="day-chip empty" data-date="2026-07-01"', html)
         self.assertNotIn('href="#day-2026-07-01"', html)
 
+    def test_the_month_heading_links_back_to_the_picker_at_the_root(self):
+        """Stepping back out of a month lands on the address somebody would type
+        or bookmark, rather than on the second URL that renders the same page."""
+        html = self.client.get(self.PAGE).text
+        self.assertIn('<a class="month-title-link" href="/?year=2026&amp;endpoint=shows"', html)
+
     def test_the_eye_icons_are_defined_once_and_referenced_per_card(self):
         html = self.client.get(self.PAGE).text
         self.assertEqual(html.count('<symbol id="eye-open"'), 1)

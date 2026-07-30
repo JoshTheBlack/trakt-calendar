@@ -1,30 +1,11 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{% call page.head('Pick a Month', scripts=assets.scripts('pick'), site_suffix=false) %}
-  <style>
-    /* No 100vh now that a header sits above it: the panel centres in what is
-       left rather than pushing the page taller than the viewport. */
-    .pick-wrap { display: flex; align-items: center; justify-content: center; padding: 40px 6vw; }
-    .pick-panel { width: 100%; max-width: 720px; text-align: center; }
-    .pick-panel .brand { height: 56px; margin-bottom: 22px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.55)); }
-    .pick-panel h1 { font-family: 'Bebas Neue', sans-serif; font-size: clamp(2rem, 6vw, 3.2rem); letter-spacing: 2px;
-        background: linear-gradient(90deg, var(--gold-soft), var(--gold) 40%, var(--crimson)); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: 6px; }
-    .pick-panel .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 26px; }
-    .year-nav { display: flex; align-items: center; justify-content: center; gap: 20px; margin-bottom: 26px; }
-    .year-nav .year { font-family: 'Bebas Neue', sans-serif; font-size: 2.2rem; letter-spacing: 2px; color: var(--gold-soft); min-width: 110px; }
-    /* A deliberate 4x3 rectangle rather than auto-fit, which packed 5-5-2 at
-       this width and read as a ragged list instead of a calendar year. */
-    .month-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
-    @media (max-width: 620px) { .month-grid { grid-template-columns: repeat(2, 1fr); } }
-    .month-btn { display: block; padding: 18px 10px; background: var(--card); border: 1px solid var(--card-border); border-radius: 12px;
-        color: var(--text); font-weight: 700; font-size: 1rem; transition: all .18s ease; }
-    .month-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.1); transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,0.4); }
-    .month-btn.current { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
-    .month-btn .num { display: block; color: var(--text-faint); font-size: 0.72rem; font-weight: 400; margin-top: 5px; }
-    .pick-foot { margin-top: 30px; }
-  </style>
-{% endcall %}
+{# This page's own styling lives in the bundled stylesheet, NOT in a <style>
+   here. A boosted navigation swaps <body> and leaves <head> alone, so CSS a
+   page carries in its own head is applied only when that page is the one the
+   browser loaded cold — arrive here by clicking and the rules never exist. #}
+{{ page.head('Pick a Month', scripts=assets.scripts('pick'), site_suffix=false) }}
 {%- set body_class %}{% endset %}
 <body class="{{ body_class }}" hx-boost="true">
 {# What a boosted arrival cannot work out for itself. A swap replaces the body's
