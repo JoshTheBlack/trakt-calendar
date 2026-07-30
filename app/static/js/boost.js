@@ -29,6 +29,17 @@
  * time it is needed and never again.
  */
 
+// BACK RE-ASKS THE SERVER. htmx caches each page's body as you leave it and
+// restores that snapshot on Back, with no request — and every page here is a view
+// of server state that has moved on since. The rankings board is the sharp edge:
+// its markup carries the board's VERSION, every save has to echo the current one,
+// and a restored snapshot carries the version from before whatever you did on the
+// way out. The next drag then saves against a stale version, gets the 409 that
+// means "another tab changed this", and reloads — losing the drag and looking
+// like a bug in saving rather than in going Back.
+// A restore then costs one local request, which is what a real navigation cost.
+htmx.config.historyCacheSize = 0;
+
 // Which scripts each page needs, in load order, as URLs with their cache-busting
 // token already on them. Rendered by the head macro from the one list in
 // app/assets.py, so this file names no filenames of its own.
