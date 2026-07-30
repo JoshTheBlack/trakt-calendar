@@ -1,13 +1,9 @@
-"""Unit tests for the per-user calendar state layer and the legacy import
-(app/calendar_state).
+"""Unit tests for the per-user calendar state layer (app/calendar_state).
 
 Covers: the not-watching delta (idempotent, per (user, endpoint, year, month)),
 the whole-document save/load round trip in app/state.py's shape, the distrakt
-roster union read, the change-detection writer preserving history when it isn't
-resent, and the legacy state_*.json import — which backs the files up BEFORE
-reading them, lands the rows on the given user, and is idempotent on a re-run.
-The import is exercised both directly and through onboarding (the only path that
-runs it in production), the same way tests/test_auth_routes.py drives onboarding.
+roster union read, and the change-detection writer preserving history when it
+isn't resent.
 
 No network. TRAKT_DATA_DIR points at a temp dir (set BEFORE importing app modules).
 
@@ -44,15 +40,6 @@ async def _make_user(username="viewer") -> int:
     return result.lastrowid
 
 
-def _clear_legacy_files():
-    for f in DATA_DIR.glob("state_*.json"):
-        f.unlink()
-    backup = calendar_state.LEGACY_BACKUP_DIR
-    if backup.exists():
-        for f in backup.glob("*"):
-            f.unlink()
-
-
 class StateTestCase(unittest.IsolatedAsyncioTestCase):
     _counter = 0
 
@@ -60,7 +47,6 @@ class StateTestCase(unittest.IsolatedAsyncioTestCase):
         StateTestCase._counter += 1
         db.set_db_path(TMP / f"calstate-{StateTestCase._counter}.db")
         await db.migrate()
-        _clear_legacy_files()
         self.user_id = await _make_user()
 
     async def asyncTearDown(self):
@@ -153,94 +139,6 @@ class RosterUnionTests(StateTestCase):
             await calendar_state.not_watching_ids(self.user_id),
             {"new-1", "prem-1", "all-1"},
         )
-
-
-class LegacyImportTests(StateTestCase):
-    def _write_legacy(self, name, doc):
-        (DATA_DIR / name).write_text(json.dumps(doc), encoding="utf-8")
-
-    async def test_backs_up_before_importing_and_lands_rows_on_the_user(self):
-        self._write_legacy("state_shows_new_2026_7.json",
-                            {"notWatching": ["slug-a", "slug-b"], "lastCount": 3,
-                             "lastShowIds": ["slug-a"], "history": [{"h": 1}]})
-        self._write_legacy("state_shows_premieres_2026_8.json", {"notWatching": ["slug-c"]})
-
-        count = await calendar_state.import_legacy_state(self.user_id)
-        self.assertEqual(count, 2)
-
-        # The backup copies exist and match the originals verbatim.
-        backup = calendar_state.LEGACY_BACKUP_DIR
-        self.assertTrue((backup / "state_shows_new_2026_7.json").exists())
-        self.assertEqual(
-            (backup / "state_shows_new_2026_7.json").read_text(encoding="utf-8"),
-            (DATA_DIR / "state_shows_new_2026_7.json").read_text(encoding="utf-8"),
-        )
-        # The originals are NOT deleted.
-        self.assertTrue((DATA_DIR / "state_shows_new_2026_7.json").exists())
-
-        # Change detection landed on this user, mapped back to the right
-        # endpoint/year/month; every file's marks merged into the one global set.
-        july = await calendar_state.load_state(self.user_id, "shows/new", 2026, 7)
-        self.assertEqual(july["lastCount"], 3)
-        self.assertEqual(july["lastShowIds"], ["slug-a"])
-        self.assertEqual(july["history"], [{"h": 1}])
-        self.assertEqual(set(july["notWatching"]), {"slug-a", "slug-b", "slug-c"})
-        aug = await calendar_state.load_state(self.user_id, "shows/premieres", 2026, 8)
-        self.assertEqual(set(aug["notWatching"]), {"slug-a", "slug-b", "slug-c"})
-
-    async def test_import_is_idempotent_on_a_rerun(self):
-        self._write_legacy("state_shows_2026_7.json", {"notWatching": ["slug-a"]})
-        await calendar_state.import_legacy_state(self.user_id)
-        await calendar_state.import_legacy_state(self.user_id)  # re-run
-        rows = await db.fetch_all(
-            "SELECT * FROM not_watching_shows WHERE user_id = ?", (self.user_id,))
-        self.assertEqual(len(rows), 1)
-
-    async def test_unrecognized_filenames_are_skipped(self):
-        self._write_legacy("state_nonsense_endpoint_2026_7.json", {"notWatching": ["x"]})
-        self._write_legacy("state_shows_2026_7.json", {"notWatching": ["ok"]})
-        count = await calendar_state.import_legacy_state(self.user_id)
-        self.assertEqual(count, 1)  # only the recognized one
-        self.assertEqual(
-            (await calendar_state.load_state(self.user_id, "shows", 2026, 7))["notWatching"], ["ok"])
-
-    async def test_no_files_is_a_noop(self):
-        self.assertEqual(await calendar_state.import_legacy_state(self.user_id), 0)
-
-
-class OnboardingImportTests(unittest.TestCase):
-    """The production path: onboarding creates the bootstrap admin and calls the
-    importer via app/auth_routes._import_legacy_calendar_state."""
-    _counter = 0
-
-    def setUp(self):
-        OnboardingImportTests._counter += 1
-        db.set_db_path(TMP / f"calstate-onboard-{OnboardingImportTests._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        _clear_legacy_files()
-        (DATA_DIR / "state_shows_new_2026_7.json").write_text(
-            json.dumps({"notWatching": ["onboarded-slug"], "lastCount": 2}), encoding="utf-8")
-        from app.main import app
-        self.client = TestClient(app, base_url="https://testserver",
-                                 headers={"Origin": "https://testserver"})
-
-    def tearDown(self):
-        self.client.close()
-        _clear_legacy_files()
-        db.close_thread_connection()
-
-    def test_onboarding_imports_legacy_state_onto_the_new_admin(self):
-        resp = self.client.post("/onboarding", json={
-            "username": "operator", "password": "hunter2hunter2", "password_confirm": "hunter2hunter2"})
-        self.assertEqual(resp.status_code, 200, resp.text)
-        admin = asyncio.run(auth.find_user_by_username("operator"))
-        loaded = asyncio.run(
-            calendar_state.load_state(admin["id"], "shows/new", 2026, 7))
-        self.assertEqual(loaded["notWatching"], ["onboarded-slug"])
-        self.assertEqual(loaded["lastCount"], 2)
-        # And the backup was made.
-        self.assertTrue((calendar_state.LEGACY_BACKUP_DIR / "state_shows_new_2026_7.json").exists())
 
 
 if __name__ == "__main__":  # pragma: no cover
