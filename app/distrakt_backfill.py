@@ -42,7 +42,8 @@ import logging
 import re
 from datetime import date
 
-from . import cache, db, distrakt, watch_history
+from . import cache, db, discord_fmt, distrakt, providers, watch_history
+from .providers.base import Media, resolve_key
 
 logger = logging.getLogger(__name__)
 
@@ -141,28 +142,39 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
 
     # ONE paged history sweep for the whole range, read twice — once for the
     # seasons, once for the films.
-    from .trakt import fetch_history, watched_progress_from
+    port = providers.for_tracker()
+    if port is None:
+        return _empty_plan(start_month, end_month)
     start_day = date(int(months[0][:4]), int(months[0][5:7]), 1)
-    events = await fetch_history(settings, start_at=start_day.isoformat())
-    films, films_known = await _split_films(user_id, events, set(months))
+    events = await port.fetch_history(settings, start_at=start_day.isoformat())
+    films, films_known = await _split_films(user_id, port.movie_plays_from(events), set(months))
 
     by_month: dict[str, list[dict]] = {m: [] for m in wanted}
     seasons_seen = 0
     show_ids: list[int] = []
     if wanted:
-        candidates = watched_progress_from(events)
-        # Identity per (show, season), and the shows to ask about.
-        by_key = {(int(c["trakt_id"]), int(c["season"])): c for c in candidates}
-        show_ids = list(dict.fromkeys(int(c["trakt_id"]) for c in candidates))
+        # Identity per (title, season), and the source ids to ask about. A
+        # candidate naming no shared id is dropped here: it could not be stored
+        # under an identity afterwards, so surveying it would promise a row the
+        # apply step could not write.
+        by_key: dict[tuple[str, int], dict] = {}
+        for candidate in port.watched_progress_from(events):
+            key = resolve_key(Media.SHOW, candidate.get("ids") or {})
+            if key is not None:
+                by_key[(str(key), int(candidate["season"]))] = candidate
+        show_ids = list(dict.fromkeys(
+            int(c["ids"]["trakt"]) for c in by_key.values() if c.get("ids", {}).get("trakt")
+        ))
 
-        progress = await _progress_by_show(settings, show_ids)
-        totals = await _season_totals(settings, list(by_key))
+        progress = await _progress_by_show(settings, port, show_ids)
+        totals = await _season_totals(settings, list(by_key.values()))
 
         wanted_set = set(wanted)
-        for (trakt_id, season), ident in by_key.items():
+        for (key, season), ident in by_key.items():
             seasons_seen += 1
-            episodes = (progress.get(trakt_id) or {}).get(season) or {}
-            detail = totals.get((trakt_id, season)) or {}
+            source_id = int(ident["ids"]["trakt"]) if ident.get("ids", {}).get("trakt") else None
+            episodes = (progress.get(source_id) or {}).get(season) or {}
+            detail = totals.get((key, season)) or {}
             total = int(detail.get("total") or 0)
             if not total or len(episodes) < total:
                 continue  # not finished at all -> belongs to no month
@@ -331,10 +343,8 @@ def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dic
     anything else here would render as a part-watched season forever.
     """
     return {
-        "trakt_id": int(ident["trakt_id"]),
-        "tmdb": ident.get("tmdb"),
-        "slug": str(ident.get("slug") or ""),
-        "media": "show",
+        "media": Media.SHOW,
+        "ids": dict(ident.get("ids") or {}),
         "title": str(ident.get("title") or ""),
         "season": int(season),
         "network": str(ident.get("network") or ""),
@@ -345,48 +355,44 @@ def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dic
         "cadence": detail.get("cadence"),
         "premiere": detail.get("premiere"),
         "finale": detail.get("finale"),
-        "bucket": "completed",
+        "bucket": discord_fmt.Bucket.COMPLETED,
         "started_airing": True,
         "finished_airing": True,
-        "source": distrakt.SOURCE_HISTORY,
+        "added_by": distrakt.ADDED_BY_HISTORY,
     }
 
 
-async def _progress_by_show(settings, show_ids: list[int]) -> dict[int, dict]:
-    """{trakt_id: {season: {episode: watched_at}}} for every show in one go.
+async def _progress_by_show(settings, port, show_ids: list[int]) -> dict[int, dict]:
+    """{source id: {season: {episode: watched_at}}} for every title in one go.
 
-    From progress/watched rather than from the history sweep, because the sweep
-    only sees plays inside the range: a season whose earlier episodes were
-    watched in December and whose last one landed in January IS finished in
+    From the per-title progress record rather than from the history sweep, because
+    the sweep only sees plays inside the range: a season whose earlier episodes
+    were watched in December and whose last one landed in January IS finished in
     January, and counting only what the sweep saw would miss it.
     """
-    from .trakt import fetch_show_progress_detail, shared_client
     if not show_ids:
         return {}
-    client = shared_client()
-    details = await asyncio.gather(*(
-        fetch_show_progress_detail(settings, tid, client=client) for tid in show_ids
-    ), return_exceptions=True)
-    out: dict[int, dict] = {}
-    for tid, detail in zip(show_ids, details):
-        if isinstance(detail, Exception):
-            logger.warning("distrakt backfill: progress lookup failed for show %s", tid)
-            continue
-        out[int(tid)] = {int(season): eps for season, eps in (detail or {}).items()}
-    return out
+    details = await port.fetch_progress_details(settings, show_ids)
+    return {
+        int(source_id): {int(season): eps for season, eps in (detail or {}).items()}
+        for source_id, detail in details.items()
+    }
 
 
-async def _season_totals(settings, keys: list[tuple[int, int]]) -> dict[tuple[int, int], dict]:
-    """{(trakt_id, season): season detail} — the episode total that decides
+async def _season_totals(settings, candidates: list[dict]) -> dict[tuple[str, int], dict]:
+    """{(item key, season): season detail} — the episode total that decides
     whether a season is finished, plus the dates a frozen row carries."""
-    from .trakt import fetch_season_detail, shared_client
-    if not keys:
+    from .providers.trakt.detail import fetch_season_detail
+    from .providers.trakt.transport import shared_client
+    if not candidates:
         return {}
     client = shared_client()
+    keys = [(str(resolve_key(Media.SHOW, c["ids"])), int(c["season"])) for c in candidates]
     details = await asyncio.gather(*(
-        fetch_season_detail(settings, tid, season, client=client) for tid, season in keys
+        fetch_season_detail(settings, c["ids"].get("trakt"), c["season"], client=client)
+        for c in candidates
     ), return_exceptions=True)
-    out: dict[tuple[int, int], dict] = {}
+    out: dict[tuple[str, int], dict] = {}
     for key, detail in zip(keys, details):
         if isinstance(detail, Exception):
             logger.warning("distrakt backfill: season lookup failed for %s", key)
@@ -395,7 +401,7 @@ async def _season_totals(settings, keys: list[tuple[int, int]]) -> dict[tuple[in
     return out
 
 
-async def _split_films(user_id: int, events: list[dict],
+async def _split_films(user_id: int, plays: list[dict],
                        months: set[str]) -> tuple[list[dict], list[dict]]:
     """The films in the range, split into (not recorded yet, already recorded).
 
@@ -407,32 +413,18 @@ async def _split_films(user_id: int, events: list[dict],
     is a later watch, and the fold keeps the later date.
     """
     state = await watch_history.load_state(user_id)
-    known = {tid: str((m or {}).get("watched_at") or "")
-             for tid, m in (state.get("movies") or {}).items()}
+    known = {key: str((m or {}).get("watched_at") or "")
+             for key, m in (state.get("movies") or {}).items()}
     fresh, seen = [], []
-    for film in _movies_in_months(events, months):
-        target = fresh if str(film["watched_at"]) > known.get(str(film["trakt_id"]), "") else seen
+    for film in plays:
+        # Films are not gated on a roster the way episodes are, and the routine
+        # sync only ever looks back to the start of the CURRENT month — so for any
+        # month before tracking began they are recorded nowhere. The ranker reads
+        # them straight from that table, and this sweep is the one thing that can
+        # see them.
+        key = resolve_key(Media.MOVIE, film.get("ids") or {})
+        if key is None or str(film["watched_at"])[:7] not in months:
+            continue
+        target = fresh if str(film["watched_at"]) > known.get(str(key), "") else seen
         target.append(film)
     return fresh, seen
-
-
-def _movies_in_months(events: list[dict], months: set[str]) -> list[dict]:
-    """Every film play in the sweep that falls inside the range.
-
-    Films are not gated on a roster the way episodes are, and the routine sync
-    only ever looks back to the start of the CURRENT month — so for any month
-    before tracking began they are recorded nowhere. The ranker reads them
-    straight from that table, and this sweep is the one thing that can see them.
-    """
-    out: list[dict] = []
-    for event in events:
-        if event.get("type") != "movie":
-            continue
-        movie = event.get("movie") or {}
-        trakt_id = ((movie.get("ids") or {}).get("trakt"))
-        watched_at = str(event.get("watched_at") or "")
-        if trakt_id is None or watched_at[:7] not in months:
-            continue
-        out.append({"trakt_id": int(trakt_id), "title": movie.get("title") or "",
-                    "year": movie.get("year"), "watched_at": watched_at})
-    return out

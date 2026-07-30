@@ -1,27 +1,22 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  {# Parsed before first paint, so the gap before the stylesheet applies
-     is the page's own dark rather than the browser's default white. #}
-  <meta name="color-scheme" content="dark">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Account &ndash; Trakt New Shows</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
-  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
-  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-  {# Gated for the same reason the menu item is: without the grant this page must
-     not mention the tracker at all, and the script names it. Nothing to reveal
-     here anyway when the item itself was not rendered. #}
-  {% if distrakt_available %}{% include '_nav_head.html' %}{% endif %}
-</head>
+{% import '_head.html' as page with context %}
+{# _nav_head is gated for the same reason the menu item is: without the grant
+   this page must not mention the tracker at all, and the script names it.
+   Nothing to reveal here anyway when the item itself was not rendered. #}
+{{ page.head('Account', scripts=assets.scripts('account'),
+             nav_head=distrakt_available) }}
 {# `has-nav` swaps the centred sign-in layout for a header above centred content.
    The signed-out pages (login, register, onboarding) keep the plain .auth-page
    centring — there is nowhere for a nav to take you before you sign in. #}
-<body class="auth-page has-nav">
+{%- set body_class %}auth-page has-nav{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="account" data-body-class="{{ body_class }}"></div>
 
 {% import '_nav.html' as site_nav %}
 {# The one page that gates the tracker's menu item server-side rather than
@@ -71,10 +66,13 @@
           <button class="btn-ghost tiny" type="button" id="avatarRemoveBtn"
                   {% if not has_avatar %}style="display:none"{% endif %}>Remove</button>
           <input type="file" id="avatarFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+          {# Beside the button that caused it, not on a line under the card: a
+             refused upload is something to read and act on — make the file
+             smaller — and down there it was missed entirely. #}
+          <span class="auth-error" id="avatarError" role="alert"></span>
         </div>
       </div>
     </div>
-    <p class="auth-error" id="avatarError" role="alert"></p>
 
     {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
        instead of the profile picture. They live here rather than only inside the
@@ -96,10 +94,10 @@
           <button class="btn-ghost tiny" type="button" id="imageUploadBtn">Upload</button>
           <input type="file" id="imageFile" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
           <span class="auth-hint" id="imageCount"></span>
+          <span class="auth-error" id="imageError" role="alert"></span>
         </div>
       </div>
     </div>
-    <p class="auth-error" id="imageError" role="alert"></p>
 
     {# The two names, together, because the whole point of having both is that
        they differ: one is what you sign in with, the other is what people see.
@@ -115,7 +113,10 @@
           {{ user.display_name or "Using your username" }}
         </span>
       </div>
-      <form class="auth-inline-form" id="displayNameForm">
+      {# None of this page's forms is boosted: each is submitted by the script
+         below and writes over the API. htmx boosts every form under a boosted
+         <body>, and none of them has anywhere to navigate. #}
+      <form class="auth-inline-form" id="displayNameForm" hx-boost="false">
         <label for="newDisplayName">Change your display name</label>
         {# Capitals and spaces are the reason this field exists, so nothing here
            lowercases or strips them. Left empty, it clears the name and the
@@ -180,7 +181,8 @@
         <button class="btn-ghost tiny" type="button" data-unlink="trakt">Unlink</button>
         {% endif %}
         {% elif trakt_login_configured %}
-        <a class="btn-ghost tiny" href="/auth/trakt/link">Connect</a>
+        {# Leaves the app — see the same link on the sign-in page. #}
+        <a class="btn-ghost tiny" href="/auth/trakt/link" hx-boost="false">Connect</a>
         {% else %}
         {# Not a dead end: say who can fix it, so this doesn't read as "linking
            is broken". Only an administrator can, and only they are told how. #}
@@ -206,7 +208,7 @@
       {# An account made through Plex or Trakt has no username. Claiming one is
          offered once; changing it afterwards stays with an administrator,
          because it is what /u/<name> share links are built from. #}
-      <form class="auth-inline-form" id="usernameForm">
+      <form class="auth-inline-form" id="usernameForm" hx-boost="false">
         <label for="newUsername">Choose a username</label>
         <input type="text" id="newUsername" name="username" autocomplete="username" spellcheck="false"
                placeholder="your-name" required>
@@ -214,7 +216,7 @@
       </form>
       {% endif %}
 
-      <form class="auth-inline-form" id="passwordForm">
+      <form class="auth-inline-form" id="passwordForm" hx-boost="false">
         <label for="newPassword">{{ "Change your password" if has_password else "Set a password" }}</label>
         {% if has_password %}
         <input type="password" id="currentPassword" name="current_password" autocomplete="current-password"
@@ -239,9 +241,13 @@
 </div>
 </div>
 
-<script src="/static/js/nav.js?v={{ asset_v }}"></script>
-<script src="/static/js/plex-auth.js?v={{ asset_v }}"></script>
 <script>
+// Wrapped, because a boosted navigation back to this page re-executes this
+// script in the same document: at top level its `const`s would be
+// redeclarations and the whole script would fail to parse, leaving the page's
+// controls bound to nothing. Inside a function each arrival gets its own
+// bindings, which is what the fresh DOM needs anyway.
+(function () {
 const plexConnect = document.getElementById('plexConnect');
 if (plexConnect) {
   plexConnect.addEventListener('click', async () => {
@@ -570,12 +576,18 @@ imageFile.addEventListener('change', async () => {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || !data.ok) throw new Error(data.error || 'Could not upload that image.');
   } catch (e) {
+    // No loadImages() on this path, and that is the point: nothing changed on
+    // the server, and its first act is to blank this element — so the message
+    // was being written and wiped before it could ever be read.
     imageError.textContent = e.message || 'Could not upload that image.';
+    imageUploadBtn.disabled = false;
+    return;
   }
   loadImages();
 });
 
 loadImages();
+})();
 </script>
 </body>
 </html>

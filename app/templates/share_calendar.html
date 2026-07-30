@@ -1,39 +1,19 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    {# Parsed before first paint, so the gap before the stylesheet applies
-       is the page's own dark rather than the browser's default white. #}
-    <meta name="color-scheme" content="dark">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ owner_username or "Shared calendar" }} &ndash; {{ month_label }}</title>
-
-    {# Open Graph / link-preview tags. og:url and og:image are absolute, set only
-       when the instance has a configured public base URL to build them from. #}
-    <meta property="og:type" content="website">
-    <meta property="og:site_name" content="New Shows">
-    <meta property="og:title" content="{{ owner_username or 'Shared calendar' }} &ndash; {{ month_label }} {{ year }}">
-    <meta property="og:description" content="Shows I'm watching this month">
-    {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}
-    {% if og_image %}
-    <meta property="og:image" content="{{ og_image }}">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:image" content="{{ og_image }}">
-    {% else %}
-    <meta name="twitter:card" content="summary">
-    {% endif %}
-    <meta name="twitter:title" content="{{ owner_username or 'Shared calendar' }} &ndash; {{ month_label }} {{ year }}">
-    <meta name="twitter:description" content="Shows I'm watching this month">
-    <meta name="theme-color" content="#e8b545">
-
-    <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css">
-    <link rel="stylesheet" href="/static/css/share.css">
-    <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}">
+{% import '_head.html' as page with context %}
+{% call page.head((owner_username or 'Shared calendar') ~ ' – ' ~ month_label,
+                  scripts=assets.scripts('share'), nav_head=false, site_suffix=false) %}
+  {{ page.og((owner_username or 'Shared calendar') ~ ' – ' ~ month_label ~ ' ' ~ year,
+             "Shows I'm watching this month") }}
+{% endcall %}
+{%- set body_class %}pack-{{ view.day_packing }} card-{{ view.card_style }}{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="share" data-body-class="{{ body_class }}"></div>
 
 <header class="hero">
     <div class="hero-lead">
@@ -140,8 +120,8 @@
                    identity the fetch needs plus a title/poster to show instantly
                    while it loads. A JS enhancement: with it off, the poster's own
                    Trakt link still reaches the full details. #}
-                <div class="card{% if item.not_watching %} not-watching{% endif %}"
-                     data-trakt-id="{{ item.trakt_id if item.trakt_id is not none else '' }}"
+                <div class="card{% if item.id in not_watching %} not-watching{% endif %}"
+                     data-trakt-id="{{ item.ids.get('trakt') or '' }}"
                      data-media="{{ item.media }}"
                      data-season="{{ item.season if item.season is not none else '' }}"
                      data-title="{{ item.title }}"
@@ -173,7 +153,7 @@
                             <span class="time">{{ item.air_time }}</span>
                         </div>
                         <div class="links-row">
-                            <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" title="View on Trakt">
+                            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" title="View on Trakt">
                                 <img src="/static/images/traktlogo.png" alt="Trakt">
                             </a>
                         </div>
@@ -205,6 +185,5 @@
     </div>
 </div>
 
-<script src="/static/js/share.js"></script>
 </body>
 </html>

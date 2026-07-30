@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from . import user_images
+from .providers.base import item_key
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +82,14 @@ class RankedTitle:
 
     @property
     def key(self) -> str:
-        return f"{self.media}:{self.match_source}:{self.match_id}"
+        """This title's flat item key.
+
+        Built by the shared identity helper rather than formatted here: an export
+        row addresses the same title the ranker and the tracker do, and a second
+        spelling of the separator would come apart silently the day one of them
+        changed it.
+        """
+        return item_key(self.media, self.match_source, self.match_id)
 
 
 def consolidate(

@@ -19,7 +19,6 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -27,26 +26,20 @@ import anyio
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.templating import Jinja2Templates
 
-from . import (assets, auth, authz, grid_builder, nav, posters, ranker, ranker_export,
+from . import (auth, authz, chrome, grid_builder, posters, ranker, ranker_export,
                ranker_import, ranker_sources, user_images)
 from .auth import AuthLevel
 from .config import load_settings
 from .ranker_sources import Media
+from .templating import templates
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # `private`: this response requires a session, so a shared cache in front of
 # the app has no business holding a copy.
 _POSTER_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
-
-# A layout for a board at its 1000-item cap is a list of short keys and comes in
-# well under this; anything larger is not a board this feature can produce, so it
-# is refused before it is parsed rather than after it has been held in memory.
-MAX_BODY_BYTES = 1024 * 1024
 
 # A restore is the one request that legitimately carries whole boards rather than
 # a list of keys: fifty boards of a thousand titles, each with its own title,
@@ -127,24 +120,6 @@ async def _search_over_budget(user_id: int) -> bool:
     return limited
 
 
-def _error(message: str, status: int = 400, **extra) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
-
-
-async def _json_body(request: Request, limit: int = MAX_BODY_BYTES) -> dict:
-    """Require a JSON object body, within the size cap."""
-    body = await request.body()
-    if len(body) > limit:
-        raise HTTPException(status_code=413, detail="That request is too large.")
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Malformed JSON body.") from None
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object.")
-    return data
-
-
 def _refusal(exc: ranker.RankerError) -> JSONResponse:
     """The one place a data-layer refusal becomes a status code.
 
@@ -153,10 +128,10 @@ def _refusal(exc: ranker.RankerError) -> JSONResponse:
     to tell them apart could enumerate other people's boards.
     """
     if isinstance(exc, ranker.BoardNotFound):
-        return _error("No such board.", 404)
+        return authz.error("No such board.", 404)
     if isinstance(exc, ranker.VersionConflict):
-        return _error(str(exc), 409, reason="version_conflict")
-    return _error(str(exc), 400)
+        return authz.error(str(exc), 409, reason="version_conflict")
+    return authz.error(str(exc), 400)
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +277,9 @@ async def rankings_page(request: Request):
     tiered = sum(len(c["items"]) for c in board["categories"]) if board else 0
     context = {
         "request": request,
-        # is_admin, calendar_available and ranker_available for the shared header.
-        **nav.nav_context(user),
+        # is_admin, calendar_available, ranker_available, version, build
+        # for the shared header.
+        **chrome.page_context(user),
         # The name the export dialog prefills with: the chosen display name if
         # there is one, else the username. Only a DEFAULT — the dialog's field
         # stays editable, so a one-off export can still say something else.
@@ -318,7 +294,6 @@ async def rankings_page(request: Request):
         "rows_open": tiered <= EAGER_ROW_LIMIT,
         "export_limits": _export_limits(),
         "tier_template": ranker.TIER_TEMPLATE,
-        "asset_v": assets.ASSET_VERSION,
     }
     if board:
         context.update(_pool_context(board, 0))
@@ -401,7 +376,7 @@ async def create_board(request: Request):
     holding.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         if clone_of := data.get("clone_of"):
             board = await ranker.clone_board(
@@ -428,7 +403,7 @@ async def patch_board(board_uid: str, request: Request):
     string for `year` clears it; omitting `year` leaves it alone.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         board = await ranker.update_board(
             user.user_id, board_uid,
@@ -443,7 +418,7 @@ async def patch_board(board_uid: str, request: Request):
 @guard.delete("/api/rankings/boards/{board_uid}", AuthLevel.RANKER_APPROVED)
 async def remove_board(board_uid: str, request: Request):
     user = await auth.current_user(request)
-    await _json_body(request)
+    await authz.json_body(request)
     try:
         await ranker.delete_board(user.user_id, board_uid)
     except ranker.RankerError as exc:
@@ -471,7 +446,7 @@ async def remove_category(board_uid: str, category_uid: str, request: Request):
     which is also what makes undoing this a matter of re-creating the tier and
     putting the same keys back."""
     user = await auth.current_user(request)
-    await _json_body(request)
+    await authz.json_body(request)
     try:
         returned = await ranker.delete_category(user.user_id, board_uid, category_uid)
     except ranker.RankerError as exc:
@@ -484,7 +459,7 @@ async def save_board_layout(board_uid: str, request: Request):
     """Store an arrangement. 409 when another tab saved first, which the UI
     answers by reloading rather than by guessing whose version wins."""
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         result = await ranker.save_layout(user.user_id, board_uid, data)
     except ranker.RankerError as exc:
@@ -522,7 +497,7 @@ async def restore_backup(request: Request):
     REPLACE, not merge, in one transaction — see ranker.restore_user_data for
     why merging an arrangement is not a coherent thing to ask for."""
     user = await auth.current_user(request)
-    data = await _json_body(request, MAX_RESTORE_BYTES)
+    data = await authz.json_body(request, MAX_RESTORE_BYTES)
     try:
         boards = await ranker.restore_user_data(user.user_id, data)
     except ranker.RankerError as exc:
@@ -562,10 +537,10 @@ async def warm_board_posters(board_uid: str, request: Request):
     is tiered, which is the first-open case.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     keys = data.get("keys")
     if keys is not None and not isinstance(keys, list):
-        return _error("`keys` must be a list of item keys.")
+        return authz.error("`keys` must be a list of item keys.")
     try:
         board = await ranker.fetch_board(user.user_id, board_uid)
     except ranker.RankerError as exc:
@@ -575,7 +550,7 @@ async def warm_board_posters(board_uid: str, request: Request):
     known = {item["key"]: item for item in [*tiered, *board["pool"]]}
     wanted = [known[key] for key in keys if key in known] if keys is not None else tiered
     if len(wanted) > MAX_WARM_ITEMS:
-        return _error(f"Warm at most {MAX_WARM_ITEMS} titles at a time.")
+        return authz.error(f"Warm at most {MAX_WARM_ITEMS} titles at a time.")
 
     pairs = [(item["media"], item["tmdb"]) for item in wanted if item["tmdb"]]
     generated = await posters.ensure_posters(load_settings(), pairs)
@@ -621,19 +596,19 @@ async def search_titles(request: Request):
     grant does not imply a linked account, and what is asked for is public
     catalogue data either way."""
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     query = str(data.get("query") or "").strip()
     media = _media(data.get("media"), Media.SHOW)
     if len(query) < MIN_SEARCH_LENGTH:
-        return _error(f"Type at least {MIN_SEARCH_LENGTH} characters to search.")
+        return authz.error(f"Type at least {MIN_SEARCH_LENGTH} characters to search.")
     if await _search_over_budget(user.user_id):
-        return _error("Too many searches just now — give it a moment.", 429)
+        return authz.error("Too many searches just now — give it a moment.", 429)
 
     source = ranker_sources.search_source()
     try:
         refs = await source.search(query, media)
     except ranker_sources.SourceUnavailable as exc:
-        return _error(str(exc), 502)
+        return authz.error(str(exc), 502)
     # The results come back in the same shape the add endpoint takes, so the
     # client hands back exactly what the user picked rather than rebuilding it.
     results = [
@@ -648,10 +623,10 @@ async def add_board_items(board_uid: str, request: Request):
     """Add chosen titles to a board's pool. Idempotent: a title the board
     already holds — pooled or tiered — is left exactly as it is."""
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     refs = data.get("refs")
     if not isinstance(refs, list):
-        return _error("`refs` must be a list of titles.")
+        return authz.error("`refs` must be a list of titles.")
     try:
         added = await ranker.add_titles(user.user_id, board_uid, refs, added_from="manual")
     except ranker.RankerError as exc:
@@ -664,10 +639,10 @@ async def remove_board_items(board_uid: str, request: Request):
     """Take titles off a board entirely. The only true delete in this feature —
     every other removal returns something to the pool."""
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     keys = data.get("keys")
     if not isinstance(keys, list):
-        return _error("`keys` must be a list of item keys.")
+        return authz.error("`keys` must be a list of item keys.")
     try:
         removed = await ranker.remove_items(user.user_id, board_uid, keys)
     except ranker.RankerError as exc:
@@ -684,19 +659,19 @@ async def import_finished_titles(board_uid: str, request: Request):
     exist, because for that account it does not.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     media = _media(data.get("media"), Media.SHOW)
     year = data.get("year")
     if year not in (None, ""):
         try:
             year = int(year)
         except (TypeError, ValueError):
-            return _error("Year must be a whole number.")
+            return authz.error("Year must be a whole number.")
     else:
         year = None
 
     if not await ranker_import.tracker_available(user.user_id):
-        return _error("No such source.", 404)
+        return authz.error("No such source.", 404)
     source = ranker_import.finished_titles_source()
     refs = await source.finished_titles(user.user_id, media=media, year=year)
     try:
@@ -719,16 +694,16 @@ async def seed_from_ratings(board_uid: str, request: Request):
     ratings from: an action that can never work is not offered.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     commit = bool(data.get("commit"))
     if not await ranker_sources.ratings_available(user.user_id):
-        return _error("No such source.", 404)
+        return authz.error("No such source.", 404)
 
     source = ranker_sources.ratings_source()
     try:
         rated = await source.fetch_ratings(user.user_id)
     except ranker_sources.SourceUnavailable as exc:
-        return _error(str(exc), 502)
+        return authz.error(str(exc), 502)
     entries = [
         item for rating in rated
         if (item := rating.title.as_item(user_rating=rating.rating)) is not None
@@ -924,7 +899,7 @@ async def preview_grid(board_uid: str, request: Request):
     they wanted.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         options = _parse_export(data)
         _, ranked = await _consolidated(user.user_id, board_uid, options)
@@ -932,7 +907,7 @@ async def preview_grid(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     except ranker_export.ExportError as exc:
-        return _error(str(exc))
+        return authz.error(str(exc))
 
     scale = PREVIEW_WIDTH / (options.columns * grid_builder.TILE_W)
     try:
@@ -942,7 +917,7 @@ async def preview_grid(board_uid: str, request: Request):
         # A preview is small enough that no allowed request reaches a format
         # ceiling, but the renderer is the authority on that rather than this
         # route's arithmetic about it.
-        return _error(str(exc))
+        return authz.error(str(exc))
     return Response(payload, media_type="image/webp",
                     headers={"Cache-Control": "no-store"})
 
@@ -959,7 +934,7 @@ async def export_grid(board_uid: str, request: Request):
     the limit is, and what would get under it.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         options = _parse_export(data)
         board, ranked = await _consolidated(user.user_id, board_uid, options)
@@ -967,14 +942,14 @@ async def export_grid(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     except ranker_export.ExportError as exc:
-        return _error(str(exc))
+        return authz.error(str(exc))
 
     layout = grid_builder.compute_layout(
         len(ranked), columns=options.columns, scale=options.scale,
         show_titles=options.show_titles, podium=options.podium,
     )
     if not layout.fits(options.fmt):
-        return _error(
+        return authz.error(
             str(grid_builder.CanvasTooLarge(
                 layout.width, layout.height, options.fmt,
                 grid_builder.MAX_DIMENSION[options.fmt],
@@ -999,7 +974,7 @@ async def export_grid(board_uid: str, request: Request):
         # the same image again — which costs nothing — is never refused.
         wait = await _export_cooldown_remaining(user.user_id)
         if wait:
-            return _error(
+            return authz.error(
                 f"Exports are limited to one every {EXPORT_COOLDOWN_SECONDS} seconds. "
                 f"Try again in {wait} second{'' if wait == 1 else 's'}.",
                 429, reason="export_cooldown", retry_after=wait,
@@ -1031,14 +1006,14 @@ async def export_markdown(board_uid: str, request: Request):
     them.
     """
     user = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         options = _parse_export(data)
         board, ranked = await _consolidated(user.user_id, board_uid, options)
     except ranker.RankerError as exc:
         return _refusal(exc)
     except ranker_export.ExportError as exc:
-        return _error(str(exc))
+        return authz.error(str(exc))
 
     emojis, default_emoji = await ranker_import.network_emojis(user.user_id)
     markdown = ranker_export.to_markdown(

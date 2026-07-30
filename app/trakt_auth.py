@@ -48,9 +48,16 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .trakt import API_BASE, TraktRateLimitError, _send
+# The OAuth endpoints are NOT the Trakt data API: they carry a client_id/secret
+# in the body and must NOT carry the API's Authorization/trakt-api-key headers,
+# so what they want is the bare sender — one request plus the 429 retry/backoff
+# budget, and no interpretation — rather than transport.cached_get. Reached
+# through the module object rather than bound as a name at import, so that
+# patching app.providers.trakt.transport.send reaches this copy too.
+from .providers.trakt import transport
+from .providers.trakt.transport import API_BASE, TraktRateLimitError
 
-# Same "app.perf" DEBUG channel app/trakt.py's _cached_get and
+# Same "app.perf" DEBUG channel the Trakt transport's cached_get and
 # app/calendar_cache.py's fetch_window_raw log their own outbound calls to —
 # one place to watch every Trakt request, OAuth included. Never logs a body:
 # these calls carry client_secret/tokens, so only the path and outcome go out.
@@ -110,7 +117,7 @@ async def exchange_code(
     """
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await _send(client, "POST", TOKEN_URL, timeout=15, json={
+        resp = await transport.send(client, "POST", TOKEN_URL, timeout=15, json={
             "code": code,
             "client_id": client_id,
             "client_secret": client_secret,
@@ -150,7 +157,7 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     try:
         t0 = _time.perf_counter()
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await _send(
+            resp = await transport.send(
                 client, "GET", ACCOUNT_URL, timeout=15,
                 headers={
                     "Authorization": f"Bearer {access_token}",
@@ -201,7 +208,7 @@ async def request_device_code(client_id: str) -> dict:
     user_code, verification_url, expires_in, interval)."""
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await _send(client, "POST", DEVICE_CODE_URL, timeout=15, json={"client_id": client_id})
+        resp = await transport.send(client, "POST", DEVICE_CODE_URL, timeout=15, json={"client_id": client_id})
     _perf.debug("netPOST   oauth/device/code -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
@@ -246,7 +253,7 @@ async def refresh_access_token(client_id: str, client_secret: str, refresh_token
     """Exchange a refresh_token for a new access_token + refresh_token pair."""
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await _send(client, "POST", TOKEN_URL, timeout=15, json={
+        resp = await transport.send(client, "POST", TOKEN_URL, timeout=15, json={
             "refresh_token": refresh_token,
             "client_id": client_id,
             "client_secret": client_secret,
@@ -270,7 +277,7 @@ async def revoke_token(client_id: str, client_secret: str, access_token: str) ->
     """
     t0 = _time.perf_counter()
     async with httpx.AsyncClient(timeout=15) as client:
-        resp = await _send(client, "POST", REVOKE_URL, timeout=15, json={
+        resp = await transport.send(client, "POST", REVOKE_URL, timeout=15, json={
             "token": access_token,
             "client_id": client_id,
             "client_secret": client_secret,

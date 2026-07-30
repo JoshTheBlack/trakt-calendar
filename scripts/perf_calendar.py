@@ -2,7 +2,7 @@
 
 Seeds a synthetic month sized like a busy "All Episodes" view (~1,100 items
 spread across the aligned 7-day windows a month spans), behind the same
-app.calendar_cache.fetch_window_raw patch point tests/test_calendar_route.py
+app.calendar_cache.fetch_window_raw patch point tests/calendar/test_routes.py
 uses, so the real read_month -> group -> Jinja render pipeline runs for real
 instead of a guess. A small per-window sleep stands in for the Trakt round
 trip so a cold (uncached) run still shows the cost of fetching every window
@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, calendar_cache, db  # noqa: E402
-from app import main as main_module  # noqa: E402
+from app import calendar_routes  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -154,8 +154,8 @@ def main() -> None:
     # Two passes over the SAME code, so the comparison isn't against numbers from
     # an older tree: first with the inline day count raised past a month, which is
     # the whole month in one response, then as the page actually ships.
-    for pass_label, inline_days in (("all-in-one", 366), ("windowed", main_module.INITIAL_DAY_BLOCKS)):
-        main_module.INITIAL_DAY_BLOCKS = inline_days
+    for pass_label, inline_days in (("all-in-one", 366), ("windowed", calendar_routes.INITIAL_DAY_BLOCKS)):
+        calendar_routes.INITIAL_DAY_BLOCKS = inline_days
         # Empty the window cache so this pass's "cold" is genuinely cold — the
         # previous pass filled it.
         asyncio.run(db.execute("DELETE FROM api_cache"))

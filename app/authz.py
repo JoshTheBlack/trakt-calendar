@@ -47,6 +47,13 @@ Both are enforced here rather than per-route so that a new endpoint is covered
 the moment it exists. Non-browser clients (curl, scripts) must therefore send
 `Content-Type: application/json` and either an `Origin` header or
 `Sec-Fetch-Site: same-origin`.
+
+READING THAT BODY is here too, as json_body() — the size cap and the two
+malformed-body refusals every mutating route needs. It lives beside the
+middleware because the two halves are one question ("is this request a shape we
+will act on?"), split only by what can be answered before routing and what
+cannot. Routes answer refusals with error(), the same JSON shape the middleware's
+own denials use.
 """
 from __future__ import annotations
 
@@ -55,7 +62,7 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, FastAPI, Request
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import BaseRoute, Match
 
@@ -102,6 +109,68 @@ def declare(func: Callable, level: AuthLevel) -> Callable:
         )
     setattr(func, LEVEL_ATTR, level)
     return func
+
+
+# ---------------------------------------------------------------------------
+# reading a mutating request's body
+# ---------------------------------------------------------------------------
+
+# The ceiling on a JSON body, in bytes. Sized by the largest LEGITIMATE payload
+# the app sends, which is NOT a ranker board save (1000 titles, comfortably under
+# a megabyte) but an IMAGE: /api/me/avatar and /api/me/images carry the file as
+# base64 inside the JSON, and user_images.MAX_UPLOAD_BYTES allows 4 MB DECODED,
+# which is ~5.6 MB once base64 has added its third. A cap below that would refuse
+# every ordinary upload with a 413 that says nothing about images, and the real
+# limit would stop being the one that explains itself. This is a backstop against
+# an unbounded body, not a policy knob — user_images owns what an image may be.
+MAX_BODY_BYTES = 8 * 1024 * 1024
+
+
+async def json_body(request: Request, limit: int = MAX_BODY_BYTES) -> dict:
+    """The JSON object a mutating route was called with.
+
+    ONE implementation, called by every route that reads a body, because the
+    rules below are meant to hold app-wide and a rule that holds app-wide cannot
+    live in one caller's copy. It was six near-copies with five different
+    contracts until this existed, and the differences were all accidental: one
+    author thought of the size cap and the copies did not inherit the thought.
+
+    Raises rather than returning a sentinel — a body that broke the rules is not
+    a body, and every caller that tried to encode "no body" in its return value
+    ended up with a dead branch at each call site.
+
+    NOT CHECKED HERE, DELIBERATELY: that the Content-Type is application/json.
+    request_shape_guard below already refuses anything else on every mutating
+    request, before routing, and does it more strictly than a per-route check can
+    (it compares the type exactly, where a substring test lets
+    `text/html; x=application/json` through). Re-checking it here would put a
+    second copy of an app-wide rule inside the very function written to stop
+    exactly that. If you are looking for WHY that rule exists, it is a CSRF
+    defence-in-depth layer behind the session cookie's SameSite=Lax — a
+    form-encoded cross-origin POST is a CORS "simple request" that a browser
+    sends with cookies and no preflight — and it is documented at the middleware.
+    """
+    body = await request.body()
+    if len(body) > limit:
+        raise HTTPException(status_code=413, detail="That request is too large.")
+    try:
+        data = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed JSON body.") from None
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Expected a JSON object.")
+    return data
+
+
+def error(message: str, status: int = 400, **extra) -> JSONResponse:
+    """The refusal shape every JSON route answers with, and that the front end
+    reads: `d.error` for the message, `d.ok` for whether to believe the rest.
+
+    Matches what authz's own middleware denials send, so a refusal from the
+    middleware and one from a route are the same shape to the client — which is
+    what lets a caller handle both without knowing which layer refused it.
+    """
+    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
 
 
 class Guard:

@@ -37,16 +37,16 @@ _LIGHT_BG = (43, 45, 49, 255)      # for light/white logos
 _WHITE_BG = (255, 255, 255, 255)   # for dark/colored logos
 
 
-def _slug(network: str) -> str:
+def slug(network: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (network or "").lower()).strip("-")
 
 
 def _tile_path(network: str) -> Path:
-    return LOGO_DIR / f"{_slug(network)}.png"
+    return LOGO_DIR / f"{slug(network)}.png"
 
 
 def _none_path(network: str) -> Path:
-    return LOGO_DIR / f"{_slug(network)}.none"
+    return LOGO_DIR / f"{slug(network)}.none"
 
 
 def cached_tile(network: str) -> Path | None:
@@ -129,21 +129,6 @@ def _rasterize_svg(svg_bytes: bytes) -> bytes | None:
         return None
 
 
-async def _download(url: str) -> bytes | None:
-    from .trakt import shared_client
-    with span("logo.download") as sp:
-        try:
-            resp = await shared_client().get(url)
-        except Exception as exc:
-            logger.warning("logo download %s failed: %s", url, exc)
-            return None
-        sp.set(status=resp.status_code, bytes=len(resp.content or b""))
-    if resp.status_code != 200:
-        logger.warning("logo download %s -> HTTP %s", url, resp.status_code)
-        return None
-    return resp.content
-
-
 def _avg_luminance(img: Image.Image) -> float:
     """Mean luminance (0-255) of the logo's opaque pixels."""
     small = img.resize((32, 32))
@@ -215,15 +200,15 @@ async def ensure_logo(settings, network: str, tmdb_id) -> Path | None:
 
         raw = None
         if logo_path and not logo_path.lower().endswith(".svg"):
-            raw = await _download(f"{TMDB_IMG}/w300{logo_path}")
+            raw = await tmdb.download(f"{TMDB_IMG}/w300{logo_path}")
         else:
             # Primary logo is SVG (or missing): prefer a raster alternative from the
             # network's image list; only if there's none do we rasterize the SVG.
             alt = await _network_raster_logo(settings, network_id)
             if alt:
-                raw = await _download(f"{TMDB_IMG}/w300{alt}")
+                raw = await tmdb.download(f"{TMDB_IMG}/w300{alt}")
             elif logo_path:
-                svg = await _download(f"{TMDB_IMG}/original{logo_path}")
+                svg = await tmdb.download(f"{TMDB_IMG}/original{logo_path}")
                 raw = _rasterize_svg(svg) if svg else None
 
         img = _render_tile(raw) if raw else None

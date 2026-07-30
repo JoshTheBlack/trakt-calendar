@@ -26,7 +26,8 @@ import asyncio
 import logging
 from typing import Any
 
-from . import artwork, auth, db, distrakt, ranker_sources, trakt
+from . import artwork, auth, db, discord_fmt, distrakt, ranker_sources
+from .providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
 from .config import load_settings
 from .ranker_sources import Media, TitleRef, int_or_none
 
@@ -140,18 +141,20 @@ async def _finished_shows(user_id: int, year: int | None) -> list[TitleRef]:
     wanted = [row for row in months
               if year is None or str(row["month"]).startswith(f"{year:04d}")]
 
-    # trakt_id -> {identity fields, the completed seasons and their totals}
-    finished: dict[int, dict[str, Any]] = {}
+    # item key -> {identity fields, the completed seasons and their totals}
+    finished: dict[str, dict[str, Any]] = {}
     # Months in order, so a later month's record overwrites an earlier one's —
     # which is what makes the identity fields come from the most recent row.
     for row in wanted:
         for record in await _completed_in(user_id, row["month"], bool(row["closed"])):
-            entry = finished.setdefault(int(record["trakt_id"]), {"seasons": {}})
+            entry = finished.setdefault(str(distrakt.record_key(record)), {"seasons": {}})
             entry.update({
                 "title": record.get("title") or "",
                 "network": record.get("network") or "",
-                "tmdb": record.get("tmdb"),
-                "slug": record.get("slug") or "",
+                # The whole map the roster row carries, which is already the shape
+                # a TitleRef wants — the tracker resolved these ids once and there
+                # is nothing here to translate.
+                "ids": dict(record.get("ids") or {}),
             })
             # Keyed by season so the same season finished across two months (a
             # split cour, or a correction) counts once rather than doubling the
@@ -162,12 +165,12 @@ async def _finished_shows(user_id: int, year: int | None) -> list[TitleRef]:
         TitleRef(
             media=Media.SHOW,
             title=entry["title"],
-            ids=_ids(trakt_id, entry["slug"], entry["tmdb"]),
+            ids=entry["ids"],
             network=entry["network"],
             season_count=len(entry["seasons"]),
             episode_count=sum(entry["seasons"].values()),
         )
-        for trakt_id, entry in finished.items()
+        for entry in finished.values()
     ]
     logger.info("tracker import: %d finished show(s) for user %s (year=%s)",
                 len(refs), user_id, year)
@@ -199,10 +202,14 @@ async def _completed_in(user_id: int, month: str, closed: bool) -> list[dict[str
     if closed:
         rows = await db.fetch_all(
             "SELECT * FROM distrakt_shows WHERE user_id = ? AND month = ?", (user_id, month))
-        return [dict(row) for row in rows if row["bucket"] == "completed"]
+        # Read through the tracker's own row reader rather than as raw rows: the
+        # id columns become the `ids` map every caller below expects, and this
+        # module does not need a second opinion about the roster's storage shape.
+        return [distrakt.row_to_show(row) for row in rows
+                if row["bucket"] == discord_fmt.Bucket.COMPLETED]
 
     settings = await ranker_sources.user_trakt_settings(user_id)
-    if settings is None or not settings.configured:
+    if settings is None or not settings.trakt_configured:
         logger.info("tracker import: skipping open month %s for user %s — no usable credential",
                     month, user_id)
         return []
@@ -214,19 +221,8 @@ async def _completed_in(user_id: int, month: str, closed: bool) -> list[dict[str
     # last-known fields rather than taking the whole import down with it.
     shows = await distrakt.compute_live_shows(
         user_id, records, settings, allow_degrade=True)
-    return [show for show in shows if show.get("bucket") == "completed"]
-
-
-def _ids(trakt_id: int, slug: str, tmdb: Any) -> dict[str, Any]:
-    """The provenance map for a record that was only ever stored with these
-    three. Omitting the unknown keys keeps the map a record of what was actually
-    known rather than a shape full of nulls."""
-    ids: dict[str, Any] = {"trakt": int(trakt_id)}
-    if slug:
-        ids["slug"] = slug
-    if tmdb:
-        ids["tmdb"] = int(tmdb)
-    return ids
+    return [show for show in shows
+            if show.get("bucket") == discord_fmt.Bucket.COMPLETED]
 
 
 # ---------------------------------------------------------------------------
@@ -236,16 +232,15 @@ def _ids(trakt_id: int, slug: str, tmdb: Any) -> dict[str, Any]:
 async def _finished_movies(user_id: int, year: int | None) -> list[TitleRef]:
     """Watched movies, each resolved to a real id map.
 
-    Those records carry a Trakt id, a title and a year and nothing else — no
-    tmdb — so each one needs a summary lookup before it can be keyed on the
-    artwork id or matched against another service later. The lookups are cached
-    and happen ONCE per movie at import time, never at render time, and the
-    poster URL that comes back with them is recorded so the tile it will need
-    later is a lookup already paid for.
+    Those records carry the ids the tracker files them under, a title and a year,
+    and no artwork id of their own unless the play happened to name one — so each
+    still gets a summary lookup, which is also where the runtime and the poster URL
+    come from. The lookups are cached and happen ONCE per movie at import time,
+    never at render time, and the poster URL that comes back with them is recorded
+    so the tile it will need later is a lookup already paid for.
     """
     rows = await db.fetch_all(
-        "SELECT trakt_id, title, year, watched_at FROM distrakt_movie_watches "
-        " WHERE user_id = ? ORDER BY watched_at DESC",
+        "SELECT * FROM distrakt_movie_watches WHERE user_id = ? ORDER BY watched_at DESC",
         (user_id,),
     )
     wanted = [
@@ -284,26 +279,32 @@ async def _movie_ref(settings, row) -> tuple[TitleRef, tuple | None]:
     """One watched-movie record as a TitleRef, plus any poster URL worth
     recording.
 
-    A lookup that fails degrades to the Trakt id alone rather than dropping the
-    movie: it still ranks perfectly well, it just has no poster until something
-    else discovers its tmdb.
+    A lookup that fails degrades to the ids the row already carries rather than
+    dropping the movie: it still ranks perfectly well, it just has no poster until
+    something else discovers its tmdb.
     """
-    trakt_id = int(row["trakt_id"])
-    ids: dict[str, Any] = {"trakt": trakt_id}
+    # The id the row was FILED under, plus the source id a lookup is placed with —
+    # after the re-key those are two different things, and a row with no source id
+    # (a film some other service reported) simply skips the lookup.
+    ids: dict[str, Any] = {row["match_source"]: row["match_id"]}
+    trakt_id = int_or_none(row["trakt_id"])
+    if trakt_id:
+        ids["trakt"] = trakt_id
     title, year, runtime, poster = row["title"] or "", int_or_none(row["year"]), None, None
-    try:
-        summary = await trakt.fetch_movie_summary(settings, trakt_id)
-    except trakt.TraktError as exc:
-        logger.info("tracker import: no summary for movie %s (%s)", trakt_id, exc)
-        summary = None
+    summary = None
+    if trakt_id:
+        try:
+            summary = await trakt_detail.fetch_movie_summary(settings, trakt_id)
+        except TraktError as exc:
+            logger.info("tracker import: no summary for movie %s (%s)", trakt_id, exc)
     if summary:
-        ids = trakt.ids_map(summary) or ids
+        ids = trakt_detail.ids_map(summary) or ids
         title = summary.get("title") or title
         year = int_or_none(summary.get("year")) or year
         runtime = int_or_none(summary.get("runtime"))
         # The same extraction the calendar's own recording path uses, so a URL
         # observed here is stored identically to one observed there.
-        poster = trakt._poster(summary)
+        poster = trakt_calendar.poster(summary)
     tmdb = int_or_none(ids.get("tmdb"))
     sighting = ("movie", tmdb, "trakt", poster) if (tmdb and poster) else None
     return TitleRef(media=Media.MOVIE, title=title, ids=ids, year=year, runtime=runtime), sighting

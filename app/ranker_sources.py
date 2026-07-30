@@ -30,42 +30,22 @@ import logging
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any, Protocol
 
-from . import trakt, trakt_routes
+from . import trakt_routes
+from .providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from .config import Settings, load_settings
+# Re-exported deliberately: `ranker_sources.Media` and `ranker_sources.parse_media`
+# are what the ranker's routes and data layer already import, and the vocabulary
+# they name is the app's, not this feature's — the calendar and the tracker deal
+# in the same two kinds of title. One definition, read from where it lives.
+#
+# `resolve_identity` comes from there too, and is CALLED here rather than
+# re-exported: the tracker keys its own rows on the same waterfall's answer, so a
+# second copy would be two definitions of what makes two titles the same one.
+from .providers.base import Media, parse_media, resolve_identity  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-
-class Media(StrEnum):
-    """The two kinds of title this feature ranks.
-
-    A StrEnum rather than bare strings so the closed set is stated once, while
-    each member still IS the string the database column and the JSON payloads
-    hold — no conversion layer, and no way to store `Media.SHOW` by accident.
-    """
-    SHOW = "show"
-    MOVIE = "movie"
-
-
-def parse_media(value: Any, default: Media | None = None) -> Media:
-    """A client-supplied media type, or a raised refusal. `default` applies only
-    when the value is absent entirely, never when it is present and wrong."""
-    if value in (None, "") and default is not None:
-        return default
-    try:
-        return Media(value)
-    except ValueError:
-        raise ValueError(f"Unknown media type {value!r}.") from None
-
-
-# The identity waterfall, first shared non-empty id wins. tmdb leads because it
-# is the id both Trakt and Simkl expose AND the one that indexes TMDB artwork;
-# tvdb is strong for TV, imdb is near-universal but weakest to match on, and mal
-# is often the only id two services share for anime.
-MATCH_SOURCES = ("tmdb", "tvdb", "imdb", "mal")
 
 
 @dataclass(frozen=True)
@@ -131,22 +111,6 @@ class RatedTitle:
     title: TitleRef
     rating: int
     rated_at: str | None = None
-
-
-def resolve_identity(ids: Mapping[str, Any]) -> tuple[str, str] | None:
-    """THE identity waterfall. One implementation; search, tracker import and the
-    ratings seed all come through here.
-
-    Returns (match_source, match_id) for the first of tmdb/tvdb/imdb/mal the
-    provider actually knew, or None when it knew none of them. The id is
-    stringified because imdb ids are not numbers and a column that holds both
-    has to hold text.
-    """
-    for source in MATCH_SOURCES:
-        value = ids.get(source)
-        if value not in (None, "", 0):
-            return source, str(value)
-    return None
 
 
 def int_or_none(value: Any) -> int | None:
@@ -233,7 +197,7 @@ def _translating_failures():
     of the implementation and nowhere else."""
     try:
         yield
-    except trakt.TraktError as exc:
+    except TraktError as exc:
         raise SourceUnavailable(str(exc), getattr(exc, "status", None)) from exc
 
 
@@ -245,11 +209,11 @@ class TraktSearchSource:
 
     @property
     def configured(self) -> bool:
-        return bool(self._settings.configured)
+        return bool(self._settings.trakt_configured)
 
     async def search(self, query: str, media: Media) -> list[TitleRef]:
         with _translating_failures():
-            entries = await trakt.search_titles(self._settings, str(media), query)
+            entries = await trakt_detail.search_titles(self._settings, str(media), query)
         return [_ref_from_search(entry, media) for entry in entries]
 
 
@@ -283,7 +247,7 @@ class TraktRatingsSource:
             # cannot read with somebody else's credential.
             raise NoLinkedIdentity("No linked account to read ratings from.")
         with _translating_failures():
-            entries = await trakt.fetch_ratings(settings)
+            entries = await trakt_sync.fetch_ratings(settings)
         rated = []
         for entry in entries:
             media_key = entry.get("type")
@@ -293,7 +257,7 @@ class TraktRatingsSource:
                 continue
             media = Media(media_key)
             item = entry.get(media_key) or {}
-            ids = trakt.ids_map(item) if isinstance(item, dict) else {}
+            ids = trakt_detail.ids_map(item) if isinstance(item, dict) else {}
             score = int_or_none(entry.get("rating"))
             if not ids or score is None:
                 continue

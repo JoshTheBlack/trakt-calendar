@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -99,7 +100,7 @@ class Settings:
     # Off by default: fills the calendar window cache from the heartbeat on a
     # schedule, ahead of any viewer opening the page, so a cold load never pays
     # the sequential-fetch cost. It only takes effect once
-    # calendar_cache_ttl_minutes >= 1440 — see main._heartbeat_loop — because a
+    # calendar_cache_ttl_minutes >= 1440 — see main._heartbeat_tick — because a
     # shorter TTL would let the pre-warmed data expire before it helps anyone.
     # It spends the instance's Trakt API budget on a schedule even with nobody
     # viewing, which is why it defaults off; see the settings-modal caveat.
@@ -146,7 +147,7 @@ class Settings:
     # deployment. Use "never" only when genuinely serving over plain HTTP.
     # Editable in Settings > Server; the route guards the one self-locking change
     # (setting "always" from a browser that is genuinely on http). See
-    # main._cookie_secure_error.
+    # settings_routes._cookie_secure_error.
     cookie_secure: str = "always"
     # Comma-separated CIDRs whose X-Forwarded-For this app will honor. Seeded
     # from the TRUSTED_PROXY_IPS env var on first run, editable in Settings after
@@ -184,29 +185,35 @@ class Settings:
 
     @classmethod
     def from_dict(cls, data: dict) -> "Settings":
+        """Build Settings from a dict that may have come from a form, a JSON
+        file, or the database — so every value may be a string.
+
+        The int and bool coercions are DERIVED FROM THE FIELD'S OWN DECLARED
+        TYPE rather than from a list of names kept alongside it. Both lists used
+        to be maintained by hand, which meant every new numeric or boolean
+        setting needed an edit here as well as above, and a forgotten one showed
+        up as a setting that saved fine and then compared wrong (`"0"` is
+        truthy). Adding a field is now a one-line change again.
+        """
         known = {f for f in cls.__dataclass_fields__}  # type: ignore[attr-defined]
         clean = {k: v for k, v in (data or {}).items() if k in known}
         # network_filter may arrive as a comma string from the form
         nf = clean.get("network_filter")
         if isinstance(nf, str):
             clean["network_filter"] = [s.strip() for s in nf.split(",") if s.strip()]
-        for int_field in ("pagination_limit", "cache_ttl_minutes", "calendar_cache_ttl_minutes",
-                          "api_cache_max_bytes", "poster_cache_max_bytes", "sonarr_quality_profile_id",
-                          "sonarr_language_profile_id", "radarr_quality_profile_id",
-                          "trakt_token_expires_at"):
-            if int_field in clean:
+        for name, declared in _scalar_field_types().items():
+            if name not in clean:
+                continue
+            if declared is bool:
+                clean[name] = _as_bool(clean[name])
+            else:
+                # An uncoercible number is DROPPED rather than defaulted here, so
+                # the dataclass supplies its own default instead of this method
+                # inventing a second answer for what a bad value means.
                 try:
-                    clean[int_field] = int(clean[int_field])
+                    clean[name] = int(clean[name])
                 except (TypeError, ValueError):
-                    clean.pop(int_field)
-        if "hide_not_watching" in clean:
-            clean["hide_not_watching"] = _as_bool(clean["hide_not_watching"])
-        if "allow_open_registration" in clean:
-            clean["allow_open_registration"] = _as_bool(clean["allow_open_registration"])
-        if "auto_approve_calendar" in clean:
-            clean["auto_approve_calendar"] = _as_bool(clean["auto_approve_calendar"])
-        if "calendar_prewarm_enabled" in clean:
-            clean["calendar_prewarm_enabled"] = _as_bool(clean["calendar_prewarm_enabled"])
+                    clean.pop(name)
         # Normalized on the way in as well as validated on save, so a
         # hand-edited settings.json with a trailing slash still builds a correct
         # redirect URI instead of one with a doubled separator in it.
@@ -237,9 +244,30 @@ class Settings:
         return data
 
     @property
-    def configured(self) -> bool:
-        """True once the Trakt credentials have been filled in."""
+    def trakt_configured(self) -> bool:
+        """True once the Trakt credentials have been filled in.
+
+        Named for the service rather than left as a bare `configured`, which
+        read as "this instance is set up" while meaning only "Trakt is". The two
+        stop being the same statement the moment there is a second source, and
+        the calendar route in particular wants the other question — see
+        calendar_source_configured.
+        """
         return bool(self.trakt_client_id.strip() and self.trakt_access_token.strip())
+
+    @property
+    def calendar_source_configured(self) -> bool:
+        """Whether ANY registered source can supply the calendar.
+
+        This is the question the calendar page, the day fragment and the public
+        share pages are actually asking before they try to read a month: not
+        "does Trakt work" but "is there anybody to ask". Today the two answers
+        coincide because Trakt is the only registered provider; they diverge the
+        moment a second one is registered, and this is the call site that then
+        needs no edit.
+        """
+        from . import providers  # local: providers -> trakt -> config would cycle
+        return providers.for_calendar(self) is not None
 
     @property
     def trakt_login_configured(self) -> bool:
@@ -329,7 +357,27 @@ def _as_bool(v) -> bool:
     return str(v).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _ensure_data_dir() -> None:
+@lru_cache(maxsize=1)
+def _scalar_field_types() -> dict[str, type]:
+    """{field name: bool or int} for the Settings fields declared as one of
+    those two. Every other field is absent, which is how from_dict knows to
+    leave it alone.
+
+    Matched on the annotation as WRITTEN, because `from __future__ import
+    annotations` leaves every one of them a string rather than a type object.
+    That also side-steps the trap in comparing them as types at all: bool is a
+    subclass of int in Python, so an `issubclass` test would quietly coerce
+    every flag through int() and turn it into 0 or 1.
+    """
+    by_name = {"bool": bool, "int": int}
+    return {
+        name: by_name[f.type]
+        for name, f in Settings.__dataclass_fields__.items()  # type: ignore[attr-defined]
+        if f.type in by_name
+    }
+
+
+def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -393,7 +441,7 @@ def _read_db_config() -> tuple[dict, dict]:
 def _write_settings_file(data: dict) -> None:
     """Write settings.json atomically (temp file + os.replace) so a crash mid-write
     can never leave a truncated recovery file behind."""
-    _ensure_data_dir()
+    ensure_data_dir()
     tmp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, SETTINGS_FILE)
@@ -412,7 +460,7 @@ def load_settings(open_secrets: bool = True) -> Settings:
     sealed under a key the current one cannot open (that decrypt would otherwise raise
     SealedButWrongKey), so an administrator can still reach the recovery screen.
     """
-    _ensure_data_dir()
+    ensure_data_dir()
     file_data = _read_settings_file()
     globals_doc, stored_secrets = _read_db_config()
     if not open_secrets:
@@ -476,7 +524,7 @@ def save_settings(settings: Settings) -> None:
     recovery fields to settings.json. The Settings dataclass API is unchanged; only
     the destinations moved.
     """
-    _ensure_data_dir()
+    ensure_data_dir()
     from . import db, encryption_flow
 
     data = settings.to_dict()

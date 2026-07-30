@@ -1,19 +1,14 @@
 /* The public share page's details modal.
  *
  * Same content as the calendar page — overview, trailer, cast, episodes — so the
- * render below is a copy of app.js's. The one difference is where the data comes
- * from: a token-scoped, rate-limited, CACHE-ONLY endpoint at
+ * render below is a copy of the calendar's details modal. The one difference is
+ * where the data comes from: a token-scoped, rate-limited, CACHE-ONLY endpoint at
  * "<this page's path>/details", rather than the session-only /api/details. It
  * never calls Trakt — it serves back only what the owner's own views already
  * cached (see share_routes._details), so a public page still makes zero Trakt
  * calls. Progressive enhancement: with JavaScript off, the card's own Trakt link
  * still reaches the full details.
  */
-function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
-}
 
 // Where the details endpoint lives for whichever share URL this page was reached
 // by (/s/<token>, /u/<name>, /c/<slug>): the current path plus "/details".
@@ -52,12 +47,6 @@ async function openShareDetails(card, event) {
         console.error(e);
         document.getElementById('detailsBody').innerHTML = '<div class="d-empty">⚠️ Could not load details.</div>';
     }
-}
-
-// Extract a YouTube video id from the various URL shapes Trakt returns.
-function youTubeId(url) {
-    const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
-    return m ? m[1] : null;
 }
 
 function renderShareDetails(d, poster, media, season) {

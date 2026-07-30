@@ -8,14 +8,14 @@
    The not-watching and is-new classes are decided HERE, on the server. They used
    to be added by the client after /api/state resolved, which meant hidden items
    painted and then popped out and the badges arrived a frame late. #}
-<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.trakt_id }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.tvdb if item.tvdb is not none else '' }}" data-tmdb="{{ item.tmdb if item.tmdb is not none else '' }}" onclick="openDetails(this, event)">
+<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}" onclick="openDetails(this, event)">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>
         {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
-        {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.tmdb if item.tmdb is not none else '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
+        {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
         {# Both eyes reference the <symbol>s defined once per page instead of
            repeating ~800 bytes of path data on every card; which one shows is a
            CSS consequence of the card's not-watching class. #}
@@ -46,7 +46,7 @@
         <div class="season-info" data-role="season-info" hidden></div>
         {% endif %}
         <div class="links-row">
-            <a class="trakt-btn" href="{{ item.trakt_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
+            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
                 <img src="/static/images/traktlogo.png" alt="Trakt">
             </a>
             {% if is_admin %}

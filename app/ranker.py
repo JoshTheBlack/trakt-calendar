@@ -33,10 +33,15 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
 from typing import Any
 
 from . import db
+# Re-exported deliberately (the same reasoning MEDIA_VALUES below carries): the
+# identity a board row is keyed on is the app's notion of "the same title", not
+# this feature's — the tracker files its own rows under the same triple. One
+# definition, read from where it lives.
+from .providers.base import MATCH_SOURCES, ItemKey, Media, item_key  # noqa: F401
+from .providers.base import parse_item_key as base_parse_item_key
 
 # Caps. Every one of these is enforced by rejecting the whole request, never by
 # quietly truncating: a user who pasted a 90-character board name should be told
@@ -53,11 +58,12 @@ MAX_CATEGORIES_PER_BOARD = 30
 MAX_ITEMS_PER_BOARD = 1000
 MAX_UID_LENGTH = 64
 
-MEDIA_VALUES = frozenset({"show", "movie"})
-MEDIA_SCOPES = frozenset({"show", "movie", "mixed"})
-# The identity waterfall, in preference order. A row's match_source is whichever
-# of these was the first shared id available when the title was resolved.
-MATCH_SOURCES = ("tmdb", "tvdb", "imdb", "mal")
+# Both derived from the app's one media vocabulary rather than restated. A scope
+# is "one of the media kinds, or both at once", which is a statement ABOUT that
+# set — so writing the members out again here would be a second copy that goes
+# quietly stale rather than loudly wrong.
+MEDIA_VALUES = frozenset(Media)
+MEDIA_SCOPES = MEDIA_VALUES | {"mixed"}
 ADDED_FROM_VALUES = frozenset({"manual", "tracker", "ratings"})
 
 _COLOUR = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -95,44 +101,18 @@ class VersionConflict(RankerError):
     first. The caller reloads rather than guessing which write wins."""
 
 
-@dataclass(frozen=True)
-class ItemKey:
-    """An item's identity within a board: the same triple as its UNIQUE
-    constraint, parsed from the composite key a client sends."""
-    media: str
-    match_source: str
-    match_id: str
-
-    def __str__(self) -> str:
-        return f"{self.media}:{self.match_source}:{self.match_id}"
-
-
-def item_key(media: str, match_source: str, match_id: str) -> str:
-    """The string a client uses to name one item on a board."""
-    return str(ItemKey(media, match_source, match_id))
-
-
 def parse_item_key(value: Any) -> ItemKey:
-    """Parse a composite item key, raising rather than returning a sentinel a
-    caller could forget to check.
+    """Parse the composite item key a client names a board item by.
 
-    Split at most twice, because an imdb or mal id is opaque to us and may one
-    day contain the separator; media and match_source never can, since both come
-    from closed sets checked here.
+    The parsing itself is shared (the tracker addresses its own rows the same
+    way); what belongs to this module is that a bad key is a ValidationError, which
+    the route layer already maps to a 400. Re-raising rather than letting a
+    ValueError escape keeps that mapping in the one place that knows about HTTP.
     """
-    if not isinstance(value, str):
-        raise ValidationError("Item keys must be strings.")
-    parts = value.split(":", 2)
-    if len(parts) != 3:
-        raise ValidationError(f"Malformed item key: {value!r}.")
-    media, match_source, match_id = parts
-    if media not in MEDIA_VALUES:
-        raise ValidationError(f"Unknown media type {media!r}.")
-    if match_source not in MATCH_SOURCES:
-        raise ValidationError(f"Unknown match source {match_source!r}.")
-    if not match_id:
-        raise ValidationError("An item key needs a match id.")
-    return ItemKey(media, match_source, match_id)
+    try:
+        return base_parse_item_key(value)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from None
 
 
 # ---------------------------------------------------------------------------

@@ -1,31 +1,22 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    {# Parsed before first paint, so the gap before the stylesheet applies
-       is the page's own dark rather than the browser's default white. #}
-    <meta name="color-scheme" content="dark">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Rankings{% if board %} &ndash; {{ board.name or "Untitled board" }}{% endif %}</title>
-    <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-    <link rel="stylesheet" href="/static/css/ranker.css?v={{ asset_v }}">
-    {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
-       navigation swaps the whole <body> in place. A <script src> living inside
-       that swapped region would be re-fetched and re-executed on every board
-       switch — re-declaring every top-level const and double-binding every
-       listener. In <head> they load exactly once and survive the swaps. #}
-    <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
-    {# SortableJS 1.15.6 (MIT), vendored rather than fetched from a CDN so the
-       page has no third-party origin to trust or to be offline without.
-       Integrity of the file as committed:
-       sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU #}
-    <script src="/static/js/sortable.min.js?v={{ asset_v }}" defer></script>
-    <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
-    <script src="/static/js/ranker.js?v={{ asset_v }}" defer></script>
-    {% include '_nav_head.html' %}
-</head>
-<body class="has-nav ranker-page">
+{% import '_head.html' as page with context %}
+{% call page.head('Rankings' ~ (' – ' ~ (board.name or 'Untitled board') if board else ''),
+                  scripts=assets.scripts('rankings'),
+                  site_suffix=false) %}
+  {# SortableJS 1.15.6 (MIT), vendored rather than fetched from a CDN so the
+     page has no third-party origin to trust or to be offline without.
+     Integrity of the file as committed:
+     sha384-HZZ/fukV+9G8gwTNjN7zQDG0Sp7MsZy5DDN6VfY3Be7V9dvQpEpR2jF2HlyFUUjU #}
+{% endcall %}
+{%- set body_class %}has-nav ranker-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="rankings" data-body-class="{{ body_class }}"></div>
 
 {% import '_nav.html' as site_nav %}
 {% call site_nav.navbar(title='Rankings',
@@ -50,11 +41,11 @@
 
 <div class="ranker-shell">
 
-    {# BOARD BAR. Real links to real URLs, boosted so switching keeps the page's
-       CSS and scripts resident with htmx managing history — and degrading to
-       plain navigation with no script at all. Grouped by year because that is
-       how somebody with a dozen boards finds one. #}
-    <nav class="ranker-boards" hx-boost="true">
+    {# BOARD BAR. Real links to real URLs, boosted with the rest of the page so
+       switching keeps its CSS and scripts resident with htmx managing history —
+       and degrading to plain navigation with no script at all. Grouped by year
+       because that is how somebody with a dozen boards finds one. #}
+    <nav class="ranker-boards">
         {% for group in board_groups %}
         <span class="ranker-year-group">
             <span class="ranker-year">{{ group.year or "No year" }}</span>
@@ -265,7 +256,10 @@
 
             <div class="field">
                 <label>Download a backup</label>
-                <a class="btn-ghost small" href="/api/rankings/backup" download>⤓ Download</a>
+                {# Not boosted: htmx boosts every link under a boosted <body> and
+                   ignores `download`, so this would fetch the backup and swap
+                   the JSON into the page instead of saving a file. #}
+                <a class="btn-ghost small" href="/api/rankings/backup" download hx-boost="false">⤓ Download</a>
                 <span class="hint">Keep a copy locally. Restoring it later takes seconds,
                     and it restores fine into a rebuilt database.</span>
             </div>
@@ -288,7 +282,7 @@
         <div class="modal-foot">
             <button type="button" class="btn-ghost" onclick="closeBackupModal()">Close</button>
             <button type="button" class="btn-primary" id="backupGo"
-                    onclick="restoreBackup()" disabled>Replace my boards</button>
+                    onclick="restoreBoardsBackup()" disabled>Replace my boards</button>
         </div>
     </div>
 </div>

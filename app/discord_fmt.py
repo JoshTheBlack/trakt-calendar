@@ -1,10 +1,10 @@
 """Bucketing state machine + POST 1/POST 2 markdown renderer.
 
 Pure, offline functions — no I/O, no Trakt calls, no persistence. Callers
-(app/main.py) merge each show's stored record (app/distrakt.py, identity +
-`abandoned`/`abandoned_form`) with its live Trakt-derived fields (app/trakt.py
-`fetch_watched_shows` + `fetch_season_detail`) into one flat dict before calling
-anything here.
+(app/distrakt/live.py) merge each show's stored record (app/distrakt/store.py,
+identity + `abandoned`/`abandoned_form`) with its live Trakt-derived fields
+(app/providers/trakt/ `fetch_season_detail` + the watch-history cache) into one
+flat dict before calling anything here.
 
 LIVE SHOW SHAPE (one dict per show+season, used throughout this module):
   title (str), season (int), network (str),
@@ -23,6 +23,28 @@ when sorting — see `_sort_title`), the sample wins: it is the more concrete,
 harder-to-misread source of truth.
 """
 from __future__ import annotations
+
+from enum import StrEnum
+
+
+class Bucket(StrEnum):
+    """Where a show sits in the month's lifecycle.
+
+    A StrEnum, and it lives here beside the state machine that decides it, because
+    the vocabulary is read outside this module — the rollover refuses to carry a
+    COMPLETED or ABANDONED show into a new month, the backfill writes COMPLETED
+    rows, and the value is stored on a frozen record and shipped to the browser as
+    a plain string. Each member IS that string, so nothing needs converting at
+    either boundary; what the enum buys is that the closed set is stated once
+    instead of being spelled out at each of those places.
+    """
+    NEW = "new"
+    RETURNING = "returning"
+    KEEPUP = "keepup"
+    CLEANUP = "cleanup"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+
 
 # Keepup groups shows by air weekday, Sun..Sat; only weekdays with at least one
 # show get a header, so a quiet Tuesday doesn't leave an empty section in the post.
@@ -111,8 +133,8 @@ def premiered_in_month(show: dict, month_number: int) -> bool:
 # Bucketing state machine
 # ---------------------------------------------------------------------------
 
-def bucket_of(rec: dict, live: dict) -> str:
-    """One of: new, returning, keepup, cleanup, completed, abandoned.
+def bucket_of(rec: dict, live: dict) -> Bucket:
+    """Which Bucket this show is in.
 
     `rec` carries identity + the manual `abandoned` flag; `live` carries the
     Trakt-derived counts/dates/airing flags. Callers may pass the same merged
@@ -126,18 +148,18 @@ def bucket_of(rec: dict, live: dict) -> str:
       abandon can happen from any other state)
     """
     if rec.get("abandoned"):
-        return "abandoned"
+        return Bucket.ABANDONED
     watched = int(live.get("watched") or 0)
     total = int(live.get("total") or 0)
     if total > 0 and watched >= total:
-        return "completed"
+        return Bucket.COMPLETED
     if not live.get("started_airing"):
-        return "new" if int(rec.get("season") or 1) == 1 else "returning"
+        return Bucket.NEW if int(rec.get("season") or 1) == 1 else Bucket.RETURNING
     if live.get("cadence") == "b":
-        return "cleanup"  # binge goes straight to Cleanup, skipping Keepup
+        return Bucket.CLEANUP  # binge goes straight to Cleanup, skipping Keepup
     if live.get("finished_airing"):
-        return "cleanup"  # weekly, finale has aired
-    return "keepup"  # weekly, still airing
+        return Bucket.CLEANUP  # weekly, finale has aired
+    return Bucket.KEEPUP  # weekly, still airing
 
 
 # ---------------------------------------------------------------------------
@@ -193,7 +215,7 @@ def freeze_form(show: dict) -> str:
 
     Deliberately does not call bucket_of / look at `abandoned` — this freezes
     what the state WOULD be right now, independent of the toggle being applied.
-    Reused both by app/main.py's abandon endpoint (to freeze `abandoned_form`)
+    Reused both by app/distrakt_routes.py's abandon endpoint (to freeze `abandoned_form`)
     and by `_abandoned_line` below as the fallback for abandoned records
     written before `abandoned_form` existed, where it is still None.
     """
@@ -230,10 +252,10 @@ def _section(header: str, lines: list[str]) -> str:
     return header + ("\n" + "\n".join(lines) if lines else "")
 
 
-def _group_by_bucket(shows: list[dict]) -> dict[str, list[dict]]:
-    groups: dict[str, list[dict]] = {
-        "new": [], "returning": [], "keepup": [], "cleanup": [], "completed": [], "abandoned": [],
-    }
+def _group_by_bucket(shows: list[dict]) -> dict[Bucket, list[dict]]:
+    """Every bucket gets a list, empty or not, so a caller can read one without
+    checking whether anything landed in it."""
+    groups: dict[Bucket, list[dict]] = {bucket: [] for bucket in Bucket}
     for show in shows:
         groups[bucket_of(show, show)].append(show)
     return groups
@@ -283,7 +305,7 @@ def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji
     month_number = _month_number(month)
     if month_number is None:
         groups = _group_by_bucket(shows)
-        news, returning = groups["new"], groups["returning"]
+        news, returning = groups[Bucket.NEW], groups[Bucket.RETURNING]
     else:
         premieres = [
             s for s in shows
@@ -320,15 +342,15 @@ def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji
     article, at the very end."""
     emoji_map = emoji_map or {}
     groups = _group_by_bucket(shows)
-    cleanup = sorted(groups["cleanup"], key=lambda s: _sort_title(s.get("title")))
-    completed = sorted(groups["completed"], key=lambda s: _sort_title(s.get("title")))
-    abandoned = sorted(groups["abandoned"], key=lambda s: _sort_title(s.get("title")))
-    news = sorted(groups["new"], key=_premiere_sort_key)
-    returning = sorted(groups["returning"], key=_premiere_sort_key)
+    cleanup = sorted(groups[Bucket.CLEANUP], key=lambda s: _sort_title(s.get("title")))
+    completed = sorted(groups[Bucket.COMPLETED], key=lambda s: _sort_title(s.get("title")))
+    abandoned = sorted(groups[Bucket.ABANDONED], key=lambda s: _sort_title(s.get("title")))
+    news = sorted(groups[Bucket.NEW], key=_premiere_sort_key)
+    returning = sorted(groups[Bucket.RETURNING], key=_premiere_sort_key)
 
     sections = [
         _section("## **Cleanup**", [_cleanup_line(s, emoji_map, default_emoji) for s in cleanup]),
-        _render_keepup(groups["keepup"], emoji_map, default_emoji),
+        _render_keepup(groups[Bucket.KEEPUP], emoji_map, default_emoji),
         _section("**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
         _section("**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
     ]

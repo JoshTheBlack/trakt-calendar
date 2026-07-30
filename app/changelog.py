@@ -116,3 +116,17 @@ def reset_cache() -> None:
     """Drop the parsed copy. For tests, which write their own changelog files."""
     global _cache
     _cache = None
+
+
+def current_version() -> str:
+    """The version to show in the UI: the newest release heading's version.
+
+    That heading's own date field, not this function, is what decides whether
+    the release is "Unreleased" — the version number is real and displayed
+    either way, so a reader always sees what the running code actually is.
+    Empty string if the changelog didn't parse at all (see releases()), so a
+    template can render past a missing version the same way it renders past a
+    missing changelog.
+    """
+    rs = releases()
+    return rs[0].version if rs else ""

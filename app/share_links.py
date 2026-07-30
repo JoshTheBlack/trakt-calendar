@@ -57,7 +57,7 @@ def _insert_row(conn: db.Connection, user_id: int, now: int) -> None:
     """Seed the owner-default view columns from this user's CURRENT prefs and
     timezone at the moment the row is created — the same seed-then-diverge
     pattern user_prefs itself uses against settings.json. After this, the
-    owner defaults are their own copy: app/main.py's prefs/timezone writes
+    owner defaults are their own copy: app/calendar_routes.py's prefs/timezone writes
     keep them in sync going forward (see their docstrings), but nothing here
     re-reads user_prefs on every share request."""
     prefs = conn.execute(

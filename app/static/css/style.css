@@ -1,3 +1,17 @@
+/* The whole app's stylesheet, in one file, in five sections: the shared shell
+   and the calendar first, then accounts, tracker, rankings and the public share
+   page.
+
+   ONE FILE ON PURPOSE, and it is not a size decision — it is what lets every
+   page ship an identical <head>. htmx's boosted navigation swaps <body> and
+   leaves <head> alone, so with a stylesheet per page family the FIRST boosted
+   move between families would land on a page whose rules were never loaded.
+   Per-page sheets would have to be re-added on every swap, or boosting confined
+   to one family; one sheet, cached after first paint, costs a single larger
+   first load and nothing after it.
+
+   So a new rule goes in the section it belongs to, and anything genuinely
+   shared goes above the first banner rather than into a family's section. */
 :root {
     --bg: #0a0c10; --bg-panel: #12151c; --card: #151923; --card-border: #242a38;
     --gold: #e8b545; --gold-soft: #f4d385; --crimson: #e0384d; --text: #eef0f4;
@@ -508,6 +522,15 @@ body.hide-not-watching .card.not-watching { display: none; }
 .btn-primary:hover { filter: brightness(1.08); }
 .btn-ghost { cursor: pointer; background: none; border: 1px solid var(--card-border); color: var(--text-dim); padding: 10px 18px; border-radius: 8px; font-family: inherit; }
 .btn-ghost.small { padding: 7px 12px; font-size: 0.78rem; align-self: flex-start; }
+/* The destructive variant of .btn-ghost. Here rather than with either page
+   family because both the admin screen and the tracker use it, and they had a
+   copy each: identical base rules, and two hover rules that differed only in
+   `:not(:disabled)`. The narrower hover is the one kept — the tracker's restore
+   button ships disabled until the confirmation phrase is typed, and a disabled
+   control that lights up under the pointer invites a click that does nothing. No
+   .btn-danger anywhere else is ever disabled, so it changes nothing for them. */
+.btn-danger { border-color: rgba(224,56,77,0.5); color: var(--crimson); }
+.btn-danger:hover:not(:disabled) { background: rgba(224,56,77,0.1); border-color: var(--crimson); }
 .settings-section { font-weight: 700; color: var(--gold-soft); font-size: 0.92rem; margin-top: 8px; padding-top: 14px; border-top: 1px solid var(--card-border); }
 .settings-section .hint { font-weight: 400; color: var(--text-faint); font-size: 0.72rem; }
 /* The at-rest encryption panel's own heading swaps color with its real state,
@@ -655,4 +678,681 @@ body.hide-not-watching .card.not-watching { display: none; }
   .release-date { margin-left: 0; }
   .release > summary { flex-wrap: wrap; }
   .release-body { padding-left: 8px; }
+}
+
+
+/* ==========================================================================
+   ACCOUNTS: sign-in, registration, onboarding, the account page and admin.
+   These pages reuse the tokens, the hero, the buttons and the modal chrome
+   above and add only their own forms, badges and tables.
+   ========================================================================== */
+
+body.auth-page {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 24px;
+}
+
+/* A signed-in auth page (the account screen) carries the site header, so the
+   body stacks instead of centring — the header belongs at the top, not in the
+   middle of a flex row — and the card centres inside what is left. */
+body.auth-page.has-nav { display: block; padding: 0; }
+.auth-page-inner { display: flex; align-items: center; justify-content: center; padding: 40px 24px; }
+/* The header carries the wordmark now; a second logo above the card was the
+   same image twice on one screen. */
+body.auth-page.has-nav .auth-logo { display: none; }
+/* Bebas is a display face — .hero h1 sizes it for a month name; a one-word page
+   title wants the same treatment so both headers look identical. */
+.hero-lead h1 {
+    font-family: 'Bebas Neue', sans-serif; font-size: clamp(1.3rem, 2.4vw, 1.9rem);
+    letter-spacing: 1.5px; white-space: nowrap; color: var(--gold-soft);
+}
+
+.auth-shell { width: 100%; max-width: 420px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
+/* The signed-in account page is wider than the sign-in forms, which are a
+   column of single fields and read badly stretched. This one carries the header
+   images, and 420px wrapped five of them onto three rows for no reason: the
+   width is what makes the whole set visible at once. */
+body.auth-page.has-nav .auth-shell { max-width: 680px; }
+.auth-logo { height: 34px; opacity: 0.92; }
+
+.auth-card {
+    width: 100%; background: var(--bg-panel); border: 1px solid var(--card-border);
+    border-radius: 16px; padding: 30px 28px; box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+    display: flex; flex-direction: column; gap: 18px;
+}
+.auth-card h1 {
+    font-family: 'Bebas Neue', sans-serif; font-size: 1.7rem; letter-spacing: 1px;
+    color: var(--gold-soft);
+}
+.auth-sub { color: var(--text-dim); font-size: 0.85rem; line-height: 1.5; margin-top: -10px; }
+.auth-form { display: flex; flex-direction: column; gap: 14px; }
+
+.auth-error {
+    color: var(--crimson); font-size: 0.82rem; min-height: 1.1em; line-height: 1.5;
+}
+.auth-notice {
+    color: var(--gold-soft); font-size: 0.8rem; line-height: 1.5;
+    background: rgba(232,181,69,0.08); border: 1px solid rgba(232,181,69,0.25);
+    border-radius: 8px; padding: 10px 12px;
+}
+
+.auth-links { display: flex; justify-content: space-between; gap: 12px; font-size: 0.8rem; color: var(--text-faint); flex-wrap: wrap; }
+.auth-links a { color: var(--accent-blue); }
+.auth-links a:hover { text-decoration: underline; }
+
+.auth-divider { display: flex; align-items: center; gap: 10px; color: var(--text-faint); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 1px; }
+.auth-divider::before, .auth-divider::after { content: ''; flex: 1; height: 1px; background: var(--card-border); }
+
+.auth-providers { display: flex; flex-direction: column; gap: 10px; }
+.auth-provider-btn {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 10px 16px; border-radius: 8px; border: 1px solid var(--card-border);
+    background: rgba(255,255,255,0.03); color: var(--text-dim); font-family: inherit;
+    font-weight: 600; font-size: 0.85rem; cursor: not-allowed;
+}
+.auth-provider-btn .soon { font-size: 0.68rem; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.5px; margin-left: auto; }
+/* A provider that is actually wired up. Rendered as a link rather than a button
+   because starting the flow is a top-level navigation away from this page. */
+.auth-provider-btn.ready { color: var(--text); cursor: pointer; text-decoration: none; }
+.auth-provider-btn.ready:hover { background: rgba(255,255,255,0.07); border-color: var(--gold-soft); }
+
+.auth-list { display: flex; flex-direction: column; gap: 8px; }
+.auth-list .row {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 9px 12px; background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 8px; font-size: 0.85rem;
+}
+.auth-list .row .label { color: var(--text-dim); }
+.auth-badge { font-size: 0.7rem; font-weight: 700; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.auth-badge.ok { color: #0a0c10; background: var(--green); }
+.auth-badge.pending { color: #0a0c10; background: var(--gold-soft); }
+.auth-badge.off { color: var(--text-dim); background: rgba(255,255,255,0.06); }
+
+/* Sits inside an .auth-list row next to the badge, so it has to stay small
+   enough not to change the row's height. */
+.btn-ghost.tiny { padding: 4px 10px; font-size: 0.72rem; border-radius: 999px; text-decoration: none; }
+.btn-ghost.tiny:hover { color: var(--text); border-color: var(--gold-soft); }
+
+/* The username / password forms on the account page. Same card shell as a
+   .row so they read as part of the same list, but laid out as a wrapping line
+   of inputs rather than a label-and-badge pair. */
+.auth-inline-form {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 9px 12px; background: var(--card); border: 1px solid var(--card-border);
+    border-radius: 8px; font-size: 0.85rem;
+}
+.auth-inline-form label { color: var(--text-dim); flex: 1 1 100%; }
+.auth-inline-form input {
+    flex: 1 1 140px; min-width: 0; padding: 6px 10px; font-size: 0.8rem;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; color: var(--text);
+}
+
+.auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.avatar-row .row-main { display: flex; align-items: center; gap: 10px; }
+.avatar-thumb {
+    width: 40px; height: 40px; border-radius: 999px; object-fit: cover;
+    border: 1px solid var(--card-border); background: var(--card);
+}
+.avatar-placeholder {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 1.1rem;
+}
+
+/* Header images: a picture, the name it goes by, and the way to get rid of it,
+   in one card each. Wrapping rather than scrolling — there are at most five. */
+.auth-hint { color: var(--text-dim); font-size: 0.78rem; }
+.image-manager { display: flex; flex-wrap: wrap; gap: 10px; width: 100%; }
+.image-card {
+    display: flex; flex-direction: column; gap: 6px; width: 108px;
+    padding: 8px; border: 1px solid var(--card-border); border-radius: 10px;
+    background: var(--card);
+}
+.image-card img {
+    width: 92px; height: 92px; object-fit: cover; border-radius: 8px;
+    background: var(--bg-panel);
+}
+.image-card input {
+    width: 100%; min-width: 0; padding: 4px 6px; font-size: 0.74rem;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 6px; color: var(--text); font-family: inherit;
+}
+.image-card input:focus { border-color: var(--gold); outline: none; }
+.image-card .btn-ghost { align-self: flex-start; }
+
+/* Error pages (404 / 403). The same card as the auth screens, with the status
+   set as a watermark so the page is identifiable at a glance without the number
+   competing with the sentence that actually explains it. */
+.error-card { text-align: center; align-items: center; position: relative; overflow: hidden; }
+.error-code {
+    font-family: 'Bebas Neue', sans-serif; font-size: 5.5rem; line-height: 0.9;
+    letter-spacing: 4px; color: var(--gold); opacity: 0.16; user-select: none;
+}
+.error-card h1 { margin-top: -14px; }
+.error-card .auth-notice { text-align: left; }
+.error-card .auth-actions { justify-content: center; }
+
+/* Admin screen — same tokens and fonts as the auth pages above, but a wide
+   table layout instead of a centered form. */
+/* Wide: the accounts table carries ten columns and a cluster of row actions, and
+   the alternative to the width is a horizontal scrollbar between the operator and
+   every button. */
+.admin-shell { width: 100%; max-width: 1500px; margin: 0 auto; padding: 24px 20px 60px; display: flex; flex-direction: column; gap: 26px; }
+.admin-section { background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 16px; padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; }
+.admin-section h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.25rem; letter-spacing: 1px; color: var(--gold-soft); }
+.admin-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.admin-table-wrap { overflow-x: auto; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+.admin-table th, .admin-table td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--card-border); vertical-align: middle; white-space: nowrap; }
+.admin-table th { color: var(--text-faint); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700; }
+/* `display: flex` on a <td> takes it OUT of table layout — it stops being a cell,
+   so it no longer sits in its column, the row grows to whatever height the
+   stacked content wants, and every cell after it slides out of alignment. The
+   flexing belongs to a wrapper INSIDE the cell; the cell stays a cell. */
+.admin-table td.actions { white-space: normal; }
+.admin-table td.actions .action-group {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+    /* Wrap into a block rather than stretching the table sideways. */
+    max-width: 320px;
+}
+/* Same rule, same reason: the flexing lives in the wrapper, not the cell. */
+.admin-table td.badge-row .badge-group { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+/* Timestamps are the other width hog: three columns of full locale strings. */
+.admin-table td.ts { font-variant-numeric: tabular-nums; color: var(--text-dim); }
+.admin-empty { color: var(--text-faint); font-size: 0.82rem; }
+.admin-inline-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: flex-end; }
+.admin-inline-form .field { min-width: 140px; }
+.admin-msg { font-size: 0.8rem; min-height: 1.1em; }
+.admin-msg.error { color: var(--crimson); }
+.admin-msg.ok { color: var(--green); }
+
+
+/* ==========================================================================
+   TRACKER: the /distrakt page.
+   ========================================================================== */
+/* The bar IS the calendar's header — it carries `hero` and takes its sticky
+   positioning, padding, background and flex layout from the rules above.
+   Everything here is only what is specific to this page's brand mark, so the
+   two bars stay the same height and the same shape as each other by
+   construction. */
+.distrakt-brand {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: 'Bebas Neue', sans-serif; letter-spacing: 1.5px;
+    /* Matches .hero h1 so the wordmark is the same size as the calendar's title. */
+    font-size: clamp(1.3rem, 2.4vw, 1.9rem);
+    color: var(--gold-soft); text-decoration: none; white-space: nowrap;
+}
+.distrakt-mark { width: 1.1em; height: 1.1em; display: block; }
+
+.distrakt-main { padding: 14px 4vw 60px 4vw; max-width: 1200px; margin: 0 auto; }
+
+/* Tabs */
+.distrakt-tabs {
+    display: flex; gap: 2px; margin-bottom: 16px;
+    border-bottom: 1px solid var(--card-border);
+    position: sticky; top: 49px; z-index: 15;
+    background: rgba(10,12,16,0.92); backdrop-filter: blur(8px);
+}
+.distrakt-tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--text-dim); padding: 9px 16px; cursor: pointer; font-size: 0.9rem; font-weight: 600;
+}
+.distrakt-tab:hover { color: var(--text); }
+.distrakt-tab.active { color: var(--gold-soft); border-bottom-color: var(--gold); }
+.distrakt-panel[hidden] { display: none; }
+.distrakt-placeholder { text-align: center; padding: 100px 20px; color: var(--text-faint); }
+.distrakt-placeholder .emoji { font-size: 2.4rem; margin-bottom: 12px; }
+.distrakt-show-row .btn-ghost.danger { color: var(--danger, #e0736b); border-color: transparent; }
+.distrakt-show-row .btn-ghost.danger:hover { border-color: var(--danger, #e0736b); }
+
+.distrakt-section { background: var(--bg-panel); border: 1px solid var(--card-border); border-radius: 14px; padding: 20px 22px; margin-bottom: 24px; }
+.distrakt-section h2 { font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.5px; font-size: 1.2rem; color: var(--gold-soft); margin: 0 0 14px 0; }
+
+.distrakt-empty { color: var(--text-faint); padding: 14px 4px; }
+
+/* Shown when the server degraded the month to last-known totals (Trakt
+   rate-limited or unreachable); a warning tint so the stale data reads as such. */
+.distrakt-notice {
+    color: var(--danger, #e0736b);
+    border: 1px solid var(--danger, #e0736b); border-radius: 8px;
+    background: rgba(224,115,107,0.08);
+    padding: 8px 12px; margin-bottom: 10px; font-size: 0.85rem;
+}
+
+.distrakt-show-list { display: flex; flex-direction: column; gap: 5px; }
+.distrakt-bucket-head {
+    font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.5px; font-size: 1rem;
+    color: var(--gold-soft); margin: 14px 0 3px 0;
+}
+.distrakt-bucket-head:first-child { margin-top: 0; }
+.distrakt-weekday-head { color: var(--text-dim); font-style: italic; font-size: 0.82rem; margin: 5px 0 2px 2px; }
+
+/* Uniform single-line rows: badge | title (flex, hover-scrolls) | S## | (x/y) | dates | actions */
+.distrakt-show-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 4px 10px; min-height: 34px; font-size: 0.85rem;
+    border: 1px solid var(--card-border); border-radius: 8px; background: rgba(255,255,255,0.02);
+}
+.distrakt-show-row.abandoned { opacity: 0.5; }
+/* A show whose totals couldn't be refreshed this pass: dim it and tint the
+   "unavailable — refresh to retry" note so its last-known counts aren't trusted. */
+.distrakt-show-row.unavailable { opacity: 0.6; }
+.distrakt-show-row.unavailable .distrakt-dates { color: var(--danger, #e0736b); font-style: italic; }
+.distrakt-badge {
+    flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center;
+    justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;
+}
+.distrakt-badge .distrakt-logo { max-width: 26px; max-height: 26px; border-radius: 5px; object-fit: contain; }
+.distrakt-title { flex: 1 1 auto; min-width: 0; overflow: hidden; font-weight: 600; }
+.distrakt-title .tt {
+    display: inline-block; max-width: 100%; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; vertical-align: bottom;
+}
+.distrakt-title.scrolling .tt {
+    overflow: visible; text-overflow: clip; max-width: none;
+    animation: ttscroll var(--dur, 3s) linear infinite alternate;
+}
+@keyframes ttscroll { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--scroll, 0px))); } }
+.distrakt-season { flex: 0 0 auto; width: 3em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+/* Details modal -------------------------------------------------------------
+   The layout comes from style.css (.modal, .details-hero, .ep-list); these are
+   only the tracker's additions: no poster, and a watched marker per episode. */
+.distrakt-show-row { cursor: pointer; }
+.details-hero.no-poster { display: block; }
+.ep-watched-count {
+    font-size: 0.72rem; font-weight: 700; color: var(--green);
+    background: rgba(76,175,80,0.12); border-radius: 999px; padding: 2px 8px; margin-left: 8px;
+}
+/* Watched rows are tinted and marked. The tick is a link to that episode on
+   Trakt; unwatched rows get an equally-sized blank so the numbers stay aligned. */
+.ep-row.watched { background: rgba(76,175,80,0.07); }
+.ep-check {
+    flex: 0 0 auto; width: 1.4em; text-align: center; color: var(--green);
+    font-weight: 700; text-decoration: none; border-radius: 4px;
+}
+a.ep-check:hover { background: rgba(76,175,80,0.2); }
+/* Unwatched: same slot, hollow and muted, so the column reads as a checklist
+   rather than a ragged mix of marks and gaps. Still a link — this is the one you
+   click to go and mark it off. */
+.ep-check.unseen { color: var(--text-faint); font-weight: 400; }
+a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+
+/* The emoji map is keyed on this exact string, so it is shown rather than left in
+   a tooltip. Truncates instead of wrapping — a long network name must not push
+   the counts and dates out of their columns. */
+.distrakt-network {
+    flex: 0 0 auto; width: 9em; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; color: var(--text-faint); font-size: 0.82em;
+}
+.distrakt-counts { flex: 0 0 auto; width: 6em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.distrakt-dates { flex: 0 0 auto; width: 8.5em; text-align: right; white-space: nowrap; color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.distrakt-row-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+/* A watched film: same row shape as a show so the columns line up, but nothing
+   to open and nothing to act on — it is a play that happened on a day. */
+.distrakt-film-row { cursor: default; }
+
+.distrakt-section-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
+.distrakt-section-head h2 { margin: 0; }
+.distrakt-copy-block { margin-bottom: 18px; }
+.distrakt-copy-block:last-child { margin-bottom: 0; }
+.distrakt-copy-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; color: var(--text-dim); font-size: 0.9rem; }
+.distrakt-copy-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+
+/* Backup panel */
+.distrakt-note { color: var(--text-dim); font-size: 0.82rem; line-height: 1.5; margin: 6px 0 10px; }
+.distrakt-note.ok { color: var(--green); }
+.distrakt-note.distrakt-warn { color: var(--crimson); }
+.distrakt-note code {
+    background: rgba(255,255,255,0.08); border-radius: 4px; padding: 1px 5px;
+    font-family: 'Consolas', 'Menlo', monospace;
+}
+#restoreConfirm { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+#restoreConfirm label { color: var(--text-dim); font-size: 0.82rem; flex: 1 1 100%; }
+#restoreConfirm input[type="text"] {
+    flex: 0 1 220px; padding: 6px 10px; font-size: 0.82rem; color: var(--text);
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px;
+}
+#restoreFile { font-size: 0.82rem; color: var(--text-dim); }
+.distrakt-link-select {
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; padding: 4px 8px; color: var(--text); font-size: 0.8rem; max-width: 190px;
+}
+.distrakt-copy-textarea {
+    width: 100%; min-height: 160px; resize: vertical;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 10px; padding: 10px 12px; color: var(--text);
+    font-family: 'Consolas', 'Menlo', monospace; font-size: 0.85rem; line-height: 1.5;
+}
+
+.distrakt-search-results { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+.distrakt-search-row {
+    display: flex; align-items: center; gap: 10px; cursor: pointer;
+    padding: 9px 12px; border: 1px solid var(--card-border); border-radius: 8px;
+}
+.distrakt-search-row:hover { border-color: var(--gold); }
+.distrakt-search-row .distrakt-title { flex: 1; font-weight: 600; }
+.distrakt-search-row .distrakt-year, .distrakt-search-row .distrakt-network { color: var(--text-faint); font-size: 0.82rem; }
+
+.distrakt-season-pick { margin-top: 14px; }
+.distrakt-season-list { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.emoji-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.emoji-map-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+.emoji-row { display: grid; grid-template-columns: 30px 1fr 100px auto auto; gap: 8px; align-items: center; }
+.emoji-row .emoji-logo-cell { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; }
+.emoji-row .emoji-logo { max-width: 30px; max-height: 30px; border-radius: 6px; object-fit: contain; }
+.emoji-row .logo-actions { display: none; gap: 4px; }
+.emoji-row.has-logo .logo-actions { display: inline-flex; }
+.emoji-row input {
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; padding: 8px 10px; color: var(--text); font-family: inherit;
+}
+.distrakt-default-emoji { max-width: 160px; margin: 14px 0; }
+
+/* Month-nav + frozen (past-month) banner */
+/* Sits inside .hero-lead beside the wordmark, exactly like the calendar's own
+   month nav — so `justify-self` (a grid property) no longer applies. */
+.distrakt-nav { display: flex; align-items: center; gap: 8px; }
+.distrakt-nav-label {
+    font-variant-numeric: tabular-nums; color: var(--text-dim); font-size: 0.95rem; min-width: 82px; text-align: center;
+}
+.distrakt-frozen-note {
+    max-width: 900px; margin: 0 auto 18px auto; padding: 10px 14px;
+    border: 1px solid var(--card-border); border-radius: 10px;
+    background: rgba(255,255,255,0.03); color: var(--text-dim); text-align: center; font-size: 0.9rem;
+}
+
+
+/* ==========================================================================
+   RANKINGS: the /rankings boards.
+   The board bar, the pool, the tier accordions and the export modal. Layered
+   on the palette, hero, modal chrome, buttons and toasts above — nothing here
+   restates those.
+   ========================================================================== */
+
+.ranker-shell { padding: 16px 3vw 60px; display: flex; flex-direction: column; gap: 14px; }
+
+/* ---- board bar ---- */
+.ranker-boards {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px 18px;
+    padding: 10px 14px; border: 1px solid var(--card-border);
+    border-radius: 12px; background: var(--bg-panel);
+}
+.ranker-year-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ranker-year {
+    font-family: 'Bebas Neue', sans-serif; font-size: 1.05rem; letter-spacing: 1px;
+    color: var(--text-faint);
+}
+.ranker-board-link {
+    display: inline-flex; align-items: center; gap: 7px; padding: 6px 12px;
+    border: 1px solid var(--card-border); border-radius: 999px;
+    font-size: 0.8rem; font-weight: 600; transition: all .18s ease;
+}
+.ranker-board-link:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
+.ranker-board-link.active { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.16); }
+.ranker-board-tools { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.ranker-count {
+    font-size: 0.7rem; font-weight: 700; color: var(--text-faint);
+    background: rgba(255,255,255,0.06); border-radius: 999px; padding: 1px 7px;
+}
+
+/* ---- the two columns ---- */
+.ranker-board { display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 14px; align-items: start; }
+@media (max-width: 900px) { .ranker-board { grid-template-columns: 1fr; } }
+
+.ranker-pool-col, .ranker-tier-col {
+    border: 1px solid var(--card-border); border-radius: 14px;
+    background: var(--bg-panel); padding: 14px; min-width: 0;
+}
+/* PINNED WHILE THE TIERS SCROLL. Dragging a title from the pool into the bottom
+   tier of a long board otherwise means scrolling the pool out of the window
+   first, which leaves nothing to drag. The offset clears the sticky header, and
+   the column becomes its own scroll container so a long pool scrolls inside the
+   pin rather than escaping it. */
+/* The offset clears the sticky hero (a 30px logo inside 8px padding, plus its
+   border). Named so the two places that depend on it cannot drift; the column
+   also sits below the header in the stacking order, so a header that wraps to
+   two lines covers the pool rather than colliding with it. */
+.ranker-page { --ranker-pinned-top: 54px; }
+.ranker-pool-col {
+    position: sticky; top: var(--ranker-pinned-top); align-self: start;
+    max-height: calc(100vh - var(--ranker-pinned-top) - 14px);
+    display: flex; flex-direction: column; overflow: hidden;
+}
+/* Stacked on a narrow screen, the pool sits ABOVE the tiers rather than beside
+   them, so pinning it would cover the thing being dragged to. */
+@media (max-width: 900px) {
+    .ranker-pool-col { position: static; max-height: none; }
+}
+.ranker-panel-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ranker-panel-head h2 {
+    font-family: 'Bebas Neue', sans-serif; font-size: 1.35rem; letter-spacing: 1px;
+    color: var(--gold-soft); font-weight: 400;
+}
+.ranker-panel-actions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.ranker-empty { color: var(--text-faint); font-size: 0.82rem; padding: 14px 4px; }
+
+/* ---- search & sources ---- */
+.ranker-add { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ranker-search-row { display: flex; gap: 8px; }
+.ranker-search-row input, .ranker-search-row select {
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 8px; padding: 8px 10px; font-family: inherit; font-size: 0.84rem;
+}
+.ranker-search-row input { flex: 1; min-width: 0; }
+.ranker-search-row input:focus, .ranker-search-row select:focus { border-color: var(--gold); outline: none; }
+.ranker-source-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.ranker-source-actions:empty { display: none; }
+
+.ranker-results {
+    display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto;
+    border: 1px solid var(--card-border); border-radius: 10px; padding: 6px; background: var(--card);
+}
+.ranker-result {
+    display: flex; align-items: center; gap: 8px; padding: 5px 7px; border-radius: 8px;
+    cursor: grab; font-size: 0.8rem;
+}
+.ranker-result:hover { background: rgba(255,255,255,0.06); }
+.ranker-result img { width: 30px; height: 45px; object-fit: cover; border-radius: 3px; background: var(--card-border); }
+.ranker-result .ranker-name { flex: 1; min-width: 0; }
+.ranker-result.is-held { opacity: 0.45; cursor: default; }
+
+/* ---- bulk selection ---- */
+.ranker-bulk {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
+    padding: 7px 10px; border-radius: 10px; font-size: 0.78rem;
+    background: rgba(232,181,69,0.12); border: 1px solid rgba(232,181,69,0.4);
+}
+.ranker-bulk select {
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 7px; padding: 5px 8px; font-family: inherit; font-size: 0.78rem;
+}
+
+/* ---- the item unit, shared by the pool and by every tier ----
+   One element in both places, so a drag between them moves the node the browser
+   already has. Only the spacing differs. */
+.ranker-item {
+    display: flex; align-items: center; gap: 8px; padding: 5px 8px;
+    border: 1px solid var(--card-border); border-radius: 9px; background: var(--card);
+    font-size: 0.8rem; cursor: grab; user-select: none;
+}
+.ranker-item:hover { border-color: rgba(232,181,69,0.5); }
+.ranker-item:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+.ranker-item.is-selected { border-color: var(--gold); background: rgba(232,181,69,0.14); }
+.ranker-grip { color: var(--text-faint); cursor: grab; line-height: 1; }
+.ranker-thumb {
+    width: 46px; height: 69px; object-fit: cover; border-radius: 4px;
+    background: var(--card-border); flex-shrink: 0;
+}
+.ranker-thumb.is-missing { background: repeating-linear-gradient(45deg, #1c1f22, #1c1f22 6px, #23272b 6px, #23272b 12px); }
+.ranker-name { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.ranker-title { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ranker-year { color: var(--text-faint); font-size: 0.72rem; }
+.ranker-facts { display: flex; gap: 5px; flex-wrap: wrap; justify-content: flex-end; }
+.ranker-fact { font-size: 0.68rem; color: var(--text-dim); background: rgba(255,255,255,0.05); border-radius: 5px; padding: 1px 5px; }
+.ranker-fact.rating { color: var(--gold-soft); }
+.ranker-actions { display: flex; gap: 2px; flex-shrink: 0; }
+.ranker-act {
+    cursor: pointer; background: none; border: none; color: var(--text-faint);
+    font-size: 0.8rem; padding: 3px 4px; border-radius: 5px; font-family: inherit; line-height: 1;
+}
+.ranker-act:hover { color: var(--gold); background: rgba(255,255,255,0.07); }
+.ranker-act.danger:hover { color: var(--crimson); }
+
+/* In the narrow pool column the per-title facts are noise; the title and its
+   poster are what somebody scanning a pool is reading. */
+.ranker-pool .ranker-facts { display: none; }
+.ranker-pool, .ranker-rows { display: flex; flex-direction: column; gap: 5px; min-height: 40px; }
+/* The scrolling part of the pinned column: it takes whatever height is left
+   under the search box and the source buttons, so the pool is as tall as the
+   window allows rather than a fixed fraction of it. */
+.ranker-pool { flex: 1 1 auto; overflow-y: auto; padding-right: 4px; }
+@media (max-width: 900px) { .ranker-pool { max-height: 62vh; } }
+
+/* Height reserved from a count the server already knew, so a page of cards or a
+   tier's rows slot into space made for them instead of shoving the page down. */
+.ranker-pool-sentinel, .ranker-rows:not([data-loaded]) {
+    min-height: calc(var(--skeleton-rows, 1) * 45px);
+    border-radius: 9px;
+    background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 40px, transparent 40px 45px);
+}
+.ranker-pool-sentinel { display: flex; align-items: flex-start; justify-content: center; padding-top: 10px; }
+.ranker-sentinel-label { font-size: 0.74rem; color: var(--text-faint); }
+
+/* ---- tiers ---- */
+.ranker-tier {
+    border: 1px solid var(--card-border); border-left: 4px solid var(--tier-colour, var(--card-border));
+    border-radius: 11px; background: var(--card); margin-bottom: 8px; overflow: hidden;
+}
+.ranker-tier.is-isolated { border-style: dashed; }
+.ranker-tier-head {
+    display: flex; align-items: center; gap: 10px; padding: 9px 12px; cursor: pointer;
+    list-style: none;
+}
+.ranker-tier-head::-webkit-details-marker { display: none; }
+.ranker-tier-head:hover { background: rgba(255,255,255,0.04); }
+.ranker-tier-label {
+    font-family: 'Bebas Neue', sans-serif; font-size: 1.25rem; letter-spacing: 1px;
+    color: var(--tier-colour, var(--text)); min-width: 32px;
+}
+.ranker-tier-meta { display: flex; align-items: center; gap: 6px; }
+.ranker-prio, .ranker-iso { font-size: 0.68rem; color: var(--text-faint); }
+.ranker-iso { color: var(--accent-blue); }
+.ranker-strip { flex: 1; display: flex; gap: 2px; overflow: hidden; justify-content: flex-end; }
+.ranker-strip img { width: 24px; height: 36px; object-fit: cover; border-radius: 2px; }
+.ranker-tier-acts { display: flex; gap: 2px; }
+.ranker-rows { padding: 4px 10px 10px; }
+
+/* ---- a fragment that failed: a gap with a way out, not a broken board ---- */
+.ranker-failed {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 14px; border-radius: 10px; font-size: 0.82rem;
+    background: rgba(232,181,69,0.1); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft);
+}
+
+/* ---- move-to-tier menu ---- */
+.ranker-menu {
+    position: absolute; z-index: 9000; min-width: 150px; padding: 5px;
+    background: var(--bg-panel); border: 1px solid var(--card-border);
+    border-radius: 10px; box-shadow: 0 18px 40px rgba(0,0,0,0.6);
+    display: flex; flex-direction: column; gap: 2px;
+}
+.ranker-menu button {
+    cursor: pointer; background: none; border: none; color: var(--text); text-align: left;
+    padding: 6px 10px; border-radius: 6px; font-family: inherit; font-size: 0.8rem;
+}
+.ranker-menu button:hover { background: rgba(255,255,255,0.08); }
+
+/* ---- saving indicator ---- */
+.ranker-save-state { font-size: 0.74rem; color: var(--text-faint); min-width: 54px; text-align: right; }
+.ranker-save-state[data-state="saving"] { color: var(--gold-soft); }
+.ranker-save-state[data-state="saved"] { color: var(--green); }
+.ranker-save-state[data-state="error"] { color: var(--crimson); }
+
+/* ---- export modal ---- */
+.ranker-export-body { flex-direction: row; gap: 22px; }
+@media (max-width: 720px) { .ranker-export-body { flex-direction: column; } }
+.ranker-export-opts { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.ranker-opt-row { display: flex; gap: 12px; }
+.ranker-opt-row > .field { flex: 1; min-width: 0; }
+.ranker-export-preview { width: 240px; flex-shrink: 0; }
+@media (max-width: 720px) { .ranker-export-preview { width: 100%; } }
+.ranker-preview-frame {
+    border: 1px solid var(--card-border); border-radius: 10px; background: #111315;
+    min-height: 240px; display: flex; align-items: center; justify-content: center;
+    overflow: hidden; padding: 6px;
+}
+.ranker-preview-frame img { max-width: 100%; max-height: 60vh; display: block; }
+/* Zoomed: the image at the size it was rendered, moved under a fixed window by
+   the pointer. The frame is the window, so it needs a height of its own — with
+   `min-height` alone it would simply grow to fit the image and there would be
+   nothing to look around. */
+.ranker-preview-frame { cursor: zoom-in; position: relative; }
+.ranker-preview-frame.is-zoomed {
+    cursor: zoom-out; height: 60vh; padding: 0;
+    align-items: flex-start; justify-content: flex-start;
+}
+.ranker-preview-frame.is-zoomed img {
+    /* The width is set in script, from the image's own natural size. */
+    max-width: none; max-height: none;
+    /* No transition: the image has to track the pointer, and easing it turns
+       looking around into waiting for it to catch up. */
+    will-change: transform;
+}
+.ranker-preview-hint { font-size: 0.76rem; color: var(--text-faint); text-align: center; }
+.ranker-size { font-size: 0.74rem; color: var(--text-dim); }
+.ranker-size.is-over { color: var(--crimson); font-weight: 600; }
+
+/* The ask dialog can be opened FROM another modal — naming an image while the
+   export dialog is up — and it sits earlier in the document, so at the shared
+   z-index it would open behind the thing that asked for it. */
+#askModal { z-index: 10001; }
+
+/* The header-image chooser: the picture beside the name it goes by. */
+.ranker-header-pick { display: flex; align-items: center; gap: 8px; }
+.ranker-header-pick select { flex: 1; min-width: 0; }
+#exHeaderThumb {
+    width: 42px; height: 42px; border-radius: 999px; object-fit: cover;
+    border: 1px solid var(--card-border); background: var(--card); flex-shrink: 0;
+}
+
+/* ---- backup modal ----
+   The restore button is the primary action of that dialog and also the only
+   irreversible one on this page, so it reads in the destructive colour rather
+   than the inviting one. Same rule the other backup screen carries; it lives
+   here too because each page loads only its own stylesheet. */
+#backupGo { background: var(--crimson); border-color: var(--crimson); }
+#backupGo:disabled { opacity: 0.45; }
+
+.ranker-blank { padding: 40px 4px; display: flex; flex-direction: column; gap: 12px; align-items: flex-start; }
+.ranker-blank h2 { font-family: 'Bebas Neue', sans-serif; font-size: 1.6rem; letter-spacing: 1px; color: var(--gold-soft); font-weight: 400; }
+.ranker-blank p { color: var(--text-dim); font-size: 0.86rem; max-width: 52ch; }
+
+/* `.field` is display:flex in style.css, which beats the browser's own rule for
+   [hidden] — so the ask dialog's input would still show when it is only asking
+   a yes/no question. */
+.ranker-page [hidden] { display: none !important; }
+
+/* SortableJS's own hooks. `.sortable-ghost` is the placeholder left where the
+   dragged item would land; `.sortable-drag` is the element under the cursor. */
+.sortable-ghost { opacity: 0.35; border-style: dashed; }
+.sortable-drag { cursor: grabbing; }
+
+
+/* ==========================================================================
+   PUBLIC SHARE PAGE: a shared calendar seen by someone with the link.
+   It reuses the grid/card/hero rules above as-is; these two are the only
+   additions, and neither overrides anything.
+   ========================================================================== */
+
+.share-owner {
+    font-weight: 700;
+}
+
+.share-asof {
+    padding: 6px 24px;
+    font-size: 0.85rem;
+    opacity: 0.7;
 }

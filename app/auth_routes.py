@@ -11,15 +11,16 @@ Three things here carry real weight and must survive any future restyling:
     existed the app had no login at all, so an existing instance starts with
     an empty `users` table and setup is where its operator first gets
     credentials. Setup therefore also adopts the Trakt token already in
-    settings.json, seeds the new account's view preferences and timezone from
-    settings.json so the calendar looks exactly as it did, and calls the hook
-    that imports the legacy per-month state files.
+    settings.json and seeds the new account's view preferences and timezone
+    from settings.json, so the calendar looks exactly as it did.
 
   - JSON-only request bodies. A form-encoded POST is a CORS "simple request"
     that browsers send with no preflight, so accepting one would leave these
-    endpoints defended by SameSite alone. Everything here posts JSON via
-    fetch; there is no HTML form POST anywhere in this app and none may be
-    added.
+    endpoints defended by SameSite alone. The rule itself is enforced for every
+    mutating route at once, in app/authz.py's request_shape_guard, rather than
+    here — this note says what the constraint MEANS for these pages: everything
+    here posts JSON via fetch, there is no HTML form POST anywhere in this app,
+    and none may be added.
 
 Registration is gated by an invite unless the operator has turned that off,
 and every sign-in / registration failure is throttled per username and per IP
@@ -29,17 +30,16 @@ ordinary failure — see the login and register handlers for why.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from urllib.parse import quote
 
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, calendar_state, db, nav, trakt_auth, user_images
+from . import auth, authz, calendar_state, chrome, db, trakt_auth, user_images
 from .auth import AuthLevel
 from .config import load_settings, save_settings
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,6 @@ router = APIRouter()
 # of the app uses, so the startup audit and the deny-by-default middleware see
 # them exactly as they see the routes defined on the app itself.
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # One message for every sign-in failure — unknown username, wrong password,
 # locked out, and disabled account alike — so none of them can be used to tell
@@ -63,28 +62,6 @@ INVALID_INVITE = "This invite link is not valid. Ask your admin for a new one."
 # app_meta key, set when setup could not adopt the Trakt token already in
 # settings.json, so the Settings screen can prompt for a reconnect.
 TRAKT_RECONNECT_NOTICE = "trakt_reconnect_notice"
-
-
-async def _json_body(request: Request) -> dict:
-    """Require a JSON body, rejecting anything else with 415.
-
-    A form-encoded cross-origin POST needs no CORS preflight, so accepting one
-    would make every mutating endpoint reachable from a hostile page with only
-    the cookie's SameSite attribute standing in the way.
-    """
-    if "application/json" not in (request.headers.get("content-type") or "").lower():
-        raise HTTPException(status_code=415, detail="Send application/json.")
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Malformed JSON body.")
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object.")
-    return data
-
-
-def _error(message: str, status: int = 400) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message}, status_code=status)
 
 
 # ---------------------------------------------------------------------------
@@ -111,19 +88,19 @@ async def onboarding_create(request: Request):
     then a Trakt outage, a revoked app registration, or a mistyped redirect URI
     would lock the operator out of their own instance with no way back in.
     """
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     confirm = str(data.get("password_confirm") or "")
 
     if err := auth.identifier_error(username):
-        return _error(err)
+        return authz.error(err)
     if len(password) < auth.MIN_PASSWORD_LENGTH:
-        return _error(f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
+        return authz.error(f"Password must be at least {auth.MIN_PASSWORD_LENGTH} characters.")
     if password != confirm:
-        return _error("The two passwords don't match.")
+        return authz.error("The two passwords don't match.")
     if await auth.any_users_exist():
-        return _error("This instance has already been set up.", 409)
+        return authz.error("This instance has already been set up.", 409)
 
     settings = load_settings()
     # Both of these happen before the transaction opens: neither 200ms of Argon2
@@ -162,18 +139,17 @@ async def onboarding_create(request: Request):
     try:
         user_id = await db.transaction(_create)
     except _AlreadySetUp:
-        return _error("This instance has already been set up.", 409)
+        return authz.error("This instance has already been set up.", 409)
     except db.IntegrityError:
         # The unique index on the bootstrap flag caught a simultaneous request
         # that got past the count check. Same answer either way.
-        return _error("This instance has already been set up.", 409)
+        return authz.error("This instance has already been set up.", 409)
 
     if settings.trakt_access_token.strip() and not trakt_identity:
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "1")
     elif trakt_identity:
         await db.set_meta(TRAKT_RECONNECT_NOTICE, "")
 
-    await _import_legacy_calendar_state(user_id)
     # BEFORE the session below, so the very first cookie this instance issues
     # already carries the right policy.
     settings = _adopt_cookie_policy(settings, request)
@@ -257,22 +233,6 @@ async def _fetch_trakt_identity(settings) -> dict | None:
         return None
 
 
-async def _import_legacy_calendar_state(user_id: int) -> None:
-    """Import the legacy `data/state_*.json` files onto the account just created.
-
-    Those files hold the pre-accounts "not watching" decisions and per-month
-    change-detection state, keyed by endpoint/year/month with no user; the
-    importer backs them up, then copies them into the per-user calendar tables
-    under this account. A failure is logged rather than raised — onboarding must
-    not be blocked by a local file hiccup, and the originals are left in place so
-    a retry can still succeed.
-    """
-    try:
-        await calendar_state.import_legacy_state(user_id)
-    except Exception:
-        logger.warning("Legacy calendar state import failed for user %s", user_id, exc_info=True)
-
-
 # ---------------------------------------------------------------------------
 # registration
 # ---------------------------------------------------------------------------
@@ -320,16 +280,6 @@ async def register_page(request: Request):
     })
 
 
-async def _registration_rate_limited(ip: str, token: str) -> bool:
-    if await auth.rate_limited("register_ip", ip, max_attempts=auth.REGISTER_MAX_ATTEMPTS,
-                               window_seconds=auth.REGISTER_WINDOW_SECONDS):
-        return True
-    if token and await auth.rate_limited("invite_ip", ip, max_attempts=auth.INVITE_MAX_ATTEMPTS,
-                                         window_seconds=auth.INVITE_WINDOW_SECONDS):
-        return True
-    return False
-
-
 @guard.post("/register", AuthLevel.PUBLIC)
 async def register(request: Request):
     """Create an account, gated by an invite unless the operator turned that
@@ -348,21 +298,19 @@ async def register(request: Request):
     """
     settings = load_settings()
     ip = auth.client_ip(request, settings)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     confirm = str(data.get("password_confirm") or "")
     token = str(data.get("invite") or request.query_params.get("invite") or "").strip()
     invite_required = not settings.allow_open_registration
 
-    if await _registration_rate_limited(ip, token):
-        return _error("Too many attempts from this address. Try again later.", 429)
+    if await auth.registration_rate_limited(ip, token):
+        return authz.error("Too many attempts from this address. Try again later.", 429)
 
     async def _fail(message: str, status: int = 400) -> JSONResponse:
-        await auth.record_attempt("register_ip", ip, False)
-        if token:
-            await auth.record_attempt("invite_ip", ip, False)
-        return _error(message, status)
+        await auth.record_registration_attempt(ip, token, False)
+        return authz.error(message, status)
 
     invite = await auth.find_invite_by_token(token) if token else None
     if invite_required and not auth.invite_is_usable(invite):
@@ -394,8 +342,8 @@ async def register(request: Request):
             # registration — it just doesn't grant anything either.
             row = candidate if usable else None
         # The invite's own grant, OR the instance-wide "approve new accounts
-        # automatically" setting — the same rule the provider-identity
-        # registration path in auth.py applies, so both doors behave alike.
+        # automatically" setting — the same rule auth.login_with_provider_identity
+        # applies when it registers, so both doors behave alike.
         grants_calendar = (
             bool(row["grants_calendar_on_accept"]) if row else False
         ) or settings.auto_approve_calendar
@@ -419,9 +367,7 @@ async def register(request: Request):
     except db.IntegrityError:
         return await _fail("That username is taken.")
 
-    await auth.record_attempt("register_ip", ip, True)
-    if token:
-        await auth.record_attempt("invite_ip", ip, True)
+    await auth.record_registration_attempt(ip, token, True)
     await auth.mark_logged_in(user_id)
     session_id = await auth.create_session(
         user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
@@ -476,7 +422,7 @@ async def login(request: Request):
     lockout open forever — which matters most for the per-IP counter, where
     every user behind one reverse proxy shares a key.
     """
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     username = str(data.get("username") or "").strip()
     password = str(data.get("password") or "")
     # Sign-in reads only the cookie policy and the proxy list, never a credential,
@@ -511,7 +457,7 @@ async def login(request: Request):
             auth.LOGIN_WINDOW_SECONDS // 60,
         )
         await auth.burn_dummy_verify(password)
-        return _error(INVALID_CREDENTIALS, 401)
+        return authz.error(INVALID_CREDENTIALS, 401)
 
     user = await auth.find_user_by_username(username) if username else None
     if user is None:
@@ -519,13 +465,13 @@ async def login(request: Request):
         if username_key:
             await auth.record_attempt("username", username_key, False)
         await auth.record_attempt("ip", ip, False)
-        return _error(INVALID_CREDENTIALS, 401)
+        return authz.error(INVALID_CREDENTIALS, 401)
 
     result = await auth.verify_password(user["password_hash"], password)
     if not result.ok or user["is_disabled"]:
         await auth.record_attempt("username", username_key, False)
         await auth.record_attempt("ip", ip, False)
-        return _error(INVALID_CREDENTIALS, 401)
+        return authz.error(INVALID_CREDENTIALS, 401)
     if result.new_hash:
         # The hashing library's defaults have moved on since this hash was
         # written; upgrade it now that we have the plaintext to do it with.
@@ -553,7 +499,7 @@ async def login(request: Request):
 async def logout(request: Request):
     # Signing someone out is a state change, so it is held to the same JSON-only
     # rule as every other mutating endpoint. The body itself is ignored.
-    await _json_body(request)
+    await authz.json_body(request)
     settings = load_settings(open_secrets=False)
     session_id = auth.read_session_cookie(request, settings)
     if session_id:
@@ -576,8 +522,9 @@ async def me_page(request: Request):
     account = await auth.get_user(user.user_id)
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
-        # is_admin, calendar_available and ranker_available for the shared header.
-        **nav.nav_context(user),
+        # is_admin, calendar_available, ranker_available, version, build
+        # for the shared header.
+        **chrome.page_context(user),
         # This page gates the tracker's menu item server-side rather than leaving
         # it to CSS — it must not mention the tracker at all to an account without
         # the grant. Same two conditions the tracker's own access level enforces.
@@ -596,9 +543,6 @@ async def me_page(request: Request):
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": user_images.has_avatar(user.user_id),
-        # Cache-busting token for the shared header's script/stylesheet, the same
-        # one every other page uses.
-        "asset_v": assets.ASSET_VERSION,
     })
 
 
@@ -611,10 +555,10 @@ async def unlink_identity(request: Request):
     undo it by hand.
     """
     user = await auth.require_session(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
     if provider not in ("trakt", "plex"):
-        return _error("Unknown provider.")
+        return authz.error("Unknown provider.")
     # Imported here rather than at module scope: app.trakt_routes reads this
     # module's message constants, so the dependency only runs one way at import
     # time.
@@ -627,12 +571,12 @@ async def unlink_identity(request: Request):
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
     except auth.LastLoginMethod:
-        return _error(
+        return authz.error(
             "That's the only way you can sign in. Link another account first, or "
             "ask an administrator.", 409,
         )
     if not removed:
-        return _error("That account isn't linked.", 404)
+        return authz.error("That account isn't linked.", 404)
     warning = await trakt_routes.revoke_token_value(token)
     return JSONResponse({"ok": True, "redirect": "/me", "warning": warning})
 
@@ -652,17 +596,17 @@ async def set_own_username(request: Request):
     user = await auth.require_session(request)
     account = await auth.get_user(user.user_id)
     if account and account["username"]:
-        return _error("You already have a username. An administrator can change it.", 409)
-    data = await _json_body(request)
+        return authz.error("You already have a username. An administrator can change it.", 409)
+    data = await authz.json_body(request)
     username = str(data.get("username") or "").strip().lower()
     if err := await auth.username_availability_error(username):
-        return _error(err)
+        return authz.error(err)
     try:
         await auth.admin_set_username(user.user_id, username)
     except db.IntegrityError:
         # Lost a race between the availability check and this write; the UNIQUE
         # column is the real arbiter, exactly as registration treats it.
-        return _error("That username is taken.")
+        return authz.error("That username is taken.")
     return JSONResponse({"ok": True, "username": username})
 
 
@@ -680,10 +624,10 @@ async def set_own_display_name(request: Request):
     by its username.
     """
     user = await auth.require_session(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     raw = data.get("display_name")
     if err := auth.display_name_error(raw):
-        return _error(err)
+        return authz.error(err)
     stored = await auth.set_display_name(user.user_id, raw)
     # Echo the NORMALIZED form, not what was sent: the client should show what
     # was actually stored once the collapsing of whitespace has been applied.
@@ -713,22 +657,22 @@ async def set_own_password(request: Request):
     # locking them out over a neighbour's typos is pure harm.
     if await auth.check_lockout("ip", ip, max_attempts=auth.LOGIN_IP_MAX_ATTEMPTS,
                                 window_seconds=auth.LOGIN_WINDOW_SECONDS):
-        return _error("Too many attempts. Try again later.", 429)
+        return authz.error("Too many attempts. Try again later.", 429)
 
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     account = await auth.get_user(user.user_id)
     stored_hash = account["password_hash"] if account else None
     if stored_hash:
         result = await auth.verify_password(stored_hash, str(data.get("current_password") or ""))
         if not result.ok:
             await auth.record_attempt("ip", ip, False)
-            return _error("That isn't your current password.", 403)
+            return authz.error("That isn't your current password.", 403)
 
     password = str(data.get("password") or "")
     if password != str(data.get("password_confirm") or ""):
-        return _error("The two passwords don't match.")
+        return authz.error("The two passwords don't match.")
     if len(password) < auth.MIN_PASSWORD_LENGTH:
-        return _error(f"Use at least {auth.MIN_PASSWORD_LENGTH} characters.")
+        return authz.error(f"Use at least {auth.MIN_PASSWORD_LENGTH} characters.")
 
     await auth.clear_attempts("ip", ip)
     await auth.set_password(user.user_id, password)
@@ -753,18 +697,18 @@ _PRIVATE_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 @guard.post("/api/me/avatar", AuthLevel.SESSION)
 async def upload_avatar(request: Request):
     user = await auth.require_session(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         await user_images.save_avatar(user.user_id, str(data.get("image_b64") or ""))
     except user_images.ValidationError as exc:
-        return _error(str(exc))
+        return authz.error(str(exc))
     return JSONResponse({"ok": True})
 
 
 @guard.delete("/api/me/avatar", AuthLevel.SESSION)
 async def remove_avatar(request: Request):
     user = await auth.require_session(request)
-    await _json_body(request)
+    await authz.json_body(request)
     user_images.delete_avatar(user.user_id)
     return JSONResponse({"ok": True})
 
@@ -784,9 +728,9 @@ async def get_avatar(request: Request):
     try:
         size = int(size_param)
     except ValueError:
-        return _error("`size` must be a whole number.")
+        return authz.error("`size` must be a whole number.")
     if not 16 <= size <= user_images.MASTER_SIZE:
-        return _error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
+        return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
     resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
@@ -796,16 +740,16 @@ async def upload_saved_image(request: Request):
     """Add a saved image (an alternative grid-header icon to the avatar),
     capped at user_images.MAX_IMAGES_PER_USER per account."""
     user = await auth.require_session(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         uid = await user_images.add_image(
             user.user_id, str(data.get("image_b64") or ""), str(data.get("name") or ""))
     except user_images.TooManyImages:
-        return _error(
+        return authz.error(
             f"You can save up to {user_images.MAX_IMAGES_PER_USER} images. Delete one first.", 409,
         )
     except user_images.ValidationError as exc:
-        return _error(str(exc))
+        return authz.error(str(exc))
     return JSONResponse({"ok": True, "uid": uid})
 
 
@@ -827,13 +771,13 @@ async def rename_saved_image(image_uid: str, request: Request):
     """Name or rename one saved image. An empty name clears it, and the image
     falls back to its positional default rather than being left blank."""
     user = await auth.require_session(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     try:
         name = user_images.clean_name(data.get("name"))
     except user_images.ValidationError as exc:
-        return _error(str(exc))
+        return authz.error(str(exc))
     if not user_images.set_image_name(user.user_id, image_uid, name):
-        return _error("No such image.", 404)
+        return authz.error("No such image.", 404)
     return JSONResponse({"ok": True, "name": name})
 
 
@@ -856,9 +800,9 @@ async def get_saved_image(image_uid: str, request: Request):
 @guard.delete("/api/me/images/{image_uid}", AuthLevel.SESSION)
 async def remove_saved_image(image_uid: str, request: Request):
     user = await auth.require_session(request)
-    await _json_body(request)
+    await authz.json_body(request)
     if not user_images.delete_image(user.user_id, image_uid):
-        return _error("No such image.", 404)
+        return authz.error("No such image.", 404)
     return JSONResponse({"ok": True})
 
 
@@ -872,16 +816,16 @@ async def remove_saved_image(image_uid: str, request: Request):
 @guard.post("/api/admin/invites", AuthLevel.ADMIN)
 async def admin_create_invite(request: Request):
     admin = await auth.current_user(request)
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     label = str(data.get("label") or "").strip() or None
 
     max_uses = data.get("max_uses")
     try:
         max_uses = int(max_uses) if max_uses is not None else None
     except (TypeError, ValueError):
-        return _error("max_uses must be a whole number.")
+        return authz.error("max_uses must be a whole number.")
     if max_uses is not None and max_uses < 1:
-        return _error("max_uses must be at least 1.")
+        return authz.error("max_uses must be at least 1.")
 
     expires_at = None
     expires_in_hours = data.get("expires_in_hours")
@@ -889,9 +833,9 @@ async def admin_create_invite(request: Request):
         try:
             hours = float(expires_in_hours)
         except (TypeError, ValueError):
-            return _error("expires_in_hours must be a number.")
+            return authz.error("expires_in_hours must be a number.")
         if hours <= 0:
-            return _error("expires_in_hours must be positive.")
+            return authz.error("expires_in_hours must be positive.")
         expires_at = db.now() + int(hours * 3600)
 
     invite = await auth.create_invite(

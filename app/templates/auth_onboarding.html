@@ -1,20 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  {# Parsed before first paint, so the gap before the stylesheet applies
-     is the page's own dark rather than the browser's default white. #}
-  <meta name="color-scheme" content="dark">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Set up &ndash; Trakt New Shows</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <link rel="stylesheet" href="/static/css/auth.css">
-  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body class="auth-page">
+{% import '_head.html' as page with context %}
+{{ page.head('Set up', nav_head=false) }}
+{%- set body_class %}auth-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-body-class="{{ body_class }}"></div>
 <div class="auth-shell">
   <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
   <div class="auth-card">
@@ -48,6 +43,12 @@
 </div>
 
 <script>
+// Wrapped, because a boosted navigation back to this page re-executes this
+// script in the same document: at top level its `const`s would be
+// redeclarations and the whole script would fail to parse, leaving the page's
+// controls bound to nothing. Inside a function each arrival gets its own
+// bindings, which is what the fresh DOM needs anyway.
+(function () {
 const err = document.getElementById('error');
 async function submit() {
   err.textContent = '';
@@ -72,7 +73,15 @@ async function submit() {
   btn.disabled = false;
 }
 document.getElementById('submit').addEventListener('click', submit);
-document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+// On `document`, which a boosted navigation does not replace — only <body> is
+// swapped — so arriving here a second time would stack a second Enter handler
+// and submit twice. The previous one is removed by name first. The name is
+// shared with the other auth pages on purpose: moving between two of them has
+// to clear the one the page being left installed.
+document.removeEventListener('keydown', window.__authEnterHandler);
+window.__authEnterHandler = (e) => { if (e.key === 'Enter') submit(); };
+document.addEventListener('keydown', window.__authEnterHandler);
+})();
 </script>
 </body>
 </html>

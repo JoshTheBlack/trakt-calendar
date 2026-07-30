@@ -26,23 +26,21 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, db, secrets_box, trakt_auth
 from .auth import AuthLevel
 from .auth_routes import INVALID_CREDENTIALS, INVALID_INVITE, TRAKT_RECONNECT_NOTICE
 from .config import Settings, load_settings
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 PROVIDER = "trakt"
 
@@ -261,7 +259,7 @@ async def _finish_login(request: Request, settings: Settings,
     # known identity is no more expensive than one with a password, and
     # throttling it would lock out a household behind one address.
     if await auth.find_identity(PROVIDER, identity.provider_user_id) is None:
-        if await _registration_rate_limited(ip, token):
+        if await auth.registration_rate_limited(ip, token):
             return _notice(request, "Too many attempts",
                            "Too many sign-up attempts from this address. Try again later.",
                            status=429)
@@ -272,7 +270,7 @@ async def _finish_login(request: Request, settings: Settings,
     except auth.RegistrationRefused:
         # An unknown Trakt account with no usable invite. NO account is created,
         # and every unusable-invite cause renders the same page.
-        await _record_registration_attempt(ip, token, False)
+        await auth.record_registration_attempt(ip, token, False)
         return _notice(request, "Invite required", INVALID_INVITE, status=403)
     except auth.IdentityInUse:  # pragma: no cover — needs a concurrent registration
         return _notice(request, "Already linked", ALREADY_LINKED, status=409)
@@ -282,7 +280,7 @@ async def _finish_login(request: Request, settings: Settings,
         return _notice(request, "Sign-in failed", INVALID_CREDENTIALS, status=403)
 
     if outcome.kind == "registered":
-        await _record_registration_attempt(ip, token, True)
+        await auth.record_registration_attempt(ip, token, True)
     else:
         await _clear_reconnect_notice(await _is_admin(outcome.user_id))
 
@@ -293,25 +291,6 @@ async def _finish_login(request: Request, settings: Settings,
     auth.set_session_cookie(response, session_id, settings, request)
     auth.clear_handshake_cookie(response, settings, request)
     return response
-
-
-async def _registration_rate_limited(ip: str, token: str | None) -> bool:
-    """The same two per-address volume limits registration with a password uses,
-    so a script cycling Trakt accounts or invite tokens through this path is
-    throttled exactly as one cycling them through the form is."""
-    if await auth.rate_limited("register_ip", ip, max_attempts=auth.REGISTER_MAX_ATTEMPTS,
-                               window_seconds=auth.REGISTER_WINDOW_SECONDS):
-        return True
-    return bool(token) and await auth.rate_limited(
-        "invite_ip", ip, max_attempts=auth.INVITE_MAX_ATTEMPTS,
-        window_seconds=auth.INVITE_WINDOW_SECONDS,
-    )
-
-
-async def _record_registration_attempt(ip: str, token: str | None, succeeded: bool) -> None:
-    await auth.record_attempt("register_ip", ip, succeeded)
-    if token:
-        await auth.record_attempt("invite_ip", ip, succeeded)
 
 
 async def _is_admin(user_id: int) -> bool:

@@ -1,20 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  {# Parsed before first paint, so the gap before the stylesheet applies
-     is the page's own dark rather than the browser's default white. #}
-  <meta name="color-scheme" content="dark">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ status }} {{ title }} &ndash; Trakt New Shows</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
-  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
-  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body class="auth-page">
+{% import '_head.html' as page with context %}
+{{ page.head(status ~ ' ' ~ title, nav_head=false) }}
+{%- set body_class %}auth-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-body-class="{{ body_class }}"></div>
 <div class="auth-shell">
   <a href="/"><img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows"></a>
   <div class="auth-card error-card">

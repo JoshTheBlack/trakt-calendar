@@ -1,0 +1,103 @@
+{# The <head> every page renders, and the reasons behind the parts of it that
+   look optional and are not.
+
+   ONE MACRO because a boosted navigation swaps <body> and leaves <head> in
+   place: whatever the first page of a session loaded is what every page reached
+   without a full reload has to make do with. A copy of this block per page could
+   drift apart without anything failing until somebody boosted between two pages
+   that disagreed, and then the symptom would be an unstyled page rather than a
+   diff.
+
+   Asset URLs come from app/assets.py (installed as `assets` in
+   app/templating.py) rather than being written out here, so adding a script or
+   renaming a file is one edit in the list that already had to know about it. So
+   does each page's SCRIPT LIST, which is why every caller passes
+   scripts=assets.scripts('<page>') rather than its own tuple of filenames: the
+   order those load in is load-bearing (assets.PAGE_SCRIPTS says why), and a page
+   spelling it out again is a second copy that can disagree.
+
+   IMPORT IT `with context`: og() reads the og_url / og_image a route supplies,
+   and a plain import would give the macros an empty context and silently drop
+   both tags rather than failing. #}
+
+{% macro head(title, scripts=(), nav_head=true, site_suffix=true) %}
+<head>
+  <meta charset="UTF-8">
+  {# Parsed before first paint, so the gap before the stylesheet applies
+     is the page's own dark rather than the browser's default white. #}
+  <meta name="color-scheme" content="dark">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  {# The site name is the macro's, not each page's: ten templates spelled out the
+     same suffix by hand. The five whose title already carries its own subject —
+     a month, a board, a share owner — pass site_suffix=false instead. #}
+  <title>{{ title }}{% if site_suffix %} &ndash; Trakt New Shows{% endif %}</title>
+  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  {# ORDER MATTERS: the stylesheet is the only resource that gates first paint,
+     so it is requested before the font preloads rather than after them. The
+     three woff2 files are ~86 KB and preload at high priority; ahead of the
+     stylesheet they compete with it for the connection pool on any load where
+     nothing is cached yet, which delays paint instead of just delaying fonts.
+     Preloading them still starts both fetches in the same early batch. #}
+  <link rel="stylesheet" href="{{ assets.url(assets.STYLESHEET) }}">
+  {% for font in assets.FONT_PRELOADS -%}
+  <link rel="preload" href="{{ assets.font_url(font) }}" as="font" type="font/woff2" crossorigin>
+  {% endfor -%}
+  {# Ahead of the scripts, and inline: it decides a header item's visibility, and
+     a deferred bundle runs after first paint, which is the shift being avoided. #}
+  {% if nav_head %}{% include '_nav_head.html' %}{% endif %}
+  {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
+     navigation swaps the whole <body> in place. A <script src> living inside
+     that swapped region would be re-fetched and re-executed on every nav —
+     re-declaring every top-level const and double-binding every listener.
+     In <head> they load exactly once and survive the swaps.
+
+     htmx is first and is on every page: it is what boosting is, and a page that
+     omitted it would be a one-way door out of the boosted session. #}
+  <script src="{{ assets.url(assets.HTMX) }}" defer></script>
+  {# What a boosted arrival needs and cannot get for itself: the swap replaces the
+     body's children, so the page landed on has neither its own <body> classes nor
+     its own scripts. boost.js reads this map to fetch the ones this session has
+     not already run — once each, since re-running one would re-declare its
+     top-level const. On every page, ahead of the page's own scripts, because it
+     is what loads them on every arrival after the first. #}
+  <script id="pageScripts" type="application/json">{{ assets.page_script_urls() | tojson }}</script>
+  <script src="{{ assets.url(assets.BOOST) }}" defer></script>
+  {# htmx does not swap a 4xx or 5xx response, so with every link boosted a click
+     that lands on an error page would do nothing at all and read as ignored.
+     This falls back to a real navigation, which renders that page in full with
+     its own <head> — the error pages are the ones that cannot count on the
+     stylesheet this page loaded. Boosted requests ONLY: a day fragment or a pool
+     page that fails must not take the whole page down with it.
+     In <head>, so a body swap never binds it a second time. #}
+  <script>
+    document.addEventListener('htmx:responseError', (e) => {
+      if (e.detail && e.detail.boosted) window.location = e.detail.pathInfo.requestPath;
+    });
+  </script>
+  {% for script in scripts -%}
+  <script src="{{ assets.url(script) }}" defer></script>
+  {% endfor -%}
+  {% if caller %}{{ caller() }}{% endif %}
+</head>
+{% endmacro %}
+
+
+{% macro og(title, description) %}
+  {# Open Graph / link-preview tags. og:url and og:image are absolute, set only
+     when the instance has a configured public base URL to build them from. #}
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="New Shows">
+  <meta property="og:title" content="{{ title }}">
+  <meta property="og:description" content="{{ description }}">
+  {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}
+  {% if og_image %}
+  <meta property="og:image" content="{{ og_image }}">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="{{ og_image }}">
+  {% else %}
+  <meta name="twitter:card" content="summary">
+  {% endif %}
+  <meta name="twitter:title" content="{{ title }}">
+  <meta name="twitter:description" content="{{ description }}">
+  <meta name="theme-color" content="#e8b545">
+{% endmacro %}

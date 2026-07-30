@@ -1,18 +1,16 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    {# Parsed before first paint, so the gap before the stylesheet applies
-       is the page's own dark rather than the browser's default white. #}
-    <meta name="color-scheme" content="dark">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Distrakt</title>
-    <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-    <link rel="stylesheet" href="/static/css/distrakt.css?v={{ asset_v }}">
-    {% include '_nav_head.html' %}
-</head>
-<body class="distrakt-page">
+{% import '_head.html' as page with context %}
+{{ page.head('Distrakt', scripts=assets.scripts('tracker'),
+             site_suffix=false) }}
+{%- set body_class %}distrakt-page{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all. #}
+<div id="pageMeta" hidden data-page="tracker" data-body-class="{{ body_class }}"></div>
 
 {# Aliased `site_nav`, not `nav`: this page's own context already binds `nav` to
    the previous/next month numbers. #}
@@ -107,7 +105,10 @@
             <div class="distrakt-copy-block">
                 <div class="distrakt-copy-head"><span>Download a backup</span></div>
                 <p class="distrakt-note">Keep a copy locally. Restoring it later takes seconds.</p>
-                <a class="btn-ghost small" href="/api/distrakt/export" download>⤓ Download</a>
+                {# Not boosted: htmx boosts every link under a boosted <body> and
+                   ignores `download`, so this would fetch the export and swap
+                   the JSON into the page instead of saving a file. #}
+                <a class="btn-ghost small" href="/api/distrakt/export" download hx-boost="false">⤓ Download</a>
             </div>
 
             <div class="distrakt-copy-block">
@@ -125,7 +126,7 @@
                     <input type="text" id="restoreAck" spellcheck="false" autocomplete="off"
                            placeholder="REPLACE MY DATA" oninput="onRestoreAckInput()">
                     <button type="button" class="btn-ghost small btn-danger" id="restoreBtn"
-                            onclick="restoreBackup()" disabled>Replace my data</button>
+                            onclick="restoreTrackerBackup()" disabled>Replace my data</button>
                 </div>
                 <p class="distrakt-note" id="restoreStatus"></p>
             </div>
@@ -258,7 +259,5 @@
     window.NETWORK_EMOJIS = {{ network_emojis | tojson }};
     window.DEFAULT_NETWORK_EMOJI = {{ default_network_emoji | tojson }};
 </script>
-<script src="/static/js/nav.js?v={{ asset_v }}"></script>
-<script src="/static/js/distrakt.js?v={{ asset_v }}"></script>
 </body>
 </html>

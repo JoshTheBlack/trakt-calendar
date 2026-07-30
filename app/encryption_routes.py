@@ -21,20 +21,18 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 
-from . import assets, auth, authz, db, encryption_flow, secrets_backfill, secrets_box
+from . import auth, authz, chrome, db, encryption_flow, secrets_backfill, secrets_box
 from .auth import AuthLevel
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # Where the request gate sends a browser while the key is wrong, and the one screen
 # it may reach. Kept here next to the routes that answer it.
@@ -43,22 +41,6 @@ RECOVERY_PATH = "/admin/encryption/recovery"
 # The exact phrase the destructive reset requires, echoed back by the admin — the
 # same deliberate-friction pattern as typing an account's name to delete it.
 RESET_CONFIRM_PHRASE = "reset encrypted secrets"
-
-
-def _error(message: str, status: int = 400, **extra) -> JSONResponse:
-    return JSONResponse({"ok": False, "error": message, **extra}, status_code=status)
-
-
-async def _json_body(request: Request) -> dict:
-    if "application/json" not in (request.headers.get("content-type") or "").lower():
-        raise HTTPException(status_code=415, detail="Send application/json.")
-    try:
-        data = await request.json()
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Malformed JSON body.")
-    if not isinstance(data, dict):
-        raise HTTPException(status_code=400, detail="Expected a JSON object.")
-    return data
 
 
 async def _secrets_present() -> bool:
@@ -112,7 +94,7 @@ async def encryption_enable(request: Request):
     environment — move straight to the confirm step with no restart. A generated key
     is revealed exactly once here and never stored; the admin copies it into their
     environment."""
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     result = await encryption_flow.begin_enable(generate=bool(data.get("generate")))
     return JSONResponse({"ok": True, "phase": await encryption_flow.get_phase(), **result})
 
@@ -134,7 +116,7 @@ async def encryption_encrypt():
     encrypted. Refused without a valid key so a missing one cannot be mistaken for
     'nothing to do'."""
     if not secrets_box.is_enabled():
-        return _error(
+        return authz.error(
             "No valid encryption key is set in the environment yet. Set "
             f"{secrets_box.ENV_VAR} and restart before encrypting.", 409,
         )
@@ -179,12 +161,14 @@ async def recovery_page(request: Request):
         return RedirectResponse("/login", status_code=303)
     context = {
         "request": request,
-        "is_admin": user.is_admin,
+        # Only is_admin is actually read by this page — it has no shared header
+        # to gate — but page_context is the one place the header flags live, so
+        # this reads from there rather than deciding is_admin by hand.
+        **chrome.page_context(user),
         "health": health,
         "key_missing": health == encryption_flow.KEY_MISSING,
         "env_var": secrets_box.ENV_VAR,
         "confirm_phrase": RESET_CONFIRM_PHRASE,
-        "asset_v": assets.ASSET_VERSION,
     }
     return templates.TemplateResponse(request, "encryption_recovery.html", context)
 
@@ -210,13 +194,13 @@ async def recovery_reset(request: Request):
     endpoint). Only meaningful while the key is actually wrong; refused otherwise so
     it can never blank a healthy instance's values by mistake."""
     if encryption_flow.health() != encryption_flow.KEY_MISMATCH:
-        return _error(
+        return authz.error(
             "There is nothing to reset — the current key matches the stored secrets.",
             409,
         )
-    data = await _json_body(request)
+    data = await authz.json_body(request)
     typed = str(data.get("confirm") or "").strip().lower()
     if typed != RESET_CONFIRM_PHRASE:
-        return _error(f'Type "{RESET_CONFIRM_PHRASE}" exactly to confirm the reset.')
+        return authz.error(f'Type "{RESET_CONFIRM_PHRASE}" exactly to confirm the reset.')
     result = await encryption_flow.destructive_reset()
     return JSONResponse({"ok": True, **result})

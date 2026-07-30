@@ -17,13 +17,13 @@ _SERVICE = {
 }
 
 
-def _base(kind: str, settings: Settings) -> tuple[str, str]:
+def credentials(kind: str, settings: Settings) -> tuple[str, str]:
     url_attr, key_attr = _SERVICE[kind]
     return getattr(settings, url_attr).strip().rstrip("/"), getattr(settings, key_attr).strip()
 
 
 def is_configured(kind: str, settings: Settings) -> bool:
-    url, key = _base(kind, settings)
+    url, key = credentials(kind, settings)
     return bool(url and key)
 
 
@@ -31,7 +31,7 @@ async def check_health(kind: str, settings: Settings) -> dict:
     """Ping the instance; returns {configured, reachable}."""
     if not is_configured(kind, settings):
         return {"configured": False, "reachable": False}
-    url, key = _base(kind, settings)
+    url, key = credentials(kind, settings)
     try:
         async with httpx.AsyncClient(timeout=8) as client:
             resp = await client.get(f"{url}/api/v3/system/status", headers={"X-Api-Key": key})
@@ -44,7 +44,7 @@ async def library_ids(kind: str, settings: Settings) -> list:
     """All ids already in the library — TVDB ids for Sonarr, TMDB ids for Radarr."""
     if not is_configured(kind, settings):
         return []
-    url, key = _base(kind, settings)
+    url, key = credentials(kind, settings)
     path = "series" if kind == "sonarr" else "movie"
     field = "tvdbId" if kind == "sonarr" else "tmdbId"
     try:
@@ -83,7 +83,7 @@ def _error_text(resp: httpx.Response) -> str:
 
 async def add_media(kind: str, settings: Settings, ids: dict, title: str) -> dict:
     """Look up the title in Sonarr/Radarr and add it to the library."""
-    url, key = _base(kind, settings)
+    url, key = credentials(kind, settings)
     headers = {"X-Api-Key": key, "Content-Type": "application/json"}
 
     if kind == "sonarr":

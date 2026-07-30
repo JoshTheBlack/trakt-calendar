@@ -32,10 +32,12 @@ from pathlib import Path
 import anyio.to_thread
 from PIL import Image
 
-from . import artwork, trakt
+from . import artwork
 from . import tmdb as tmdb_client
+from .providers.trakt import calendar as trakt_calendar, transport as trakt_transport
 from .config import DATA_DIR
 from .perftrace import span
+from .providers.base import Media
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +52,9 @@ JPEG_QUALITY = 88
 # way. No legitimate poster is anywhere near this large.
 MAX_SOURCE_DIMENSION = 6000
 
-MEDIA_VALUES = ("show", "movie")
+# Read from the app's own media vocabulary rather than restated, so a third kind
+# of title would not need this module to be remembered.
+MEDIA_VALUES = tuple(Media)
 
 _FAN_OUT = 8
 
@@ -137,17 +141,17 @@ async def _try_source(url: str) -> bytes | None:
 
 async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     """A live Trakt id-lookup by tmdb id, cached like any other Trakt call
-    through _cached_get. Tried only once TMDB and the registry have both come
+    through cached_get. Tried only once TMDB and the registry have both come
     up empty. Whatever URL this finds is recorded through app/artwork.py so the
     next poster this cold doesn't pay for the lookup twice."""
     media_type = "show" if media == "show" else "movie"
-    results = await trakt._cached_get(
-        trakt.shared_client(), settings, f"search/tmdb/{tmdb}",
+    results = await trakt_transport.cached_get(
+        trakt_transport.shared_client(), settings, f"search/tmdb/{tmdb}",
         {"type": media_type, "extended": "full,images"},
     )
     for entry in results if isinstance(results, list) else []:
         obj = entry.get(media_type) or {}
-        url = trakt._poster(obj)
+        url = trakt_calendar.poster(obj)
         if url:
             await artwork.record_poster_url(media, tmdb, "trakt", url)
             return url
