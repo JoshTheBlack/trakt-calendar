@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{% call page.head('Sign in', scripts=('static/js/plex-auth.js',), nav_head=false) %}
+{% call page.head('Sign in', scripts=assets.scripts('sign-in'), nav_head=false) %}
   {{ page.og('Trakt New Shows', "Track new episode premieres for the shows you're watching.") }}
 {% endcall %}
 <body class="auth-page" hx-boost="true">

@@ -4,7 +4,7 @@
 {# _nav_head is gated for the same reason the menu item is: without the grant
    this page must not mention the tracker at all, and the script names it.
    Nothing to reveal here anyway when the item itself was not rendered. #}
-{{ page.head('Account', scripts=('static/js/nav.js', 'static/js/plex-auth.js'),
+{{ page.head('Account', scripts=assets.scripts('account'),
              nav_head=distrakt_available) }}
 {# `has-nav` swaps the centred sign-in layout for a header above centred content.
    The signed-out pages (login, register, onboarding) keep the plain .auth-page

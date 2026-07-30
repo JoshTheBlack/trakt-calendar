@@ -50,8 +50,8 @@ def markup(name: str) -> str:
 
 class AssetRegistryTests(unittest.TestCase):
     def test_url_carries_the_cache_busting_token(self):
-        self.assertEqual(assets.url("static/js/app.js"),
-                         f"/static/js/app.js?v={assets.ASSET_VERSION}")
+        self.assertEqual(assets.url("static/js/ui.js"),
+                         f"/static/js/ui.js?v={assets.ASSET_VERSION}")
 
     def test_url_refuses_a_file_it_does_not_track(self):
         """The whole point of the list is that a `?v=` means the token really
@@ -105,10 +105,9 @@ class HeadMacroTests(unittest.TestCase):
     def test_htmx_ships_on_every_page_and_ships_first(self):
         """A page without htmx is a one-way door out of a boosted session: you
         can arrive there boosted, but every link on it is then a full reload."""
-        html = self.render(call="'Title', scripts=('static/js/app.js',)")
+        html = self.render(call="'Title', scripts=('static/js/ui.js',)")
         srcs = re.findall(r'<script src="([^"]+)"', html)
-        self.assertEqual(srcs, [assets.url("static/js/htmx.min.js"),
-                                assets.url("static/js/app.js")])
+        self.assertEqual(srcs, [assets.url(assets.HTMX), assets.url("static/js/ui.js")])
 
     def test_every_script_is_deferred(self):
         html = self.render(call="'Title', scripts=('static/js/nav.js',)")
@@ -229,6 +228,126 @@ class EveryPageAgreesTests(unittest.TestCase):
             for tag in re.findall(r"<a [^>]*\bdownload\b[^>]*>", source):
                 with self.subTest(page=name, tag=tag[:60]):
                     self.assertIn('hx-boost="false"', tag)
+
+
+VENDORED = ("htmx.min.js", "sortable.min.js")
+
+JS_DIR = assets.BASE_DIR / "static/js"
+
+# A page's <head> is built from assets.scripts('<page>'), so this is how a
+# template says which bundle it loads.
+PAGE_KEY = re.compile(r"assets\.scripts\('([^']+)'\)")
+
+
+def js_source(name: str) -> str:
+    return (assets.BASE_DIR / name).read_text(encoding="utf-8")
+
+
+# `onclick="if(event.target===this) closeSettings()"` is the app's click-outside
+# idiom, so an attribute's calls are not all function calls of ours.
+JS_KEYWORDS = {"if", "for", "while", "switch", "catch", "return", "typeof", "new",
+               "do", "else", "function", "await", "delete", "void"}
+
+HANDLER_ATTR = re.compile(r"""\bon[a-z]+=(["'])(.*?)\1""", re.S)
+# Not preceded by a dot: `this.form.requestSubmit()` is the DOM's, not ours.
+CALL = re.compile(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(")
+
+
+def handlers_in(source: str) -> set[str]:
+    """Every function an on*= attribute in `source` calls."""
+    called = set()
+    for _, value in HANDLER_ATTR.findall(source):
+        called.update(CALL.findall(value))
+    return called - JS_KEYWORDS
+
+
+def declares(source: str) -> set[str]:
+    """Every name a script declares at TOP LEVEL — the ones that land in the one
+    scope a page's scripts share. Indented declarations are inside something and
+    cannot collide."""
+    names = set(re.findall(r"^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)", source, re.M))
+    for group in re.findall(r"^(?:let|const|var)\s+([^=;\n]+)", source, re.M):
+        names.update(part.strip() for part in group.split(",") if part.strip().isidentifier())
+    return names
+
+
+class PageScriptTests(unittest.TestCase):
+    """The three ways splitting one page script into many can break silently.
+
+    They are ordinary scripts sharing one global scope (see assets.PAGE_SCRIPTS
+    for why they are not modules), so a page is only correct if its files agree
+    about names, its order lets each file see what it calls, and every function an
+    inline handler names is actually on the page.
+    """
+
+    def page_scripts(self, page: str) -> list[str]:
+        return [n for n in assets.scripts(page)
+                if not n.endswith(VENDORED)]
+
+    def test_every_script_on_disk_is_loaded_by_some_page(self):
+        """A file nothing loads is dead code that still looks alive. Splitting a
+        page script into a directory is exactly when one gets left behind."""
+        loaded = {n for scripts in assets.PAGE_SCRIPTS.values() for n in scripts}
+        for path in sorted(JS_DIR.rglob("*.js")):
+            name = path.relative_to(assets.BASE_DIR).as_posix()
+            if path.name in VENDORED:
+                continue
+            with self.subTest(script=name):
+                self.assertIn(name, loaded, f"{name} is served but no page loads it")
+
+    def test_each_page_loads_its_boot_file_last(self):
+        """boot.js runs an init the moment it executes, so everything it calls has
+        to have been declared by an earlier file."""
+        for page, scripts in assets.PAGE_SCRIPTS.items():
+            boots = [n for n in scripts if n.endswith("/boot.js")]
+            if not boots:
+                continue
+            with self.subTest(page=page):
+                self.assertEqual(boots, [scripts[-1]],
+                                 f"{page}: boot.js must be the last script")
+
+    def test_no_two_of_a_page_s_scripts_declare_the_same_name(self):
+        """Top-level `let`/`const` go into the global lexical scope, so a second
+        declaration of one is a SyntaxError that stops that whole file executing
+        — every function in it silently missing."""
+        for page in assets.PAGE_SCRIPTS:
+            owner: dict[str, str] = {}
+            for name in self.page_scripts(page):
+                for declared in declares(js_source(name)):
+                    with self.subTest(page=page, name=declared):
+                        # assertNotIn would print the whole page's name table.
+                        if declared in owner:
+                            self.fail(f"{page}: {declared} is declared at top level by "
+                                      f"both {owner[declared]} and {name}")
+                    owner[declared] = name
+
+    def test_every_function_an_inline_handler_calls_is_on_that_page(self):
+        """The markup calls these functions from onclick/onerror attributes, which
+        reach the global scope only. A page whose script list is missing the file
+        that declares one looks fine until somebody clicks — so the handlers are
+        checked against what the page actually loads. Handlers in markup the page
+        BUILDS in the browser count too: they are the same promise made from a
+        template literal instead of a template."""
+        for template in PAGES:
+            page = PAGE_KEY.search(read(template))
+            scripts = self.page_scripts(page.group(1)) if page else []
+            sources = [js_source(n) for n in scripts]
+            available = set()
+            for source in sources:
+                available |= declares(source)
+            # A page's own inline <script> is part of the page too. Scanned
+            # unanchored, since an inline script's declarations are indented — it
+            # over-counts nested names, which can only ever hide a problem here,
+            # never invent one.
+            for inline in re.findall(r"<script>(.*?)</script>", read(template), re.S):
+                available |= set(re.findall(r"\bfunction\s+([A-Za-z_$][\w$]*)", inline))
+            called = set()
+            for source in [markup(template), *sources]:
+                called |= handlers_in(source)
+            for name in sorted(called - available):
+                with self.subTest(page=template, handler=name):
+                    self.fail(f"{template} calls {name}() from an attribute, but no "
+                              f"script it loads declares it")
 
 
 class BundledStylesheetTests(unittest.TestCase):

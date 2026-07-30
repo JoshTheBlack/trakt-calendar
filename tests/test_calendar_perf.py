@@ -182,12 +182,12 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         on every nav, re-declaring every top-level const."""
         html = self._page()
         head = html[: html.index("</head>")]
-        for src in ("htmx.min.js", "nav.js", "app.js"):
+        for src in ("htmx.min.js", "nav.js", "calendar/boot.js"):
             with self.subTest(src=src):
                 self.assertIn(src, head)
         # ...and NOT left at the end of <body> where the old page carried them.
         body = html[html.index("</head>"):]
-        self.assertNotIn("/static/js/app.js", body)
+        self.assertNotIn("/static/js/calendar/", body)
 
     def test_page_context_lives_in_the_swapped_region(self):
         """month/year/endpoint/total moved off <body> (which an innerHTML swap

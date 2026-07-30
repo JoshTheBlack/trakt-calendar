@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{{ page.head('Admin', scripts=('static/js/nav.js',)) }}
+{{ page.head('Admin', scripts=assets.scripts('admin')) }}
 <body hx-boost="true">
 
 {% import '_nav.html' as site_nav %}

@@ -10,7 +10,11 @@
 
    Asset URLs come from app/assets.py (installed as `assets` in
    app/templating.py) rather than being written out here, so adding a script or
-   renaming a file is one edit in the list that already had to know about it.
+   renaming a file is one edit in the list that already had to know about it. So
+   does each page's SCRIPT LIST, which is why every caller passes
+   scripts=assets.scripts('<page>') rather than its own tuple of filenames: the
+   order those load in is load-bearing (assets.PAGE_SCRIPTS says why), and a page
+   spelling it out again is a second copy that can disagree.
 
    IMPORT IT `with context`: og() reads the og_url / og_image a route supplies,
    and a plain import would give the macros an empty context and silently drop
@@ -49,7 +53,7 @@
 
      htmx is first and is on every page: it is what boosting is, and a page that
      omitted it would be a one-way door out of the boosted session. #}
-  <script src="{{ assets.url('static/js/htmx.min.js') }}" defer></script>
+  <script src="{{ assets.url(assets.HTMX) }}" defer></script>
   {# htmx does not swap a 4xx or 5xx response, so with every link boosted a click
      that lands on an error page would do nothing at all and read as ignored.
      This falls back to a real navigation, which renders that page in full with

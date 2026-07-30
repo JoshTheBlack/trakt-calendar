@@ -2,7 +2,7 @@
 <html lang="en">
 {% import '_head.html' as page with context %}
 {% call page.head((owner_username or 'Shared calendar') ~ ' – ' ~ month_label,
-                  scripts=('static/js/share.js',), nav_head=false, site_suffix=false) %}
+                  scripts=assets.scripts('share'), nav_head=false, site_suffix=false) %}
   {{ page.og((owner_username or 'Shared calendar') ~ ' – ' ~ month_label ~ ' ' ~ year,
              "Shows I'm watching this month") }}
 {% endcall %}

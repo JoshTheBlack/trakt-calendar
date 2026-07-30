@@ -18,28 +18,104 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 
-# Every stylesheet and script served to a browser. A file missing from this list
-# can be edited without the browser ever noticing, so add new ones here.
-# url() refuses a path that is not in it, which is what keeps that true: a script
-# tag for an untracked file fails the first time the page renders, rather than
-# quietly serving a stale copy for as long as a browser's cache holds it.
-_CACHED_ASSETS = (
-    "static/css/style.css",
-    "static/js/app.js",
-    "static/js/distrakt.js",
-    "static/js/nav.js",
-    "static/js/plex-auth.js",
-    "static/js/share.js",
-    "static/js/ranker.js",
-    # Vendored third-party, so their mtime only moves when the pinned version does.
-    "static/js/htmx.min.js",
-    "static/js/sortable.min.js",
-)
-
 # The app's whole stylesheet. ONE file so every page can ship an identical
 # <head>, which is what a boosted navigation — it swaps <body> only — needs in
 # order to land styled. style.css's own header explains the bargain.
 STYLESHEET = "static/css/style.css"
+
+# On every page too, from the head macro rather than from any page's list below:
+# boosting IS htmx, so a page without it is a one-way door out of a boosted
+# session.
+HTMX = "static/js/htmx.min.js"
+
+# What each page loads, and IN WHAT ORDER, keyed by the page's own name. The
+# lists live here rather than in the templates for the reason the stylesheet does:
+# a template that spelled out its own script filenames would be a second copy of
+# this list, and adding a file would half-work until somebody edited both.
+#
+# THEY ARE ORDINARY SCRIPTS, NOT MODULES, and that is what makes the order matter.
+# The templates call these functions from onclick attributes, which reach names in
+# the global scope only — so a module would have to publish every one of them onto
+# window by hand. Instead a page's files share one global scope and run in the
+# order below (defer preserves it), which means:
+#   - a page's boot.js goes LAST. It is the one file that runs an init rather than
+#     only declaring things, and by then everything it calls has to exist.
+#   - a file's top-level `let`/`const` is visible to the whole page, so a name may
+#     be declared in exactly ONE of a page's files. Two of them declaring the same
+#     one is a SyntaxError that stops the second file dead.
+# tests/test_page_head.py holds both of those to account.
+PAGE_SCRIPTS = {
+    "calendar": (
+        "static/js/ui.js",
+        "static/js/nav.js",
+        "static/js/calendar/view.js",
+        "static/js/calendar/layout.js",
+        "static/js/calendar/arr-buttons.js",
+        "static/js/calendar/season-tiles.js",
+        "static/js/calendar/details-modal.js",
+        "static/js/calendar/cert-picker.js",
+        "static/js/calendar/filters.js",
+        "static/js/calendar/settings.js",
+        "static/js/calendar/settings-encryption.js",
+        "static/js/calendar/settings-trakt.js",
+        "static/js/calendar/share-links.js",
+        "static/js/calendar/easter-egg.js",
+        "static/js/calendar/boot.js",
+    ),
+    "tracker": (
+        "static/js/ui.js",
+        "static/js/nav.js",
+        "static/js/tracker/month.js",
+        "static/js/tracker/rows.js",
+        "static/js/tracker/actions.js",
+        "static/js/tracker/post.js",
+        "static/js/tracker/details.js",
+        "static/js/tracker/add.js",
+        "static/js/tracker/emoji.js",
+        "static/js/tracker/backup.js",
+        "static/js/tracker/backfill.js",
+        "static/js/tracker/boot.js",
+    ),
+    "rankings": (
+        # SortableJS first: ranker/dnd.js hands it containers, and `typeof
+        # Sortable === 'undefined'` is its check for the file having failed to
+        # load, not for it not having run yet.
+        "static/js/sortable.min.js",
+        "static/js/ui.js",
+        "static/js/nav.js",
+        "static/js/ranker/core.js",
+        "static/js/ranker/ask.js",
+        "static/js/ranker/dnd.js",
+        "static/js/ranker/save.js",
+        "static/js/ranker/rows.js",
+        "static/js/ranker/tiers.js",
+        "static/js/ranker/boards.js",
+        "static/js/ranker/search.js",
+        "static/js/ranker/sources.js",
+        "static/js/ranker/selection.js",
+        "static/js/ranker/export.js",
+        "static/js/ranker/export-preview.js",
+        "static/js/ranker/export-image.js",
+        "static/js/ranker/backup.js",
+        "static/js/ranker/boot.js",
+    ),
+    "admin": ("static/js/ui.js", "static/js/nav.js"),
+    "account": ("static/js/ui.js", "static/js/nav.js", "static/js/plex-auth.js"),
+    "pick": ("static/js/nav.js",),
+    "sign-in": ("static/js/plex-auth.js",),
+    "register": ("static/js/plex-auth.js",),
+    "share": ("static/js/ui.js", "static/js/share.js"),
+}
+
+# Every stylesheet and script served to a browser: the pages' own scripts, plus
+# the two files no page lists (the stylesheet, and htmx, which the head macro adds
+# to every page itself).
+# url() refuses a path that is not in here, which is what makes a `?v=` token a
+# promise rather than decoration: a script tag for an untracked file fails the
+# first time the page renders, instead of quietly serving a stale copy for as long
+# as a browser's cache holds it.
+_CACHED_ASSETS = (STYLESHEET, HTMX) + tuple(
+    dict.fromkeys(name for scripts in PAGE_SCRIPTS.values() for name in scripts))
 
 # Preloaded by every page: these are the faces the shared header and body text
 # are set in, so every page waits on them and none should discover them late.
@@ -67,7 +143,7 @@ ASSET_VERSION = _compute()
 
 
 def url(name: str) -> str:
-    """The browser-facing URL for a cache-busted asset, e.g. "static/js/app.js".
+    """The browser-facing URL for a cache-busted asset, e.g. "static/js/ui.js".
 
     Raises KeyError for anything not in _CACHED_ASSETS, so a page cannot serve a
     file the token does not cover. That combination — a `?v=` on a file whose
@@ -75,8 +151,22 @@ def url(name: str) -> str:
     busted and never busts.
     """
     if name not in _CACHED_ASSETS:
-        raise KeyError(f"{name} is not in assets._CACHED_ASSETS; add it there first")
+        raise KeyError(
+            f"{name} is not a tracked asset; add it to the page that loads it in "
+            "assets.PAGE_SCRIPTS")
     return f"/{name}?v={ASSET_VERSION}"
+
+
+def scripts(page: str) -> tuple[str, ...]:
+    """What `page` loads, in load order — see PAGE_SCRIPTS.
+
+    Raises KeyError for a page that has no entry, rather than rendering a page
+    with no scripts at all: every one of these pages is inert without them, and a
+    silently empty tuple would look like a JavaScript bug rather than a typo here.
+    """
+    if page not in PAGE_SCRIPTS:
+        raise KeyError(f"no scripts declared for page {page!r} in assets.PAGE_SCRIPTS")
+    return PAGE_SCRIPTS[page]
 
 
 def font_url(name: str) -> str:

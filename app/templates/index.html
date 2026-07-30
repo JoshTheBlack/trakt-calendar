@@ -2,7 +2,7 @@
 <html lang="en">
 {% import '_head.html' as page with context %}
 {{ page.head('New Shows – ' ~ month_label,
-             scripts=('static/js/nav.js', 'static/js/app.js'),
+             scripts=assets.scripts('calendar'),
              site_suffix=false) }}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't
    change across a month/endpoint nav, so they can safely ride the persistent
@@ -147,8 +147,8 @@
 {# Jump-to strip: one chip per day of the month, pinned under the header. A day
    this viewer will see nothing of — empty, or entirely not-watching while hiding
    is on — has no section to scroll to, so its chip is inert rather than a link
-   that goes nowhere. data-date is how app.js re-greys one when a toggle empties
-   its day without a reload. #}
+   that goes nowhere. data-date is how calendar/layout.js re-greys one when a
+   toggle empties its day without a reload. #}
 {# The band that brings the strip back once it has tucked away. A SIBLING of the
    strip rather than something inside it, because the tucked strip is transformed
    and a transformed element becomes the containing block for its fixed-position
@@ -306,9 +306,10 @@
 
                     {# At-rest encryption for the stored credentials and per-user
                        tokens. The whole flow is driven by app/encryption_routes and
-                       rendered by renderEncryption() in app.js from /api/admin/
-                       encryption — the key is never held by this app, only revealed
-                       once for the operator to place in their own environment. #}
+                       rendered by renderEncryption() in
+                       calendar/settings-encryption.js from /api/admin/encryption —
+                       the key is never held by this app, only revealed once for the
+                       operator to place in their own environment. #}
                     <div class="settings-section" id="s_enc_heading">🔒 Secret encryption at rest</div>
                     <div class="field" id="s_enc_panel">
                         <p class="hint" id="s_enc_status">Loading…</p>

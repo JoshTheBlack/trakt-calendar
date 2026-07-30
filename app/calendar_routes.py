@@ -88,7 +88,8 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
 
 # How many columns a packed day's grid may grow to, per card style: the poster
 # wall is compact, "poster beside" cards are wide. Mirrored by updateCols() in
-# app.js, which re-runs this per day after a toggle changes what is visible.
+# calendar/layout.js, which re-runs this per day after a toggle changes what is
+# visible.
 _COLUMN_CAPS = {"poster": 6, "horizontal": 2}
 _COLUMN_CAP_DEFAULT = 5
 
@@ -278,8 +279,9 @@ def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
     `count` is what the day holds; `shown` is what THIS viewer will see of it, and
     a day showing nothing has no section to scroll to, so its chip renders inert.
     With hide-not-watching on, a day whose every item is marked renders nothing at
-    all, so its chip must not offer to scroll somewhere blank. app.js keeps this in
-    step when the viewer toggles hiding or marks a show without reloading.
+    all, so its chip must not offer to scroll somewhere blank. calendar/layout.js
+    keeps this in step when the viewer toggles hiding or marks a show without
+    reloading.
     """
     counts = {group["date"]: len(group["items"]) for group in assembly.grouped}
     shown = {

@@ -8,8 +8,8 @@
    day's grid is in the packed layout, and whether the day disappears entirely
    because hiding is on and everything on it is marked. Both used to be worked out
    by the client after paint, which is what made a day header appear and then
-   vanish, taking the rest of the month up the page with it. app.js still maintains
-   them from here on, for toggles made without a reload. #}
+   vanish, taking the rest of the month up the page with it. calendar/layout.js
+   still maintains them from here on, for toggles made without a reload. #}
 <section class="day-block{% if group.collapsed %} is-empty-hidden{% endif %}" id="day-{{ group.date }}" data-date="{{ group.date }}" style="--cols: {{ group.cols | default(1) }}">
     <div class="day-header">
         <div class="day-title">📅 {{ group.label }}</div>

@@ -1,34 +1,17 @@
-/* The public share page's details modal.
- *
- * Same content as the calendar page — overview, trailer, cast, episodes — so the
- * render below is a copy of the calendar's details modal. The one difference is
- * where the data comes from: a token-scoped, rate-limited, CACHE-ONLY endpoint at
- * "<this page's path>/details", rather than the session-only /api/details. It
- * never calls Trakt — it serves back only what the owner's own views already
- * cached (see share_routes._details), so a public page still makes zero Trakt
- * calls. Progressive enhancement: with JavaScript off, the card's own Trakt link
- * still reaches the full details.
- */
-
-// Where the details endpoint lives for whichever share URL this page was reached
-// by (/s/<token>, /u/<name>, /c/<slug>): the current path plus "/details".
-function shareDetailsBase() {
-    return window.location.pathname.replace(/\/+$/, '') + '/details';
-}
-
-async function openShareDetails(card, event) {
+// ---- Details modal ----
+async function openDetails(card, event) {
     if (event) {
-        // Let the poster's own Trakt link (and any future control) act normally.
-        if (event.target.closest('a, button')) return;
+        const interactive = event.target.closest('.watch-toggle, .trakt-btn, a, button');
+        if (interactive) return;
     }
-    const d = card.dataset;
-    const title = d.title || 'Details';
-    const poster = d.poster || '/static/images/nopostertv.png';
-    const media = d.media;
-    const id = d.traktId;
-    const season = d.season;
+    const title = card.dataset.title || card.querySelector('.show-title')?.textContent || 'Details';
+    const poster = card.dataset.poster || '/static/images/nopostertv.png';
+    const media = card.dataset.media;
+    const id = card.dataset.traktId;
+    const season = card.dataset.season;
 
     document.getElementById('detailsTitle').textContent = title;
+    buildDetailsActions(card, media, title);
     document.getElementById('detailsBody').innerHTML = '<div class="details-loading">⏳ Loading details…</div>';
     document.getElementById('detailsModal').classList.add('open');
 
@@ -37,16 +20,47 @@ async function openShareDetails(card, event) {
         return;
     }
     try {
-        const q = `media=${encodeURIComponent(media)}&id=${encodeURIComponent(id)}`
-            + (season ? `&season=${encodeURIComponent(season)}` : '');
-        const res = await fetch(`${shareDetailsBase()}?${q}`);
-        const dd = await res.json();
-        if (!dd.ok) throw new Error(dd.error || 'failed');
-        renderShareDetails(dd, poster, media, season);
+        const q = `media=${encodeURIComponent(media)}&id=${encodeURIComponent(id)}` + (season ? `&season=${encodeURIComponent(season)}` : '');
+        const res = await fetch(`/api/details?${q}`);
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        renderDetails(d, poster, media, season);
     } catch (e) {
         console.error(e);
-        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">⚠️ Could not load details.</div>';
+        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">⚠️ Could not load details from Trakt.</div>';
     }
+}
+
+// Add-to-library buttons in the details modal's top bar (arr + Seerr, if configured).
+function buildDetailsActions(card, media, title) {
+    const actions = document.getElementById('detailsActions');
+    actions.innerHTML = '';
+    if (!window.IS_ADMIN) return;
+    const labels = {
+        sonarr: 'Add to Sonarr', radarr: 'Add to Radarr', seer: 'Request on Seerr'
+    };
+    const targets = [media === 'movie' ? 'radarr' : 'sonarr', 'seer'];
+    targets.forEach(kind => {
+        const st = arrStatus[kind] || {};
+        if (!st.configured) return;
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'arr-btn ' + kind;
+        btn.dataset.arr = kind;
+        btn.dataset.media = media;
+        btn.dataset.tvdb = card.dataset.tvdb || '';
+        btn.dataset.tmdb = card.dataset.tmdb || '';
+        btn.dataset.title = title;
+        btn.innerHTML = `<img src="/static/icons/${kind}.png" alt=""> ${labels[kind]}`;
+        btn.disabled = !st.reachable;
+        if (!st.reachable) { btn.classList.add('unreachable'); btn.title = kind.charAt(0).toUpperCase() + kind.slice(1) + ' is unreachable'; }
+        const id = libIdFor(kind, btn.dataset);
+        if (id && libraryIds[kind] && libraryIds[kind].has(String(id))) {
+            markInLibrary(btn, 'Already in ' + kind.charAt(0).toUpperCase() + kind.slice(1));
+        }
+        btn.addEventListener('click', (e) => addToArr(btn, e));
+        actions.appendChild(btn);
+    });
 }
 
 // Extract a YouTube video id from the various URL shapes Trakt returns.
@@ -55,12 +69,13 @@ function youTubeId(url) {
     return m ? m[1] : null;
 }
 
-function renderShareDetails(d, poster, media, season) {
+function renderDetails(d, poster, media, season) {
     const chips = [];
     if (d.status) chips.push(`<span class="chip">${esc(d.status)}</span>`);
     if (d.network) chips.push(`<span class="chip network">📡 ${esc(d.network)}</span>`);
     if (d.runtime) chips.push(`<span class="chip">⏱️ ${esc(d.runtime)}m</span>`);
     if (d.rating) chips.push(`<span class="chip country">⭐ ${esc(d.rating)}</span>`);
+    if (d.certification) chips.push(`<span class="chip cert" data-cert="${esc(d.certification)}">${esc(d.certification)}</span>`);
     (d.genres || []).forEach(g => chips.push(`<span class="chip">${esc(g)}</span>`));
 
     let html = `
@@ -72,6 +87,7 @@ function renderShareDetails(d, poster, media, season) {
             </div>
         </div>`;
 
+    // Trailer (Trakt exposes it via extended=full). Embed YouTube inline, else link out.
     if (d.trailer) {
         const yt = youTubeId(d.trailer);
         html += `<div class="details-section-title">▶️ Trailer</div>`;
@@ -108,10 +124,4 @@ function renderShareDetails(d, poster, media, season) {
     document.getElementById('detailsBody').innerHTML = html;
 }
 
-function closeShareDetails() {
-    document.getElementById('detailsModal').classList.remove('open');
-}
-
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeShareDetails();
-});
+function closeDetails() { document.getElementById('detailsModal').classList.remove('open'); }

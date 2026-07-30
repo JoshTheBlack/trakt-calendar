@@ -280,15 +280,20 @@ class NoBrowserDialogTests(FragmentTestCase):
     failure is silent on the machine of whoever adds one.
     """
 
-    SCRIPT = Path(__file__).resolve().parent.parent / "app" / "static" / "js" / "ranker.js"
+    SCRIPTS = sorted(
+        (Path(__file__).resolve().parent.parent / "app" / "static" / "js" / "ranker")
+        .glob("*.js"))
 
     def test_the_page_script_calls_no_browser_dialog(self):
-        source = re.sub(r"//.*", "", self.SCRIPT.read_text(encoding="utf-8"))
-        for name in ("prompt", "confirm", "alert"):
-            self.assertNotRegex(
-                source, r"(?<![.\w])(window\.)?" + name + r"\s*\(",
-                f"ranker.js calls {name}(); ask() is the in-page replacement",
-            )
+        self.assertTrue(self.SCRIPTS, "the page's scripts moved; this scans nothing")
+        for script in self.SCRIPTS:
+            source = re.sub(r"//.*", "", script.read_text(encoding="utf-8"))
+            for name in ("prompt", "confirm", "alert"):
+                with self.subTest(script=script.name, dialog=name):
+                    self.assertNotRegex(
+                        source, r"(?<![.\w])(window\.)?" + name + r"\s*\(",
+                        f"{script.name} calls {name}(); ask() is the in-page replacement",
+                    )
 
     def test_the_page_carries_the_dialog_that_replaces_them(self):
         self.board_with(pool=1)
@@ -452,7 +457,7 @@ class PageShellTests(FragmentTestCase):
         # The page's own stylesheet is now a section of the one bundled sheet,
         # so only its scripts are separate files to bust.
         from app import assets
-        for name in ("static/js/ranker.js", "static/js/sortable.min.js"):
+        for name in ("static/js/ranker/core.js", "static/js/sortable.min.js"):
             self.assertIn(name, assets._CACHED_ASSETS)
             self.assertTrue((assets.BASE_DIR / name).exists(), f"{name} should exist")
 

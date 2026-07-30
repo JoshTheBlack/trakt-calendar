@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{{ page.head('Distrakt', scripts=('static/js/nav.js', 'static/js/distrakt.js'),
+{{ page.head('Distrakt', scripts=assets.scripts('tracker'),
              site_suffix=false) }}
 <body class="distrakt-page" hx-boost="true">
 

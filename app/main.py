@@ -193,8 +193,8 @@ async def lifespan(_app: FastAPI):
         await _trakt_transport.aclose_shared_client()
 
 
-# Every load carries app.js/style.css/fonts plus (mostly) whatever cache-busting
-# token was minted at the last deploy; a short max-age still saves a full refetch
+# Every load carries the page's scripts/style.css/fonts plus (mostly) whatever
+# cache-busting token was minted at the last deploy; a short max-age still saves a full refetch
 # within a session without risking the "forgot to register the file" staleness a
 # long/immutable one would cause. ETags (StaticFiles' own default) still catch a change within
 # that window.

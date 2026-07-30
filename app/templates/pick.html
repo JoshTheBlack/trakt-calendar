@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{% call page.head('Pick a Month', scripts=('static/js/nav.js',), site_suffix=false) %}
+{% call page.head('Pick a Month', scripts=assets.scripts('pick'), site_suffix=false) %}
   <style>
     /* No 100vh now that a header sits above it: the panel centres in what is
        left rather than pushing the page taller than the viewport. */

@@ -1013,7 +1013,7 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         deferred means after first paint, which is the shift being prevented."""
         html = self.client.get(self.PAGE).text
         decide = html.index("classList.add('has-distrakt')")
-        self.assertLess(decide, html.index("/static/js/app.js"))
+        self.assertLess(decide, html.index("/static/js/calendar/view.js"))
         self.assertLess(decide, html.index("<body"))
 
     def test_the_optional_nav_link_is_not_shown_by_clearing_an_attribute(self):

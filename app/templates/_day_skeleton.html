@@ -13,9 +13,9 @@
    element, and it also fires when one BECOMES visible (turning "Hiding" off)
    without waiting for the viewer to scroll.
 
-   `data-visible` is what this viewer would see of the day: app.js needs it to
-   decide whether the placeholder collapses when hiding is toggled, which it
-   cannot work out by counting cards that are not here yet. #}
+   `data-visible` is what this viewer would see of the day: calendar/layout.js
+   needs it to decide whether the placeholder collapses when hiding is toggled,
+   which it cannot work out by counting cards that are not here yet. #}
 <section class="day-block is-skeleton{% if group.collapsed %} is-empty-hidden{% endif %}"
          id="day-{{ group.date }}" data-date="{{ group.date }}"
          data-visible="{{ group.visible }}"
