@@ -316,33 +316,48 @@ Hypercorn directly and never reads `.env`.
 
 ```
 app/
-  main.py           FastAPI app + calendar/tracker routes
+  main.py           App construction, lifespan/heartbeat, error pages
   config.py         Settings model + persistence (secrets/globals in data/app.db, two
                      recovery fields in data/settings.json)
   db.py             SQLite connection policy + schema migrations (data/app.db)
+  authz.py          Route authorization: declare-or-denied, CSRF/origin rules,
+                     the shared JSON body guard
+  chrome.py         The page context every route merges in (nav flags, version)
+  assets.py         The cache-busted asset registry each page's <head> renders from
+  templating.py     The one Jinja environment
   secrets_box.py    At-rest encryption primitive (seal/open, key from ENCRYPTION_KEY)
   secrets_backfill.py  Seal-in-place conversion shared by the enable flow and Settings
   encryption_flow.py   Enable/verify/encrypt lifecycle, key-health canary, lost-key recovery
   encryption_routes.py Admin encryption endpoints + the recovery screen
-  auth.py           Passwords, sessions, identities, invites, access levels
-  authz.py          Route authorization: declare-or-denied, CSRF/origin rules
+  auth/             Passwords, sessions, identities, invites, lockout, cookie policy,
+                     admin operations, access levels
   auth_routes.py    Onboarding, register, sign in/out, account page
   admin_routes.py   Admin screen: accounts, invites, retired identifiers
   trakt_routes.py   "Log in with Trakt" (OAuth redirect flow)
   plex_routes.py    "Log in with Plex" (PIN flow)
+  calendar_routes.py   The calendar, the month picker, and the tile/detail endpoints
+  distrakt_routes.py   The tracker page and its API
+  settings_routes.py   Settings and the Trakt device-authorization flow
+  integrations_routes.py  Sonarr / Radarr / Seerr
+  route_params.py   The query coercions the route modules share
   share_routes.py   Public read-only calendars (/s/, /u/, /c/)
   share_links.py    Share-link settings + URL building
   share_code.py     The compact ?p= code a share link is handed out as
-  distrakt_backfill.py  Filling in never-tracked months from watch history
   calendar_cache.py Global UTC window cache + the read path over it
   calendar_state.py Per-user not-watching marks (show-level, all views) + change detection
-  trakt.py          Async Trakt client + response normalizer
+  providers/        The calendar-source seam: the Item record, capabilities, the
+                     registry — and trakt/ (transport, calendar, detail, sync)
+  distrakt/         The watch tracker: store, live counts, month rollover, backup
+  distrakt_backfill.py  Filling in never-tracked months from watch history
+  ranker*.py        The ranking boards, their sources, and the export/grid renderer
   endpoints.py      Calendar endpoint registry
   timezones.py      Curated IANA timezone list
   cache.py          TTL blob cache for detail lookups (shares api_cache)
   templates/        Jinja2 templates
-  static/           CSS, JS, images
+  static/           CSS (one bundled stylesheet), JS (one directory per page), images
 run.py              Dev runner (Hypercorn)
+tests/              Mirrors app/ — kernel, providers, calendar, tracker, ranker,
+                     auth, encryption, media
 ```
 
 ## License
