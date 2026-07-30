@@ -21,20 +21,18 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, chrome, db, encryption_flow, secrets_backfill, secrets_box
 from .auth import AuthLevel
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # Where the request gate sends a browser while the key is wrong, and the one screen
 # it may reach. Kept here next to the routes that answer it.
@@ -179,9 +177,9 @@ async def recovery_page(request: Request):
         return RedirectResponse("/login", status_code=303)
     context = {
         "request": request,
-        # Only is_admin and asset_v are actually read by this page — it has no
-        # shared header to gate — but page_context is the one place that fact
-        # lives, so this reads from there rather than restating asset_v by hand.
+        # Only is_admin is actually read by this page — it has no shared header
+        # to gate — but page_context is the one place the header flags live, so
+        # this reads from there rather than deciding is_admin by hand.
         **chrome.page_context(user),
         "health": health,
         "key_missing": health == encryption_flow.KEY_MISSING,

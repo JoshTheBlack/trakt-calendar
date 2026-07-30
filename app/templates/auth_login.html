@@ -1,39 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  {# Parsed before first paint, so the gap before the stylesheet applies
-     is the page's own dark rather than the browser's default white. #}
-  <meta name="color-scheme" content="dark">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in &ndash; Trakt New Shows</title>
-
-  {# Open Graph / link-preview tags. og:url and og:image are absolute, set only
-     when the instance has a configured public base URL to build them from. #}
-  <meta property="og:type" content="website">
-  <meta property="og:site_name" content="New Shows">
-  <meta property="og:title" content="Trakt New Shows">
-  <meta property="og:description" content="Track new episode premieres for the shows you're watching.">
-  {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}
-  {% if og_image %}
-  <meta property="og:image" content="{{ og_image }}">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:image" content="{{ og_image }}">
-  {% else %}
-  <meta name="twitter:card" content="summary">
-  {% endif %}
-  <meta name="twitter:title" content="Trakt New Shows">
-  <meta name="twitter:description" content="Track new episode premieres for the shows you're watching.">
-  <meta name="theme-color" content="#e8b545">
-
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
-  <link rel="stylesheet" href="/static/css/style.css">
-  <link rel="stylesheet" href="/static/css/auth.css">
-  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body class="auth-page">
+{% import '_head.html' as page with context %}
+{% call page.head('Sign in', scripts=('static/js/plex-auth.js',), nav_head=false) %}
+  {{ page.og('Trakt New Shows', "Track new episode premieres for the shows you're watching.") }}
+{% endcall %}
+<body class="auth-page" hx-boost="true">
 <div class="auth-shell">
   <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
   <div class="auth-card">
@@ -70,8 +41,11 @@
   </div>
 </div>
 
-<script src="/static/js/plex-auth.js"></script>
 <script>
+// Wrapped so a boosted navigation back to this page, which re-executes this
+// script in the same document, does not redeclare `err` at top level and fail
+// to parse — which would leave the sign-in button bound to nothing.
+(function () {
 // The server decides whether the session cookie carries `Secure`; only the
 // browser knows which protocol it is really on. When those disagree the browser
 // discards the cookie on arrival, so sign-in returns success and the very next
@@ -127,7 +101,15 @@ async function submit() {
   btn.disabled = false;
 }
 document.getElementById('submit').addEventListener('click', submit);
-document.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+// On `document`, which a boosted navigation does not replace — only <body> is
+// swapped — so arriving here a second time would stack a second Enter handler
+// and submit twice. The previous one is removed by name first. The name is
+// shared with the other auth pages on purpose: moving between two of them has
+// to clear the one the page being left installed.
+document.removeEventListener('keydown', window.__authEnterHandler);
+window.__authEnterHandler = (e) => { if (e.key === 'Enter') submit(); };
+document.addEventListener('keydown', window.__authEnterHandler);
+})();
 </script>
 </body>
 </html>

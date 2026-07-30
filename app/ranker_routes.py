@@ -19,7 +19,6 @@ from __future__ import annotations
 import functools
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -27,17 +26,16 @@ import anyio
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
-from fastapi.templating import Jinja2Templates
 
 from . import (auth, authz, chrome, grid_builder, posters, ranker, ranker_export,
                ranker_import, ranker_sources, user_images)
 from .auth import AuthLevel
 from .config import load_settings
 from .ranker_sources import Media
+from .templating import templates
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # `private`: this response requires a session, so a shared cache in front of
 # the app has no business holding a copy.
@@ -302,7 +300,7 @@ async def rankings_page(request: Request):
     tiered = sum(len(c["items"]) for c in board["categories"]) if board else 0
     context = {
         "request": request,
-        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
         # The name the export dialog prefills with: the chosen display name if

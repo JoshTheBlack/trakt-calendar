@@ -12,18 +12,16 @@ interchangeable — see admin_wipe_user and admin_delete_user.
 from __future__ import annotations
 
 import secrets
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, chrome
 from .auth import AuthLevel
+from .templating import templates
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 
 def _error(message: str, status: int = 400, **extra) -> JSONResponse:
@@ -60,7 +58,7 @@ async def admin_page(request: Request):
     retired = await auth.list_retired_identifiers()
     return templates.TemplateResponse(request, "admin.html", {
         "request": request,
-        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # is_admin, calendar_available, ranker_available, version, build
         # for the shared header. Reaching this route at all means is_admin, but
         # the header asks for the flag by name rather than assuming it.
         **chrome.page_context(me),

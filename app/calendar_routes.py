@@ -22,13 +22,11 @@ import re
 from collections import Counter
 from datetime import date, datetime
 from math import ceil
-from pathlib import Path
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, calendar_cache, calendar_state, chrome
 from . import integrations_routes, logos, route_params, share_links
@@ -39,10 +37,10 @@ from .perftrace import span
 from .providers.trakt import TraktError
 from .providers.trakt.detail import fetch_details, fetch_tile_info
 from .timezones import build_options as build_timezone_options
+from .templating import templates
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # How many of a month's day blocks the calendar page renders inline. The rest are
 # fetched in one request once the page has painted, so a busy month's first
@@ -403,7 +401,7 @@ async def calendar_page(request: Request):
         # administrator's affordance. The buttons and health state are left out
         # of the page entirely for everyone else rather than rendered into a
         # guaranteed 403.
-        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
         # The same two conditions the tracker's own access level enforces, asked

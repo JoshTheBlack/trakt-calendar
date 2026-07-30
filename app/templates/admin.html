@@ -1,21 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  {# Parsed before first paint, so the gap before the stylesheet applies
-     is the page's own dark rather than the browser's default white. #}
-  <meta name="color-scheme" content="dark">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Admin &ndash; Trakt New Shows</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
-  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
-  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-  {% include '_nav_head.html' %}
-</head>
-<body>
+{% import '_head.html' as page with context %}
+{{ page.head('Admin', scripts=('static/js/nav.js',)) }}
+<body hx-boost="true">
 
 {% import '_nav.html' as site_nav %}
 {% call site_nav.navbar(title='Admin',
@@ -79,7 +66,10 @@
 
   <section class="admin-section">
     <div class="admin-section-head"><h2>Invites</h2></div>
-    <form class="admin-inline-form" id="inviteForm">
+    {# Not boosted: it is submitted by the handler below, which posts JSON and
+       reloads. htmx boosts every form under a boosted <body>, and this one has
+       nowhere to navigate to. #}
+    <form class="admin-inline-form" id="inviteForm" hx-boost="false">
       <div class="field"><label>Label</label><input type="text" name="label" placeholder="optional"></div>
       <div class="field"><label>Max uses</label><input type="number" name="max_uses" min="1" placeholder="unlimited"></div>
       <div class="field"><label>Expires (hours)</label><input type="number" name="expires_in_hours" min="1" placeholder="never"></div>
@@ -147,8 +137,13 @@
   </section>
 </div>
 
-<script src="/static/js/nav.js?v={{ asset_v }}"></script>
 <script>
+// Wrapped, because a boosted navigation back to this page re-executes this
+// script in the same document: at top level `const TS_FMT` would then be a
+// redeclaration and the whole script would fail to parse, leaving the page's
+// buttons dead. Inside a function each arrival gets its own bindings, which is
+// what the fresh DOM needs anyway.
+(function () {
 // Compact, because three of these columns sit side by side and a full locale
 // string ("7/22/2026, 11:39:30 AM") is most of the table's width. Seconds are
 // noise at this granularity; the exact value stays in the tooltip.
@@ -358,6 +353,7 @@ document.querySelectorAll('[data-action="delete"]').forEach(btn => {
     setMsg('usersMsg', data.error || 'Could not delete that account.', false);
   });
 });
+})();
 </script>
 </body>
 </html>

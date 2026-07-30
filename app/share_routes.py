@@ -18,13 +18,11 @@ import calendar as _calendar
 import json
 from datetime import date, datetime
 from itertools import groupby
-from pathlib import Path
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 
 from . import auth, calendar_cache, calendar_state, share_code, share_links
 from .providers.trakt import detail as trakt_detail
@@ -33,10 +31,10 @@ from .authz import Guard
 from .config import load_settings
 from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
+from .templating import templates
 
 router = APIRouter()
 guard = Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # One definition, in the module that also builds the links carrying these
 # values, so a link can never offer a view this page would reject.

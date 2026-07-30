@@ -11,8 +11,10 @@ The header offers Calendar, Rankings and Admin on every page, so every page has
 to know which of them this account may actually reach. Before this existed each
 route decided that for itself and most of them didn't decide at all, which is
 why the links were only present on the two pages that happened to pass the
-flags. version/build/asset_v were the same problem one level up: eight call
-sites each restating the same three lines.
+flags. version and build were the same problem one level up: eight call sites
+each restating the same lines. The static-asset token used to live here too; it
+now reaches templates through app/assets.py directly, because the head macro is
+the only thing that ever wanted it and a route context was one hop too many.
 
 Distrakt is deliberately absent: its menu item is rendered for everyone and
 revealed client-side, so that the HTML gives nothing away. See _nav.html.
@@ -21,7 +23,7 @@ from __future__ import annotations
 
 import os
 
-from . import assets, changelog
+from . import changelog
 
 # Injected at Docker build time (GitHub Actions); "dev" for local runs.
 _BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
@@ -42,5 +44,4 @@ def page_context(user) -> dict:
         "ranker_available": bool(user and user.ranker_approved),
         "version": changelog.current_version(),
         "build": BUILD_LABEL,
-        "asset_v": assets.ASSET_VERSION,
     }

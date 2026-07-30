@@ -21,7 +21,6 @@ import anyio.to_thread
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -51,6 +50,7 @@ from . import share_routes
 from . import trakt_routes
 from .auth import AuthLevel
 from .config import load_settings
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
@@ -193,17 +193,17 @@ async def lifespan(_app: FastAPI):
         await _trakt_transport.aclose_shared_client()
 
 
-# Every load carries app.js/style.css/fonts plus (mostly) whatever asset_v was
-# minted at the last deploy; a short max-age still saves a full refetch within a
-# session without risking the "forgot to bump asset_v" staleness a long/immutable
-# one would cause. ETags (StaticFiles' own default) still catch a change within
+# Every load carries app.js/style.css/fonts plus (mostly) whatever cache-busting
+# token was minted at the last deploy; a short max-age still saves a full refetch
+# within a session without risking the "forgot to register the file" staleness a
+# long/immutable one would cause. ETags (StaticFiles' own default) still catch a change within
 # that window.
 _STATIC_CACHE_HEADERS = {"Cache-Control": "max-age=600"}
 
 # Fonts are the one exception, and it is safe for a reason that does not hold for
 # anything else under /static: a vendored woff2 cannot change without its FILENAME
 # changing, because the name carries the version (inter-v20-latin-400). So there is
-# no "forgot to bump asset_v" staleness to protect against — a new font is a new
+# no "forgot to bust it" staleness to protect against — a new font is a new
 # URL. At 600s a viewer who opens the calendar twice a day re-downloads ~86 KB both
 # times and watches the text re-flow from the fallback face on each; a year makes
 # that a true-cold-load-only event.
@@ -231,7 +231,6 @@ app = FastAPI(title="Trakt New Shows", lifespan=lifespan,
 # 403s) are tiny, so shipping those uncompressed costs nothing.
 app.add_middleware(GZipMiddleware)
 app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="static")
-templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
@@ -291,8 +290,9 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
     title, message, template = page
     return templates.TemplateResponse(
         request, template,
-        # No user to gate a header with — these pages have none — but asset_v
-        # comes from the one function that knows it, same as every other page.
+        # No user to gate a header with — these pages have none — but the version
+        # and build labels come from the one function that knows them, same as
+        # every other page.
         {"status": exc.status_code, "title": title, "message": message,
          **chrome.page_context(None)},
         status_code=exc.status_code,

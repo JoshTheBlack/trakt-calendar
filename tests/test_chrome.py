@@ -1,12 +1,11 @@
 """app/chrome.py: the shared page context every route merges into its template
-context — header nav flags plus version, build label, and the asset
-cache-busting token, absorbed from app/nav.py and the eight hand-restated
-asset_v lines it replaced.
+context — the header nav flags plus the version and build label, absorbed from
+app/nav.py and the eight hand-restated copies it replaced.
 
 Two kinds of test. The unit tests below exercise page_context() as a pure
 function of a user (or None). The one pytest-style test at the bottom is a
-route-level smoke test, using the shared fixtures in conftest.py, proving
-asset_v actually reaches a real rendered page rather than only a mock.
+route-level smoke test, using the shared fixtures in conftest.py, proving the
+context actually reaches a real rendered page rather than only a mock.
 
 Run: ./.venv/Scripts/python.exe -m unittest tests.test_chrome -v
 """
@@ -40,7 +39,6 @@ class PageContextTests(unittest.TestCase):
         self.assertFalse(ctx["ranker_available"])
         self.assertIn("version", ctx)
         self.assertIn("build", ctx)
-        self.assertIn("asset_v", ctx)
 
     def test_each_flag_reads_its_own_attribute(self):
         ctx = chrome.page_context(_User(is_admin=True, calendar_approved=True))
@@ -52,8 +50,11 @@ class PageContextTests(unittest.TestCase):
         with patch.object(changelog, "current_version", return_value="9.9.9"):
             self.assertEqual(chrome.page_context(None)["version"], "9.9.9")
 
-    def test_asset_v_comes_from_assets(self):
-        self.assertEqual(chrome.page_context(None)["asset_v"], assets.ASSET_VERSION)
+    def test_it_no_longer_carries_the_asset_token(self):
+        """Templates get it from app/assets.py through the head macro, which is
+        the only thing that ever read it. A key nothing reads would tell the next
+        reader that a route decides its page's asset URLs, and none does."""
+        self.assertNotIn("asset_v", chrome.page_context(None))
 
 
 if __name__ == "__main__":
@@ -74,4 +75,7 @@ def test_pick_page_renders_the_shared_chrome_context(client, settings):
     resp = client.get("/pick")
 
     assert resp.status_code == 200
+    # The asset token reaches the page through the head macro rather than
+    # through this route's context, which is the arrangement worth pinning: the
+    # route supplies only the header flags.
     assert f"?v={assets.ASSET_VERSION}" in resp.text

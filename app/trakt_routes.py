@@ -26,23 +26,21 @@ from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, db, secrets_box, trakt_auth
 from .auth import AuthLevel
 from .auth_routes import INVALID_CREDENTIALS, INVALID_INVITE, TRAKT_RECONNECT_NOTICE
 from .config import Settings, load_settings
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 PROVIDER = "trakt"
 

@@ -1,39 +1,15 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    {# Parsed before first paint, so the gap before the stylesheet applies
-       is the page's own dark rather than the browser's default white. #}
-    <meta name="color-scheme" content="dark">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>New Shows &ndash; {{ month_label }}</title>
-    <link rel="shortcut icon" href="/static/images/favicon.ico">
-    {# ORDER MATTERS: the stylesheet is the only resource that gates first paint,
-       so it is requested before the font preloads rather than after them. The
-       three woff2 files are ~86 KB and preload at high priority; ahead of the
-       stylesheet they compete with it for the connection pool on any load where
-       nothing is cached yet, which delays paint instead of just delaying fonts.
-       Preloading them still starts both fetches in the same early batch. #}
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-    <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-    {# Loaded in <head> with defer, NOT at the end of <body>, because a boosted
-       navigation swaps the whole <body> in place. A <script src> living inside
-       that swapped region would be re-fetched and re-executed on every nav —
-       re-declaring every top-level const and double-binding every listener.
-       In <head> they load exactly once and survive the swaps. #}
-    {% include '_nav_head.html' %}
-    <script src="/static/js/htmx.min.js?v={{ asset_v }}" defer></script>
-    <script src="/static/js/nav.js?v={{ asset_v }}" defer></script>
-    <script src="/static/js/app.js?v={{ asset_v }}" defer></script>
-</head>
+{% import '_head.html' as page with context %}
+{{ page.head('New Shows – ' ~ month_label,
+             scripts=('static/js/nav.js', 'static/js/app.js'),
+             site_suffix=false) }}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't
    change across a month/endpoint nav, so they can safely ride the persistent
    <body> element that an innerHTML swap leaves in place. The per-PAGE context
    (month/year/endpoint/total) DOES change per nav, so it lives on #pageData
    below — inside the swapped region — where the new page's values replace it. #}
-<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}">
+<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}" hx-boost="true">
 <div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
 {# What the page knows about itself that the client still needs after paint: the
    month's per-show card counts (so a toggle can move the stat tiles without
@@ -59,26 +35,27 @@
 
 {% macro hero_lead() %}
         <div class="month-nav">
-            <a class="month-nav-btn prev" hx-boost="true" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
+            <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
             </a>
             <a class="month-title-link" href="/pick?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
                 <h1>{{ month_label }} {{ year }}</h1>
             </a>
-            <a class="month-nav-btn next" hx-boost="true" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
+            <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
                 <img src="/static/images/arrow-right.png" alt="Next month">
             </a>
         </div>
 {% endmacro %}
 
 {% macro hero_controls() %}
-        {# A boosted GET form so switching the calendar is an AJAX body-swap (CSS
-           and JS stay resident, no re-flash) with htmx managing history the same
-           way the month arrows do. Hidden month/year hold the current position;
-           the select carries the endpoint. With no htmx it degrades to a plain
-           GET form submit, and the query it builds (?endpoint=&month=&year=) is
-           exactly what the calendar route already reads. #}
-        <form class="control" action="/calendar" method="get" hx-boost="true" title="{{ endpoint.description }}">
+        {# Boosted along with everything else on the page, so switching the
+           calendar is an AJAX body-swap (CSS and JS stay resident, no re-flash)
+           with htmx managing history. Hidden month/year hold the current
+           position; the select carries the endpoint. With no htmx it degrades to
+           a plain GET form submit, and the query it builds
+           (?endpoint=&month=&year=) is exactly what the calendar route already
+           reads. #}
+        <form class="control" action="/calendar" method="get" title="{{ endpoint.description }}">
             <input type="hidden" name="month" value="{{ month }}">
             <input type="hidden" name="year" value="{{ year }}">
             <label for="endpointSelect">📡</label>
@@ -223,7 +200,10 @@
             <h2>⚙️ Settings</h2>
             <button type="button" class="modal-close" onclick="closeSettings()">&times;</button>
         </div>
-        <form id="settingsForm" onsubmit="return saveSettings(event)">
+        {# Not boosted: these two forms are submitted by JS and write over the
+           API. htmx boosts every form under a boosted <body>, and neither of
+           them has anywhere to navigate. #}
+        <form id="settingsForm" onsubmit="return saveSettings(event)" hx-boost="false">
             {# One long scroll became four groups. The tabs are presentation only:
                every field stays inside this one <form> and one Save writes the
                lot, because these settings are interdependent (a base URL without
@@ -560,7 +540,7 @@
             <h2>🔎 Filters</h2>
             <button type="button" class="modal-close" onclick="closeFilters()">&times;</button>
         </div>
-        <form id="filtersForm" onsubmit="return saveFilters(event)">
+        <form id="filtersForm" onsubmit="return saveFilters(event)" hx-boost="false">
             <div class="modal-body">
                 <p class="hint">These apply to your calendar only — everyone else keeps their own.</p>
                 <div class="field">

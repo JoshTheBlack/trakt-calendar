@@ -449,9 +449,10 @@ class PageShellTests(FragmentTestCase):
         self.assertIn("No board open", response.text)
 
     def test_the_new_assets_are_registered_for_cache_busting(self):
+        # The page's own stylesheet is now a section of the one bundled sheet,
+        # so only its scripts are separate files to bust.
         from app import assets
-        for name in ("static/css/ranker.css", "static/js/ranker.js",
-                     "static/js/sortable.min.js"):
+        for name in ("static/js/ranker.js", "static/js/sortable.min.js"):
             self.assertIn(name, assets._CACHED_ASSETS)
             self.assertTrue((assets.BASE_DIR / name).exists(), f"{name} should exist")
 

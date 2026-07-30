@@ -1,20 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  {# Parsed before first paint, so the gap before the stylesheet applies
-     is the page's own dark rather than the browser's default white. #}
-  <meta name="color-scheme" content="dark">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Encryption recovery &ndash; Trakt New Shows</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
-  <link rel="stylesheet" href="/static/css/style.css?v={{ asset_v }}">
-  <link rel="stylesheet" href="/static/css/auth.css?v={{ asset_v }}">
-  <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body class="auth-page">
+{% import '_head.html' as page with context %}
+{{ page.head('Encryption recovery', nav_head=false) }}
+<body class="auth-page" hx-boost="true">
 <div class="auth-shell">
   <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
   <div class="auth-card">
@@ -101,13 +89,21 @@
     {% endif %}
 
     <p class="auth-sub recovery-signout">
-      <a href="/logout" id="signout">Sign out</a>
+      {# Not boosted: the handler below turns this into a JSON POST, and htmx
+         boosts every link under a boosted <body> without noticing that a
+         click handler already claimed it. #}
+      <a href="/logout" id="signout" hx-boost="false">Sign out</a>
     </p>
   </div>
 </div>
 
 {% if is_admin %}
 <script>
+// Wrapped, because a boosted navigation back to this page re-executes this
+// script in the same document: at top level its `const`s would be
+// redeclarations and the whole script would fail to parse, leaving the reset
+// and key-generation buttons bound to nothing.
+(function () {
 const CONFIRM_PHRASE = {{ confirm_phrase | tojson }};
 
 // Present only in the KEY_MISMATCH door — a lost-and-replaced key is already an
@@ -200,6 +196,7 @@ document.getElementById('signout').addEventListener('click', async (e) => {
   } catch (_) { /* fall through to the redirect regardless */ }
   window.location = '/login';
 });
+})();
 </script>
 {% else %}
 <script>

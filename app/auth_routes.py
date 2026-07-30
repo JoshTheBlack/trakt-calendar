@@ -29,17 +29,16 @@ ordinary failure — see the login and register handlers for why.
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from urllib.parse import quote
 
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, calendar_state, chrome, db, trakt_auth, user_images
 from .auth import AuthLevel
 from .config import load_settings, save_settings
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,6 @@ router = APIRouter()
 # of the app uses, so the startup audit and the deny-by-default middleware see
 # them exactly as they see the routes defined on the app itself.
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # One message for every sign-in failure — unknown username, wrong password,
 # locked out, and disabled account alike — so none of them can be used to tell
@@ -576,7 +574,7 @@ async def me_page(request: Request):
     account = await auth.get_user(user.user_id)
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
-        # is_admin, calendar_available, ranker_available, version, build, asset_v
+        # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
         # This page gates the tracker's menu item server-side rather than leaving

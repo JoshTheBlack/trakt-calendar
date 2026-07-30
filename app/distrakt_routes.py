@@ -21,11 +21,9 @@ import dataclasses
 import json
 import logging
 from datetime import date, datetime, timezone
-from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
-from fastapi.templating import Jinja2Templates
 
 from . import auth, authz, calendar_state, chrome, db, discord_fmt
 from . import distrakt as distrakt_store
@@ -44,12 +42,12 @@ from .providers.trakt.detail import (
     search_titles,
 )
 from .providers.trakt.sync import fetch_watched_map
+from .templating import templates
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
-templates = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
 
 # Which ids arriving in a request body are read as integers. imdb ids are not
 # numbers and slugs are words, so those stay text; everything else is a numeric id

@@ -1,39 +1,12 @@
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    {# Parsed before first paint, so the gap before the stylesheet applies
-       is the page's own dark rather than the browser's default white. #}
-    <meta name="color-scheme" content="dark">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{ owner_username or "Shared calendar" }} &ndash; {{ month_label }}</title>
-
-    {# Open Graph / link-preview tags. og:url and og:image are absolute, set only
-       when the instance has a configured public base URL to build them from. #}
-    <meta property="og:type" content="website">
-    <meta property="og:site_name" content="New Shows">
-    <meta property="og:title" content="{{ owner_username or 'Shared calendar' }} &ndash; {{ month_label }} {{ year }}">
-    <meta property="og:description" content="Shows I'm watching this month">
-    {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}
-    {% if og_image %}
-    <meta property="og:image" content="{{ og_image }}">
-    <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:image" content="{{ og_image }}">
-    {% else %}
-    <meta name="twitter:card" content="summary">
-    {% endif %}
-    <meta name="twitter:title" content="{{ owner_username or 'Shared calendar' }} &ndash; {{ month_label }} {{ year }}">
-    <meta name="twitter:description" content="Shows I'm watching this month">
-    <meta name="theme-color" content="#e8b545">
-
-    <link rel="shortcut icon" href="/static/images/favicon.ico">
-    <link rel="stylesheet" href="/static/css/style.css">
-    <link rel="stylesheet" href="/static/css/share.css">
-    <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/static/fonts/inter-v20-latin-400.woff2" as="font" type="font/woff2" crossorigin>
-    <link rel="preload" href="/static/fonts/inter-v20-latin-700.woff2" as="font" type="font/woff2" crossorigin>
-</head>
-<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}">
+{% import '_head.html' as page with context %}
+{% call page.head((owner_username or 'Shared calendar') ~ ' – ' ~ month_label,
+                  scripts=('static/js/share.js',), nav_head=false, site_suffix=false) %}
+  {{ page.og((owner_username or 'Shared calendar') ~ ' – ' ~ month_label ~ ' ' ~ year,
+             "Shows I'm watching this month") }}
+{% endcall %}
+<body class="pack-{{ view.day_packing }} card-{{ view.card_style }}" hx-boost="true">
 
 <header class="hero">
     <div class="hero-lead">
@@ -205,6 +178,5 @@
     </div>
 </div>
 
-<script src="/static/js/share.js"></script>
 </body>
 </html>

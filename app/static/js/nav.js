@@ -83,10 +83,10 @@ function confirmInline(trigger, message, onConfirm, opts) {
 
 /* The changelog modal, shared by every page carrying the header.
 
-   Plain fetch rather than htmx: htmx is only loaded by the calendar and the
-   ranker, and this entry sits in the menu on all six pages. Fetched once and
-   left in the DOM — the changelog cannot change under a running server, since a
-   new one only arrives with a new container. */
+   Plain fetch rather than htmx, even though every page now ships htmx: the
+   response goes into a modal this page already owns, which is a fetch, not a
+   navigation. Fetched once and left in the DOM — the changelog cannot change
+   under a running server, since a new one only arrives with a new container. */
 let changelogLoaded = false;
 
 async function openChangelog() {

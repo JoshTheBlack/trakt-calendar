@@ -135,12 +135,12 @@ class StaticCacheHeaderTests(unittest.TestCase):
 
 
 class BoostedNavigationMarkupTests(unittest.TestCase):
-    """The calendar page wires hx-boost for snappy, no-reflash month/endpoint
-    navigation. These pin the structural pieces that make the boosted swap safe:
-    the vendored htmx <script>, the per-page context moved into the swapped
-    region (#pageData), hx-boost on the month arrows + the calendar switcher, and
-    the app scripts loaded (deferred) in <head> so a body swap can't re-execute
-    them.
+    """The calendar page wires hx-boost for snappy, no-reflash navigation. These
+    pin the structural pieces that make the boosted swap safe: the vendored htmx
+    <script>, the per-page context moved into the swapped region (#pageData),
+    hx-boost declared on <body> so every link and form under it inherits it, the
+    two JS-handled forms opting back out, and the app scripts loaded (deferred)
+    in <head> so a body swap can't re-execute them.
     """
 
     _counter = 0
@@ -198,11 +198,25 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         self.assertIn('data-month="7"', html)
         self.assertIn('data-endpoint="shows"', html)
 
-    def test_month_navigation_is_boosted(self):
+    def test_the_whole_page_is_boosted_from_the_body(self):
+        """Boosting is declared once, on <body>, and inherited by every link and
+        form under it — including the month arrows and the endpoint switcher,
+        which used to carry the attribute themselves."""
         html = self._page()
-        self.assertEqual(html.count("hx-boost"), 3)  # prev, next, switcher form
-        prev_i = html.index('month-nav-btn prev')
-        self.assertIn("hx-boost", html[prev_i - 60: prev_i + 60])
+        body_tag = html[html.index("<body"): html.index(">", html.index("<body")) + 1]
+        self.assertIn('hx-boost="true"', body_tag)
+        prev_i = html.index("month-nav-btn prev")
+        self.assertNotIn("hx-boost", html[prev_i - 80: prev_i + 80])
+
+    def test_the_js_handled_form_opts_out_of_boosting(self):
+        """Filters is submitted by JS and writes over the API. htmx boosts every
+        form under a boosted <body>, so it has to say no — otherwise a save turns
+        into an attempted navigation. (The settings modal's form does the same;
+        it is admin-only, so this viewer's page does not carry it — both are
+        covered at the template level by tests/test_page_head.py.)"""
+        html = self._page()
+        i = html.index('id="filtersForm"')
+        self.assertIn('hx-boost="false"', html[i - 40: i + 140])
 
     def test_endpoint_switcher_is_a_boosted_get_form(self):
         html = self._page()
