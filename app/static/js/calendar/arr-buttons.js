@@ -37,8 +37,11 @@ function markInLibrary(btn, titleText) {
     if (titleText) btn.title = titleText;
 }
 
-function applyLibraryStatus() {
-    document.querySelectorAll('.arr-btn').forEach(btn => {
+// The two appliers below RE-RENDER FROM STATE ALREADY IN MEMORY — no request —
+// so they are cheap to run again over one newly arrived subtree. `root` is what
+// to walk: the whole document after a refresh, or just the block that landed.
+function applyLibraryStatus(root = document) {
+    root.querySelectorAll('.arr-btn').forEach(btn => {
         if (btn.dataset.busy === '1') return;
         const kind = btn.dataset.arr;
         const card = btn.closest('.card');
@@ -49,8 +52,8 @@ function applyLibraryStatus() {
     });
 }
 
-function applyArrStatus() {
-    document.querySelectorAll('.arr-btn').forEach(btn => {
+function applyArrStatus(root = document) {
+    root.querySelectorAll('.arr-btn').forEach(btn => {
         if (btn.dataset.busy === '1' || btn.dataset.added === '1') return;
         const st = arrStatus[btn.dataset.arr] || {};
         const ok = st.configured && st.reachable;
@@ -108,6 +111,19 @@ async function addAllToArr(event) {
             const worker = async () => { while (i < btns.length) { await addToArr(btns[i++]); } };
             await Promise.all([worker(), worker(), worker()]);  // 3 concurrent
         });
+}
+
+// Cards that arrived after the page initialised — a day block that fetched
+// itself in as it was scrolled to. Its buttons are laid out by the same template
+// as the shell's, but nothing had visited them: both appliers walk from a root,
+// and between an insertion and the next 60s poll tick that root was never the
+// document. So a late day showed plain Add buttons for up to a minute, whether
+// or not the title was already in the library. Marked from the status and
+// library sets this page already holds, which is why it costs no request.
+function applyArrStateTo(root) {
+    if (!window.IS_ADMIN || !root || !root.querySelectorAll) return;
+    applyArrStatus(root);
+    applyLibraryStatus(root);
 }
 
 // The add/request buttons and the health state behind them only exist for an

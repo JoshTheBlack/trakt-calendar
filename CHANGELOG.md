@@ -11,6 +11,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 📜 **The changelog is readable from inside the app.** The ☰ menu has a *What's new* entry on every page, opening this file rendered properly — one collapsible section per release, newest already open. It is the same `CHANGELOG.md` that lives in the repository, rendered on the way past rather than copied, so what you read here cannot drift from what was actually written.
 
 ### Fixed
+- 📚 **Days further down the calendar show their library marks straight away.** The Sonarr, Radarr and Seerr buttons on the first few days correctly showed what you already had; the days that load as you scroll to them arrived unmarked and stayed that way for up to a minute. They now say what they know the moment the day appears. (Administrators only — nobody else sees those buttons.)
 - 🔢 **A greyed-out day chip comes back when you show that day again.** Opening the calendar with *Hiding* switched on greyed out the jump-to chips for days whose every show you'd marked not-watching — and switching to *Showing all* left them greyed and unclickable until you reloaded the page. They now become destinations again the moment the day has something on it.
 
 ### Under the hood

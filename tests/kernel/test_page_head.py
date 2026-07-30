@@ -431,6 +431,40 @@ class PageScriptTests(unittest.TestCase):
                               f"script it loads declares it")
 
 
+class LateArrivingDayBlockTests(unittest.TestCase):
+    """What a day block that fetches itself in gets, and how.
+
+    The calendar's swap handler splits on purpose: a boosted arrival re-runs the
+    page init, a CONTENT swap must not — re-running it would re-arm listeners and
+    redo one-time setup. So everything a late block needs has to be named in the
+    content-swap branch explicitly, and anything it names has to be able to work
+    on one subtree rather than the whole document.
+    """
+
+    def setUp(self):
+        self.boot = js_source("static/js/calendar/boot.js")
+        self.arr = js_source("static/js/calendar/arr-buttons.js")
+
+    def content_swap_branch(self) -> str:
+        return self.boot.split("function applyViewStateTo(root)")[1].split("\n}")[0]
+
+    def test_a_swapped_in_block_gets_its_sonarr_radarr_seerr_marks(self):
+        """Without this the buttons on a late day showed as plain Adds — for a
+        title already in the library as much as for one that is not — until the
+        60s poll's next whole-document sweep happened to catch up."""
+        self.assertIn("applyArrStateTo(root)", self.content_swap_branch())
+
+    def test_the_content_swap_does_not_reach_for_the_page_init(self):
+        self.assertNotIn("initCalendarPage", self.content_swap_branch())
+
+    def test_the_arr_appliers_walk_from_a_root_rather_than_the_document(self):
+        """Hard-wired to `document`, neither could be pointed at the block that
+        just landed, which is the only cheap way to mark it."""
+        self.assertIn("function applyLibraryStatus(root = document)", self.arr)
+        self.assertIn("function applyArrStatus(root = document)", self.arr)
+        self.assertNotIn("document.querySelectorAll('.arr-btn')", self.arr)
+
+
 class BundledStylesheetTests(unittest.TestCase):
     def setUp(self):
         self.css = (assets.BASE_DIR / assets.STYLESHEET).read_text(encoding="utf-8")

@@ -54,6 +54,10 @@ function applyViewStateTo(root) {
         // show hidden a moment ago comes back visible on the days that loaded late.
         setCardState(card, notWatching.has(id));
     });
+    // Sonarr/Radarr/Seerr marks, for this subtree only. They are a re-render of
+    // state the page already holds rather than part of the init, so the swapped
+    // block can have them without the init running again.
+    applyArrStateTo(root);
     // Column packing is per day block and counts that block's (visible) cards, so
     // it has to run for blocks that did not exist when the page initialised.
     updateEmptyDays();
