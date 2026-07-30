@@ -123,6 +123,20 @@ class AppTestCase(unittest.TestCase):
         return asyncio.run(auth.create_user(
             username=username, password=password, settings=Settings(), **flags))
 
+    def link_identity(self, user_id: int, provider: str, provider_user_id: int,
+                      access_token: str | None = None) -> None:
+        """Give an account a linked provider identity, as a real handshake would.
+
+        Written straight to the table rather than through a flow: the flows have
+        their own tests, and everything that gates on "has this person linked
+        Trakt?" only needs the row to exist.
+        """
+        from app import auth, db
+
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user_id, provider=provider,
+            provider_user_id=provider_user_id, access_token=access_token)))
+
     def sign_in_as(self, user_id: int) -> str:
         """Put a real session cookie on the client, skipping the login form.
 

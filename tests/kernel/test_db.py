@@ -298,9 +298,11 @@ class DriverIsolationTests(unittest.TestCase):
         blocking query ends up stalling the event loop from inside a route.
         """
         pattern = re.compile(r"^\s*(import sqlite3|from sqlite3 import)", re.MULTILINE)
-        app_dir = APP_DIR
+        # Walked, not globbed: app/ holds packages now (auth, distrakt,
+        # providers), and a top-level glob stopped seeing most of the app the
+        # moment the first one was created.
         offenders = sorted(
-            path.name for path in app_dir.glob("*.py")
+            str(path.relative_to(APP_DIR)) for path in APP_DIR.rglob("*.py")
             if path.name != "db.py" and pattern.search(path.read_text(encoding="utf-8"))
         )
         self.assertEqual(offenders, [], f"modules importing sqlite3 directly: {offenders}")

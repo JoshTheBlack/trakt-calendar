@@ -1,21 +1,32 @@
-"""Rate limiting, proxy configuration, and three narrower security fixes.
+"""Regressions in abuse resistance and in what one account may see of another.
 
-What this file pins down, and why each one matters:
+One class per defect, each naming the failure it exists to catch. They are kept
+together, and at the top of tests/ rather than under one feature, because what
+they have in common is not a module — it is that every one of them fails
+SILENTLY: nothing looks broken, the wrong person is simply served, or a limit
+simply stops limiting. A file per feature would file each of them next to the
+tests that already pass while the defect is live.
 
   - A LOCKOUT THAT ENDS. Attempts made while already locked out are not counted,
     and a lockout that has served its window resets the counter instead of
     leaving it primed one failure below the threshold. Without both, a retry loop
     holds a lockout open forever — and because every user behind a reverse proxy
     shares one per-IP key, that is a whole-instance outage rather than one
-    account's problem.
-  - THE PER-IP COUNTER CLEARS ON SUCCESS. Same reason: one shared key means other
-    people's failures must not survive somebody proving they own an account.
-  - THE SETTINGS SCREEN CAN DIAGNOSE THE PROXY. The value to type is reported
-    back rather than guessed at, and the silent misconfiguration (headers
-    arriving from an untrusted peer) is called out explicitly.
-  - The three narrow fixes: admin session revocation is scoped to the account it
-    was issued against, share tokens compare in constant time, and the provider
-    sign-in start routes are throttled.
+    account's problem. The per-IP counter clearing on success is the same rule:
+    other people's failures must not survive somebody proving they own an
+    account.
+  - THE SETTINGS SCREEN CAN DIAGNOSE THE PROXY, and the cookie policy is
+    resolved from evidence at onboarding rather than guessed — including on a
+    brand-new instance behind a proxy, which is the install that could not be
+    set up at all.
+  - ONE ACCOUNT'S THINGS ARE ITS OWN: admin session revocation is scoped to the
+    account it was issued against, the network-emoji map is per user, the
+    tracker's details route answers from the caller's own roster, and the
+    account page and share panel disclose nothing an admin-only setting owns.
+  - THE NARROW ONES: share tokens compare in constant time, the provider sign-in
+    start routes are throttled, a retired slug keeps working while its name is
+    freed, re-authorizing in Settings writes the token where the tracker reads
+    it, and every mutating body goes through the one shared guard.
 
 No network.
 """
@@ -37,7 +48,7 @@ PASSWORD = "correct-horse-battery"
 LOCK = {"max_attempts": auth.LOGIN_MAX_ATTEMPTS, "window_seconds": auth.LOGIN_WINDOW_SECONDS}
 
 
-class HardeningTestCase(AppTestCase):
+class RegressionTestCase(AppTestCase):
     def make_user(self, username="josh", password=PASSWORD, **flags):
         flags.setdefault("calendar_approved", True)
         return super().make_user(username, password, **flags)
@@ -57,7 +68,7 @@ class HardeningTestCase(AppTestCase):
         ))
 
 
-class LockoutDoesNotSelfPerpetuateTests(HardeningTestCase):
+class LockoutDoesNotSelfPerpetuateTests(RegressionTestCase):
     """The failure mode this whole change exists for: a lockout that never ends
     because the attempts rejected BY the lockout kept refilling its own window."""
 
@@ -106,7 +117,7 @@ class LockoutDoesNotSelfPerpetuateTests(HardeningTestCase):
         self.assertTrue(asyncio.run(auth.check_lockout("username", "josh", **LOCK)))
 
 
-class SharedProxyIpCounterTests(HardeningTestCase):
+class SharedProxyIpCounterTests(RegressionTestCase):
     """Behind a reverse proxy every user shares one per-IP key, so anything that
     leaves failures on it is an instance-wide outage waiting to happen."""
 
@@ -132,7 +143,7 @@ class SharedProxyIpCounterTests(HardeningTestCase):
         self.assertEqual(self.login("alice").status_code, 200)
 
 
-class ProxyDiagnosticsTests(HardeningTestCase):
+class ProxyDiagnosticsTests(RegressionTestCase):
     """The Settings screen has to be able to answer "what do I type here?" —
     guessing a container subnet is exactly how this gets left at the default."""
 
@@ -178,7 +189,7 @@ class ProxyDiagnosticsTests(HardeningTestCase):
         self.assertNotIn("super-secret-value", str(body))
 
 
-class AdminSessionScopingTests(HardeningTestCase):
+class AdminSessionScopingTests(RegressionTestCase):
     """An admin looking at one account's session list must not be able to act on
     a different account's session by posting its id."""
 
@@ -210,7 +221,7 @@ class AdminSessionScopingTests(HardeningTestCase):
         self.assertIsNone(asyncio.run(auth.validate_session(victim_session)))
 
 
-class ShareTokenComparisonTests(HardeningTestCase):
+class ShareTokenComparisonTests(RegressionTestCase):
     """The one comparison this app makes against a secret is constant-time."""
 
     def test_a_valid_token_still_resolves(self):
@@ -234,7 +245,7 @@ class ShareTokenComparisonTests(HardeningTestCase):
         spy.assert_called_once()
 
 
-class HandshakeStartThrottleTests(HardeningTestCase):
+class HandshakeStartThrottleTests(RegressionTestCase):
     """/auth/plex/start and /auth/trakt/start are unauthenticated, mint a row, and
     (for Plex) call out to plex.tv. They share one per-address budget so nobody
     gets a second one by alternating providers."""
@@ -274,7 +285,7 @@ class HandshakeStartThrottleTests(HardeningTestCase):
                 self.assertEqual(self.client.get("/auth/plex/start").status_code, 200)
 
 
-class CookiePolicyDetectionTests(HardeningTestCase):
+class CookiePolicyDetectionTests(RegressionTestCase):
     """cookie_secure is resolved from evidence at onboarding rather than asked as
     a question, because the operator most likely to answer it wrong is the one
     behind a TLS-terminating proxy — where the app's own view of the scheme is
@@ -366,7 +377,7 @@ class CookiePolicyDetectionTests(HardeningTestCase):
                 self.assertEqual(auth.detect_cookie_secure(req(headers)), expected)
 
 
-class FreshProxiedInstallCanOnboardTests(HardeningTestCase):
+class FreshProxiedInstallCanOnboardTests(RegressionTestCase):
     """A brand-new instance behind Traefik could not be set up at all: the origin
     check compared the browser's https Origin against an expected origin built
     with the scheme the app saw (http), so every mutating request was refused —
@@ -437,7 +448,7 @@ class FreshProxiedInstallCanOnboardTests(HardeningTestCase):
         )
 
 
-class CookieMismatchWarningTests(HardeningTestCase):
+class CookieMismatchWarningTests(RegressionTestCase):
     """Onboarding gets it right on its own, so a mismatch means the deployment
     moved or settings.json was hand-edited. Either way it must not present as a
     wrong password."""
@@ -464,7 +475,7 @@ class CookieMismatchWarningTests(HardeningTestCase):
         self.assertEqual(body["cookie_secure"], "always")
 
 
-class CookieSecureEditingTests(HardeningTestCase):
+class CookieSecureEditingTests(RegressionTestCase):
     """cookie_secure is editable in Settings now, with the one self-locking
     change refused rather than the whole field left hand-edited.
 
@@ -525,7 +536,7 @@ class CookieSecureEditingTests(HardeningTestCase):
         self.assertEqual(load_settings().cookie_secure, "always")  # unchanged
 
 
-class ShareLinkSelectorTests(HardeningTestCase):
+class ShareLinkSelectorTests(RegressionTestCase):
     """The Share panel's dropdown is PRESENTATION: it picks which URL you are
     handed. Every published form keeps answering, because a link already given to
     somebody must not break because its owner later looked at a different one."""
@@ -594,7 +605,7 @@ class ShareLinkSelectorTests(HardeningTestCase):
                       (401, 403))
 
 
-class RetiredSlugTests(HardeningTestCase):
+class RetiredSlugTests(RegressionTestCase):
     """Changing a slug frees the old name, and `/c/<old>` links are already out in
     the world by then — so the name has to be blocked from being claimed by
     somebody else, exactly as a deleted account's is."""
@@ -683,7 +694,7 @@ class RetiredSlugTests(HardeningTestCase):
         self.assertEqual(self.retired(), [])
 
 
-class PerUserEmojiMapTests(HardeningTestCase):
+class PerUserEmojiMapTests(RegressionTestCase):
     """The map renders into ONE account's Discord posts. It was app-wide, so
     importing a roster on any tracker account registered its networks into the
     operator's map and one person's emoji went out in everybody's posts."""
@@ -758,7 +769,7 @@ class PerUserEmojiMapTests(HardeningTestCase):
             "/api/distrakt/emojis", json={"network_emojis": "not-an-object"}).status_code, 400)
 
 
-class DistraktDetailsTests(HardeningTestCase):
+class DistraktDetailsTests(RegressionTestCase):
     """The tracker's own details modal. A separate route from /api/details because
     that one is CALENDAR_APPROVED — a tracker user need not be calendar approved —
     and because this one answers a question the calendar has no business knowing:
@@ -850,7 +861,7 @@ class DistraktDetailsTests(HardeningTestCase):
             self.client.get(f"/api/distrakt/details?key={self.KEY}").status_code, 400)
 
 
-class SiteHeaderTests(HardeningTestCase):
+class SiteHeaderTests(RegressionTestCase):
     """One header across the calendar, the month picker, and the tracker. They
     had drifted into three different bars, and the admin calendar's had swollen
     onto a second row."""
@@ -934,7 +945,7 @@ class SiteHeaderTests(HardeningTestCase):
                 self.assertLessEqual(len(ep.label), 16, ep.label)
 
 
-class SharedAddressLockoutTests(HardeningTestCase):
+class SharedAddressLockoutTests(RegressionTestCase):
     """Five wrong passwords on ONE account used to lock out EVERY account from
     that address — administrator included, with the generic failure message and
     nothing in the log. On a single-user instance that is self-inflicted; behind a
@@ -975,7 +986,7 @@ class SharedAddressLockoutTests(HardeningTestCase):
         self.assertTrue(any("locked out" in line for line in captured.output))
 
 
-class SharePanelDisclosureTests(HardeningTestCase):
+class SharePanelDisclosureTests(RegressionTestCase):
     """public_base_url is an admin-only setting, so the "set a base URL" prompt is
     an unfixable complaint for everybody else."""
 
@@ -999,7 +1010,7 @@ class SharePanelDisclosureTests(HardeningTestCase):
         self.assertTrue(self.client.get("/api/me/share").json()["base_url_missing"])
 
 
-class AccountPageDisclosureTests(HardeningTestCase):
+class AccountPageDisclosureTests(RegressionTestCase):
     """/me is now linked from the calendar, so what it renders is read by every
     user rather than only whoever knew the URL."""
 
@@ -1039,7 +1050,7 @@ class AccountPageDisclosureTests(HardeningTestCase):
         self.assertIn('href="/me"', self.client.get("/?month=1&year=2026").text)
 
 
-class DeviceAuthAdoptsTheTokenTests(HardeningTestCase):
+class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
     """Re-authorizing in Settings renewed the app-wide token but never wrote a
     linked identity, so the "reconnect your Trakt account" notice could not be
     cleared by the one button that looked like it should clear it — and the
@@ -1129,7 +1140,7 @@ class DeviceAuthAdoptsTheTokenTests(HardeningTestCase):
         self.assertEqual(asyncio.run(db.get_meta("trakt_reconnect_notice")), "1")
 
 
-class PlexPopupUrlTests(HardeningTestCase):
+class PlexPopupUrlTests(RegressionTestCase):
     """The popup URL is a fragment parsed by Plex's own single-page app, so it has
     to match what known-working Plex clients emit rather than merely being
     well-formed."""
@@ -1151,7 +1162,7 @@ class PlexPopupUrlTests(HardeningTestCase):
         self.assertNotIn("+", url)
 
 
-class CacheIsOffTheEventLoopTests(HardeningTestCase):
+class CacheIsOffTheEventLoopTests(RegressionTestCase):
     """Every database call goes through a worker thread. app/cache was
     reading and zlib-decompressing ~200 KB blobs inline on the event loop."""
 
@@ -1194,7 +1205,7 @@ class CacheIsOffTheEventLoopTests(HardeningTestCase):
             self.assertNotEqual(name, loop_thread)
 
 
-class SharedBodyGuardTests(HardeningTestCase):
+class SharedBodyGuardTests(RegressionTestCase):
     """The one guard every mutating route reads its body through.
 
     It replaced six near-copies with five different contracts, so what matters is

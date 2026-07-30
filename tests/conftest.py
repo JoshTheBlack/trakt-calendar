@@ -13,7 +13,7 @@ setdefault calls were each trying to win alone.
 
 The fixtures below extract the per-test setup — a migrated database, saved
 settings, an app client — that most test files currently rebuild by hand in
-setUp/tearDown (see e.g. tests/test_calendar_route.py). Existing files are NOT
+setUp/tearDown (see e.g. tests/calendar/test_routes.py). Existing files are NOT
 rewritten to use these; only tests written against this file adopt them.
 
 The outbound-network guard below is the one thing here that applies to every

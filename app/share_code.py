@@ -30,7 +30,7 @@ people hold on to:
 1. The codebooks below are APPEND-ONLY. An index is a promise about what that
    number means; reordering or removing an entry silently repoints every link
    already in the wild at a different timezone or a different calendar.
-   tests/test_share_code.py fails if a codebook is reordered or shortened, or if
+   tests/calendar/test_share_code.py fails if a codebook is reordered or shortened, or if
    a vocabulary elsewhere in the app grows an entry that was never appended here.
 2. Nothing here ever raises or half-decodes. A value this module cannot encode
    (an index too wide for its field, a timezone outside the codebook) makes

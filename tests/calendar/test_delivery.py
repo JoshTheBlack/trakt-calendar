@@ -4,7 +4,7 @@ before authz.install so it nests inside the authz stack), and /static gets a
 short Cache-Control instead of the bare ETag-only default StaticFiles ships.
 
 No network: the Trakt window fetch is patched the same way
-tests/test_calendar_route.py does it.
+tests/calendar/test_routes.py does it.
 """
 from __future__ import annotations
 
@@ -192,7 +192,7 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         form under a boosted <body>, so it has to say no — otherwise a save turns
         into an attempted navigation. (The settings modal's form does the same;
         it is admin-only, so this viewer's page does not carry it — both are
-        covered at the template level by tests/test_page_head.py.)"""
+        covered at the template level by tests/kernel/test_page_head.py.)"""
         html = self._page()
         i = html.index('id="filtersForm"')
         self.assertIn('hx-boost="false"', html[i - 40: i + 140])

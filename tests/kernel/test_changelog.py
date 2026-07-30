@@ -112,7 +112,7 @@ class ChangelogParsingTests(unittest.TestCase):
 
 class CurrentVersionTests(unittest.TestCase):
     """current_version() is what app/chrome.py puts in every page's context —
-    see tests/test_chrome.py for the merge itself."""
+    see tests/kernel/test_chrome.py for the merge itself."""
 
     def test_the_newest_release_at_the_top_wins(self):
         with patch.object(changelog, "releases", return_value=changelog.parse(SAMPLE)):

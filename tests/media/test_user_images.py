@@ -1,9 +1,9 @@
 """Per-user avatar/image upload and storage (app/user_images.py).
 
-S4's six validation rules are each pinned by their own test: an oversized
+The six rules an upload has to satisfy are each pinned by their own test: an oversized
 decoded payload, unreadable bytes, a disallowed format, declared dimensions
 over the cap, Pillow's own decompression-bomb guard, and metadata surviving
-the round trip. Account deletion's cleanup of DATA_DIR/user_data/<id>/ (S15)
+the round trip. Account deletion's cleanup of DATA_DIR/user_data/<id>/
 gets its own section, proving the shared poster cache is untouched.
 """
 from __future__ import annotations
@@ -295,7 +295,7 @@ class ImageNameTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# S15 — account deletion sweeps DATA_DIR/user_data/<id>/, and only that
+# Account deletion sweeps DATA_DIR/user_data/<id>/, and only that
 # ---------------------------------------------------------------------------
 
 class AccountDeletionCleanupTests(unittest.TestCase):

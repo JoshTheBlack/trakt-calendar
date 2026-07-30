@@ -2,7 +2,7 @@
 
 Seeds a synthetic month sized like a busy "All Episodes" view (~1,100 items
 spread across the aligned 7-day windows a month spans), behind the same
-app.calendar_cache.fetch_window_raw patch point tests/test_calendar_route.py
+app.calendar_cache.fetch_window_raw patch point tests/calendar/test_routes.py
 uses, so the real read_month -> group -> Jinja render pipeline runs for real
 instead of a guess. A small per-window sleep stands in for the Trakt round
 trip so a cold (uncached) run still shows the cost of fetching every window

@@ -5,8 +5,8 @@ Two things carry the most weight here and get the most direct coverage:
 
   - Deleting an account must leave zero orphan rows in EVERY table that
     references `users`, discovered from the schema itself (PRAGMA
-    foreign_key_list) rather than a hand-maintained list, so a table a later
-    chat adds is caught automatically — with the one deliberate exception,
+    foreign_key_list) rather than a hand-maintained list, so a table added
+    later is caught automatically — with the one deliberate exception,
     invites.created_by, which is ON DELETE SET NULL so that deleting the admin
     who issued an invite doesn't revoke it out from under someone mid-
     redemption.
@@ -56,7 +56,7 @@ class DeleteOrphanTests(AdminTestCase):
     def _foreign_keys_into_users(self) -> list[tuple[str, str, str]]:
         """(table, column, on_delete) for every FK referencing users(id),
         discovered live from the schema rather than hardcoded — so a table a
-        later chat adds is caught automatically."""
+        added later is caught automatically."""
         tables = [r["name"] for r in asyncio.run(db.fetch_all(
             "SELECT name FROM sqlite_master WHERE type = 'table' "
             "AND name NOT IN ('schema_version', 'users')"

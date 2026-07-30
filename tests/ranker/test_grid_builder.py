@@ -359,7 +359,8 @@ class HeaderImageTests(unittest.TestCase):
 
 
 class RenderKeyTests(unittest.TestCase):
-    """S9's cache is only correct if the key covers everything that can change a
+    """The rendered-grid cache is only correct if the key covers everything that
+    can change a
     pixel. Each of these is one input somebody can change and expect to see."""
 
     def _ranked(self, **overrides) -> list[ranker_export.RankedTitle]:

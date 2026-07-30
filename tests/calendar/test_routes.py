@@ -9,7 +9,7 @@ instead of settings.json; and the timezone picker persists to `users.timezone`
 and changes which month a boundary item renders under.
 
 No network — the Trakt window fetch is patched at app.calendar_cache's own
-module boundary, the same way tests/test_calendar_cache.py does it, so the
+module boundary, the same way tests/calendar/test_cache.py does it, so the
 real per-viewer normalize/trim logic in calendar_cache.read_month runs for
 real.
 """

@@ -72,7 +72,7 @@ class FirstRunTests(RouteTestCase):
     def test_a_second_setup_request_is_refused(self):
         """The application-level half of the race guard. The database-level half
         (the partial unique index that catches genuinely simultaneous requests)
-        is covered in tests/test_db.py."""
+        is covered in tests/kernel/test_db.py."""
         self.assertEqual(self.setup_account().status_code, 200)
         resp = self.setup_account(username="mallory")
         self.assertEqual(resp.status_code, 409)
@@ -281,7 +281,7 @@ class LoginRateLimitTests(RouteTestCase):
         from an ordinary failure, or the response itself reveals which usernames
         exist. Status and body are asserted directly; the timing class is what
         auth.burn_dummy_verify (exercised on every branch here) exists to hold,
-        and is covered at the unit level in tests/test_auth.py."""
+        and is covered at the unit level in tests/auth/test_accounts.py."""
         for _ in range(auth.LOGIN_MAX_ATTEMPTS):
             self._fail()
         locked_real_account = self._fail(username="josh", password="hunter2hunter2")

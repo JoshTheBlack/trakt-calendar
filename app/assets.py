@@ -46,7 +46,7 @@ BOOST = "static/js/boost.js"
 #   - a file's top-level `let`/`const` is visible to the whole page, so a name may
 #     be declared in exactly ONE of a page's files. Two of them declaring the same
 #     one is a SyntaxError that stops the second file dead.
-# tests/test_page_head.py holds both of those to account.
+# tests/kernel/test_page_head.py holds both of those to account.
 #
 # THE SAME LISTS ARE SHIPPED TO THE BROWSER, because a boosted navigation swaps
 # the body and never the <head>: the page arrived at has to fetch its own scripts,
