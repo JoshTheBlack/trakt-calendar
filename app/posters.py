@@ -141,17 +141,17 @@ async def _try_source(url: str) -> bytes | None:
 
 async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     """A live Trakt id-lookup by tmdb id, cached like any other Trakt call
-    through _cached_get. Tried only once TMDB and the registry have both come
+    through cached_get. Tried only once TMDB and the registry have both come
     up empty. Whatever URL this finds is recorded through app/artwork.py so the
     next poster this cold doesn't pay for the lookup twice."""
     media_type = "show" if media == "show" else "movie"
-    results = await trakt_transport._cached_get(
+    results = await trakt_transport.cached_get(
         trakt_transport.shared_client(), settings, f"search/tmdb/{tmdb}",
         {"type": media_type, "extended": "full,images"},
     )
     for entry in results if isinstance(results, list) else []:
         obj = entry.get(media_type) or {}
-        url = trakt_calendar._poster(obj)
+        url = trakt_calendar.poster(obj)
         if url:
             await artwork.record_poster_url(media, tmdb, "trakt", url)
             return url

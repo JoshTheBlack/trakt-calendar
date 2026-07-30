@@ -14,7 +14,7 @@ from __future__ import annotations
 import calendar as _calendar
 import logging
 import time as _time
-from datetime import datetime
+from datetime import date, datetime
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
@@ -42,14 +42,60 @@ def calendar_path(endpoint: Endpoint) -> str:
     return endpoint.key
 
 
-def _build_url(endpoint: Endpoint, settings: Settings, start_date: str, days: int) -> str:
-    # genres/countries are NOT sent as query params any more: the calendar cache
-    # stores the complete unfiltered result and those become read-time per-user
-    # filters, so one viewer can include JP/KR shows and another exclude them from
-    # the same cached data. The equivalent filtering is reproduced client-side in
-    # fetch_calendar (and the cached read path) via app/calendar_filter.py.
-    path = f"{transport.API_BASE}/calendars/all/{calendar_path(endpoint)}/{start_date}/{days}"
-    return f"{path}?{urlencode({'extended': 'full,images'})}"
+async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days: int) -> list[dict]:
+    """One window of Trakt's calendar, exactly as Trakt returned it.
+
+    THE ONLY PLACE THIS APP ASKS TRAKT WHAT AIRS. Everything downstream — the
+    month fetch below, and the cache's own pruned-window fetch — is this plus
+    what that caller does with the answer. It was two copies until they began to
+    drift, which is what a second copy looks like: the same thirty lines, and two
+    different wordings of the same pagination warning.
+
+    Returns the raw entries, unfiltered and unnormalized, because the two callers
+    filter differently: an uncached month applies the viewer-facing genre/country
+    reproduction, while the cache applies the instance-wide content floor
+    (certifications included) before anything is stored. Deciding that here would
+    make one of them wrong.
+
+    genres/countries are NOT sent as query params. The calendar cache stores the
+    complete unfiltered result so those can be read-time per-viewer filters —
+    one viewer including JP/KR shows and another excluding them from the same
+    cached data — and the equivalent filtering is reproduced client-side via
+    app/calendar_filter.py.
+
+    Pagination headers are not sent either: Trakt's calendar endpoints ignore
+    them and return the whole window in one response (verified live). The warning
+    below fires if that ever changes, because the symptom would otherwise be a
+    silently short window.
+
+    Raises TraktError for a refusal, a non-200, or a body that will not parse. A
+    body that parses to something other than a list reads as an empty window —
+    there is nothing to salvage from it and nothing to report about it.
+    """
+    url = (
+        f"{transport.API_BASE}/calendars/all/{calendar_path(endpoint)}/{start.isoformat()}/{days}"
+        f"?{urlencode({'extended': 'full,images'})}"
+    )
+    t0 = _time.perf_counter()
+    resp = await transport.send(transport.shared_client(), "GET", url,
+                                headers=transport.api_headers(settings, paginate=False))
+    _perf.debug("netGET    calendar/%s/%s+%dd -> %s  %.0fms", endpoint.key, start.isoformat(),
+                days, resp.status_code, (_time.perf_counter() - t0) * 1000.0)
+    if resp.status_code == 401:
+        raise TraktError("Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401)
+    if resp.status_code != 200:
+        raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+    if resp.headers.get("x-pagination-page-count"):
+        logger.warning(
+            "Trakt calendar response carried pagination headers (page-count=%s) for %s; "
+            "the window may be truncated.",
+            resp.headers.get("x-pagination-page-count"), url,
+        )
+    try:
+        raw = resp.json()
+    except ValueError:
+        raise TraktError("Trakt API returned an unreadable response.")
+    return raw if isinstance(raw, list) else []
 
 
 async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, month: int) -> list[Item]:
@@ -57,29 +103,8 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     days = _calendar.monthrange(year, month)[1]
     start_date = f"{year:04d}-{month:02d}-01"
     end_date = f"{year:04d}-{month:02d}-{days:02d}"
-    url = _build_url(endpoint, settings, start_date, days)
 
-    # Calendar endpoints ignore pagination headers and return the whole range in
-    # one response (verified live), so they are not sent here; a warning fires if
-    # Trakt ever starts paginating.
-    t0 = _time.perf_counter()
-    resp = await transport._send(transport.shared_client(), "GET", url,
-                                 headers=transport._headers(settings, paginate=False))
-    _perf.debug("netGET    calendar/%s/%s..%s -> %s  %.0fms", endpoint.key, start_date, end_date,
-                resp.status_code, (_time.perf_counter() - t0) * 1000.0)
-    if resp.status_code == 401:
-        raise TraktError("Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401)
-    if resp.status_code != 200:
-        raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
-    if resp.headers.get("x-pagination-page-count"):
-        logger.warning("Trakt calendar endpoint returned pagination headers for %s; response may be truncated.", url)
-
-    try:
-        raw = resp.json()
-    except ValueError:
-        raise TraktError("Trakt API returned an unreadable response.")
-    if not isinstance(raw, list):
-        raw = []
+    raw = await fetch_window(endpoint, settings, date(year, month, 1), days)
 
     # Trakt used to filter by the genres/countries query params server-side;
     # those are no longer sent, so the same filtering is reproduced here on the
@@ -101,7 +126,7 @@ async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, mont
     return items
 
 
-def _poster(media: dict) -> str | None:
+def poster(media: dict) -> str | None:
     imgs = media.get("images") or {}
     posters = imgs.get("poster") or []
     if posters:
@@ -159,7 +184,7 @@ def normalize(entry: dict, endpoint: Endpoint, tz: ZoneInfo) -> Item | None:
         genres=[g.replace("-", " ").title() for g in (media.get("genres") or [])],
         certification=(media.get("certification") or "").upper(),
         overview=overview,
-        poster=_poster(media),
+        poster=poster(media),
         air_date=dt.strftime("%Y-%m-%d"),
         air_ts=dt.timestamp(),
         air_display=dt.strftime("%d %b %Y"),

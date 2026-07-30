@@ -304,7 +304,7 @@ async def _movie_ref(settings, row) -> tuple[TitleRef, tuple | None]:
         runtime = int_or_none(summary.get("runtime"))
         # The same extraction the calendar's own recording path uses, so a URL
         # observed here is stored identically to one observed there.
-        poster = trakt_calendar._poster(summary)
+        poster = trakt_calendar.poster(summary)
     tmdb = int_or_none(ids.get("tmdb"))
     sighting = ("movie", tmdb, "trakt", poster) if (tmdb and poster) else None
     return TitleRef(media=Media.MOVIE, title=title, ids=ids, year=year, runtime=runtime), sighting

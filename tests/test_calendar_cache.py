@@ -209,9 +209,12 @@ class FetchShapeTests(CacheTestCase):
         self.assertNotIn("unused_field", entries[0]["show"])
 
     async def test_pagination_header_on_a_calendar_response_is_logged(self):
+        """Logged by the SOURCE, not by this module: the cache no longer asks
+        Trakt for anything itself, so the one warning about a truncated window
+        now lives with the one fetch — and a cache fill still surfaces it."""
         client = _CaptureClient([], headers={"x-pagination-page-count": "3"})
         with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            with self.assertLogs("app.calendar_cache", level="WARNING") as logged:
+            with self.assertLogs("app.providers.trakt.calendar", level="WARNING") as logged:
                 await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
 

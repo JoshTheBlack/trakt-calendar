@@ -46,21 +46,20 @@ import asyncio
 import calendar as _calendar
 import json
 import logging
-import time as _time
 import zlib
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
-from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 from . import artwork, calendar_filter, db
 from .cache import COMPRESS_LEVEL
 from .endpoints import ENDPOINTS, Endpoint
 from .providers.base import Item
-from .providers.trakt import calendar as trakt_calendar, transport as trakt_transport
+from .providers.trakt import TraktError
+from .providers.trakt import calendar as trakt_calendar
 
 logger = logging.getLogger(__name__)
-# Same "app.perf" logger the Trakt transport's _cached_get already uses for its own
+# Same "app.perf" logger the Trakt transport's cached_get already uses for its own
 # netGET/cacheHIT lines — one DEBUG channel for every outbound Trakt call,
 # regardless of which module made it. Enable it with LOG_LEVEL=DEBUG.
 _perf = logging.getLogger("app.perf")
@@ -221,7 +220,7 @@ def _poster_sighting(media: dict, media_key: str):
     """(media_key, tmdb, 'trakt', url) for one pruned media object, or None when
     it lacks either id — the pair the ranker's poster registry is keyed on."""
     tmdb_id = (media.get("ids") or {}).get("tmdb")
-    poster = trakt_calendar._poster(media)
+    poster = trakt_calendar.poster(media)
     if not tmdb_id or not poster:
         return None
     return (media_key, int(tmdb_id), "trakt", poster)
@@ -261,47 +260,20 @@ def _decompress(blob) -> list[dict]:
 
 
 async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[dict]:
-    """Fetch one 7-day window from Trakt, floor-filtered, PRUNED, and TRIMMED to
-    the window's own 7 days.
+    """Fetch one 7-day window from the source, floor-filtered, PRUNED, and
+    TRIMMED to the window's own 7 days.
 
-    No `genres`/`countries` query params (Trakt's server-side filtering is gone;
-    see filter_entries below for why it is reproduced here instead) and no
-    pagination headers (calendar endpoints ignore them and return the whole
-    window in one response). Logs a warning if Trakt ever starts paginating.
+    The fetch itself belongs to the source, not to the cache: this module knows
+    what a cached window has to LOOK like, and nothing about how to ask for one.
+    That is what lets a second source reuse this cache instead of the cache
+    growing a branch per source.
 
     The trim is not tidiness. Trakt does not honour the `days` bound it is given
     (see in_window), so consecutive windows overlap by days or weeks; storing
     what arrived would mean caching the same airings several times over and
     handing the page duplicate cards for every one of them.
     """
-    url = (
-        f"{trakt_transport.API_BASE}/calendars/all/{trakt_calendar.calendar_path(endpoint)}/{start.isoformat()}/{WINDOW_DAYS}"
-        f"?{urlencode({'extended': 'full,images'})}"
-    )
-    t0 = _time.perf_counter()
-    resp = await trakt_transport._send(trakt_transport.shared_client(), "GET", url, headers=trakt_transport._headers(settings, paginate=False))
-    _perf.debug("netGET    calendar/%s/%s -> %s  %.0fms", endpoint.key, start.isoformat(),
-                resp.status_code, (_time.perf_counter() - t0) * 1000.0)
-    if resp.status_code == 401:
-        raise trakt_transport.TraktError(
-            "Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401,
-        )
-    if resp.status_code != 200:
-        raise trakt_transport.TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
-    if resp.headers.get("x-pagination-page-count"):
-        # Calendar endpoints have never paginated (verified live); if that ever
-        # changes this window is silently truncated, so make it loud.
-        logger.warning(
-            "Trakt calendar response carried pagination headers (page-count=%s) for %s; "
-            "the window may be truncated.",
-            resp.headers.get("x-pagination-page-count"), url,
-        )
-    try:
-        raw = resp.json()
-    except ValueError:
-        raise trakt_transport.TraktError("Trakt API returned an unreadable response.")
-    if not isinstance(raw, list):
-        return []
+    raw = await trakt_calendar.fetch_window(endpoint, settings, start, WINDOW_DAYS)
     # The instance-wide content floor: an operator who excludes a genre,
     # country, or certification here means it never enters the shared cache for
     # ANY viewer, not just their own — applied on the raw entries, before
@@ -388,7 +360,7 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
         return [], None
     try:
         entries = await fetch_window_raw(endpoint, settings, start)
-    except trakt_transport.TraktError:
+    except TraktError:
         if cached is not None:  # serve the stale copy rather than nothing
             return cached
         raise
@@ -499,9 +471,9 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     entries: list[dict] = []
     as_of: int | None = None
     errored = 0
-    first_error: trakt_transport.TraktError | None = None
+    first_error: TraktError | None = None
     for result in results:
-        if isinstance(result, trakt_transport.TraktError):
+        if isinstance(result, TraktError):
             # load_window already served a stale copy when it had one, so getting
             # here means this window had nothing cached AND its fetch failed.
             errored += 1

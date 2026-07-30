@@ -31,7 +31,7 @@ class TraktError(Exception):
 
 
 class TraktRateLimitError(TraktError):
-    """Trakt returned 429 and _send's retry/backoff budget was exhausted.
+    """Trakt returned 429 and send's retry/backoff budget was exhausted.
 
     A DISTINCT type (not a generic retryable flag) so callers can tell "Trakt is
     rate-limiting us" apart from every other failure and react deliberately: the
@@ -43,7 +43,7 @@ class TraktRateLimitError(TraktError):
     correctly degrades to its stale cached window)."""
 
 
-def _headers(settings: Settings, paginate: bool = True) -> dict:
+def api_headers(settings: Settings, paginate: bool = True) -> dict:
     """Trakt request headers. `paginate=False` OMITS the X-Pagination-* headers.
 
     This matters for /sync/watched/shows: sending pagination headers switches it
@@ -103,7 +103,7 @@ async def aclose_shared_client() -> None:
 # real answer out of Trakt" and "decide what that answer means" is preserved.
 # ---------------------------------------------------------------------------
 
-# One _send call is bounded two ways, whichever it hits first: a small attempt
+# One send call is bounded two ways, whichever it hits first: a small attempt
 # count AND a wall-clock budget. A user-initiated Refresh must return an answer in
 # a bounded window even when Trakt hands back a large Retry-After (its own docs
 # cite a 254s example from the wild) rather than hang silently. The budget is
@@ -158,7 +158,7 @@ def _retry_after_seconds(resp: httpx.Response) -> float | None:
     return secs
 
 
-async def _send(client: httpx.AsyncClient, method: str, url: str, *,
+async def send(client: httpx.AsyncClient, method: str, url: str, *,
                 headers: dict | None = None, json=None, timeout: float | None = None) -> httpx.Response:
     """Issue one Trakt request, retrying only on 429 within a bounded budget.
 
@@ -220,7 +220,7 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
                       fresh: bool, raise_errors: bool):
     """One GET, reduced to "the parsed body, or None". No caching.
 
-    Split out of _cached_get so that function is only the CACHE POLICY —
+    Split out of cached_get so that function is only the CACHE POLICY —
     what to read, what to serve stale, what to write — and this one is only the
     call and what its answer means. The two change for different reasons: a new
     caching mode (cache_only was one) touches the policy alone, and a change in
@@ -228,14 +228,14 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
     """
     t0 = _time.perf_counter()
     try:
-        resp = await _send(client, "GET", url, headers=_headers(settings))
+        resp = await send(client, "GET", url, headers=api_headers(settings))
     except httpx.HTTPError as exc:
         # A transport failure means we never got a real answer from Trakt. Unlike a
         # 404 or an empty list, that is NOT "Trakt says there's nothing here", so it
         # must never collapse into the None that callers read as an empty result —
         # a season would then render a false 0 episodes, a progress record a false
         # 0 watched. Always raise, regardless of raise_errors. (An exhausted-retry
-        # TraktRateLimitError from _send is not an httpx error and propagates on its
+        # TraktRateLimitError from send is not an httpx error and propagates on its
         # own for the same reason — the affected caller degrades it deliberately.)
         logger.warning("Trakt GET %s failed: %s", path, exc)
         raise TraktError(f"Could not reach Trakt: {exc}") from exc
@@ -257,7 +257,7 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
         return None
 
 
-async def _cached_get(
+async def cached_get(
     client: httpx.AsyncClient,
     settings: Settings,
     path: str,

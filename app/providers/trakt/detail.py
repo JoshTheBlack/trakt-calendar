@@ -58,7 +58,7 @@ async def fetch_tile_info(settings: Settings, media: str, trakt_id: str, season:
     if media == "movie" or season is None:
         return {"episode_count": None, "first_aired": None, "last_aired": None, "next_aired": None}
     tz = ZoneInfo(settings.timezone)
-    episodes = await transport._cached_get(
+    episodes = await transport.cached_get(
         transport.shared_client(), settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
     )
     if not isinstance(episodes, list):
@@ -117,13 +117,13 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     base = "movies" if media == "movie" else "shows"
     client = transport.shared_client()
     tasks = {
-        "info": transport._cached_get(
+        "info": transport.cached_get(
             client, settings, f"{base}/{trakt_id}", {"extended": "full"}, cache_only=cache_only),
-        "people": transport._cached_get(
+        "people": transport.cached_get(
             client, settings, f"{base}/{trakt_id}/people", {"extended": "full"}, cache_only=cache_only),
     }
     if media != "movie" and season is not None:
-        tasks["episodes"] = transport._cached_get(
+        tasks["episodes"] = transport.cached_get(
             client, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
             cache_only=cache_only)
     results = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
@@ -235,7 +235,7 @@ async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: 
     shared `client` when batching (else a throwaway one is created)."""
     tz = ZoneInfo(settings.timezone)
     c = client or transport.shared_client()
-    episodes = await transport._cached_get(
+    episodes = await transport.cached_get(
         c, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
         ttl_seconds=SEASON_CACHE_TTL_SECONDS, fresh=fresh,
     )
@@ -256,7 +256,7 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     filtering on aired_episodes wrongly hid every not-yet-aired season from
     the picker, which is exactly a season 1 that has not started airing yet.
     Fixed once manual add-show on an unaired season turned out to be broken."""
-    results = await transport._cached_get(
+    results = await transport.cached_get(
         transport.shared_client(), settings, f"shows/{trakt_id}/seasons", {"extended": "full"}, raise_errors=True,
     )
     out = []
@@ -299,7 +299,7 @@ async def search_titles(settings: Settings, media: str, query: str) -> list[dict
     q = (query or "").strip()
     if not q:
         return []
-    results = await transport._cached_get(
+    results = await transport.cached_get(
         transport.shared_client(), settings, f"search/{media}", {"query": q, "extended": "full"},
         raise_errors=True,
     )
@@ -353,7 +353,7 @@ async def fetch_movie_summary(settings: Settings, trakt_id) -> dict | None:
     because the same response then answers "what is this movie's poster URL"
     without a second call.
     """
-    data = await transport._cached_get(
+    data = await transport.cached_get(
         transport.shared_client(), settings, f"movies/{trakt_id}", {"extended": "full,images"},
     )
     return data if isinstance(data, dict) else None

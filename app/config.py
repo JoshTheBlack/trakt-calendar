@@ -377,7 +377,7 @@ def _scalar_field_types() -> dict[str, type]:
     }
 
 
-def _ensure_data_dir() -> None:
+def ensure_data_dir() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -441,7 +441,7 @@ def _read_db_config() -> tuple[dict, dict]:
 def _write_settings_file(data: dict) -> None:
     """Write settings.json atomically (temp file + os.replace) so a crash mid-write
     can never leave a truncated recovery file behind."""
-    _ensure_data_dir()
+    ensure_data_dir()
     tmp = SETTINGS_FILE.with_name(SETTINGS_FILE.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     os.replace(tmp, SETTINGS_FILE)
@@ -460,7 +460,7 @@ def load_settings(open_secrets: bool = True) -> Settings:
     sealed under a key the current one cannot open (that decrypt would otherwise raise
     SealedButWrongKey), so an administrator can still reach the recovery screen.
     """
-    _ensure_data_dir()
+    ensure_data_dir()
     file_data = _read_settings_file()
     globals_doc, stored_secrets = _read_db_config()
     if not open_secrets:
@@ -524,7 +524,7 @@ def save_settings(settings: Settings) -> None:
     recovery fields to settings.json. The Settings dataclass API is unchanged; only
     the destinations moved.
     """
-    _ensure_data_dir()
+    ensure_data_dir()
     from . import db, encryption_flow
 
     data = settings.to_dict()

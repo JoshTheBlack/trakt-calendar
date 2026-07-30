@@ -4,7 +4,7 @@ progress, ratings, and the activity beacon that gates a sync.
 Separate from detail.py because these answers are personal. None of them may be
 written to the URL-keyed shared cache — two accounts asking the same question
 send the identical URL — which is why every call here passes `private=True` or
-goes through _send directly. That is also the whole of what a second provider
+goes through send directly. That is also the whole of what a second provider
 has to supply before the tracker can be backed by it, so it is one module
 rather than a handful of functions scattered through the client.
 """
@@ -47,7 +47,7 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     client = transport.shared_client()
     results = await asyncio.gather(*(
-        transport._cached_get(client, settings, f"shows/{tid}/progress/watched", params, private=True)
+        transport.cached_get(client, settings, f"shows/{tid}/progress/watched", params, private=True)
         for tid in unique
     ))
     lookup: dict[tuple[int, int], int] = {}
@@ -73,7 +73,7 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
 async def fetch_last_activities(settings: Settings) -> dict:
     """/sync/last_activities -> the small per-type "last changed at" beacon blob
     (fixed size, independent of library size). Used to gate the history sync."""
-    res = await transport._cached_get(
+    res = await transport.cached_get(
         transport.shared_client(), settings, "sync/last_activities", {}, private=True)
     return res if isinstance(res, dict) else {}
 
@@ -94,7 +94,7 @@ async def fetch_show_progress_detail(settings: Settings, trakt_id,
     """
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     c = client or transport.shared_client()
-    res = await transport._cached_get(c, settings, f"shows/{trakt_id}/progress/watched", params, private=True)
+    res = await transport.cached_get(c, settings, f"shows/{trakt_id}/progress/watched", params, private=True)
     out: dict[int, dict[int, str]] = {}
     if isinstance(res, dict):
         for season in res.get("seasons") or []:
@@ -147,7 +147,7 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
         url = f"{transport.API_BASE}/users/me/history?{urlencode(params)}"
         t0 = _time.perf_counter()
         try:
-            resp = await transport._send(client, "GET", url, headers=transport._headers(settings, paginate=False))
+            resp = await transport.send(client, "GET", url, headers=transport.api_headers(settings, paginate=False))
         except httpx.HTTPError as exc:
             logger.warning("fetch_history: request failed: %s", exc)
             break
@@ -172,17 +172,6 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
         page += 1
     logger.info("fetch_history(start_at=%s): %d event(s) over %d page(s)", start_at, len(events), page)
     return events
-
-
-def _parse_watched_ts(value) -> datetime | None:
-    """Trakt's ISO-UTC last_watched_at -> aware datetime (UTC), or None."""
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 async def fetch_watched_progress(settings: Settings, since_days: int | None = 60) -> list[dict]:
@@ -272,8 +261,8 @@ async def fetch_ratings(settings: Settings) -> list[dict]:
     library at the pagination limit with nothing in the response to say so.
     """
     url = f"{transport.API_BASE}/sync/ratings?{urlencode({'extended': 'full'})}"
-    resp = await transport._send(transport.shared_client(), "GET", url,
-                                 headers=transport._headers(settings, paginate=False))
+    resp = await transport.send(transport.shared_client(), "GET", url,
+                                 headers=transport.api_headers(settings, paginate=False))
     if resp.status_code == 401:
         raise TraktError("Trakt rejected the credentials (401).", 401)
     if resp.status_code != 200:

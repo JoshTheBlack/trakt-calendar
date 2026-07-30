@@ -15,6 +15,7 @@ import asyncio
 import os
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,7 +27,9 @@ import pytest
 os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-trakt-client-test-"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.endpoints import get_endpoint  # noqa: E402
 from app.providers.trakt import TraktError  # noqa: E402
+from app.providers.trakt import calendar as trakt_calendar  # noqa: E402
 from app.providers.trakt import transport  # noqa: E402
 from app.providers.trakt.detail import _cast_from, _episodes_from  # noqa: E402
 
@@ -48,6 +51,39 @@ class _Client:
         if self._error is not None:
             raise self._error
         return self._response
+
+
+class _Unreadable:
+    """Stands in for a body that is not JSON at all."""
+
+
+class _WindowResponse:
+    def __init__(self, body, status, headers):
+        self._body = body
+        self.status_code = status
+        self.headers = headers
+
+    def json(self):
+        if isinstance(self._body, _Unreadable):
+            raise ValueError("not json")
+        return self._body
+
+
+class _CaptureClient:
+    """A client stand-in that records the request it was given and replies with a
+    canned body — what the window fetch builds is half of what it is asked to do."""
+
+    def __init__(self, body, status: int = 200, response_headers: dict | None = None):
+        self._body = body
+        self._status = status
+        self._response_headers = response_headers or {}
+        self.url = None
+        self.sent_headers: dict = {}
+
+    async def get(self, url, headers=None, timeout=None):
+        self.url = url
+        self.sent_headers = headers or {}
+        return _WindowResponse(self._body, self._status, self._response_headers)
 
 
 def _response(status: int, *, body: str = "{}") -> httpx.Response:
@@ -116,7 +152,7 @@ class TestCachedGetStoresOnlyRealAnswers:
     def _run(self, client, **kwargs):
         fake_cache = _FakeCache()
         with patch.object(transport, "cache", fake_cache):
-            result = asyncio.run(transport._cached_get(client, SETTINGS, "x", {}, **kwargs))
+            result = asyncio.run(transport.cached_get(client, SETTINGS, "x", {}, **kwargs))
         return result, fake_cache.writes
 
     def test_a_good_response_is_stored(self):
@@ -137,6 +173,70 @@ class TestCachedGetStoresOnlyRealAnswers:
         result, writes = self._run(_Client(_response(200, body='{"seasons": []}')), private=True)
         assert result == {"seasons": []}
         assert writes == []
+
+
+class TestFetchWindow:
+    """The one place the app asks Trakt what airs.
+
+    It had no direct coverage while it was two private copies assembled at their
+    call sites — each was only ever reached through a whole calendar fetch or a
+    whole cache fill, so its own refusals were only ever asserted second-hand.
+    """
+
+    def _fetch(self, client, headers=None):
+        with patch.object(transport, "shared_client", return_value=client):
+            return asyncio.run(trakt_calendar.fetch_window(
+                get_endpoint("shows"), SETTINGS, date(2026, 7, 6), 7,
+            ))
+
+    def test_the_window_is_asked_for_by_start_date_and_day_count(self):
+        client = _CaptureClient(body=[])
+        self._fetch(client)
+        assert "/calendars/all/shows/2026-07-06/7" in client.url
+        assert "extended=full%2Cimages" in client.url
+
+    def test_no_pagination_headers_are_sent(self):
+        """Sending them switches some Trakt endpoints into a paginated shape.
+        The calendar ignores them, so asking is a way to be silently truncated."""
+        client = _CaptureClient(body=[])
+        self._fetch(client)
+        assert "X-Pagination-Page" not in client.sent_headers
+        assert "X-Pagination-Limit" not in client.sent_headers
+
+    def test_the_entries_come_back_untouched(self):
+        """Raw, unfiltered and unnormalized: the two callers filter differently
+        and one of them stores the result, so deciding here would make one wrong."""
+        entries = [{"show": {"title": "A"}}, {"show": {"title": "B"}}]
+        assert self._fetch(_CaptureClient(body=entries)) == entries
+
+    def test_a_401_names_the_credentials_to_check(self):
+        with pytest.raises(TraktError) as exc:
+            self._fetch(_CaptureClient(body=[], status=401))
+        assert exc.value.status == 401
+        assert "Client ID" in str(exc.value)
+
+    def test_any_other_non_200_carries_its_status(self):
+        with pytest.raises(TraktError) as exc:
+            self._fetch(_CaptureClient(body=[], status=503))
+        assert exc.value.status == 503
+
+    def test_an_unreadable_body_raises_rather_than_reading_as_empty(self):
+        """An empty window and a broken response are different facts: the first
+        gets cached as the answer, and the second must not be."""
+        with pytest.raises(TraktError):
+            self._fetch(_CaptureClient(body=_Unreadable()))
+
+    def test_a_body_that_is_not_a_list_is_an_empty_window(self):
+        """There is nothing to salvage from it and nothing to say about it."""
+        assert self._fetch(_CaptureClient(body={"error": "nope"})) == []
+
+    def test_pagination_headers_are_reported_rather_than_ignored(self):
+        """If Trakt ever starts paginating the calendar, the symptom is a short
+        window and no other sign of it — so the warning is the only tell."""
+        client = _CaptureClient(body=[], response_headers={"x-pagination-page-count": "3"})
+        with patch.object(trakt_calendar.logger, "warning") as warn:
+            self._fetch(client)
+        assert warn.called
 
 
 class TestModalShaping:

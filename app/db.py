@@ -46,7 +46,7 @@ from typing import Any, TypeVar
 
 import anyio.to_thread
 
-from .config import DATA_DIR, _ensure_data_dir
+from .config import DATA_DIR, ensure_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,7 @@ def _drop_local_connection() -> None:
 
 
 def _new_connection(path: Path) -> sqlite3.Connection:
-    _ensure_data_dir()
+    ensure_data_dir()
     path.parent.mkdir(parents=True, exist_ok=True)
     fresh = not path.exists()
     # isolation_level=None means autocommit: transactions are opened explicitly

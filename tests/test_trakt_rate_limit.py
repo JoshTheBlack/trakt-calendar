@@ -32,7 +32,7 @@ from app.providers.trakt import TraktRateLimitError  # noqa: E402
 
 TMP = Path(os.environ["TRAKT_DATA_DIR"])
 
-# Minimal settings whose only job is to satisfy _headers()/_cached_get() — no real
+# Minimal settings whose only job is to satisfy api_headers()/cached_get() — no real
 # token is ever put on the wire because the client is a fake.
 FAKE_SETTINGS = SimpleNamespace(
     trakt_access_token="tok", trakt_client_id="cid",
@@ -45,8 +45,8 @@ def _resp(status: int, headers: dict | None = None):
 
 
 class FakeClient:
-    """Serves a scripted list of responses/exceptions to _send, one per request.
-    Exposes get/post (the shape _send dispatches to) recording each call."""
+    """Serves a scripted list of responses/exceptions to send, one per request.
+    Exposes get/post (the shape send dispatches to) recording each call."""
 
     def __init__(self, scripted):
         self._scripted = list(scripted)
@@ -96,13 +96,13 @@ def _mock_transport_client(*scripted):
 
 
 class SendRetryTests(unittest.IsolatedAsyncioTestCase):
-    """The 429 retry/backoff loop in _send."""
+    """The 429 retry/backoff loop in send."""
 
     async def test_honors_retry_after_then_succeeds(self):
         sleep = RecordingSleep()
         client = FakeClient([_resp(429, {"Retry-After": "2"}), _resp(200)])
         with _patch_sleep(sleep):
-            resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+            resp = await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [2.0])  # the header wins over the 1s step
         self.assertEqual(len(client.requests), 2)
@@ -111,7 +111,7 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         sleep = RecordingSleep()
         client = FakeClient([_resp(429), _resp(429), _resp(200)])
         with _patch_sleep(sleep):
-            resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+            resp = await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [1.0, 2.0])  # 2**0, 2**1
 
@@ -120,7 +120,7 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient([_resp(429), _resp(429), _resp(429)])
         with _patch_sleep(sleep):
             with self.assertRaises(TraktRateLimitError):
-                await transport._send(client, "GET", transport.API_BASE + "/x")
+                await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(sleep.durations, [1.0, 2.0])  # slept twice, then gave up
         self.assertEqual(len(client.requests), 3)  # exactly _SEND_MAX_ATTEMPTS
 
@@ -131,7 +131,7 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         client = FakeClient([_resp(429, {"Retry-After": "254"})])
         with _patch_sleep(sleep):
             with self.assertRaises(TraktRateLimitError):
-                await transport._send(client, "GET", transport.API_BASE + "/x")
+                await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(sleep.durations, [])  # never slept part-way in
         self.assertEqual(len(client.requests), 1)
 
@@ -139,7 +139,7 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         sleep = RecordingSleep()
         client = FakeClient([_resp(429, {"Retry-After": "not-a-number"}), _resp(200)])
         with _patch_sleep(sleep):
-            resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+            resp = await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [1.0])
 
@@ -153,21 +153,21 @@ class SendRetryTests(unittest.IsolatedAsyncioTestCase):
         clock = iter([0.0, 0.0, 0.0, 100.0])
         with _patch_sleep(sleep), patch("app.providers.trakt.transport._time.monotonic", lambda: next(clock)):
             with self.assertRaises(TraktRateLimitError):
-                await transport._send(client, "GET", transport.API_BASE + "/x")
+                await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(sleep.durations, [1.0])  # one small sleep, then elapsed cut it
         self.assertEqual(len(client.requests), 1)  # second attempt never fired
 
     async def test_non_429_returned_untouched(self):
         for status in (200, 401, 404):
             client = FakeClient([_resp(status)])
-            resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+            resp = await transport.send(client, "GET", transport.API_BASE + "/x")
             self.assertEqual(resp.status_code, status)
             self.assertEqual(len(client.requests), 1)  # no retry on non-429
 
     async def test_network_error_propagates_as_httpx(self):
         client = FakeClient([httpx.ConnectError("boom")])
         with self.assertRaises(httpx.ConnectError):
-            await transport._send(client, "GET", transport.API_BASE + "/x")
+            await transport.send(client, "GET", transport.API_BASE + "/x")
 
 
 class SemaphoreLoopKeyingTests(unittest.TestCase):
@@ -176,7 +176,7 @@ class SemaphoreLoopKeyingTests(unittest.TestCase):
     def test_semaphore_recreated_per_event_loop(self):
         async def one():
             client = FakeClient([_resp(200)])
-            await transport._send(client, "GET", transport.API_BASE + "/x")
+            await transport.send(client, "GET", transport.API_BASE + "/x")
             return transport._rate_limit_semaphore()
 
         # Two separate asyncio.run() calls => two distinct loops. A module-level
@@ -188,7 +188,7 @@ class SemaphoreLoopKeyingTests(unittest.TestCase):
 
 
 class CachedGetContractTests(unittest.IsolatedAsyncioTestCase):
-    """_cached_get: an exhausted retry ALWAYS raises; a real 404 still returns None."""
+    """cached_get: an exhausted retry ALWAYS raises; a real 404 still returns None."""
 
     async def test_exhausted_retry_raises_rate_limit(self):
         sleep = RecordingSleep()
@@ -196,12 +196,12 @@ class CachedGetContractTests(unittest.IsolatedAsyncioTestCase):
         with _patch_sleep(sleep):
             with self.assertRaises(TraktRateLimitError):
                 # private=True keeps this off the disk cache entirely (no DB needed).
-                await transport._cached_get(client, FAKE_SETTINGS, "shows/9/seasons/9",
+                await transport.cached_get(client, FAKE_SETTINGS, "shows/9/seasons/9",
                                         {"extended": "full"}, private=True)
 
     async def test_plain_404_still_returns_none(self):
         client = FakeClient([_resp(404)])
-        out = await transport._cached_get(client, FAKE_SETTINGS, "shows/9/seasons/9",
+        out = await transport.cached_get(client, FAKE_SETTINGS, "shows/9/seasons/9",
                                       {"extended": "full"}, private=True)
         self.assertIsNone(out)  # a genuine miss stays None — distinct from a 429
 
@@ -315,7 +315,7 @@ class MockTransportSendTests(unittest.IsolatedAsyncioTestCase):
         sleep = RecordingSleep()
         async with _mock_transport_client((429, {"Retry-After": "2"}), 200) as client:
             with _patch_sleep(sleep):
-                resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+                resp = await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [2.0])  # header parsed off a real Response
 
@@ -323,7 +323,7 @@ class MockTransportSendTests(unittest.IsolatedAsyncioTestCase):
         sleep = RecordingSleep()
         async with _mock_transport_client(429, 429, 200) as client:
             with _patch_sleep(sleep):
-                resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+                resp = await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [1.0, 2.0])
 
@@ -332,12 +332,12 @@ class MockTransportSendTests(unittest.IsolatedAsyncioTestCase):
         async with _mock_transport_client(429, 429, 429) as client:
             with _patch_sleep(sleep):
                 with self.assertRaises(TraktRateLimitError):
-                    await transport._send(client, "GET", transport.API_BASE + "/x")
+                    await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(sleep.durations, [1.0, 2.0])
 
     async def test_real_client_non_429_returned_untouched(self):
         async with _mock_transport_client(404) as client:
-            resp = await transport._send(client, "GET", transport.API_BASE + "/x")
+            resp = await transport.send(client, "GET", transport.API_BASE + "/x")
         self.assertEqual(resp.status_code, 404)  # no retry, returned as-is
 
 

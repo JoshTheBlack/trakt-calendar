@@ -161,14 +161,21 @@ def clear_session_cookie(
 _FORWARDED_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded")
 _warned_default_proxy = False
 
+# What ipaddress.ip_network() actually returns, spelled with the two public
+# classes rather than their shared private base: these annotations describe a
+# value, they never isinstance against it, so the public union says exactly the
+# same thing without depending on a name the stdlib can retire in a point
+# release with no deprecation and no test of ours to notice.
+TrustedNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
 
-def parse_trusted_networks(spec: str | None) -> list[ipaddress._BaseNetwork]:
+
+def parse_trusted_networks(spec: str | None) -> list[TrustedNetwork]:
     """Parse the comma-separated CIDR list.
 
     An unparseable entry is dropped with a warning rather than raising: a typo in
     an admin-editable settings field must not make the instance unbootable.
     """
-    networks: list[ipaddress._BaseNetwork] = []
+    networks: list[TrustedNetwork] = []
     for raw in (spec or "").split(","):
         token = raw.strip()
         if not token:
@@ -180,7 +187,7 @@ def parse_trusted_networks(spec: str | None) -> list[ipaddress._BaseNetwork]:
     return networks
 
 
-def _is_trusted(addr: str, networks: list[ipaddress._BaseNetwork]) -> bool:
+def _is_trusted(addr: str, networks: list[TrustedNetwork]) -> bool:
     try:
         ip = ipaddress.ip_address(addr)
     except ValueError:
