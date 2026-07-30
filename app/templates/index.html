@@ -240,7 +240,8 @@
                     </p>
                     <div class="auth-notice-actions">
                         <button type="button" class="btn-ghost small" onclick="adoptTraktToken(this)">🔗 Link it to my account</button>
-                        <a class="btn-ghost small" href="/auth/trakt/link">Reconnect with Trakt</a>
+                        {# Leaves the app — see the same link on the sign-in page. #}
+                        <a class="btn-ghost small" href="/auth/trakt/link" hx-boost="false">Reconnect with Trakt</a>
                     </div>
                     <span class="hint" id="s_reconnect_error"></span>
                 </div>

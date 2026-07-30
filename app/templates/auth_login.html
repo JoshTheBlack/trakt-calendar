@@ -21,7 +21,10 @@
 
     <div class="auth-providers">
       {% if trakt_login_configured %}
-      <a class="auth-provider-btn ready" href="/auth/trakt/start">Continue with Trakt</a>
+      {# Leaves the app: the route 303s to trakt.tv, and a boosted link fetches
+         that with XHR instead of navigating — which the browser refuses
+         cross-origin, so the click does nothing at all. #}
+      <a class="auth-provider-btn ready" href="/auth/trakt/start" hx-boost="false">Continue with Trakt</a>
       {% else %}
       <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Trakt client ID, client secret, and public base URL in Settings">Continue with Trakt <span class="soon">Off</span></button>
       {% endif %}

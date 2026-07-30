@@ -213,6 +213,23 @@ class EveryPageAgreesTests(unittest.TestCase):
                 with self.subTest(page=name, tag=tag[:60]):
                     self.assertIn('hx-boost="false"', tag)
 
+    def test_a_link_that_leaves_the_app_opts_out_of_boosting(self):
+        """A boosted link is an XHR, and an XHR cannot follow a redirect to
+        another origin — the browser's preflight refuses it over the `hx-boosted`
+        header and the click does nothing at all, silently.
+
+        These are the routes that hand the browser to a provider's own approval
+        screen, so every link to one has to be a real navigation. Enumerated
+        rather than pattern-matched: the property is "this route ends up
+        somewhere else", which a URL cannot be read off.
+        """
+        for name in PAGES:
+            source = read(name)
+            for path in ("/auth/trakt/start", "/auth/trakt/link", "/auth/plex/start"):
+                for tag in re.findall(rf'<a [^>]*href="{re.escape(path)}[^"]*"[^>]*>', source):
+                    with self.subTest(page=name, tag=tag[:60]):
+                        self.assertIn('hx-boost="false"', tag)
+
     def test_the_download_links_opt_out_of_boosting(self):
         """htmx boosts every link under a boosted <body> and ignores `download`,
         so a boosted export would swap its JSON into the page instead of saving

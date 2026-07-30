@@ -181,7 +181,8 @@
         <button class="btn-ghost tiny" type="button" data-unlink="trakt">Unlink</button>
         {% endif %}
         {% elif trakt_login_configured %}
-        <a class="btn-ghost tiny" href="/auth/trakt/link">Connect</a>
+        {# Leaves the app — see the same link on the sign-in page. #}
+        <a class="btn-ghost tiny" href="/auth/trakt/link" hx-boost="false">Connect</a>
         {% else %}
         {# Not a dead end: say who can fix it, so this doesn't read as "linking
            is broken". Only an administrator can, and only they are told how. #}
