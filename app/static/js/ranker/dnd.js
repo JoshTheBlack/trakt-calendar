@@ -10,12 +10,29 @@ function keysIn(container) {
         .map(el => el.dataset.key);
 }
 
-// Every container that holds draggable titles: the pool and each tier's body.
-// Search results are bound separately — they clone rather than move.
+// Every container that holds draggable titles: the pool, and each tier body THAT
+// HAS ITS ROWS. Search results are bound separately — they clone rather than
+// move.
+//
+// `[data-loaded]` is not a nicety. Above the row threshold a board draws its
+// tiers closed and each fetches its rows the first time it is opened, so an
+// unopened tier's body sits in the document with no children — and Sortable
+// treats a childless drop target as a place to insert, scanning every one of
+// them against the pointer on every move (its emptyInsertThreshold) and handing
+// the drag over to any it lands inside. A tier nobody has opened is not
+// somewhere a title can be dropped: it is not even on screen. Binding it made
+// dragging into the tier BELOW it shudder, the displaced row shuffling aside
+// over and over as the drag was taken away and given back. ranker/boot.js marks
+// each body loaded as its fragment lands and re-runs the binding, so a tier
+// becomes a drop target exactly when it has somewhere to drop into. A body that
+// is loaded and genuinely empty stays a target, which is how a new tier gets its
+// first title.
+const DROP_TARGETS = '.ranker-pool, .ranker-rows[data-loaded]';
+
 function dropTargets(root) {
     const scope = root && root.querySelectorAll ? root : document;
-    const found = Array.from(scope.querySelectorAll('.ranker-pool, .ranker-rows'));
-    if (scope.matches && scope.matches('.ranker-pool, .ranker-rows')) found.push(scope);
+    const found = Array.from(scope.querySelectorAll(DROP_TARGETS));
+    if (scope.matches && scope.matches(DROP_TARGETS)) found.push(scope);
     return found;
 }
 

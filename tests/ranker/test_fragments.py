@@ -295,6 +295,42 @@ class BoostedFormTests(FragmentTestCase):
         self.assertRegex(html, r'<a class="ranker-board-link[^"]*"\s+href="/rankings\?board=')
 
 
+class DropTargetTests(FragmentTestCase):
+    """A container is a drop target only once it holds what it claims to.
+
+    Sortable treats a CHILDLESS drop target as somewhere to insert, and scans
+    every one of them against the pointer on every move. A tier that has not
+    been opened yet is childless — its rows are still on the server — so binding
+    it let an off-screen container take the drag away from the tier below it and
+    give it back, over and over, which is what the shudder was.
+    """
+
+    def dnd_source(self) -> str:
+        return (STATIC_DIR / "js" / "ranker" / "dnd.js").read_text(encoding="utf-8")
+
+    def test_a_tier_body_is_a_drop_target_only_once_its_rows_are_there(self):
+        self.assertIn(".ranker-rows[data-loaded]", self.dnd_source())
+        self.assertNotIn("'.ranker-pool, .ranker-rows'", self.dnd_source())
+
+    def test_the_swap_marks_a_body_loaded_before_rebinding_the_containers(self):
+        """Order matters: the binding pass reads data-loaded, so a tier whose
+        rows have just landed has to be marked first or it waits for the next
+        swap to become droppable."""
+        boot = (STATIC_DIR / "js" / "ranker" / "boot.js").read_text(encoding="utf-8")
+        self.assertLess(boot.index("dataset.loaded = '1'"),
+                        boot.index("initSortable(document)", boot.index("afterSwap")))
+
+    def test_an_inline_tier_body_says_it_is_loaded_and_a_deferred_one_does_not(self):
+        self.board_with(tiered=4)
+        inline = self.client.get("/rankings").text
+        self.assertRegex(inline, r'<div class="ranker-rows" id="tierBody-tier-s"[^>]*data-loaded="1"')
+        with mock.patch.object(ranker_routes, "EAGER_ROW_LIMIT", 0):
+            deferred = self.client.get("/rankings").text
+        body = re.search(r'<div class="ranker-rows" id="tierBody-tier-s"[^>]*>', deferred)
+        self.assertIsNotNone(body)
+        self.assertNotIn("data-loaded", body.group(0))
+
+
 class NoBrowserDialogTests(FragmentTestCase):
     """This page asks for a name and asks to confirm through its own dialog, never
     through the browser's.
