@@ -38,7 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, db, main, share_code, share_links  # noqa: E402
+from app import auth, db, distrakt_routes, share_code, share_links  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -227,7 +227,7 @@ class AdmittedActorTests(DistraktTestCase):
         reads is the session's, not anything the caller names."""
         owner = self.tracker_user("owner", token="owner-token")
         other = self.tracker_user("other", token="other-token")
-        asyncio.run(main.distrakt_store.add_show(owner, "2026-07", {
+        asyncio.run(distrakt_routes.distrakt_store.add_show(owner, "2026-07", {
             "trakt_id": 42, "season": 1, "slug": "secret-show", "title": "Secret Show",
             "network": "HBO", "media": "show", "tmdb": None,
         }))
@@ -263,7 +263,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
     def test_the_settings_object_carries_the_users_token_not_the_instances(self):
         user_id = self.tracker_user(token="THE-USERS-TOKEN")
-        settings = asyncio.run(main._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
         self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
         self.assertNotEqual(settings.trakt_access_token, self.APP_WIDE)
         # The operator's refresh token has no business travelling next to
@@ -281,14 +281,14 @@ class RequestingUsersTokenTests(DistraktTestCase):
             async def _fake(uid, settings=None):
                 return "FROM-THE-SOURCE"
             spy.side_effect = _fake
-            settings = asyncio.run(main._distrakt_settings(user_id))
+            settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
         spy.assert_awaited_once()
         self.assertEqual(spy.await_args.args[0], user_id)
         self.assertEqual(settings.trakt_access_token, "FROM-THE-SOURCE")
 
     def test_every_trakt_call_a_month_read_makes_carries_the_users_token(self):
         user_id = self.tracker_user(token="USER-A-TOKEN")
-        asyncio.run(main.distrakt_store.add_show(user_id, "2026-07", {
+        asyncio.run(distrakt_routes.distrakt_store.add_show(user_id, "2026-07", {
             "trakt_id": 7, "season": 2, "slug": "show", "title": "Show",
             "network": "HBO", "media": "show", "tmdb": 1,
         }))
@@ -305,7 +305,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         first = self.tracker_user("first", token="FIRST-TOKEN")
         second = self.tracker_user("second", token="SECOND-TOKEN")
         for user_id in (first, second):
-            asyncio.run(main.distrakt_store.add_show(user_id, "2026-07", {
+            asyncio.run(distrakt_routes.distrakt_store.add_show(user_id, "2026-07", {
                 "trakt_id": 7, "season": 2, "slug": "show", "title": "Show",
                 "network": "HBO", "media": "show", "tmdb": 1,
             }))
@@ -340,7 +340,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         the operator's watch history."""
         user_id = self._make_user("tokenless", calendar_approved=True, distrakt_approved=True)
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
-        settings = asyncio.run(main._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
         self.assertEqual(settings.trakt_access_token, "")
         self.assertFalse(settings.trakt_configured)
 
@@ -360,7 +360,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
         user_id = self.tracker_user(token="PRIVATE-TOKEN")
         recorder = RecordingClient()
-        settings = asyncio.run(main._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             asyncio.run(trakt_sync.fetch_show_progress_detail(settings, 7))
         self.assertTrue(recorder.urls)

@@ -48,7 +48,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import auth, calendar_cache, db  # noqa: E402
-from app import main as main_module  # noqa: E402
+from app import calendar_routes  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -154,8 +154,8 @@ def main() -> None:
     # Two passes over the SAME code, so the comparison isn't against numbers from
     # an older tree: first with the inline day count raised past a month, which is
     # the whole month in one response, then as the page actually ships.
-    for pass_label, inline_days in (("all-in-one", 366), ("windowed", main_module.INITIAL_DAY_BLOCKS)):
-        main_module.INITIAL_DAY_BLOCKS = inline_days
+    for pass_label, inline_days in (("all-in-one", 366), ("windowed", calendar_routes.INITIAL_DAY_BLOCKS)):
+        calendar_routes.INITIAL_DAY_BLOCKS = inline_days
         # Empty the window cache so this pass's "cold" is genuinely cold — the
         # previous pass filled it.
         asyncio.run(db.execute("DELETE FROM api_cache"))

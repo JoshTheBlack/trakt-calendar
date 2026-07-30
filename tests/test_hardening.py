@@ -493,7 +493,7 @@ class CookieSecureEditingTests(HardeningTestCase):
     """cookie_secure is editable in Settings now, with the one self-locking
     change refused rather than the whole field left hand-edited.
 
-    The refusal is judged by main._cookie_secure_error on the BROWSER's scheme,
+    The refusal is judged by settings_routes._cookie_secure_error on the BROWSER's scheme,
     so it is unit-tested with constructed requests the same way
     detect_cookie_secure is — a TestClient will not carry an authenticated Secure
     cookie over an http:// base_url, which is the very situation under test."""
@@ -506,8 +506,8 @@ class CookieSecureEditingTests(HardeningTestCase):
                                  "headers": headers})
 
     def _error(self, mode, origin):
-        from app import main
-        return main._cookie_secure_error(Settings(cookie_secure=mode), self._req(origin))
+        from app import settings_routes
+        return settings_routes._cookie_secure_error(Settings(cookie_secure=mode), self._req(origin))
 
     def test_always_from_a_genuinely_http_browser_is_refused(self):
         """The lockout: a Secure cookie is discarded by an http browser, so the
@@ -822,7 +822,7 @@ class DistraktDetailsTests(HardeningTestCase):
                 "(user_id, trakt_id, season, watched_episodes_json) VALUES (?,?,?,?)",
                 (self.user_id, 7, 3, watched)))
         self.login("josh")
-        with patch("app.main.fetch_details", return_value=self.DETAILS):
+        with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
             return self.client.get("/api/distrakt/details?trakt_id=7&season=3")
 
     def test_it_returns_the_episodes_and_this_users_watched_set(self):
@@ -837,7 +837,7 @@ class DistraktDetailsTests(HardeningTestCase):
         body = self.details().json()
         self.assertEqual(body["slug"], "silo")
         self.login("josh")
-        with patch("app.main.fetch_details", return_value=self.DETAILS):
+        with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
             spoofed = self.client.get(
                 "/api/distrakt/details?trakt_id=7&season=3&slug=evil").json()
         self.assertEqual(spoofed["slug"], "silo")
@@ -847,7 +847,7 @@ class DistraktDetailsTests(HardeningTestCase):
         self.client.post("/logout", json={})
         other = self.tracker("other")
         self.login("other")
-        with patch("app.main.fetch_details", return_value=self.DETAILS):
+        with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
             body = self.client.get("/api/distrakt/details?trakt_id=7&season=3").json()
         self.assertEqual(body["watched_episodes"], [])
 

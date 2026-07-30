@@ -271,7 +271,7 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_prereq_rate_limit_returns_stale_plus_notice(self):
         from datetime import date
 
-        from app.main import _distrakt_month_payload
+        from app.distrakt_routes import _distrakt_month_payload
 
         today = date.today()
         month_key = f"{today.year:04d}-{today.month:02d}"

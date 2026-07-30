@@ -54,9 +54,12 @@ _CARRY_PARAMS = ("card", "packing", "hidenw", "tz", "networks", "endpoint")
 
 
 # ---------------------------------------------------------------------------
-# small page-local helpers (deliberately not shared with app/main.py's private
-# versions — these render a page with no session, and duplicating five lines
-# is cheaper than coupling this module to main.py's internals)
+# small page-local helpers.
+# TODO: these three now duplicate app/route_params.py's valid_year, valid_month
+# and adjacent_months. They were copied when the only other versions were
+# private helpers inside app/main.py, so reusing them would have meant reaching
+# into another route module's internals; route_params.py is a shared module with
+# no such problem, so fold these onto it and delete them.
 # ---------------------------------------------------------------------------
 
 def _valid_year(value, fallback: int) -> int:

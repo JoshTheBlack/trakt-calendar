@@ -1019,7 +1019,7 @@ ALTER TABLE users ADD COLUMN display_name TEXT;
 # So each row records who added it: 'calendar' (premiere import), 'history'
 # (in-progress from watch history), 'manual' (added on the tracker), or '' for a
 # row written before this column existed. Only 'calendar' rows write the mark;
-# see app/main.py's api_distrakt_remove for how the legacy '' case is resolved.
+# see app/distrakt_routes.py's api_distrakt_remove for how the legacy '' case is resolved.
 MIGRATION_16 = """
 ALTER TABLE distrakt_shows ADD COLUMN source TEXT NOT NULL DEFAULT '';
 """

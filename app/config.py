@@ -100,7 +100,7 @@ class Settings:
     # Off by default: fills the calendar window cache from the heartbeat on a
     # schedule, ahead of any viewer opening the page, so a cold load never pays
     # the sequential-fetch cost. It only takes effect once
-    # calendar_cache_ttl_minutes >= 1440 — see main._heartbeat_loop — because a
+    # calendar_cache_ttl_minutes >= 1440 — see main._heartbeat_tick — because a
     # shorter TTL would let the pre-warmed data expire before it helps anyone.
     # It spends the instance's Trakt API budget on a schedule even with nobody
     # viewing, which is why it defaults off; see the settings-modal caveat.
@@ -147,7 +147,7 @@ class Settings:
     # deployment. Use "never" only when genuinely serving over plain HTTP.
     # Editable in Settings > Server; the route guards the one self-locking change
     # (setting "always" from a browser that is genuinely on http). See
-    # main._cookie_secure_error.
+    # settings_routes._cookie_secure_error.
     cookie_secure: str = "always"
     # Comma-separated CIDRs whose X-Forwarded-For this app will honor. Seeded
     # from the TRUSTED_PROXY_IPS env var on first run, editable in Settings after

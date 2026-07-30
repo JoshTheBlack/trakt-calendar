@@ -120,7 +120,7 @@ class IdentityToProviderCallTests(EncryptionIntegrationTestCase):
         self.assertEqual(token, "alice-token")
         self.assertEqual(asyncio.run(trakt_routes.stored_access_token(user_id)), "alice-token")
 
-        # And a settings object built from it (the shape main._distrakt_settings
+        # And a settings object built from it (the shape distrakt_routes._distrakt_settings
         # hands to the Trakt client) puts that plaintext token on the wire.
         settings = dataclasses.replace(load_settings(), trakt_access_token=token)
         recorder = _RecordingClient()

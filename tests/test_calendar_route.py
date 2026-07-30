@@ -1,4 +1,4 @@
-"""Gating + wiring tests for the main calendar route (app/main.py's `/` and
+"""Gating + wiring tests for the main calendar route (app/calendar_routes.py's `/` and
 `/api/state`, `/api/me/prefs`, `/api/me/timezone`).
 
 Covers: two signed-in users reading the same month see the same cached shows
@@ -33,7 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, calendar_cache, calendar_state, db, main  # noqa: E402
+from app import auth, calendar_cache, calendar_routes, calendar_state, db  # noqa: E402
 from app.providers.trakt import TraktError  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
@@ -793,8 +793,8 @@ class CalendarShellTests(CalendarRouteTestCase):
 
     def test_the_shell_renders_the_first_days_and_announces_the_rest_one_by_one(self):
         html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
-        inline = [f"2026-07-{day:02d}" for day in range(1, main.INITIAL_DAY_BLOCKS + 1)]
-        later = [f"2026-07-{day:02d}" for day in range(main.INITIAL_DAY_BLOCKS + 1, 11)]
+        inline = [f"2026-07-{day:02d}" for day in range(1, calendar_routes.INITIAL_DAY_BLOCKS + 1)]
+        later = [f"2026-07-{day:02d}" for day in range(calendar_routes.INITIAL_DAY_BLOCKS + 1, 11)]
         self.assertEqual(_day_sections(html), inline)
         # Every later day stands there as itself and fetches only itself, so no day
         # is fetched twice, none is missed, and one nobody reaches costs nothing.

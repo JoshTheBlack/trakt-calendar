@@ -593,7 +593,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         Only Trakt itself is mocked — the watch-history cache, the completion
         dates it derives, the bucketing and the payload assembly are all real.
         """
-        from app import main
+        from app import distrakt_routes
 
         await distrakt.add_show(self.user_id, "2026-08", {
             "trakt_id": 102, "season": 1, "slug": "slug-102", "title": "Finished In July",
@@ -616,7 +616,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar_cache.read_month", side_effect=no_premieres), \
              patch("app.logos.ensure_logos", new=AsyncMock(return_value=None)):
-            payload, status = await main._distrakt_month_payload(self.user_id, 2026, 8, settings)
+            payload, status = await distrakt_routes._distrakt_month_payload(self.user_id, 2026, 8, settings)
 
         self.assertEqual(status, 200)
         self.assertEqual(payload["shows"], [])

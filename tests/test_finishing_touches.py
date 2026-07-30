@@ -192,7 +192,7 @@ class RemovingFromTheTrackerTests(FinishingTestCase):
     def _remove(self, trakt_id=202, season=1):
         # The payload rebuild at the end of the route is a whole live month and
         # not what is under test; the removal itself is.
-        with patch("app.main._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/remove", json={
                 "year": 2026, "month": 8, "trakt_id": trakt_id, "season": season})
 
@@ -277,7 +277,7 @@ class LegacyRowRemovalTests(FinishingTestCase):
         }))
 
     def _remove(self, trakt_id):
-        with patch("app.main._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/remove", json={
                 "year": 2026, "month": 8, "trakt_id": trakt_id, "season": 1})
 
