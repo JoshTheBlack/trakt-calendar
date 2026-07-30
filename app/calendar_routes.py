@@ -298,7 +298,12 @@ def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
 
 @guard.get("/", AuthLevel.CALENDAR_APPROVED)
 async def home(request: Request):
-    """The month/year picker landing page (as the original front page was).
+    """The month/year picker landing page, and its ONLY address.
+
+    It answered at /pick as well for a while, rendering this same template from
+    this same context — two URLs for one page, which meant a link, a bookmark or
+    a browser history entry could disagree about where the picker is. Everything
+    that pointed at /pick now points here.
 
     A `month` in the query is an old calendar link — a bookmark, a shared URL, or
     a Discord post from when this one route served both the picker and the
@@ -533,20 +538,6 @@ async def calendar_day(request: Request):
         {**context, "group": grouped[0] if grouped else None,
          "error": None, "partial": meta["partial"]},
     )
-
-
-@guard.get("/pick", AuthLevel.CALENDAR_APPROVED)
-async def pick(request: Request):
-    """Month/year selector landing page (carried over from the original front page)."""
-    settings = load_settings()
-    user = await auth.current_user(request)
-    prefs = await auth.get_user_prefs(user.user_id)
-    year = route_params.valid_year(request.query_params.get("year"), date.today().year)
-    endpoint = get_endpoint(
-        request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
-    )
-    return templates.TemplateResponse(
-        request, "pick.html", _picker_context(request, settings, year, endpoint, user))
 
 
 @guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)

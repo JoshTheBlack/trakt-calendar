@@ -37,12 +37,16 @@
             <h1>Pick a Month</h1>
             <div class="sub">Choose a month and year to see its new show premieres.</div>
 
+            {# Both arrows, and the endpoint switcher at the foot of this file,
+               stay on "/" — this page's one address. A `month` in the query is
+               what sends that route into a calendar instead, and neither of
+               these carries one. #}
             <div class="year-nav">
-                <a class="month-nav-btn prev" href="/pick?year={{ year - 1 }}&amp;endpoint={{ endpoint.key }}" title="Previous year" aria-label="Previous year">
+                <a class="month-nav-btn prev" href="/?year={{ year - 1 }}&amp;endpoint={{ endpoint.key }}" title="Previous year" aria-label="Previous year">
                     <img src="/static/images/arrow-left.png" alt="Previous year">
                 </a>
                 <span class="year">{{ year }}</span>
-                <a class="month-nav-btn next" href="/pick?year={{ year + 1 }}&amp;endpoint={{ endpoint.key }}" title="Next year" aria-label="Next year">
+                <a class="month-nav-btn next" href="/?year={{ year + 1 }}&amp;endpoint={{ endpoint.key }}" title="Next year" aria-label="Next year">
                     <img src="/static/images/arrow-right.png" alt="Next year">
                 </a>
             </div>
@@ -64,11 +68,14 @@
 <script>
     // Stays on the picker rather than jumping into a month: this page is where
     // you choose one, so switching the calendar type must not also choose it.
+    // Carrying the existing query forward is why `month` is dropped explicitly —
+    // "/" reads one as a request for that calendar and redirects into it.
     function switchPickEndpoint(key) {
         const params = new URLSearchParams(window.location.search);
+        params.delete('month');
         params.set('endpoint', key);
         params.set('year', '{{ year }}');
-        window.location = '/pick?' + params.toString();
+        window.location = '/?' + params.toString();
     }
 </script>
 </body>

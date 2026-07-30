@@ -653,6 +653,19 @@ class CalendarMarkupTests(CalendarRouteTestCase):
         self.assertIn('<span class="day-chip empty" data-date="2026-07-01"', html)
         self.assertNotIn('href="#day-2026-07-01"', html)
 
+    def test_the_picker_has_one_address_and_every_link_uses_it(self):
+        """The picker answered at a second URL for a while, rendering the same
+        template from the same context, so a link, a bookmark and a history entry
+        could disagree about where it lives. Nothing points at the old one, and
+        the page's own year arrows and endpoint switcher stay on this one."""
+        picker = self.client.get("/?year=2026&endpoint=shows")
+        self.assertEqual(picker.status_code, 200)
+        self.assertIn("Pick a Month", picker.text)
+        self.assertNotIn("/pick", picker.text)
+        self.assertIn('href="/?year=2025&amp;endpoint=shows"', picker.text)
+        self.assertIn('href="/?year=2027&amp;endpoint=shows"', picker.text)
+        self.assertEqual(self.client.get("/pick").status_code, 404)
+
     def test_the_month_heading_links_back_to_the_picker_at_the_root(self):
         """Stepping back out of a month lands on the address somebody would type
         or bookmark, rather than on the second URL that renders the same page."""

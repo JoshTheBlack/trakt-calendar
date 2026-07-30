@@ -866,7 +866,7 @@ class SiteHeaderTests(RegressionTestCase):
     had drifted into three different bars, and the admin calendar's had swollen
     onto a second row."""
 
-    PAGES = ("/pick", "/?month=7&year=2026", "/distrakt", "/me", "/admin")
+    PAGES = ("/", "/?month=7&year=2026", "/distrakt", "/me", "/admin")
 
     def setUp(self):
         super().setUp()
