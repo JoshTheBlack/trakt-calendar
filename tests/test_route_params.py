@@ -7,16 +7,9 @@ at each end of the year.
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-params-"))
-
-from app import route_params  # noqa: E402
+from app import route_params
 
 
 class ValidYearTests(unittest.TestCase):

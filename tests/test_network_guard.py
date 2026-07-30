@@ -14,7 +14,7 @@ import threading
 import httpx
 import pytest
 
-from conftest import OutboundNetworkBlocked
+from tests.conftest import OutboundNetworkBlocked
 
 
 def test_a_connection_off_this_machine_is_refused(no_outbound_network):

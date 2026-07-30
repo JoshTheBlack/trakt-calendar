@@ -13,47 +13,20 @@ Two things carry the most weight here and get the most direct coverage:
   - The last-admin guard on demote/disable/delete, and the "can't delete
     yourself" guard, since either one failing silently would be how an
     instance actually gets locked out.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_admin -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-admin-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, db  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import auth, db
+from app.main import app
+from tests.support import AppTestCase
 
 
-class AdminTestCase(unittest.TestCase):
-    _counter = 0
-
-    def setUp(self):
-        AdminTestCase._counter += 1
-        db.set_db_path(TMP / f"admin-{AdminTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        # See tests/test_auth_routes.py: https + a default Origin header, both
-        # required for the session cookie and the CSRF middleware respectively.
-        self.client = TestClient(app, base_url="https://testserver",
-                                 headers={"Origin": "https://testserver"})
-
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
+class AdminTestCase(AppTestCase):
     # -- helpers --------------------------------------------------------
 
     def make_admin(self, username="admin1", password="hunter2hunter2") -> int:

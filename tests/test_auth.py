@@ -7,30 +7,20 @@ sliding must never extend); logging out everywhere on a password change; client
 IP resolution with and without a trusted proxy; and the session cookie's flags,
 including the rule that the `__Host-` name and the Secure flag travel together.
 
-No network. TRAKT_DATA_DIR points at a temp dir (set BEFORE importing app
-modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_auth -v
+No network.
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-auth-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from argon2 import PasswordHasher
+from fastapi import Response
 
-from argon2 import PasswordHasher  # noqa: E402
-from fastapi import Response  # noqa: E402
-
-from app import auth, db  # noqa: E402
-from app.config import Settings  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import auth, db
+from app.config import Settings
+from tests.support import new_db_path
 
 DAY = 24 * 3600
 
@@ -52,11 +42,8 @@ def fake_request(*, peer="203.0.113.9", headers=None, cookies=None, scheme="http
 
 
 class AuthTestCase(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        AuthTestCase._counter += 1
-        db.set_db_path(TMP / f"auth-{AuthTestCase._counter}.db")
+        new_db_path("auth")
         await db.migrate()
         auth.cookies._warned_default_proxy = False
 

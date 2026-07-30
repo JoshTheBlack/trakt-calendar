@@ -12,11 +12,7 @@ No network — a stub client returns the responses.
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -24,20 +20,16 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-trakt-client-test-"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app.endpoints import get_endpoint  # noqa: E402
-from app.providers.trakt import TraktError  # noqa: E402
-from app.providers.trakt import calendar as trakt_calendar  # noqa: E402
-from app.providers.trakt import transport  # noqa: E402
-from app.providers.trakt.detail import _cast_from, _episodes_from  # noqa: E402
+from app.endpoints import get_endpoint
+from app.providers.trakt import TraktError
+from app.providers.trakt import calendar as trakt_calendar
+from app.providers.trakt import transport
+from app.providers.trakt.detail import _cast_from, _episodes_from
 
 SETTINGS = SimpleNamespace(
     trakt_access_token="token", trakt_client_id="id", pagination_limit=100,
     cache_ttl_minutes=10,
 )
-
 
 class _Client:
     """An httpx.AsyncClient stand-in that answers with one canned response, or
@@ -52,10 +44,8 @@ class _Client:
             raise self._error
         return self._response
 
-
 class _Unreadable:
     """Stands in for a body that is not JSON at all."""
-
 
 class _WindowResponse:
     def __init__(self, body, status, headers):
@@ -67,7 +57,6 @@ class _WindowResponse:
         if isinstance(self._body, _Unreadable):
             raise ValueError("not json")
         return self._body
-
 
 class _CaptureClient:
     """A client stand-in that records the request it was given and replies with a

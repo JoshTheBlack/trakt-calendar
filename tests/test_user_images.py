@@ -5,8 +5,6 @@ decoded payload, unreadable bytes, a disallowed format, declared dimensions
 over the cap, Pillow's own decompression-bomb guard, and metadata surviving
 the round trip. Account deletion's cleanup of DATA_DIR/user_data/<id>/ (S15)
 gets its own section, proving the shared poster cache is untouched.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_user_images -v
 """
 from __future__ import annotations
 
@@ -15,24 +13,17 @@ import base64
 import itertools
 import os
 import shutil
-import sys
-import tempfile
 import unittest
 from io import BytesIO
-from pathlib import Path
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-user-images-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from PIL import Image, PngImagePlugin
+from fastapi.testclient import TestClient
 
-from PIL import Image, PngImagePlugin  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, db, user_images  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import auth, db, user_images
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import migrated_db, new_db_path
 
 _user_id_seq = itertools.count(10_000)
 
@@ -308,12 +299,8 @@ class ImageNameTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class AccountDeletionCleanupTests(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        AccountDeletionCleanupTests._counter += 1
-        db.set_db_path(TMP / f"delete-{AccountDeletionCleanupTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("delete")
         save_settings(Settings())
         self.client = TestClient(app, base_url="https://testserver",
                                   headers={"Origin": "https://testserver"})
@@ -368,11 +355,8 @@ class AccountDeletionCleanupTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class RouteTests(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        RouteTests._counter += 1
-        db.set_db_path(TMP / f"routes-{RouteTests._counter}.db")
+        new_db_path("routes")
         # A fresh database has to mean a fresh disk too: onboarding hands out the
         # same user id in every test, so images left by an earlier one would be
         # sitting exactly where this one's account looks for its own.

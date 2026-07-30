@@ -1,22 +1,16 @@
 """Unit tests for the network-logo matching + history-based rollout candidates.
 
 Pure/offline: _pick_network is pure; fetch_watched_progress is tested with
-fetch_history mocked. TRAKT_DATA_DIR points at a temp dir before importing.
+fetch_history mocked.
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="distrakt-logos-test-")
-sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
-
-from app import logos  # noqa: E402
-from app.providers.trakt import sync as trakt_sync  # noqa: E402
+from app import logos
+from app.providers.trakt import sync as trakt_sync
 
 
 class PickNetworkTests(unittest.TestCase):

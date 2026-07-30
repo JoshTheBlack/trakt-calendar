@@ -17,33 +17,21 @@ Four actors run against every route:
 No network: the app-wide Trakt credentials are left unset for the gating pass,
 so admitted requests take their existing "not configured" paths, and the token
 tests patch the shared HTTP client and record what it was asked to send.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_distrakt_gating -v
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-distrakt-gate-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, db, distrakt_routes, share_code, share_links  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, db, distrakt_routes, share_code, share_links
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import AppTestCase, ORIGIN
 
 # The tracker's read-only endpoints and its page. Enumerated one by one rather
 # than discovered from the router: a route that silently loses its declaration
@@ -105,35 +93,20 @@ class RecordingClient:
         return FakeResponse([])
 
 
-class DistraktTestCase(unittest.TestCase):
-    _counter = 0
-
+class DistraktTestCase(AppTestCase):
     def setUp(self):
-        DistraktTestCase._counter += 1
-        db.set_db_path(TMP / f"distrakt-gate-{DistraktTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        super().setUp()
         # An account has to exist or the first-run gate answers everything before
         # the access levels are consulted.
         self.admin_id = self._make_user("admin_user", is_admin=True, calendar_approved=True)
 
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
     def _make_user(self, username: str, **flags) -> int:
-        return asyncio.run(auth.create_user(
-            username=username, password="hunter2hunter2", settings=Settings(), **flags))
+        return self.make_user(username, **flags)
 
     def _link_trakt(self, user_id: int, provider_user_id: int, access_token: str | None = None) -> None:
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="trakt", provider_user_id=provider_user_id,
             access_token=access_token)))
-
-    def sign_in_as(self, user_id: int) -> None:
-        session_id = asyncio.run(auth.create_session(user_id))
-        self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
 
     def sign_out(self) -> None:
         self.client.cookies.clear()

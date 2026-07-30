@@ -4,33 +4,23 @@ The rule under test is the same one the live Completed bucket uses: a season
 belongs to the month its LAST episode was watched in, and only if every episode
 was watched. Everything expensive is mocked at the Trakt boundary; the sweep,
 the bucketing, the plan and the writes are all real.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_distrakt_backfill -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-backfill-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
+from app import auth, calendar_state, db, distrakt, distrakt_backfill as backfill, watch_history
+from app.providers.base import ItemKey
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import ORIGIN, migrated_db, new_db_path
 
-from app import auth, calendar_state, db, distrakt, distrakt_backfill as backfill, watch_history  # noqa: E402
-from app.providers.base import ItemKey  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
 SETTINGS = SimpleNamespace(configured=True, timezone="UTC")
 
 
@@ -94,11 +84,8 @@ class MonthMathTests(unittest.TestCase):
 
 
 class BackfillTestCase(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        BackfillTestCase._counter += 1
-        db.set_db_path(TMP / f"backfill-{BackfillTestCase._counter}.db")
+        new_db_path("backfill")
         await db.migrate()
         self.user_id = await _make_user("tracker")
 
@@ -383,13 +370,8 @@ class ManualCompletedRouteTests(unittest.TestCase):
     """The escape hatch: recording a finished season into a past month by hand,
     for what watch history cannot know — a season watched somewhere that never
     reached Trakt, or a play logged against the wrong date."""
-
-    _counter = 0
-
     def setUp(self):
-        ManualCompletedRouteTests._counter += 1
-        db.set_db_path(TMP / f"backfill-route-{ManualCompletedRouteTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("backfill-route")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
@@ -467,13 +449,8 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
     finished now. That row does not belong on the month, and a frozen month with
     no way to correct it would be a permanent wrong answer feeding the ranker.
     """
-
-    _counter = 0
-
     def setUp(self):
-        CorrectingAFrozenMonthTests._counter += 1
-        db.set_db_path(TMP / f"backfill-frozen-{CorrectingAFrozenMonthTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("backfill-frozen")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
@@ -539,13 +516,8 @@ class FilmsAreVisibleTests(unittest.TestCase):
     imported into Rankings while appearing nowhere on the tracker except buried
     inside the POST 2 copy text — which reads exactly like them not being there.
     """
-
-    _counter = 0
-
     def setUp(self):
-        FilmsAreVisibleTests._counter += 1
-        db.set_db_path(TMP / f"backfill-visible-{FilmsAreVisibleTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("backfill-visible")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
@@ -602,13 +574,8 @@ class FilmsAreVisibleTests(unittest.TestCase):
 
 class AddingAFilmByHandTests(unittest.TestCase):
     """Recording a film the sweep could not know about."""
-
-    _counter = 0
-
     def setUp(self):
-        AddingAFilmByHandTests._counter += 1
-        db.set_db_path(TMP / f"backfill-addfilm-{AddingAFilmByHandTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("backfill-addfilm")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
@@ -676,13 +643,8 @@ class RemovingAFilmTests(unittest.TestCase):
     Unlike a show there is no roster row to take off — the watch record IS the
     film — so this is the only way to correct one.
     """
-
-    _counter = 0
-
     def setUp(self):
-        RemovingAFilmTests._counter += 1
-        db.set_db_path(TMP / f"backfill-rmfilm-{RemovingAFilmTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("backfill-rmfilm")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))
@@ -755,13 +717,8 @@ class RemovingAFilmTests(unittest.TestCase):
 class BackfillRouteTests(unittest.TestCase):
     """The two-step route pair: the survey writes nothing, and apply writes only
     what the survey worked out."""
-
-    _counter = 0
-
     def setUp(self):
-        BackfillRouteTests._counter += 1
-        db.set_db_path(TMP / f"backfill-api-{BackfillRouteTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("backfill-api")
         save_settings(Settings(trakt_client_id="id", trakt_access_token="tok"))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(_make_user("tracker"))

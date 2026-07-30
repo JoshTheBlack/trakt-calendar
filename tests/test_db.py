@@ -5,26 +5,15 @@ the connection pragmas (foreign key enforcement in particular is ASSERTED rather
 than assumed — it is per-connection and defaults off, so every cascade in the
 schema is inert without it), and the async helpers' transaction semantics.
 
-No network. TRAKT_DATA_DIR points at a temp dir (set BEFORE importing app
-modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_db -v
+No network.
 """
 from __future__ import annotations
 
-import os
 import re
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-db-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app import db  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import db
+from tests.support import APP_DIR, TMP, new_db_path
 
 EXPECTED_TABLES = {
     "users", "user_prefs", "linked_identities", "sessions", "login_attempts",
@@ -47,12 +36,8 @@ EXPECTED_TABLES = {
 
 class DbTestCase(unittest.IsolatedAsyncioTestCase):
     """Each test gets its own database file so nothing leaks between them."""
-
-    _counter = 0
-
     async def asyncSetUp(self):
-        DbTestCase._counter += 1
-        db.set_db_path(TMP / f"test-{DbTestCase._counter}.db")
+        new_db_path("test")
         await db.migrate()
 
     async def asyncTearDown(self):
@@ -313,7 +298,7 @@ class DriverIsolationTests(unittest.TestCase):
         blocking query ends up stalling the event loop from inside a route.
         """
         pattern = re.compile(r"^\s*(import sqlite3|from sqlite3 import)", re.MULTILINE)
-        app_dir = Path(__file__).resolve().parent.parent / "app"
+        app_dir = APP_DIR
         offenders = sorted(
             path.name for path in app_dir.glob("*.py")
             if path.name != "db.py" and pattern.search(path.read_text(encoding="utf-8"))

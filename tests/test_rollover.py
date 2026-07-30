@@ -12,30 +12,19 @@ two users' rosters are fully independent in both directions, and the prior-month
 freeze fires per user independently on first access on/after the 1st.
 
 No network. Each test runs against a throwaway SQLite file.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_rollover -v
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
 from dataclasses import replace as dataclasses_replace
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-_TMP_DATA = tempfile.mkdtemp(prefix="distrakt-rollover-test-")
-os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
+from app import auth, calendar_state, db, distrakt, watch_history
+from app.providers.base import Item, ItemKey, Media, Source
+from tests.support import new_db_path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app import auth, calendar_state, db, distrakt, watch_history  # noqa: E402
-from app.providers.base import Item, ItemKey, Media, Source  # noqa: E402
-
-TMP = Path(_TMP_DATA)
 SETTINGS = SimpleNamespace(trakt_configured=True, network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 
@@ -152,11 +141,8 @@ async def _make_user(username: str) -> int:
 
 class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
     """Fresh database + one distrakt user per test."""
-    _counter = 0
-
     async def asyncSetUp(self):
-        RolloverTestCase._counter += 1
-        db.set_db_path(TMP / f"rollover-{RolloverTestCase._counter}.db")
+        new_db_path("rollover")
         await db.migrate()
         self.user_id = await _make_user("tracker")
 

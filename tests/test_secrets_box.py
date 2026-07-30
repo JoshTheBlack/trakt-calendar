@@ -16,29 +16,20 @@ No key is wired into config here, so stored secrets are plaintext and behavior i
 identical to before encryption existed. Sealing at the boundaries is proven
 separately.
 
-No network. TRAKT_DATA_DIR points at a temp dir, set BEFORE importing app modules.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_secrets_box -v
+No network.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-secrets-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cryptography.fernet import Fernet
 
-from cryptography.fernet import Fernet  # noqa: E402
-
-from app import config, db, secrets_box  # noqa: E402
-from app.config import RECOVERY_FIELDS, SECRET_FIELDS, Settings, load_settings, save_settings  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import config, db, secrets_box
+from app.config import RECOVERY_FIELDS, SECRET_FIELDS, Settings, load_settings, save_settings
+from tests.support import new_db_path
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
@@ -178,12 +169,8 @@ SECRET_VALUES = {name: f"SEKRIT-{name}" for name in SECRET_FIELDS}
 
 class ConsolidationTests(unittest.TestCase):
     """settings.json splits into three homes, with no key wired in (plaintext)."""
-
-    _counter = 0
-
     def setUp(self):
-        ConsolidationTests._counter += 1
-        db.set_db_path(TMP / f"consolidation-{ConsolidationTests._counter}.db")
+        new_db_path("consolidation")
         # A pre-consolidation settings.json holding one of everything, so the split
         # can be checked per class. Written BEFORE migrate so the migration sees it.
         self._full = Settings(

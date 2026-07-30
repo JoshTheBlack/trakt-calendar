@@ -11,35 +11,24 @@ and changes which month a boundary item renders under.
 No network — the Trakt window fetch is patched at app.calendar_cache's own
 module boundary, the same way tests/test_calendar_cache.py does it, so the
 real per-viewer normalize/trim logic in calendar_cache.read_month runs for
-real. TRAKT_DATA_DIR points at a temp dir (set BEFORE importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_calendar_route -v
+real.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
-import sys
-import tempfile
 import unittest
 from datetime import date
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-calroute-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, calendar_cache, calendar_routes, calendar_state, db  # noqa: E402
-from app.providers.trakt import TraktError  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, calendar_cache, calendar_routes, calendar_state, db
+from app.providers.trakt import TraktError
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import ORIGIN, migrated_db
 
 
 def _configured_settings() -> Settings:
@@ -62,12 +51,8 @@ def _entry(slug: str, title: str, first_aired: str) -> dict:
 
 
 class CalendarRouteTestCase(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        CalendarRouteTestCase._counter += 1
-        db.set_db_path(TMP / f"calroute-{CalendarRouteTestCase._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("calroute")
         save_settings(_configured_settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
 

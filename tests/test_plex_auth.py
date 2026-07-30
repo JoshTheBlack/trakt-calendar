@@ -9,34 +9,20 @@ approved, and every poll before that re-validates the same handshake-cookie
 and session binding.
 
 No network: plex_auth.request_pin / poll_pin / fetch_account are patched.
-TRAKT_DATA_DIR points at a temp dir (set BEFORE importing app modules) so this
-suite never touches a real database file.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_plex_auth -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-plex-auth-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, auth_routes, db, plex_auth, plex_routes  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, auth_routes, db, plex_auth
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import AppTestCase
 
 # The Plex account a patched poll resolves to unless a test says otherwise. An
 # int, because the numeric account id is the only acceptable key for an
@@ -50,36 +36,14 @@ def _pin(pin_id=PIN_ID, code="ABCD") -> dict:
     return {"id": pin_id, "code": code}
 
 
-class PlexAuthTestCase(unittest.TestCase):
-    _counter = 0
-
+class PlexAuthTestCase(AppTestCase):
     def setUp(self):
-        PlexAuthTestCase._counter += 1
-        db.set_db_path(TMP / f"plex-{PlexAuthTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        # https, because the session and handshake cookies are Secure by
-        # default and a client honoring that won't send them back over plain
-        # http.
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        super().setUp()
         # Something has to exist or the first-run gate answers every request
         # before any of this is reached.
         self.admin_id = self.make_user("admin_user", is_admin=True, calendar_approved=True)
 
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
     # -- fixtures ------------------------------------------------------------
-
-    def make_user(self, username, **flags) -> int:
-        return asyncio.run(auth.create_user(
-            username=username, password="hunter2hunter2", settings=Settings(), **flags))
-
-    def sign_in_as(self, user_id: int) -> str:
-        session_id = asyncio.run(auth.create_session(user_id))
-        self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
-        return session_id
 
     def sign_out(self) -> None:
         self.client.cookies.clear()

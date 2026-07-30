@@ -5,45 +5,30 @@ they do are not: the first-run race guard, the upgrade path for an instance that
 already has data (adopting the Trakt token from settings.json, seeding view
 preferences), and the JSON-only body rule. Those are what this file pins down.
 
-No network — the Trakt account lookup is mocked. TRAKT_DATA_DIR points at a temp
-dir (set BEFORE importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_auth_routes -v
+No network — the Trakt account lookup is mocked.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import os
-import sys
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-routes-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, auth_routes, config, db  # noqa: E402
-from app.config import Settings, load_settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import auth, auth_routes, config, db
+from app.config import Settings, load_settings, save_settings
+from app.main import app
+from tests.support import TMP, migrated_db
 
 TRAKT_ACCOUNT_ID = 424242
 
 
 class RouteTestCase(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        RouteTestCase._counter += 1
-        db.set_db_path(TMP / f"routes-{RouteTestCase._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("routes")
         save_settings(Settings())
         # https, because the session cookie is Secure by default and a client
         # that honors that (as every browser does) won't send it back over plain

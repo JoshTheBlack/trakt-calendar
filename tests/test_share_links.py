@@ -10,34 +10,23 @@ retires its slug and token and leaves zero orphan rows; and the share-page
 rate limiter.
 
 No network — the Trakt window fetch is patched at app.calendar_cache's own
-module boundary, same as tests/test_calendar_route.py. TRAKT_DATA_DIR points at
-a temp dir (set BEFORE importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_share_links -v
+module boundary, same as tests/calendar/test_routes.py.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
 from datetime import date
-from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-share-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
+from app import auth, calendar_cache, calendar_state, db, share_links
+from app.config import Settings
+from app.endpoints import get_endpoint
+from app.main import app
+from tests.support import AppTestCase, ORIGIN
 
-from app import auth, calendar_cache, calendar_state, db, share_links  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.endpoints import get_endpoint  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
 BASE_URL = ORIGIN
 
 
@@ -59,19 +48,9 @@ def _entry(slug: str, title: str, first_aired: str, network: str = "") -> dict:
     }
 
 
-class ShareTestCase(unittest.TestCase):
-    _counter = 0
-
-    def setUp(self):
-        ShareTestCase._counter += 1
-        db.set_db_path(TMP / f"share-{ShareTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(_configured_settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
-
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
+class ShareTestCase(AppTestCase):
+    def make_settings(self):
+        return _configured_settings()
 
     def _make_user(self, username: str, **flags) -> int:
         flags.setdefault("calendar_approved", True)

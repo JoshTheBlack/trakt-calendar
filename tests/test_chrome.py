@@ -6,28 +6,20 @@ Two kinds of test. The unit tests below exercise page_context() as a pure
 function of a user (or None). The one pytest-style test at the bottom is a
 route-level smoke test, using the shared fixtures in conftest.py, proving the
 context actually reaches a real rendered page rather than only a mock.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_chrome -v
 """
 from __future__ import annotations
 
 import asyncio
-import sys
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app import assets, changelog, chrome  # noqa: E402
-
+from app import assets, changelog, chrome
 
 class _User:
     def __init__(self, is_admin=False, calendar_approved=False, ranker_approved=False):
         self.is_admin = is_admin
         self.calendar_approved = calendar_approved
         self.ranker_approved = ranker_approved
-
 
 class PageContextTests(unittest.TestCase):
     def test_no_user_is_a_complete_all_false_set(self):
@@ -55,7 +47,6 @@ class PageContextTests(unittest.TestCase):
         the only thing that ever read it. A key nothing reads would tell the next
         reader that a route decides its page's asset URLs, and none does."""
         self.assertNotIn("asset_v", chrome.page_context(None))
-
 
 if __name__ == "__main__":
     unittest.main()

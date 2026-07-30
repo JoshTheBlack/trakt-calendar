@@ -5,29 +5,22 @@ MEDIA NAMESPACING is the property this file cares about most: TMDB ids are
 namespaced per media type, so movie 550 and show 550 must never share a row, a
 cache path, or a lookup — every test that touches both media types asserts they
 stay apart.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_posters -v
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import sys
-import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-posters-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from PIL import Image
 
-from PIL import Image  # noqa: E402
+from app import artwork, db, posters
+from tests.support import TMP, migrated_db
 
-from app import artwork, db, posters  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
 NOT_CONFIGURED = SimpleNamespace(tmdb_configured=False, tmdb_api_key="")
 CONFIGURED = SimpleNamespace(tmdb_configured=True, tmdb_api_key="deadbeef" * 5)
 
@@ -45,12 +38,8 @@ def _jpeg_bytes(size=(300, 450)) -> bytes:
 # ---------------------------------------------------------------------------
 
 class ArtworkTestCase(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        ArtworkTestCase._counter += 1
-        db.set_db_path(TMP / f"artwork-{ArtworkTestCase._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("artwork")
 
     def tearDown(self):
         db.close_thread_connection()

@@ -5,31 +5,20 @@ are easy to break from a long way away: that the release-heading format the
 parser depends on is still the one maintainers actually write, that the file is
 copied into the Docker image at all, and that raw HTML in a changelog edit cannot
 become markup on a signed-in page.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_changelog -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-changelog-test-"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
+from app import auth, changelog, db
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import ORIGIN, ROOT, migrated_db
 
-from app import auth, changelog, db  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-ROOT = Path(__file__).resolve().parent.parent
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
 
 SAMPLE = """# Changelog
 
@@ -173,12 +162,8 @@ class RealChangelogTests(unittest.TestCase):
 
 
 class ChangelogRouteTests(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        ChangelogRouteTests._counter += 1
-        db.set_db_path(TMP / f"changelog-{ChangelogRouteTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("changelog")
         save_settings(Settings(public_base_url=ORIGIN))
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(auth.create_user(

@@ -12,16 +12,9 @@ grew a verb for it.
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-payload-"))
-
-from app import distrakt, distrakt_routes, integrations_routes  # noqa: E402
+from app import distrakt, distrakt_routes, integrations_routes
 
 EMOJIS = {"HBO": "🟪"}
 DEFAULT_EMOJI = "📺"

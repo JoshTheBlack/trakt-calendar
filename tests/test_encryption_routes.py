@@ -8,31 +8,22 @@ browser to recovery and refuses the ordinary admin API, that the reset door need
 its typed phrase, and that the admin credential save is refused while the key is
 unhealthy but a non-secret save is not.
 
-No network. TRAKT_DATA_DIR points at a temp dir, set BEFORE importing app modules.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_encryption_routes -v
+No network.
 """
 from __future__ import annotations
 
 import asyncio
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-encroutes-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
 
-from cryptography.fernet import Fernet  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import config, db, encryption_flow, secrets_box  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import config, db, encryption_flow, secrets_box
+from app.config import Settings, save_settings
+from app.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE
+from app.main import app
+from tests.support import migrated_db
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
@@ -48,12 +39,8 @@ def _set_key(key: str | None) -> None:
 
 
 class EncryptionRouteTestCase(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        EncryptionRouteTestCase._counter += 1
-        db.set_db_path(TMP / f"encroutes-{EncryptionRouteTestCase._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("encroutes")
         _set_key(None)
         save_settings(Settings())
         self.client = TestClient(app, base_url="https://testserver",

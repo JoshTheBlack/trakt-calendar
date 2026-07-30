@@ -9,23 +9,16 @@ awkward to stage through a request and trivial to state directly.
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-calctx-"))
-
-from app import calendar_routes  # noqa: E402
-from app.config import Settings  # noqa: E402
-from app.endpoints import get_endpoint  # noqa: E402
-from app.providers.base import Item, Media, Source  # noqa: E402
-from app.providers.trakt import TraktError  # noqa: E402
+from app import calendar_routes
+from app.config import Settings
+from app.endpoints import get_endpoint
+from app.providers.base import Item, Media, Source
+from app.providers.trakt import TraktError
 
 UTC = ZoneInfo("UTC")
 ENDPOINT = get_endpoint("shows")

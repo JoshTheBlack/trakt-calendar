@@ -4,27 +4,18 @@
 Pure state folders/readers are tested directly on the in-memory state dict (they
 are unchanged by the move to per-user storage); the gated `sync` is tested with
 the three Trakt calls mocked, against a throwaway SQLite file. No network.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_watch_history -v
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="distrakt-wh-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app import db
+from app import watch_history as wh
+from tests.support import new_db_path
 
-from app import db  # noqa: E402
-from app import watch_history as wh  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
 SETTINGS = SimpleNamespace(configured=True)
 
 
@@ -168,11 +159,8 @@ class PureStateTests(unittest.TestCase):
 
 
 class WatchStateTestCase(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        WatchStateTestCase._counter += 1
-        db.set_db_path(TMP / f"wh-{WatchStateTestCase._counter}.db")
+        new_db_path("wh")
         await db.migrate()
         self.user_id = await _make_user("viewer")
 

@@ -10,31 +10,23 @@ leaves every one of those call paths working at the far end.
 
 No network — the Trakt HTTP client is patched and its Authorization header
 inspected, which is the only place a token becomes observable.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_encryption_integration -v
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-encintegration-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cryptography.fernet import Fernet
 
-from cryptography.fernet import Fernet  # noqa: E402
+from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box, trakt_routes
+from app.providers.trakt import calendar as trakt_calendar
+from app.config import Settings, load_settings, save_settings
+from app.endpoints import get_endpoint
+from tests.support import migrated_db
 
-from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box, trakt_routes  # noqa: E402
-from app.providers.trakt import calendar as trakt_calendar  # noqa: E402
-from app.config import Settings, load_settings, save_settings  # noqa: E402
-from app.endpoints import get_endpoint  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
 SHOWS = get_endpoint("shows")
 
 KEY = Fernet.generate_key().decode()
@@ -71,12 +63,8 @@ class _RecordingClient:
 
 
 class EncryptionIntegrationTestCase(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        EncryptionIntegrationTestCase._counter += 1
-        db.set_db_path(TMP / f"encintegration-{EncryptionIntegrationTestCase._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("encintegration")
         _set_key(None)
         save_settings(Settings())
 

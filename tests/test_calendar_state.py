@@ -5,30 +5,15 @@ the whole-document save/load round trip in app/state.py's shape, the distrakt
 roster union read, and the change-detection writer preserving history when it
 isn't resent.
 
-No network. TRAKT_DATA_DIR points at a temp dir (set BEFORE importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_calendar_state -v
+No network.
 """
 from __future__ import annotations
 
-import asyncio
-import json
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-calstate-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, calendar_state, db  # noqa: E402
-from app.config import DATA_DIR, Settings, save_settings  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-
+from app import calendar_state, db
+from tests.support import new_db_path
 
 async def _make_user(username="viewer") -> int:
     now = db.now()
@@ -41,11 +26,8 @@ async def _make_user(username="viewer") -> int:
 
 
 class StateTestCase(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        StateTestCase._counter += 1
-        db.set_db_path(TMP / f"calstate-{StateTestCase._counter}.db")
+        new_db_path("calstate")
         await db.migrate()
         self.user_id = await _make_user()
 

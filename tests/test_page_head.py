@@ -8,23 +8,14 @@ it true — none of it fails visibly until somebody boosts between two pages tha
 disagreed, and by then the symptom is an unstyled page rather than a diff.
 
 No network, no database, no client: this reads templates and rendered markup.
-
-Run: ./.venv/Scripts/python.exe -m pytest tests/test_page_head.py -q
 """
 from __future__ import annotations
 
-import os
 import re
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-head-test-"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app import assets  # noqa: E402
-from app.templating import TEMPLATES_DIR, templates  # noqa: E402
+from app import assets
+from app.templating import TEMPLATES_DIR, templates
 
 # error_lobby.html is the one page that deliberately does NOT use the macro: it
 # inlines its styles because it has to render when something else is already

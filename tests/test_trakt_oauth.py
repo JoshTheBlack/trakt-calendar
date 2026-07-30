@@ -9,36 +9,23 @@ that identity to the victim's account permanently. Every way of arriving at the
 callback without having legitimately started the flow is asserted to be refused
 here, and none of them may ever fall back to "no state, so assume a sign-in".
 
-No network: the code exchange and the account lookup are patched. TRAKT_DATA_DIR
-points at a temp dir (set BEFORE importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_trakt_oauth -v
+No network: the code exchange and the account lookup are patched.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from threading import Barrier
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-trakt-oauth-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import httpx
 
-import httpx  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, auth_routes, db, trakt_auth, trakt_routes  # noqa: E402
-from app.config import Settings, public_base_url_error, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, auth_routes, db, trakt_auth, trakt_routes
+from app.config import Settings, public_base_url_error, save_settings
+from app.main import app
+from tests.support import AppTestCase, ORIGIN
 
 # The Trakt account the patched authorization returns unless a test says
 # otherwise. An int, because the numeric account id is the only acceptable key
@@ -67,35 +54,17 @@ class _Token(dict):
                          expires_in=expires_in, created_at=created_at)
 
 
-class TraktOAuthTestCase(unittest.TestCase):
-    _counter = 0
+class TraktOAuthTestCase(AppTestCase):
+    def make_settings(self):
+        return _settings()
 
     def setUp(self):
-        TraktOAuthTestCase._counter += 1
-        db.set_db_path(TMP / f"oauth-{TraktOAuthTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(_settings())
-        # https, because the session and handshake cookies are Secure by default
-        # and a client honoring that won't send them back over plain http.
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        super().setUp()
         # Something has to exist or the first-run gate answers every request
         # before any of this is reached.
         self.admin_id = self.make_user("admin_user", is_admin=True, calendar_approved=True)
 
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
     # -- fixtures ----------------------------------------------------------
-
-    def make_user(self, username, **flags) -> int:
-        return asyncio.run(auth.create_user(
-            username=username, password="hunter2hunter2", settings=Settings(), **flags))
-
-    def sign_in_as(self, user_id: int) -> str:
-        session_id = asyncio.run(auth.create_session(user_id))
-        self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
-        return session_id
 
     def sign_out(self) -> None:
         self.client.cookies.clear()

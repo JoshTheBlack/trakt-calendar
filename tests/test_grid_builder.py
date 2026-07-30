@@ -10,25 +10,19 @@ rather than by looking at pixels.
 What a unit test CANNOT see is whether the result looks right: whether the
 header sits well, whether the numbers are where the eye expects them. That is
 what the render-to-file check at the end of the session is for.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_grid_builder -v
 """
 from __future__ import annotations
 
-import os
-import sys
 import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-grid-test-"))
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from PIL import Image
 
-from PIL import Image  # noqa: E402
-
-from app import grid_builder, ranker_export  # noqa: E402
+from app import grid_builder, ranker_export
+from tests.support import TMP
 
 TMP = Path(tempfile.mkdtemp(prefix="tns-grid-files-"))
 

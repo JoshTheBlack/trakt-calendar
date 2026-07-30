@@ -12,35 +12,24 @@ least-recently-stored first; and the GOLDEN FIXTURE proving the read-time
 genre/country/certification predicate reproduces Trakt's own server-side
 filtering under both spec styles.
 
-No network — the Trakt fetch is patched. TRAKT_DATA_DIR points at a temp dir
-(set BEFORE importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_calendar_cache -v
+No network — the Trakt fetch is patched.
 """
 from __future__ import annotations
 
 import json
-import os
-import sys
-import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-calcache-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from app import cache, calendar_cache, calendar_filter, db
+from app.providers.trakt import TraktError
+from app.providers.trakt import calendar as trakt_calendar
+from app.config import Settings
+from app.providers import base
+from app.endpoints import ENDPOINTS, get_endpoint
+from tests.support import FIXTURES, new_db_path
 
-from app import cache, calendar_cache, calendar_filter, db  # noqa: E402
-from app.providers.trakt import TraktError  # noqa: E402
-from app.providers.trakt import calendar as trakt_calendar  # noqa: E402
-from app.config import Settings  # noqa: E402
-from app.providers import base  # noqa: E402
-from app.endpoints import ENDPOINTS, get_endpoint  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 SHOWS = get_endpoint("shows")
 
@@ -71,11 +60,8 @@ class _CaptureClient:
 
 
 class CacheTestCase(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        CacheTestCase._counter += 1
-        db.set_db_path(TMP / f"calcache-{CacheTestCase._counter}.db")
+        new_db_path("calcache")
         await db.migrate()
         self.settings = Settings()
 

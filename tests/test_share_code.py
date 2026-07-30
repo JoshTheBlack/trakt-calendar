@@ -8,16 +8,12 @@ rather than letting one ship as a "harmless" tidy-up.
 from __future__ import annotations
 
 import hashlib
-import os
-import sys
 import unittest
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from app import share_code  # noqa: E402
-from app.endpoints import ENDPOINTS  # noqa: E402
-from app.share_links import CARD_STYLES, DAY_PACKINGS  # noqa: E402
-from app.timezones import CANONICAL  # noqa: E402
+from app import share_code
+from app.endpoints import ENDPOINTS
+from app.share_links import CARD_STYLES, DAY_PACKINGS
+from app.timezones import CANONICAL
 
 
 class ShareCodeRoundTripTests(unittest.TestCase):

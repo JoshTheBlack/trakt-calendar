@@ -17,56 +17,30 @@ What this file pins down, and why each one matters:
     was issued against, share tokens compare in constant time, and the provider
     sign-in start routes are throttled.
 
-No network. TRAKT_DATA_DIR points at a temp dir, set BEFORE importing app modules.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_hardening -v
+No network.
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-hardening-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, authz, db, distrakt, share_links, user_images  # noqa: E402
-from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,  # noqa: E402
+from app import auth, authz, db, distrakt, share_links, user_images
+from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,
                         save_settings)
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app.main import app
+from tests.support import AppTestCase
 
 PASSWORD = "correct-horse-battery"
 LOCK = {"max_attempts": auth.LOGIN_MAX_ATTEMPTS, "window_seconds": auth.LOGIN_WINDOW_SECONDS}
 
 
-class HardeningTestCase(unittest.TestCase):
-    _counter = 0
-
-    def setUp(self):
-        HardeningTestCase._counter += 1
-        db.set_db_path(TMP / f"hardening-{HardeningTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        # https because the session cookie is Secure by default; Origin because
-        # mutating requests without one are refused.
-        self.client = TestClient(app, base_url="https://testserver",
-                                 headers={"Origin": "https://testserver"})
-
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
-    def make_user(self, username="josh", *, password=PASSWORD, **kwargs):
-        kwargs.setdefault("calendar_approved", True)
-        return asyncio.run(auth.create_user(username=username, password=password, **kwargs))
+class HardeningTestCase(AppTestCase):
+    def make_user(self, username="josh", password=PASSWORD, **flags):
+        flags.setdefault("calendar_approved", True)
+        return super().make_user(username, password, **flags)
 
     def login(self, username="josh", password=PASSWORD):
         return self.client.post("/login", json={"username": username, "password": password})

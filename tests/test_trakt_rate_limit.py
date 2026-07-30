@@ -6,31 +6,21 @@ and asyncio.sleep is patched to record durations instead of waiting, so the
 wall-clock and exponential-backoff logic is asserted in microseconds. The
 loop-keyed semaphore is exercised across two fresh event loops, the exact
 condition a naive module-level Semaphore would fail under the test harness.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_trakt_rate_limit -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-ratelimit-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import httpx
 
-import httpx  # noqa: E402
-
-from app import db, distrakt as distrakt_store, watch_history  # noqa: E402
-from app.providers.trakt import transport  # noqa: E402
-from app.config import Settings  # noqa: E402
-from app.providers.trakt import TraktRateLimitError  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import db, distrakt as distrakt_store, watch_history
+from app.providers.trakt import transport
+from app.config import Settings
+from app.providers.trakt import TraktRateLimitError
+from tests.support import new_db_path
 
 # Minimal settings whose only job is to satisfy api_headers()/cached_get() — no real
 # token is ever put on the wire because the client is a fake.
@@ -257,12 +247,8 @@ class PerShowDegradeTests(unittest.IsolatedAsyncioTestCase):
 class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
     """_distrakt_month_payload: a shared-prerequisite 429 degrades the whole month
     to last-known totals + a notice at HTTP 200, never a false 0/0 or a 500."""
-
-    _counter = 0
-
     async def asyncSetUp(self):
-        TopLevelDegradeTests._counter += 1
-        db.set_db_path(TMP / f"toplevel-{TopLevelDegradeTests._counter}.db")
+        new_db_path("toplevel")
         await db.migrate()
         now = db.now()
         result = await db.execute(

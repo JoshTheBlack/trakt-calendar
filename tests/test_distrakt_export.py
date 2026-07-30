@@ -12,32 +12,20 @@ matter and are tested here:
     the document fails part-way through.
 
 Both the data-layer functions and the two HTTP routes are exercised. No network.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_distrakt_export -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-distrakt-export-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, db, distrakt  # noqa: E402
-from app.providers.base import ItemKey  # noqa: E402
-from app import watch_history as wh  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
-
+from app import auth, db, distrakt
+from app.providers.base import ItemKey
+from app import watch_history as wh
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import ORIGIN, migrated_db, new_db_path
 
 async def _seed_dataset(user_id: int, *, tag: str) -> None:
     """A dataset touching all five tables, so a round trip has something to
@@ -72,13 +60,9 @@ async def _seed_dataset(user_id: int, *, tag: str) -> None:
                                    "watched_at": "2026-07-04T00:00:00Z"}},
     })
 
-
 class ExportTestCase(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        ExportTestCase._counter += 1
-        db.set_db_path(TMP / f"export-{ExportTestCase._counter}.db")
+        new_db_path("export")
         await db.migrate()
         save_settings(Settings())
         self.user_id = await auth.create_user(
@@ -90,7 +74,6 @@ class ExportTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         db.close_thread_connection()
-
 
 class RoundTripTests(ExportTestCase):
     async def test_export_restore_is_a_round_trip_identity(self):
@@ -137,7 +120,6 @@ class RoundTripTests(ExportTestCase):
         self.assertIn("slug-mine", blob)
         self.assertNotIn("theirs", blob)
         self.assertEqual({r["month"] for r in doc["distrakt_months"]}, {"2026-07", "2026-08"})
-
 
 class RestoreScopingTests(ExportTestCase):
     async def test_restore_ignores_a_user_id_present_in_the_file(self):
@@ -200,16 +182,11 @@ class RestoreScopingTests(ExportTestCase):
         before.pop("exported_at"), after.pop("exported_at")
         self.assertEqual(after, before)
 
-
 class ExportRouteTests(unittest.TestCase):
     """The two HTTP endpoints, end to end. JSON posts carry an Origin header
     because every mutating endpoint is same-origin checked."""
-    _counter = 0
-
     def setUp(self):
-        ExportRouteTests._counter += 1
-        db.set_db_path(TMP / f"export-route-{ExportRouteTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("export-route")
         save_settings(Settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = self._make_distrakt_user("tracker")
@@ -279,7 +256,6 @@ class ExportRouteTests(unittest.TestCase):
                 self.assertIn(
                     self.client.post("/api/distrakt/restore", json={"schema": 1}).status_code,
                     (401, 403))
-
 
 class LegacyBackupTests(ExportTestCase):
     """A backup taken BEFORE the tracker was re-keyed, restored onto the current
@@ -393,7 +369,6 @@ class LegacyBackupTests(ExportTestCase):
         self.assertTrue(await distrakt.remove_show(self.user_id, "2026-03", key, 2))
         self.assertEqual((await distrakt.load_month(self.user_id, "2026-03"))["shows"], [])
 
-
 class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
     """The one migration in this change that moves user data.
 
@@ -401,13 +376,8 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
     thing under test is the SQL that carries rows across — a database created at
     18 has nothing to carry.
     """
-
-    _counter = 0
-
     async def asyncSetUp(self):
-        MigrationEighteenTests._counter += 1
-        self.path = TMP / f"m18-{MigrationEighteenTests._counter}.db"
-        db.set_db_path(self.path)
+        self.path = new_db_path("m18")
         await db.run(lambda conn: db_migrate_to(conn, 17))
         now = db.now()
         result = await db.execute(

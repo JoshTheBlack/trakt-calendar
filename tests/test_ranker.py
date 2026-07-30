@@ -11,38 +11,27 @@ list.
 The rest covers the schema this feature adds, who is allowed onto the page, the
 caps that keep one account from filling the instance, and the version check that
 decides which of two open tabs wins.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_ranker -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
-import sys
-import tempfile
 import unittest
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-ranker-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from PIL import Image
 
-from fastapi.testclient import TestClient  # noqa: E402
-from PIL import Image  # noqa: E402
-
-from app import auth, authz, db, distrakt, posters, ranker, ranker_export  # noqa: E402
-from app import ranker_import, ranker_routes, ranker_sources  # noqa: E402
-from app.providers.trakt import TraktError  # noqa: E402
-from app.providers.trakt import detail as trakt_detail  # noqa: E402
-from app import user_images  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-from app.ranker_sources import Media, TitleRef  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, authz, db, distrakt, posters, ranker, ranker_export
+from app import ranker_import, ranker_routes, ranker_sources
+from app.providers.trakt import TraktError
+from app.providers.trakt import detail as trakt_detail
+from app import user_images
+from app.config import Settings
+from app.main import app
+from app.ranker_sources import Media, TitleRef
+from tests.support import AppTestCase, migrated_db, new_db_path
 
 
 def patched(module, name, replacement):
@@ -72,31 +61,17 @@ def show_ref(match_id: str, title: str = "A Show", **extra) -> dict:
             "tmdb": int(match_id), "title": title, **extra}
 
 
-class RankerTestCase(unittest.TestCase):
-    _counter = 0
-
+class RankerTestCase(AppTestCase):
     def setUp(self):
-        RankerTestCase._counter += 1
-        db.set_db_path(TMP / f"ranker-{RankerTestCase._counter}.db")
         # A fresh database has to mean a fresh disk as well. User ids restart
         # from the same numbers in every test, so an earlier test's generated
         # images would sit exactly where this one's account expects to find its
         # own — and be served back as a cache hit that never rendered anything.
         shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        super().setUp()
         # Something has to exist or the first-run gate answers every request
         # before the access levels are ever consulted.
         self.admin_id = self.make_user("admin_user", is_admin=True, calendar_approved=True)
-
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
-    def make_user(self, username: str, **flags) -> int:
-        return asyncio.run(auth.create_user(
-            username=username, password="hunter2hunter2", settings=Settings(), **flags))
 
     def ranker_user(self, username: str = "ranker") -> int:
         return self.make_user(username, ranker_approved=True)
@@ -135,7 +110,7 @@ class SchemaTests(RankerTestCase):
         screen that hands the grant out — and granting it to everyone would hand
         a new feature to accounts nobody reviewed.
         """
-        db.set_db_path(TMP / "upgrade-in-place.db")
+        new_db_path("upgrade-in-place")
 
         def _apply_through(conn, last: int) -> None:
             db._ensure_version_table(conn)
@@ -1535,10 +1510,8 @@ class BackupTests(RankerTestCase):
         its own, so no id in the restored data can coincidentally match the id
         the same row had in the database the backup came from.
         """
-        RankerTestCase._counter += 1
         db.close_thread_connection()
-        db.set_db_path(TMP / f"ranker-restore-{RankerTestCase._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("ranker-restore")
         self.client.cookies.clear()
         self.make_user("admin_user", is_admin=True)
         decoy = self.ranker_user("decoy")

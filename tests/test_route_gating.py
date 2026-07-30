@@ -10,36 +10,23 @@ the settings endpoint hands out no credentials, that a form-encoded body is
 refused, and that a request from another origin is refused.
 
 No network, and no login screen to drive — sessions are constructed directly
-through the auth primitives. TRAKT_DATA_DIR points at a temp dir (set BEFORE
-importing app modules).
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_route_gating -v
+through the auth primitives.
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
 import json
-import os
 import re
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-gating-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi import Request
 
-from fastapi import Request  # noqa: E402
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, authz, config, db, distrakt  # noqa: E402
-from app.auth import AuthLevel  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, authz, config, db, distrakt
+from app.auth import AuthLevel
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import AppTestCase, ORIGIN
 
 # A distinctive value per credential, so a leak is unmistakable in a response
 # body rather than something that might plausibly be a coincidence.
@@ -66,40 +53,16 @@ def _request(*, host: str, origin: str | None = None, client: str = "127.0.0.1",
     })
 
 
-class GatingTestCase(unittest.TestCase):
-    _counter = 0
-
+class GatingTestCase(AppTestCase):
     def setUp(self):
-        GatingTestCase._counter += 1
-        db.set_db_path(TMP / f"gating-{GatingTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        # Secure cookies are the default, so the client has to speak https or it
-        # will not send the session back. Origin is what a browser attaches to a
-        # fetch() that changes something.
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        super().setUp()
         # Something has to exist, or the first-run gate answers every request
         # before the access levels get a look in.
         self.admin_id = self._make_user("admin_user", is_admin=True,
                                         calendar_approved=True, distrakt_approved=True)
 
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
     def _make_user(self, username: str, **flags) -> int:
-        return asyncio.run(auth.create_user(
-            username=username, password="hunter2hunter2", settings=Settings(), **flags))
-
-    def sign_in_as(self, user_id: int) -> None:
-        """Attach a session for `user_id` to the client.
-
-        Built straight from the session primitives rather than by posting to the
-        sign-in form: this file is about what the gate does once somebody is
-        signed in, not about how they got there.
-        """
-        session_id = asyncio.run(auth.create_session(user_id))
-        self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
+        return self.make_user(username, **flags)
 
     def sign_out(self) -> None:
         self.client.cookies.clear()
@@ -507,20 +470,11 @@ class RequestShapeTests(GatingTestCase):
         self.assertEqual(resp.status_code, 200)
 
 
-class FirstRunTests(unittest.TestCase):
+class FirstRunTests(AppTestCase):
     """Before any account exists there is nobody who could be authorized, and the
-    only useful destination is the setup form."""
-
-    def setUp(self):
-        GatingTestCase._counter += 1
-        db.set_db_path(TMP / f"gating-firstrun-{GatingTestCase._counter}.db")
-        asyncio.run(db.migrate())
-        save_settings(Settings())
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
-
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
+    only useful destination is the setup form. This is the one class here that
+    does NOT get the admin account GatingTestCase's setUp creates — an account
+    existing is precisely what it is testing the absence of."""
 
     def test_setup_and_health_stay_reachable(self):
         self.assertEqual(self.client.get("/onboarding").status_code, 200)

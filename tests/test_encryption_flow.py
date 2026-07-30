@@ -8,32 +8,21 @@ states apart, that the destructive reset blanks only what the current key cannot
 open (keeping identity rows), and that a secret write is refused while the key is
 unhealthy.
 
-No network. TRAKT_DATA_DIR points at a temp dir, set BEFORE importing app modules.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_encryption_flow -v
+No network.
 """
 from __future__ import annotations
 
-import asyncio
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-encflow-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cryptography.fernet import Fernet
 
-from cryptography.fernet import Fernet  # noqa: E402
-
-from app import config, db, encryption_flow, secrets_box  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import config, db, encryption_flow, secrets_box
+from app.config import Settings, save_settings
+from tests.support import new_db_path
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
-
 
 class _KeyEnv:
     """Set (or clear) ENCRYPTION_KEY and make secrets_box re-read it, restoring the
@@ -64,11 +53,8 @@ def _sealed(value) -> bool:
 
 
 class EncryptionFlowTests(unittest.IsolatedAsyncioTestCase):
-    _counter = 0
-
     async def asyncSetUp(self):
-        EncryptionFlowTests._counter += 1
-        db.set_db_path(TMP / f"encflow-{EncryptionFlowTests._counter}.db")
+        new_db_path("encflow")
         await db.migrate()
 
     async def asyncTearDown(self):

@@ -9,36 +9,24 @@ by accident.
 
 No network anywhere: the Trakt window fetch is patched where a read would
 otherwise reach for it, and token revocation is patched wherever an unlink runs.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_finishing_touches -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
 import re
-import sys
-import tempfile
 import unittest
 from datetime import date
-from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-finishing-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, cache, calendar_cache, calendar_state, db, distrakt as distrakt_store, share_code, share_links  # noqa: E402
-from app.providers.trakt import TraktError  # noqa: E402
-from app.providers.trakt import transport as trakt_transport  # noqa: E402
-from app.config import Settings, load_settings, save_settings  # noqa: E402
-from app.providers.base import Item, ItemKey, Media, Source  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, cache, calendar_cache, calendar_state, db, distrakt as distrakt_store, share_code, share_links
+from app.providers.trakt import TraktError
+from app.providers.trakt import transport as trakt_transport
+from app.config import Settings, load_settings, save_settings
+from app.providers.base import Item, ItemKey, Media, Source
+from app.main import app
+from tests.support import AppTestCase, ORIGIN
 
 
 def _fake_premiere_read(trakt_id: int, season: int):
@@ -61,26 +49,18 @@ def _fake_premiere_read(trakt_id: int, season: int):
     return read_month
 
 
-class FinishingTestCase(unittest.TestCase):
-    _counter = 0
-
-    def setUp(self):
-        FinishingTestCase._counter += 1
-        db.set_db_path(TMP / f"finishing-{FinishingTestCase._counter}.db")
-        asyncio.run(db.migrate())
+class FinishingTestCase(AppTestCase):
+    def make_settings(self):
         # The configured origin has to match the one the client speaks, or the
         # cross-site rules refuse every save below for an unrelated reason.
-        save_settings(Settings(public_base_url=ORIGIN))
-        self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
+        return Settings(public_base_url=ORIGIN)
+
+    def setUp(self):
+        super().setUp()
         self.admin_id = self._make_user("admin_user", is_admin=True, calendar_approved=True)
 
-    def tearDown(self):
-        self.client.close()
-        db.close_thread_connection()
-
     def _make_user(self, username, password="hunter2hunter2", **flags) -> int:
-        return asyncio.run(auth.create_user(
-            username=username, password=password, settings=Settings(), **flags))
+        return self.make_user(username, password, **flags)
 
     def _link_trakt(self, user_id: int, provider_user_id: int, token: str | None = "tok") -> None:
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
@@ -88,9 +68,10 @@ class FinishingTestCase(unittest.TestCase):
             access_token=token)))
 
     def sign_in_as(self, user_id: int) -> None:
-        session_id = asyncio.run(auth.create_session(user_id))
+        """As the shared one, but starting from an empty jar — these tests move
+        between accounts and a stale cookie of another kind would travel."""
         self.client.cookies.clear()
-        self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
+        super().sign_in_as(user_id)
 
     def tracker_user(self, username="tracker") -> int:
         user_id = self._make_user(username, calendar_approved=True, distrakt_approved=True)

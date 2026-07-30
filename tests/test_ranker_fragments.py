@@ -11,33 +11,22 @@ nothing" rather than as an error. Each of those is asserted here directly.
 
 The lazily-arrived-equals-inline test is the load-bearing one: it is what makes
 the pagination invisible, and it fails the moment the two rendering paths drift.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_ranker_fragments -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
 import re
 import shutil
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest import mock
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-ranker-frag-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
+from app import auth, authz, db, ranker, ranker_routes, user_images
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import ORIGIN, STATIC_DIR, TEMPLATES_DIR, new_db_path
 
-from app import auth, authz, db, ranker, ranker_routes, user_images  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
-TEMPLATES = Path(__file__).resolve().parent.parent / "app" / "templates"
 
 # Every template this feature owns. Named explicitly rather than globbed so a
 # template added later has to be considered rather than silently skipped.
@@ -58,11 +47,8 @@ def title_ref(match_id: str, title: str) -> dict:
 
 
 class FragmentTestCase(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        FragmentTestCase._counter += 1
-        db.set_db_path(TMP / f"frag-{FragmentTestCase._counter}.db")
+        new_db_path("frag")
         shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
         asyncio.run(db.migrate())
         save_settings(Settings())
@@ -249,7 +235,7 @@ class BoostedFormTests(FragmentTestCase):
 
     def test_no_ranker_template_declares_a_posting_form(self):
         for name in RANKER_TEMPLATES:
-            source = (TEMPLATES / name).read_text(encoding="utf-8")
+            source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
             for form in re.findall(r"<form\b[^>]*>", source, re.I):
                 self.assertNotRegex(
                     form, r'method\s*=\s*["\']?post',
@@ -281,7 +267,7 @@ class NoBrowserDialogTests(FragmentTestCase):
     """
 
     SCRIPTS = sorted(
-        (Path(__file__).resolve().parent.parent / "app" / "static" / "js" / "ranker")
+        (STATIC_DIR / "js" / "ranker")
         .glob("*.js"))
 
     def test_the_page_script_calls_no_browser_dialog(self):

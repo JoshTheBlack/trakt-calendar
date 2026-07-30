@@ -5,30 +5,19 @@ short Cache-Control instead of the bare ETag-only default StaticFiles ships.
 
 No network: the Trakt window fetch is patched the same way
 tests/test_calendar_route.py does it.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_calendar_perf -v
 """
 from __future__ import annotations
 
 import asyncio
-import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-calperf-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from fastapi.testclient import TestClient
 
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app import auth, db  # noqa: E402
-from app.config import Settings, save_settings  # noqa: E402
-from app.main import app  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
-ORIGIN = "https://testserver"
+from app import auth, db
+from app.config import Settings, save_settings
+from app.main import app
+from tests.support import ORIGIN, migrated_db
 
 
 def _configured_settings() -> Settings:
@@ -47,12 +36,8 @@ def _entry(slug: str, title: str, first_aired: str) -> dict:
 
 
 class GzipResponseTests(unittest.TestCase):
-    _counter = 0
-
     def setUp(self):
-        GzipResponseTests._counter += 1
-        db.set_db_path(TMP / f"gzip-{GzipResponseTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("gzip")
         save_settings(_configured_settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(auth.create_user(
@@ -94,8 +79,7 @@ class GzipResponseTests(unittest.TestCase):
 
 class StaticCacheHeaderTests(unittest.TestCase):
     def setUp(self):
-        db.set_db_path(TMP / "static.db")
-        asyncio.run(db.migrate())
+        migrated_db("static")
         save_settings(_configured_settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
 
@@ -142,13 +126,8 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
     two JS-handled forms opting back out, and the app scripts loaded (deferred)
     in <head> so a body swap can't re-execute them.
     """
-
-    _counter = 0
-
     def setUp(self):
-        BoostedNavigationMarkupTests._counter += 1
-        db.set_db_path(TMP / f"boost-markup-{BoostedNavigationMarkupTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("boost-markup")
         save_settings(_configured_settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         self.user_id = asyncio.run(auth.create_user(

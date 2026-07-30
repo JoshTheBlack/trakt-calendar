@@ -4,31 +4,18 @@ Covers the correctness-critical parts: season cadence + premiere/finale
 detection (binge vs weekly vs unknown-date tail) and the per-user store round
 trip against distrakt_months + distrakt_shows. No network — _derive_season is
 pure, and the store runs against a throwaway SQLite file per test.
-
-Run from the repo root:
-    ./.venv/Scripts/python.exe -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
-import os
-import sys
-import tempfile
 import unittest
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Isolate the data dir on disk before app.config binds DATA_DIR at import time.
-_TMP_DATA = tempfile.mkdtemp(prefix="distrakt-test-")
-os.environ["TRAKT_DATA_DIR"] = _TMP_DATA
+from app import db, distrakt
+from app.providers.base import ItemKey
+from app.providers.trakt.detail import _derive_season
+from tests.support import new_db_path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app import db, distrakt  # noqa: E402
-from app.providers.base import ItemKey  # noqa: E402
-from app.providers.trakt.detail import _derive_season  # noqa: E402
-
-TMP = Path(_TMP_DATA)
 UTC = ZoneInfo("UTC")
 NOW = datetime(2026, 8, 1, tzinfo=UTC)  # fixed "today" so started/finished is stable
 
@@ -52,11 +39,8 @@ async def make_user(username: str) -> int:
 
 class DistraktTestCase(unittest.IsolatedAsyncioTestCase):
     """Fresh database + one distrakt user per test."""
-    _counter = 0
-
     async def asyncSetUp(self):
-        DistraktTestCase._counter += 1
-        db.set_db_path(TMP / f"distrakt-{DistraktTestCase._counter}.db")
+        new_db_path("distrakt")
         await db.migrate()
         self.user_id = await make_user("tracker")
 

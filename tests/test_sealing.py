@@ -13,33 +13,23 @@ Three boundaries are covered:
   - the app-level SECRET_FIELDS on the save/load path through app/config;
   - the reusable backfill that converts existing plaintext rows to sealed in place.
 
-No network. TRAKT_DATA_DIR points at a temp dir, set BEFORE importing app modules.
-
-Run: ./.venv/Scripts/python.exe -m unittest tests.test_sealing -v
+No network.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import os
-import sys
-import tempfile
 import unittest
-from pathlib import Path
 
-os.environ["TRAKT_DATA_DIR"] = tempfile.mkdtemp(prefix="tns-sealing-test-")
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from cryptography.fernet import Fernet
 
-from cryptography.fernet import Fernet  # noqa: E402
-
-from app import auth, config, db, secrets_backfill, secrets_box, trakt_routes  # noqa: E402
-from app.config import Settings, load_settings, save_settings  # noqa: E402
-
-TMP = Path(os.environ["TRAKT_DATA_DIR"])
+from app import auth, config, db, secrets_backfill, secrets_box, trakt_routes
+from app.config import Settings, load_settings, save_settings
+from tests.support import TMP, migrated_db, new_db_path
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
-
 
 class _KeyEnv:
     """Set (or clear) ENCRYPTION_KEY and make secrets_box re-read it, restoring the
@@ -72,12 +62,8 @@ def _sealed(value) -> bool:
 
 class IdentityTokenSealingTests(unittest.IsolatedAsyncioTestCase):
     """A per-user Trakt token: ciphertext on the row, plaintext at the read sites."""
-
-    _counter = 0
-
     async def asyncSetUp(self):
-        IdentityTokenSealingTests._counter += 1
-        db.set_db_path(TMP / f"sealing-identity-{IdentityTokenSealingTests._counter}.db")
+        new_db_path("sealing-identity")
         await db.migrate()
 
     async def asyncTearDown(self):
@@ -158,13 +144,8 @@ class IdentityTokenSealingTests(unittest.IsolatedAsyncioTestCase):
 
 class AppSecretSealingTests(unittest.TestCase):
     """The SECRET_FIELDS values on the config save/load path."""
-
-    _counter = 0
-
     def setUp(self):
-        AppSecretSealingTests._counter += 1
-        db.set_db_path(TMP / f"sealing-appsecret-{AppSecretSealingTests._counter}.db")
-        asyncio.run(db.migrate())
+        migrated_db("sealing-appsecret")
 
     def tearDown(self):
         db.close_thread_connection()
@@ -250,12 +231,8 @@ class AppSecretSealingTests(unittest.TestCase):
 
 class BackfillTests(unittest.IsolatedAsyncioTestCase):
     """The seal-in-place conversion the encryption opt-in runs."""
-
-    _counter = 0
-
     async def asyncSetUp(self):
-        BackfillTests._counter += 1
-        db.set_db_path(TMP / f"sealing-backfill-{BackfillTests._counter}.db")
+        new_db_path("sealing-backfill")
         await db.migrate()
 
     async def asyncTearDown(self):

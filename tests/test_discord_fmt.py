@@ -10,21 +10,14 @@ hand-verify against a real sample month's posts, with two corrections applied:
     doesn't otherwise exercise; it is rendered here with "S01" like every other
     show, matching discord_fmt's normal behavior rather than carrying the
     sample's omission forward.
-
-Run from the repo root:
-    ./.venv/Scripts/python.exe -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
 import json
 import re
-import sys
 import unittest
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from app import discord_fmt as fmt  # noqa: E402
+from app import discord_fmt as fmt
 
 _NEXT_ID = [1000]
 
