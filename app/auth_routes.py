@@ -697,7 +697,11 @@ _PRIVATE_CACHE_HEADERS = {"Cache-Control": "private, max-age=86400"}
 @guard.post("/api/me/avatar", AuthLevel.SESSION)
 async def upload_avatar(request: Request):
     user = await auth.require_session(request)
-    data = await authz.json_body(request)
+    # An image is the one body whose ceiling this route knows, so it says so
+    # here: the refusal then reads as the image rule at every size, rather than
+    # switching to the app-wide guard's wording once the file grew past it.
+    data = await authz.json_body(request, user_images.MAX_UPLOAD_BODY_BYTES,
+                                 user_images.TOO_LARGE_MESSAGE)
     try:
         await user_images.save_avatar(user.user_id, str(data.get("image_b64") or ""))
     except user_images.ValidationError as exc:
@@ -740,7 +744,9 @@ async def upload_saved_image(request: Request):
     """Add a saved image (an alternative grid-header icon to the avatar),
     capped at user_images.MAX_IMAGES_PER_USER per account."""
     user = await auth.require_session(request)
-    data = await authz.json_body(request)
+    # Same known ceiling as the avatar route above, for the same reason.
+    data = await authz.json_body(request, user_images.MAX_UPLOAD_BODY_BYTES,
+                                 user_images.TOO_LARGE_MESSAGE)
     try:
         uid = await user_images.add_image(
             user.user_id, str(data.get("image_b64") or ""), str(data.get("name") or ""))
