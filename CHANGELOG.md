@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.1.6] - Unreleased
+## 🏷️ [1.1.6] - 2026-07-31
 
 ### Look and feel
 - 🍿 **A mistyped address now gets an intermission.** A wrong link used to land on a plain card; it now opens on a cinema curtain with a marching line of concession-stand snacks and the lobby jingle waiting behind a play button. It says exactly what the old page said about where you are and how to get back — a dead end is just the one place with room to be charming about it.
