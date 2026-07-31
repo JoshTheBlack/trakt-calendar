@@ -209,9 +209,26 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
             # Don't begin a sleep that would carry elapsed past the budget: stop and
             # raise now rather than sleeping most of the way in and raising anyway.
             if (_time.monotonic() - start) + wait > _SEND_MAX_ELAPSED:
+                # Logged as well as raised, because this branch can fire on the
+                # FIRST attempt — a large Retry-After blows the budget before the
+                # retry line below has said anything — and the caller may well
+                # degrade the failure into a quiet "unavailable" on one title.
+                logger.warning("Trakt rate-limited %s with a %.0fs Retry-After, over the "
+                               "%.0fs budget — giving up on this call", path, wait, _SEND_MAX_ELAPSED)
                 raise TraktRateLimitError(
                     f"Trakt Retry-After would exceed the {_SEND_MAX_ELAPSED:.0f}s budget for {path}.", 429)
-            _perf.debug("netRETRY  %s attempt=%d wait=%.1fs (429)", path, attempt, wait)
+            # WARNING, NOT DEBUG, AND ALWAYS. Being rate-limited is a fact about
+            # the instance's relationship with Trakt, not a timing detail: it is
+            # the difference between "that fan-out was slow" and "we were told to
+            # slow down", and those have opposite fixes. It stayed invisible at
+            # DEBUG through exactly the case that needed it — the same 77-show
+            # re-baseline taking eight seconds once and under three the next time,
+            # with nothing in the log to say which explanation was right.
+            # Rare by construction: the concurrency gate above exists to keep this
+            # from happening, so a run of these lines is itself the signal that the
+            # gate is sized wrong.
+            logger.warning("Trakt rate-limited %s — attempt %d, waiting %.1fs before retry",
+                           path, attempt, wait)
             await asyncio.sleep(wait)
 
 
