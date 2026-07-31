@@ -21,7 +21,7 @@ from unittest import mock
 
 from PIL import Image
 
-from app import grid_builder, ranker_export
+from app import grid_builder, imaging, ranker_export
 from tests.support import TMP
 
 TMP = Path(tempfile.mkdtemp(prefix="tns-grid-files-"))
@@ -251,7 +251,7 @@ class PlaceholderTests(unittest.TestCase):
             )
             for corner in corners:
                 with self.subTest(corner=corner):
-                    self.assertNotEqual(pixels.getpixel(corner), grid_builder.BACKGROUND)
+                    self.assertNotEqual(pixels.getpixel(corner), imaging.BACKGROUND)
 
     def test_the_placeholder_tile_is_built_once_per_size(self):
         grid_builder._placeholder_tile.cache_clear()
@@ -261,19 +261,19 @@ class PlaceholderTests(unittest.TestCase):
 
 
 class TextTests(unittest.TestCase):
-    """Every string in the image goes through one function, which is what makes
-    these assertions possible at all — and what would make adding a font
-    fallback later a change in one place."""
+    """Every string in the image goes through one function — `imaging.draw_text`
+    — which is what makes these assertions possible at all, and what makes adding
+    a font fallback later a change in one place for every renderer at once."""
 
     def _drawn(self, items, **kwargs) -> list[str]:
         drawn = []
-        real = grid_builder.draw_centered_text
+        real = imaging.draw_text
 
         def record(draw, box, text, font, fill, **kwargs):
             drawn.append(text)
             real(draw, box, text, font, fill, **kwargs)
 
-        with mock.patch.object(grid_builder, "draw_centered_text", record):
+        with mock.patch.object(imaging, "draw_text", record):
             grid_builder.build_grid(items, columns=5, fmt="jpeg", **kwargs)
         return drawn
 
@@ -305,36 +305,11 @@ class TextTests(unittest.TestCase):
         self.assertNotIn("A Title 1", self._drawn(entries(3)))
         self.assertIn("A Title 1", self._drawn(entries(3), show_titles=True))
 
-    def test_text_too_wide_for_its_box_is_ellipsized(self):
-        canvas = Image.new("RGB", (200, 60))
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(canvas)
-        font = grid_builder._font(30)
-        shown = grid_builder._ellipsized(draw, "An Extremely Long Title Indeed", font, 120)
-        self.assertTrue(shown.endswith("…"))
-        self.assertLess(len(shown), len("An Extremely Long Title Indeed"))
-        bbox = draw.textbbox((0, 0), shown, font=font)
-        self.assertLessEqual(bbox[2] - bbox[0], 120)
-
-    def test_left_aligned_text_starts_at_its_box_rather_than_floating_in_it(self):
-        """The header line sits beside its icon. Centred in the space left over
-        it drifts with the length of the name, which stops it reading as a label
-        belonging to the picture next to it."""
-        canvas = Image.new("RGB", (400, 60), grid_builder.BACKGROUND)
-        from PIL import ImageDraw
-        draw = ImageDraw.Draw(canvas)
-        font = grid_builder._font(30)
-        grid_builder.draw_centered_text(draw, (0, 0, 400, 60), "Hi", font,
-                                        grid_builder.TEXT_COLOUR, align="left")
-        ink = [x for x in range(400)
-               if any(canvas.getpixel((x, y)) != grid_builder.BACKGROUND for y in range(60))]
-        self.assertLess(min(ink), 4)
-
     def test_a_tier_colour_tints_the_rank_and_a_bad_one_does_not_break_it(self):
         self.assertEqual(grid_builder._rank_colour("#FF7F7F"), (255, 127, 127))
         for bad in (None, "", "red", "#GGGGGG", "#12345"):
             with self.subTest(bad=bad):
-                self.assertEqual(grid_builder._rank_colour(bad), grid_builder.TEXT_COLOUR)
+                self.assertEqual(grid_builder._rank_colour(bad), imaging.TEXT_COLOUR)
 
 
 class HeaderImageTests(unittest.TestCase):

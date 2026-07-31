@@ -12,11 +12,13 @@ call it. A second copy of that arithmetic would drift, and the way it would
 announce itself is a refusal that disagrees with the image that was actually
 produced — so there is exactly one.
 
-TEXT GOES THROUGH ONE ENTRY POINT. `draw_centered_text` is the only place this
-module measures or draws a string: the header line, the rank numbers and the
-captions all route through it. That is what makes an eventual font-fallback
-stack (for scripts the bundled Latin face has no glyphs for) a change to one
-function instead of a hunt through the renderer.
+TEXT GOES THROUGH ONE ENTRY POINT, AND IT IS NOT IN THIS MODULE.
+`imaging.draw_text` is the only place a string here is measured or drawn: the
+header line, the rank numbers and the captions all route through it. That
+argument got STRONGER when the primitives moved out — an eventual font-fallback
+stack (for scripts the bundled Latin face has no glyphs for) is now one change
+that fixes every renderer in the app at once, rather than one that fixes this
+one and leaves the next renderer drawing tofu.
 
 BLOCKING. Everything here is synchronous CPU work and a full-size render takes
 seconds. Callers on the event loop run `build_grid` in a worker thread, and
@@ -30,7 +32,9 @@ from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
+
+from . import imaging
 
 # ---------------------------------------------------------------------------
 # constants — each one with the reason it has the value it has
@@ -69,8 +73,11 @@ MARGIN = 0
 # read as the result rather than as the first three of a list.
 PODIUM_RANKS = 3
 
-BACKGROUND = (17, 19, 21)          # #111315
-TEXT_COLOUR = (255, 255, 255)
+# The field and the text colour are `imaging.BACKGROUND` / `imaging.TEXT_COLOUR`
+# — the app's dark chrome, shared with every other renderer. A second copy here
+# would be a second thing to change when the chrome moves, and the drift would
+# only show up as two exports that no longer match.
+#
 # The placeholder tile's own frame, a step up from the background so a missing
 # poster looks deliberate rather than like a hole in the render.
 PLACEHOLDER_BACKGROUND = (28, 31, 34)
@@ -92,19 +99,9 @@ FORMATS = frozenset(MAX_DIMENSION)
 # that produced it was replaced.
 RENDERER_VERSION = 3
 
-_FONT_PATH = Path(__file__).resolve().parent / "static" / "fonts" / "Inter-Bold.ttf"
 _PLACEHOLDER_PATH = (
     Path(__file__).resolve().parent / "static" / "images" / "nopostertv.png"
 )
-
-if not _FONT_PATH.exists():
-    # Loud at import rather than quiet at render. The fallback Pillow offers,
-    # `ImageFont.load_default()`, is an ~11px bitmap face — on a 2500px canvas it
-    # is illegible, so an export that silently used it would look broken to the
-    # user and fine to the server.
-    raise RuntimeError(
-        f"The grid renderer needs its bundled font at {_FONT_PATH}; it is missing."
-    )
 
 # Loaded once. Converted here rather than per missing poster, because a grid can
 # be a hundred tiles and most of them may have no artwork.
@@ -303,71 +300,6 @@ def _format(fmt: str) -> str:
     return value
 
 
-@lru_cache(maxsize=16)
-def _font(size: int) -> ImageFont.FreeTypeFont:
-    """The bundled face at one size. Cached because a grid asks for the same two
-    or three sizes once per tile."""
-    return ImageFont.truetype(str(_FONT_PATH), max(1, size))
-
-
-def draw_centered_text(
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    text: str,
-    font: ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int],
-    *,
-    align: str = "center",
-) -> None:
-    """Draw `text` inside `box`, shortened with an ellipsis if it does not fit
-    across. Always centred vertically; `align` decides the horizontal.
-
-    THE ONLY PLACE THIS MODULE MEASURES OR DRAWS A STRING. Centring is done from
-    `textbbox`, not from the string length: the bounding box accounts for the
-    glyphs actually present, and it is what replaced the `textsize` that Pillow
-    10 removed.
-
-    `align="left"` exists for the header line, which sits directly beside its
-    icon rather than floating in the space left over. It stays a parameter of
-    this function rather than a second drawing path, because measurement and
-    ellipsizing are the parts worth having in one place.
-    """
-    if not text:
-        return
-    left, top, right, bottom = box
-    box_w = right - left
-    box_h = bottom - top
-    if box_w <= 0 or box_h <= 0:
-        return
-
-    shown = _ellipsized(draw, text, font, box_w)
-    if not shown:
-        return
-    x0, y0, x1, y1 = draw.textbbox((0, 0), shown, font=font)
-    # Offset by the bbox origin as well as by the alignment: a glyph's ink does
-    # not start at the pen position, and ignoring that leaves text visibly low in
-    # its strip and a hair inside its left edge.
-    x = left - x0 if align == "left" else left + (box_w - (x1 - x0)) / 2 - x0
-    y = top + (box_h - (y1 - y0)) / 2 - y0
-    draw.text((x, y), shown, font=font, fill=fill)
-
-
-def _ellipsized(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
-                box_w: int) -> str:
-    """`text`, trimmed until it fits `box_w`, with an ellipsis marking the cut."""
-    def width(value: str) -> int:
-        bbox = draw.textbbox((0, 0), value, font=font)
-        return bbox[2] - bbox[0]
-
-    if width(text) <= box_w:
-        return text
-    ellipsis = "…"
-    trimmed = text
-    while trimmed and width(trimmed + ellipsis) > box_w:
-        trimmed = trimmed[:-1]
-    return trimmed.rstrip() + ellipsis if trimmed else ""
-
-
 def build_grid(
     entries: list[GridEntry],
     *,
@@ -397,7 +329,7 @@ def build_grid(
     )
     ensure_fits(layout, fmt)
 
-    canvas = Image.new("RGB", (layout.width, layout.height), BACKGROUND)
+    canvas = Image.new("RGB", (layout.width, layout.height), imaging.BACKGROUND)
     try:
         draw = ImageDraw.Draw(canvas)
         _draw_header(canvas, draw, layout, title=title, username=username,
@@ -408,20 +340,20 @@ def build_grid(
         # column still aligned. A fixed two digits breaks at exactly the maximum
         # this feature allows.
         digits = len(str(max(entry.rank for entry in entries)))
-        rank_font = _font(round(layout.label_h * _RANK_TYPE))
-        caption_font = _font(round(layout.caption_h * _CAPTION_TYPE)) \
+        rank_font = imaging.font(round(layout.label_h * _RANK_TYPE))
+        caption_font = imaging.font(round(layout.caption_h * _CAPTION_TYPE)) \
             if layout.caption_h else None
 
         for cell in layout.cells:
             entry = entries[cell.index]
             _paste_tile(canvas, cell.tile, entry.poster)
-            draw_centered_text(
+            imaging.draw_text(
                 draw, cell.label, str(entry.rank).zfill(digits), rank_font,
                 _rank_colour(entry.colour),
             )
             if cell.caption is not None and caption_font is not None:
-                draw_centered_text(draw, cell.caption, entry.title, caption_font,
-                                   TEXT_COLOUR)
+                imaging.draw_text(draw, cell.caption, entry.title, caption_font,
+                                  imaging.TEXT_COLOUR)
         return _encode(canvas, fmt)
     finally:
         canvas.close()
@@ -431,11 +363,11 @@ def _rank_colour(colour: str | None) -> tuple[int, int, int]:
     """A tier's #RRGGBB, or white. An unreadable value falls back rather than
     failing an export over a colour."""
     if not colour or not colour.startswith("#") or len(colour) != 7:
-        return TEXT_COLOUR
+        return imaging.TEXT_COLOUR
     try:
         return tuple(int(colour[i:i + 2], 16) for i in (1, 3, 5))  # type: ignore[return-value]
     except ValueError:
-        return TEXT_COLOUR
+        return imaging.TEXT_COLOUR
 
 
 def _draw_header(canvas: Image.Image, draw: ImageDraw.ImageDraw, layout: Layout, *,
@@ -452,7 +384,7 @@ def _draw_header(canvas: Image.Image, draw: ImageDraw.ImageDraw, layout: Layout,
     gap = max(1, layout.header_h // 3)
     text_left = left + gap
     if header_image:
-        icon = _circular_icon(header_image, layout.header_h)
+        icon = imaging.circular(header_image, layout.header_h)
         if icon is not None:
             with icon:
                 canvas.paste(icon, (left, top), icon)
@@ -462,23 +394,9 @@ def _draw_header(canvas: Image.Image, draw: ImageDraw.ImageDraw, layout: Layout,
     # the line drifts with the length of the name and stops reading as a label
     # belonging to the picture next to it.
     line = f"{username}'s {title}" if username and title else (title or username)
-    draw_centered_text(draw, (text_left, top, right, bottom), line,
-                       _font(round(layout.header_h * _HEADER_TYPE)), TEXT_COLOUR,
-                       align="left")
-
-
-def _circular_icon(raw: bytes, size: int) -> Image.Image | None:
-    """The header image as a circular RGBA tile, or None if the bytes turn out
-    not to be an image. A bad icon costs the export its icon, never the export."""
-    try:
-        with Image.open(BytesIO(raw)) as source:
-            icon = source.convert("RGBA").resize((size, size), Image.LANCZOS)
-    except Exception:
-        return None
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
-    icon.putalpha(mask)
-    return icon
+    imaging.draw_text(draw, (text_left, top, right, bottom), line,
+                      imaging.font(round(layout.header_h * _HEADER_TYPE)),
+                      imaging.TEXT_COLOUR, align="left")
 
 
 def _paste_tile(canvas: Image.Image, box: tuple[int, int, int, int],
