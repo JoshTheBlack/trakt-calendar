@@ -46,6 +46,7 @@ from . import ranker_routes
 from . import secrets_backfill
 from . import secrets_box
 from . import settings_routes
+from . import share_card_cache
 from . import share_routes
 from . import trakt_routes
 from .auth import AuthLevel
@@ -121,6 +122,11 @@ async def _sweep_auth_rows() -> None:
     # worker thread rather than the event loop.
     await artwork.sweep(now)
     await anyio.to_thread.run_sync(posters.sweep, settings.poster_cache_max_bytes)
+    # And the rendered share cards, which age out at 90 days and are held under
+    # their own byte budget behind that. Same worker-thread reason as the posters
+    # above: it is a directory walk, and it is deliberately here rather than on
+    # the request path that writes the files.
+    await anyio.to_thread.run_sync(share_card_cache.sweep, settings.share_card_cache_max_bytes)
 
 
 async def _heartbeat_tick() -> None:

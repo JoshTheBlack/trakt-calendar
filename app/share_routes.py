@@ -30,7 +30,8 @@ import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import auth, calendar_cache, calendar_state, posters, route_params, share_card, share_code, share_links, user_images
+from . import (auth, calendar_cache, calendar_state, posters, route_params, share_card,
+               share_card_cache, share_code, share_links, user_images)
 from .providers.trakt import detail as trakt_detail
 from .auth import AuthLevel
 from . import authz
@@ -495,8 +496,8 @@ def _avatar_bytes(owner_id: int) -> bytes | None:
         return None
 
 
-async def build_card(view: ShareView, share_row, settings, *,
-                     budget: float | None) -> tuple[share_card.Card, bool]:
+async def assemble_card(view: ShareView, share_row, settings, *,
+                        budget: float | None) -> tuple[share_card.Card, bool]:
     """Everything behind one preview picture: the read, the marks, the tiles and
     the avatar, assembled into the renderer's value object.
 
@@ -561,6 +562,51 @@ def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item], 
     task = asyncio.create_task(_warm_job(key, refs, settings))
     _warm_tasks.add(task)
     task.add_done_callback(_warm_tasks.discard)
+
+
+# TWO CONCURRENT CARD RENDERS, INSTANCE-WIDE, and this is deliberately its own
+# semaphore rather than the ranker's. Pillow is synchronous CPU work on the one
+# loop that serves every other request, and unfurlers arrive in bursts — but a
+# share unfurl must not be able to queue behind two full-size board exports,
+# which are an order of magnitude larger and slower, and somebody's export must
+# not be blocked by a crawler. Two slots, matching the ranker's count for the
+# same reason it picked it.
+_card_render_slots = anyio.Semaphore(2)
+
+
+async def render_card(view: ShareView, share_row, settings) -> bytes:
+    """One share card as encoded bytes, rendered only if it is not already on
+    disk.
+
+    THE ORDER HERE IS NOT THE OBVIOUS ONE AND IT IS DELIBERATE: the month is read
+    and the tiles resolved BEFORE the cache is consulted. The cache is addressed
+    by what the picture CONTAINS rather than by the URL that asked for it — which
+    is what makes it self-invalidating (share_card_cache.render_key) — and there
+    is no way to know the content without doing the read. It is not the wrong way
+    round: the read is a local cache read of data the page has usually already
+    warmed, while the render is Pillow on a path an anonymous crawler can reach.
+    The expensive half is the half being skipped.
+    """
+    card, complete = await assemble_card(view, share_row, settings,
+                                         budget=POSTER_BUDGET_SECONDS)
+    key = share_card_cache.render_key(card, owner_id=int(share_row["user_id"]),
+                                      month=view.month)
+    path = share_card_cache.cache_path(key)
+
+    payload = await anyio.to_thread.run_sync(share_card_cache.cached_render, path)
+    if payload is not None:
+        return payload
+
+    async with _card_render_slots:
+        payload = await anyio.to_thread.run_sync(share_card.build_card, card)
+    if complete:
+        # An INCOMPLETE card is served but never kept: some of the artwork it
+        # wanted was still on its way, and the next request — by which time the
+        # background warm has usually landed — renders and stores the finished
+        # one. That is what makes a thin card heal itself rather than being
+        # cached half-empty for the whole retention window.
+        await anyio.to_thread.run_sync(share_card_cache.store_render, path, payload)
+    return payload
 
 
 async def _warm_job(key: tuple, refs, settings) -> None:

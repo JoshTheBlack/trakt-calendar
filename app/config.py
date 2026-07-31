@@ -117,6 +117,14 @@ class Settings:
     # runaway can't fill the volume, not because anyone should ever think about
     # it. The cache is global and shared across every user on the instance.
     poster_cache_max_bytes: int = 10 * 1024 * 1024 * 1024
+    # Budget for the rendered link-preview cards a share link unfurls into
+    # (DATA_DIR/share_cards/), swept on the same heartbeat as the two above. Age
+    # is the rule that actually fires there — a card is dropped 90 days after it
+    # was last written — and this is the backstop that stops a runaway filling
+    # the volume in the meantime. At the measured ~160 KB a card, 2 GB is on the
+    # order of ten thousand of them, which no single instance approaches inside
+    # the retention window.
+    share_card_cache_max_bytes: int = 2 * 1024 * 1024 * 1024
     day_packing: str = "stacked"   # "stacked" | "packed"
     card_style: str = "vertical"   # "vertical" | "horizontal" | "poster" (poster-only wall, info on hover)
     # Sonarr / Radarr integration (add-to-library buttons)
