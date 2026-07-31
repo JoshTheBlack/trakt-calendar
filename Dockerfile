@@ -48,8 +48,15 @@ RUN mkdir -p /data
 VOLUME ["/data"]
 
 EXPOSE 8000
+# READS THE BODY BEFORE EXITING, and that is not tidiness. Checking .status and
+# exiting leaves the response unread and the socket torn down by process exit,
+# often before the server has finished writing its eleven bytes — and Hypercorn
+# logs a stream that closes early as a SECOND access line with "- -" where the
+# status should be. So every health check billed two lines, one of them looking
+# like a failure, and the "client hung up early" signal that line actually
+# carries became worthless for spotting the requests where it means something.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/healthz').status==200 else 1)"
+    CMD python -c "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8000/healthz'); r.read(); r.close(); sys.exit(0 if r.status==200 else 1)"
 
 # Exec form: no shell, so hypercorn is PID 1 and receives the container's stop
 # signal directly. No --forwarded-allow-ips — Hypercorn has no such option (it

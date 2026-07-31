@@ -70,6 +70,17 @@ logger = logging.getLogger(__name__)
 # in Docker, where nothing else calls it, this is the only config that fires.
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+# Quiet Hypercorn's per-request access log, the same way run.py does for the dev
+# runner — and it matters MORE here, because the Docker image's CMD passes
+# --access-logfile explicitly and so turns the firehose ON. Without this line the
+# two paths were only half in step: Docker got the app.* diagnostics the comment
+# above promises AND a line per static file, per poll and per health check, which
+# is the noise the app.perf warnings then have to be found inside.
+# NOT A LOSS OF INFORMATION: perftrace's request timer reports any request over
+# SLOW_REQUEST_MS with its phases broken down, and every request at DEBUG, which
+# is strictly more than the access line said. Set hypercorn.access to INFO by
+# hand if the raw log is ever wanted back.
+logging.getLogger("hypercorn.access").setLevel(logging.WARNING)
 
 BASE_DIR = Path(__file__).resolve().parent
 HEARTBEAT_SECONDS = 60
