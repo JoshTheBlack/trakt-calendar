@@ -14,10 +14,12 @@ from __future__ import annotations
 import unittest
 import asyncio
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-from app import auth, cache, calendar_cache, db, posters, share_code, share_links, share_routes
+from app import (auth, cache, calendar_cache, db, posters, share_card, share_code,
+                 share_links, share_routes)
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
@@ -492,6 +494,70 @@ class CardTileSelectionTests(unittest.TestCase):
         item = self._item("A", day=1)
         item.air_date = "not-a-date"
         self.assertEqual(share_routes._tile_date_label(item), "")
+
+
+class CardTileOrderTests(unittest.TestCase):
+    """The order the tiles are DRAWN in, which is not the order they were picked
+    in: the selection ranks by strength, the grid then reads left to right by air
+    date within each row.
+    """
+
+    def _pair(self, title, when):
+        tile = share_card.Tile(title=title, poster=Path("/posters/show") / f"{title}.jpg",
+                               date_label=f"day {when}", is_premiere=False)
+        return tile, when
+
+    def _titles(self, pairs):
+        return [tile.title for tile in share_routes.arrange_tiles(pairs)]
+
+    def test_a_full_row_is_drawn_earliest_first(self):
+        """Ten tiles lay out five and five. Each row is re-ordered inside itself
+        and neither row's membership moves — the top row is still the stronger
+        half the selection put there."""
+        top = [self._pair(f"top-{n}", n) for n in (5, 1, 4, 2, 3)]
+        bottom = [self._pair(f"bottom-{n}", n) for n in (9, 6, 8, 10, 7)]
+        self.assertEqual(self._titles(top + bottom),
+                         [f"top-{n}" for n in (1, 2, 3, 4, 5)]
+                         + [f"bottom-{n}" for n in (6, 7, 8, 9, 10)])
+
+    def test_a_partial_grid_sorts_within_the_rows_it_actually_has(self):
+        """Seven tiles lay out four then three, which is why the sort follows the
+        grid's own row widths rather than a fixed five."""
+        pairs = [self._pair(f"t{n}", n) for n in (4, 3, 2, 1, 7, 6, 5)]
+        self.assertEqual(self._titles(pairs), ["t1", "t2", "t3", "t4", "t5", "t6", "t7"])
+        self.assertEqual(share_card.tile_rows(len(pairs)), [4, 3])
+
+    def test_an_undated_tile_lands_at_the_end_of_its_row(self):
+        """Somewhere deterministic, and after everything that does have a date —
+        a zero would sort it to the front of the row, which is the one place a
+        title with no air date should not be. Six tiles, so the row this is
+        asserting about is a real three-wide one."""
+        pairs = [self._pair("no-date", None), self._pair("later", 9),
+                 self._pair("earlier", 2)]
+        pairs += [self._pair(f"b{n}", n) for n in (1, 2, 3)]
+        self.assertEqual(self._titles(pairs),
+                         ["earlier", "later", "no-date", "b1", "b2", "b3"])
+
+    def test_undated_tiles_keep_the_order_they_were_selected_in(self):
+        pairs = [self._pair("first", None), self._pair("second", None),
+                 self._pair("dated", 4)]
+        pairs += [self._pair(f"b{n}", n) for n in (1, 2, 3)]
+        self.assertEqual(self._titles(pairs),
+                         ["dated", "first", "second", "b1", "b2", "b3"])
+
+    def test_a_title_its_date_and_its_artwork_move_together(self):
+        """The failure this guards against is the one that looks almost right: a
+        card whose posters were re-ordered and whose captions were not. Each tile
+        owns its whole caption, so this holds by construction — asserted anyway,
+        because "by construction" is exactly what stops being true later."""
+        pairs = [self._pair(f"t{n}", n) for n in (3, 1, 2)]
+        for tile in share_routes.arrange_tiles(pairs):
+            with self.subTest(title=tile.title):
+                self.assertEqual(tile.poster.name, f"{tile.title}.jpg")
+                self.assertEqual(tile.date_label, f"day {tile.title[1:]}")
+
+    def test_nothing_to_arrange_is_not_an_error(self):
+        self.assertEqual(share_routes.arrange_tiles([]), ())
 
 
 if __name__ == "__main__":

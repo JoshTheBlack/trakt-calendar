@@ -48,12 +48,15 @@ from . import imaging
 # shape gets letterboxed or demoted to a thumbnail by at least one of them.
 CARD_W, CARD_H = 1200, 630
 
-# Bumped whenever anything below changes where a pixel lands. Cards are cached
-# on disk under a key that includes this number, and unfurlers cache what they
-# fetched even harder — without the bump, a layout change keeps being invisible
-# to everyone who already unfurled a link. THIS IS THIS MODULE'S OWN VERSION and
-# has nothing to do with grid_builder's: the two renderers change independently.
-RENDERER_VERSION = 3
+# Bumped whenever what a reader sees changes — anything below that moves a
+# pixel, and equally a change to the order the caller hands the tiles over in,
+# since the picture is the same either way only if nothing about it moved. Cards
+# are cached on disk under a key that includes this number, and unfurlers cache
+# what they fetched even harder — without the bump, a layout change keeps being
+# invisible to everyone who already unfurled a link. THIS IS THIS MODULE'S OWN
+# VERSION and has nothing to do with grid_builder's: the two renderers change
+# independently.
+RENDERER_VERSION = 4
 
 # ---------------------------------------------------------------------------
 # palette — tuned for the surface this lands on, not for the app's own chrome
