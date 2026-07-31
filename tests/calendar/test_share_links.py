@@ -386,10 +386,23 @@ class DeleteRetiresShareIdentifiersTests(ShareTestCase):
 # share-page rate limiting
 # ---------------------------------------------------------------------------
 
+def _record_attempts(key_type: str, key_value: str, times: int) -> None:
+    """Spend `times` attempts against a rate-limit counter.
+
+    One event loop for the whole run rather than one per attempt: asyncio.run
+    builds and tears down a loop each call, and at these counts that setup cost
+    dwarfed the work being done inside it.
+    """
+    async def _spend() -> None:
+        for _ in range(times):
+            await auth.record_attempt(key_type, key_value, True)
+
+    asyncio.run(_spend())
+
+
 class ShareRateLimitTests(ShareTestCase):
     def test_share_ip_key_type_is_rate_limited_after_the_threshold(self):
-        for _ in range(119):
-            asyncio.run(auth.record_attempt("share_ip", "203.0.113.5", True))
+        _record_attempts("share_ip", "203.0.113.5", 119)
         self.assertFalse(asyncio.run(auth.rate_limited(
             "share_ip", "203.0.113.5", max_attempts=120, window_seconds=60)))
         asyncio.run(auth.record_attempt("share_ip", "203.0.113.5", True))
@@ -408,8 +421,7 @@ class ShareRateLimitTests(ShareTestCase):
             "SELECT key_value FROM login_attempts WHERE key_type = 'share_ip' "
             "ORDER BY attempted_at DESC LIMIT 1"))
         ip = row["key_value"]
-        for _ in range(130):
-            asyncio.run(auth.record_attempt("share_ip", ip, True))
+        _record_attempts("share_ip", ip, 130)
 
         resp = self.client.get(f"/s/{share['token']}")
         self.assertEqual(resp.status_code, 429)

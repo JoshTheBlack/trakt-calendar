@@ -26,6 +26,7 @@ import asyncio.selector_events
 import ipaddress
 import itertools
 import os
+import shutil
 import socket
 import sys
 import tempfile
@@ -41,6 +42,56 @@ os.environ.setdefault("TRAKT_DATA_DIR", tempfile.mkdtemp(prefix="tns-test-"))
 
 ORIGIN = "https://testserver"
 _db_counter = itertools.count(1)
+
+
+# ---------------------------------------------------------------------------
+# password hashing cost
+# ---------------------------------------------------------------------------
+
+def _use_cheap_password_hashing() -> None:
+    """Run Argon2id at the lowest cost that still exercises every code path.
+
+    The app hashes at the library's defaults, which are memory-hard BY DESIGN
+    and cost half a second of CPU per call on a developer machine. Nearly three
+    hundred places in this suite create an account, and each one paid that in
+    full: measured, the defaults were the single largest line item in the whole
+    run, larger than every other cause combined.
+
+    What the suite actually asserts about hashing is the SHAPE of the result and
+    the BEHAVIOUR around it — that the stored value is argon2id and not argon2i,
+    that a hash made with outdated parameters is transparently upgraded on a
+    correct password, that a wrong password fails and an absent one still burns
+    a verify. None of that reads the cost parameters; it only requires a real
+    Argon2id hash, which this still produces. The one thing that would be lost
+    is a measurement of how EXPENSIVE the defaults are, and no test makes one.
+
+    Deliberately not (time_cost=1, memory_cost=8, parallelism=1): the rehash
+    test in tests/auth/test_accounts.py hashes with exactly those to stand for
+    "outdated", and check_needs_rehash compares parameters for equality, so
+    matching them here would make that upgrade look unnecessary and quietly
+    delete the assertion's meaning.
+
+    Swapped on the module rather than passed in, because the hasher is a private
+    module global with no injection seam — and it should stay that way. Test
+    cost is not a reason to grow production configuration that a real
+    deployment would then be able to set wrong.
+    """
+    from argon2 import PasswordHasher
+
+    from app.auth import passwords
+    from tests import support
+
+    # Handed to support before it is replaced, because swapping it away removes
+    # the last place the real cost parameters are visible — and how strong they
+    # are is the security property here. tests/auth/test_accounts.py asserts on
+    # it, cheaply, without hashing anything.
+    support.PRODUCTION_HASHER = passwords._hasher
+
+    passwords._hasher = PasswordHasher(time_cost=1, memory_cost=512, parallelism=1)
+    passwords._dummy_hash = None  # built from the old hasher if anything cached it
+
+
+_use_cheap_password_hashing()
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +218,11 @@ def db_path(tmp_path):
     """A freshly migrated, test-only database, distinct from every other test's."""
     from app import db
 
+    from tests import support
+
     path = tmp_path / f"test-{next(_db_counter)}.db"
+    shutil.copyfile(support._schema_template(), path)
     db.set_db_path(path)
-    asyncio.run(db.migrate())
     yield path
     db.close_thread_connection()
 

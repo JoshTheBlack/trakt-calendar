@@ -98,7 +98,7 @@ written out, and that part is worth matching.
 ## Testing
 
 ```
-.venv/Scripts/python.exe -m pytest -q          # full suite, ~4 minutes
+.venv/Scripts/python.exe -m pytest -q          # full suite, ~6.5 minutes
 .venv/Scripts/python.exe -m pytest -q tests/calendar/test_cache.py
 ```
 

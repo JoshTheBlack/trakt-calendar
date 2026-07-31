@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import shutil
 import unittest
 from pathlib import Path
 
@@ -42,6 +43,12 @@ ORIGIN = "https://testserver"
 
 _db_counter = itertools.count(1)
 
+# The Argon2 hasher the app builds for itself, captured by conftest before it
+# swaps in a cheap one for the duration of the run. Everything in the suite
+# hashes with the cheap one; this is here so that the COST of the real one stays
+# assertable, since it is a security property and nothing else exercises it now.
+PRODUCTION_HASHER = None
+
 
 def new_db_path(prefix: str = "test") -> Path:
     """Point app.db at a database no other test is using, and return its path.
@@ -57,12 +64,46 @@ def new_db_path(prefix: str = "test") -> Path:
     return path
 
 
+_template_path: Path | None = None
+
+
+def _schema_template() -> Path:
+    """A migrated but empty database, built once, to be COPIED per test.
+
+    Migrating from nothing costs ~60ms, and almost every test in this suite
+    wants a fresh database, so the suite was replaying the same forty-odd
+    migration steps well over a thousand times to arrive at the identical empty
+    schema. Copying the finished file instead costs about a millisecond.
+
+    This is safe only because the migrations are a pure function of the code:
+    they build schema and seed no rows that vary by clock, environment or
+    randomness. A migration that inserted a timestamp would be frozen at
+    whenever the template was built — if one is ever added, it belongs after the
+    copy, not inside it.
+
+    Checkpointed and closed before it is used as a source, because the app runs
+    SQLite in WAL mode: the schema lives in a sibling -wal file until then, and
+    copying the main file alone would hand every test a database that had never
+    been migrated.
+    """
+    global _template_path
+    if _template_path is None:
+        from app import db
+
+        path = TMP / "schema-template.db"
+        db.set_db_path(path)
+        asyncio.run(db.migrate())
+        asyncio.run(db.run(lambda conn: conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")))
+        db.close_thread_connection()
+        _template_path = path
+    return _template_path
+
+
 def migrated_db(prefix: str = "test") -> Path:
     """new_db_path plus the migrations, for a synchronous test."""
-    from app import db
-
+    template = _schema_template()
     path = new_db_path(prefix)
-    asyncio.run(db.migrate())
+    shutil.copyfile(template, path)
     return path
 
 
@@ -70,10 +111,7 @@ class DatabaseTestCase(unittest.IsolatedAsyncioTestCase):
     """A freshly migrated database per test, for async tests with no HTTP."""
 
     async def asyncSetUp(self):
-        from app import db
-
-        self.db_path = new_db_path(type(self).__name__.lower())
-        await db.migrate()
+        self.db_path = migrated_db(type(self).__name__.lower())
 
     async def asyncTearDown(self):
         from app import db

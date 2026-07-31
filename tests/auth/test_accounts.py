@@ -20,6 +20,7 @@ from fastapi import Response
 
 from app import auth, db
 from app.config import Settings
+from tests import support
 from tests.support import new_db_path
 
 DAY = 24 * 3600
@@ -94,6 +95,27 @@ class PasswordTests(AuthTestCase):
     async def test_current_defaults_do_not_trigger_a_rehash(self):
         stored = await auth.hash_password("hunter2hunter2")
         self.assertIsNone((await auth.verify_password(stored, "hunter2hunter2")).new_hash)
+
+    def test_the_app_hashes_at_the_hashing_librarys_own_defaults(self):
+        """The COST the app ships with, which is the security property the rest
+        of this class cannot see.
+
+        Every other test here runs against a deliberately cheap hasher that
+        conftest swaps in, because the real parameters are memory-hard and were
+        the single most expensive thing in this suite. That trade is only safe
+        while something still checks the real ones, which is this: the app must
+        build its hasher with no arguments, taking whatever the library
+        currently considers adequate, so that a version bump raises the floor on
+        its own. Compared against a fresh default hasher rather than to pinned
+        numbers, so this does not have to be edited every time that guidance
+        moves — the point is that the app tracks it, not what it is today.
+        """
+        production, reference = support.PRODUCTION_HASHER, PasswordHasher()
+        self.assertIsNotNone(production, "conftest did not hand over the real hasher")
+        self.assertEqual(
+            (production.time_cost, production.memory_cost, production.parallelism),
+            (reference.time_cost, reference.memory_cost, reference.parallelism),
+        )
 
     async def test_upgrading_a_hash_does_not_revoke_sessions(self):
         """A transparent rehash is not a password change: the secret is the same,
