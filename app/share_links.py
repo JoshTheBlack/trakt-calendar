@@ -280,13 +280,32 @@ def build_url(row, username: str | None, base_url: str, kind: str,
     if path is None:
         return None
     view = {k: str(params[k]) for k in LINK_VIEW_PARAMS if params and k in params}
+    return f"{base}{path}{link_query(view)}"
+
+
+def link_query(params: dict | None) -> str:
+    """How a share URL spells a view: `?p=<code>` when the compact form can
+    carry the whole of it, the long query string when it cannot, and nothing at
+    all when there is no view to carry.
+
+    ONE implementation of that fallback, because two things build share URLs —
+    the three page links above, and the preview picture's URL in
+    app/share_routes.py, which addresses a different path and can carry a param
+    the codebooks have no room for. `p` is a nicer way to WRITE a link, never
+    the only way to express one, so anything the code cannot say goes out
+    verbose rather than going out wrong.
+    """
+    view = {key: str(value) for key, value in (params or {}).items()}
     if not view:
-        return f"{base}{path}"
-    # The short form when it can carry this view, the long one when it can't —
-    # `p` is a nicer way to write a link, never the only way to express one.
-    if code := share_code.encode(view):
-        return f"{base}{path}?p={code}"
-    return f"{base}{path}?{urlencode(view)}"
+        return ""
+    # share_code only knows LINK_VIEW_PARAMS and silently ignores anything else,
+    # so a view carrying more than that has to be checked BEFORE encoding: a code
+    # that dropped a param would resolve back to the owner's default for it, and
+    # the difference between "the view asked for" and "the view served" is
+    # exactly what these URLs exist to pin down.
+    if set(view) <= set(LINK_VIEW_PARAMS) and (code := share_code.encode(view)):
+        return f"?p={code}"
+    return f"?{urlencode(view)}"
 
 
 def share_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:
@@ -490,26 +509,68 @@ async def update_owner_defaults(user_id: int, **fields) -> None:
 # render the identical 404 (app/share_routes.py's job, not this module's).
 
 _RESOLVE_SELECT = (
-    "SELECT sl.*, u.username AS owner_username, u.timezone AS owner_account_timezone "
+    "SELECT sl.*, u.username AS owner_username, u.display_name AS owner_display_name, "
+    "u.timezone AS owner_account_timezone "
     "FROM share_links sl JOIN users u ON u.id = sl.user_id "
     "WHERE {condition} AND u.is_disabled = 0"
 )
 
 
-async def resolve_by_token(token: str):
-    """Resolve /s/<token>. The index lookup finds the row; the compare_digest
-    below repeats the equality in constant time, so the one comparison this app
-    makes against a secret is not a byte-at-a-time one that would let a timing
-    attack guess the token. Usernames and slugs are public identifiers and need
-    no such treatment."""
+async def _resolve_token_row(token: str, enabled_condition: str):
+    """The shared body of both token lookups below.
+
+    The index lookup finds the row; the compare_digest repeats the equality in
+    constant time, so the one comparison this app makes against a secret is not a
+    byte-at-a-time one that would let a timing attack guess the token. Usernames
+    and slugs are public identifiers and need no such treatment.
+
+    ONE BODY, because the two callers differ in nothing but which enablement they
+    require — and the constant-time comparison is exactly the kind of rule that
+    gets remembered in one near-copy and forgotten in the other.
+    """
     if not token:
         return None
     row = await db.fetch_one(
-        _RESOLVE_SELECT.format(condition="sl.token = ? AND sl.enabled_token = 1"), (token,),
+        _RESOLVE_SELECT.format(condition=f"sl.token = ? AND ({enabled_condition})"), (token,),
     )
     if row is None or not secrets.compare_digest(str(row["token"]), token):
         return None
     return row
+
+
+async def resolve_by_token(token: str):
+    """Resolve /s/<token> — the page itself, which answers only while the token
+    FORM is the one published."""
+    return await _resolve_token_row(token, "sl.enabled_token = 1")
+
+
+async def resolve_for_card(token: str):
+    """Resolve /s/<token> for a share's ATTACHMENTS rather than for its page —
+    today, the preview picture a pasted link unfurls into.
+
+    Identical to resolve_by_token but for which enablement it requires: this
+    answers whenever the share is published BY ANY FORM, not specifically when
+    the token form is.
+
+    WHY THE DIFFERENCE IS NECESSARY. The picture is addressed by token from all
+    three link forms, because the token is the only one of the three identifiers
+    that names nobody — a /u/ or /c/ image URL would print a username or a chosen
+    name into markup that gets pasted into other people's channels, which is
+    exactly what the picture itself is designed not to say. But a user who
+    publishes only a slug (enabled_slug = 1 with enabled_token = 0, which the
+    Share panel lets them do) has a perfectly live /c/ page — and gating its
+    picture on the token FORM would leave that page's preview resolving to
+    nothing forever, for precisely the users who cared most about how their link
+    looks.
+    IT WIDENS NOTHING. A share with all three forms disabled still resolves to
+    nothing, and _RESOLVE_SELECT's join still excludes a disabled account. The
+    picture stays exactly as public as the page it is attached to, and rotating
+    the token still kills both at once.
+    """
+    return await _resolve_token_row(
+        token,
+        "sl.enabled_token = 1 OR sl.enabled_username = 1 OR sl.enabled_slug = 1",
+    )
 
 
 async def resolve_by_username(username: str):

@@ -11,16 +11,24 @@ answered from the cache alone.
 """
 from __future__ import annotations
 
+import re
 import unittest
 import asyncio
 from datetime import date
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-from app import auth, cache, calendar_cache, db, share_code, share_links
+from app import (auth, cache, calendar_cache, db, posters, share_card, share_code,
+                 share_links, share_routes)
+from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
 from tests.support import AppTestCase, ORIGIN
+
+
+async def _no_poster_warm(settings, refs) -> int:
+    return 0
 
 
 class SharePageTestCase(AppTestCase):
@@ -31,6 +39,15 @@ class SharePageTestCase(AppTestCase):
 
     def setUp(self):
         super().setUp()
+        # Rendering a share page starts resolving the poster artwork its preview
+        # picture will want, in the background and without waiting for it. None
+        # of the tests in this file are about that, and leaving it live would
+        # make them depend on whether a background task happens to get a slice
+        # before the client's event loop is torn down — so the one outbound call
+        # it can make is stubbed here, deterministically.
+        warm = patch.object(posters, "ensure_posters", _no_poster_warm)
+        warm.start()
+        self.addCleanup(warm.stop)
         self.admin_id = self._make_user("admin_user", is_admin=True, calendar_approved=True)
 
     def _make_user(self, username, password="hunter2hunter2", **flags) -> int:
@@ -381,6 +398,274 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with self._no_network():
             resp = self.client.get("/s/not-a-real-token/details?media=show&id=123&season=2")
         self.assertEqual(resp.status_code, 404)
+
+
+class ShareEmbedTextTests(SharePageTestCase):
+    """The WORDS an unfurler prints around a shared link — the <title> and the
+    Open Graph tags, not the picture, which draws no name at all.
+
+    The owner's chosen display name is the only name any of this may carry. The
+    username is a sign-in identifier they never chose to publish, so where there
+    is no chosen name the text names nobody rather than falling back to it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("embedowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = self.client.get("/api/me/share").json()["token"]
+        self.client.cookies.clear()
+
+    def _head(self, path: str | None = None) -> str:
+        """Everything before <body> — the part a crawler reads. The page's own
+        body still shows a visitor who the calendar belongs to, which is a
+        different audience and a different question."""
+        resp = self.client.get(path or f"/s/{self.token}?year=2026&month=8")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text.split("<body")[0]
+
+    def _meta(self, head: str, prop: str) -> str:
+        found = re.findall(rf'<meta (?:property|name)="{re.escape(prop)}" content="([^"]*)">', head)
+        self.assertEqual(len(found), 1, f"{prop}: {found}")
+        return found[0]
+
+    def _set_name(self, value: str | None) -> None:
+        asyncio.run(auth.set_display_name(self.user_id, value))
+
+    def test_a_chosen_display_name_is_the_name_the_embed_carries(self):
+        self._set_name("Josh Black")
+        head = self._head()
+        self.assertEqual(self._meta(head, "og:title"), "Josh Black – August 2026")
+        self.assertEqual(self._meta(head, "twitter:title"), "Josh Black – August 2026")
+        self.assertIn("<title>Josh Black – August</title>", head)
+
+    def test_no_chosen_name_omits_it_rather_than_using_the_username(self):
+        """The failure this guards against is the substitution, not the gap: a
+        share link is meant to name only somebody who asked to be named."""
+        head = self._head()
+        self.assertEqual(self._meta(head, "og:title"), "Shared calendar – August 2026")
+        self.assertIn("<title>Shared calendar – August</title>", head)
+
+    def test_the_nameless_text_reads_as_deliberate_rather_than_broken(self):
+        """No dangling possessive, no leading separator, no doubled dash — the
+        nameless branch is a finished phrase of its own, not a title with a hole
+        where a name was."""
+        title = self._meta(self._head(), "og:title")
+        self.assertFalse(title.startswith(("–", "-", "'", "’", " ")), title)
+        for fragment in ("'s", "’s", "– –", "  "):
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, title)
+
+    def test_the_description_names_nobody_either_way(self):
+        for name in (None, "Josh Black"):
+            with self.subTest(name=name):
+                self._set_name(name)
+                head = self._head()
+                # Escaped as the environment writes it: the apostrophe in
+                # "I'm" is what a quoted attribute value looks like here.
+                self.assertEqual(self._meta(head, "og:description"),
+                                 "Shows I&#39;m watching this month")
+
+    def test_the_username_never_reaches_the_head_either_way(self):
+        """The token page, whose URL names nobody. A /u/ link's own URL contains
+        the username by construction and is a separate matter."""
+        for name in (None, "Josh Black"):
+            with self.subTest(name=name):
+                self._set_name(name)
+                self.assertNotIn("embedowner", self._head())
+
+    def test_a_whitespace_only_name_counts_as_no_name(self):
+        """Trimmed before the decision, so a stored value that predates the
+        account page's own normalization cannot render a title made of spaces."""
+        asyncio.run(db.execute(
+            "UPDATE users SET display_name = ? WHERE id = ?", ("   ", self.user_id)))
+        head = self._head()
+        self.assertEqual(self._meta(head, "og:title"), "Shared calendar – August 2026")
+        self.assertNotIn("embedowner", head)
+
+    def test_the_name_is_escaped_into_the_meta_attributes(self):
+        """A display name is free text the owner types, and it lands inside a
+        double-quoted HTML attribute. One that closed the attribute would put
+        markup of the owner's choosing into every crawler's copy of the page."""
+        self._set_name('"><script>alert(1)</script>')
+        head = self._head()
+        self.assertNotIn("<script>alert(1)", head)
+        self.assertEqual(self._meta(head, "og:title"),
+                         "&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt; – August 2026")
+
+    def test_every_link_form_says_the_same_thing(self):
+        """/s/, /u/ and /c/ open the same page and describe it the same way; the
+        username in a /u/ URL is the URL's business, not the text's."""
+        self._set_name("Josh Black")
+        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
+        asyncio.run(share_links.set_custom_slug(self.user_id, "embed-cal"))
+        asyncio.run(share_links.set_enabled(self.user_id, "slug", True))
+        for path in (f"/s/{self.token}", "/u/embedowner", "/c/embed-cal"):
+            with self.subTest(path=path):
+                head = self._head(f"{path}?year=2026&month=8")
+                self.assertEqual(self._meta(head, "og:title"), "Josh Black – August 2026")
+
+
+class CardTileSelectionTests(unittest.TestCase):
+    """Which titles lead a share link's preview picture.
+
+    A pure function of the month's visible items, so this needs no database, no
+    client and no renderer — which is the point of it being one.
+    """
+
+    def _item(self, title, *, day=1, season=None, episode=None, media=Media.SHOW):
+        return Item(
+            source=Source.TRAKT, media=media, id=f"{media}:{title}",
+            ids={"tmdb": 1}, detail_url="",
+            air_date=f"2026-08-{day:02d}", air_ts=float(day), air_display="",
+            air_time="", day_of_week="", title=title,
+            season=season, episode_number=episode,
+        )
+
+    def _series(self, title, day):
+        return self._item(title, day=day, season=1, episode=1)
+
+    def _season(self, title, day, season=3):
+        return self._item(title, day=day, season=season, episode=1)
+
+    def _titles(self, items):
+        return [item.title for item in share_routes.select_tile_items(items)]
+
+    def test_series_premieres_fill_the_card_earliest_first(self):
+        """More series premieres than the grid holds, so nothing else gets in."""
+        days = range(1, share_routes.MAX_CARD_TILES + 3)
+        items = [self._series(f"S{day}", day) for day in reversed(days)]
+        items += [self._season(f"P{day}", day) for day in (1, 2, 3, 4)]
+        self.assertEqual(self._titles(items),
+                         [f"S{day}" for day in days][:share_routes.MAX_CARD_TILES])
+
+    def test_season_premieres_fill_in_behind_them(self):
+        """Tier beats date: both series premieres come first even though every
+        season premiere airs before either of them."""
+        items = [self._series("Series late", 20), self._series("Series later", 28)]
+        seasons = range(1, share_routes.MAX_CARD_TILES + 1)
+        items += [self._season(f"Season {day}", day) for day in seasons]
+        expected = ["Series late", "Series later"]
+        expected += [f"Season {day}" for day in seasons]
+        self.assertEqual(self._titles(items), expected[:share_routes.MAX_CARD_TILES])
+
+    def test_a_month_of_movies_still_fills_the_card(self):
+        days = range(1, share_routes.MAX_CARD_TILES + 4)
+        items = [self._item(f"Film {day}", day=day, media=Media.MOVIE) for day in days]
+        self.assertEqual(self._titles(items),
+                         [f"Film {day}" for day in days][:share_routes.MAX_CARD_TILES])
+
+    def test_a_month_of_mid_season_episodes_still_fills_the_card(self):
+        """Every calendar view has to produce a strip; the All Episodes view is
+        the one where nothing is a premiere at all."""
+        days = range(1, share_routes.MAX_CARD_TILES + 4)
+        items = [self._item(f"Ep {day}", day=day, season=4, episode=7) for day in days]
+        self.assertEqual(self._titles(items),
+                         [f"Ep {day}" for day in days][:share_routes.MAX_CARD_TILES])
+
+    def test_a_movie_is_preferred_over_a_mid_season_episode(self):
+        items = [self._item("Episode", day=1, season=2, episode=6),
+                 self._item("Movie", day=28, media=Media.MOVIE)]
+        self.assertEqual(self._titles(items), ["Movie", "Episode"])
+
+    def test_missing_episode_coordinates_do_not_raise(self):
+        """`season` and `episode_number` are optional on Item and absent on
+        movies, so nothing here may compare None with an integer."""
+        items = [self._item("No coordinates", day=2),
+                 self._item("Half", day=3, season=1),
+                 self._series("Premiere", 9)]
+        self.assertEqual(self._titles(items), ["Premiere", "No coordinates", "Half"])
+
+    def test_a_thin_month_produces_what_it_has(self):
+        self.assertEqual(self._titles([]), [])
+        self.assertEqual(self._titles([self._series("Only", 3)]), ["Only"])
+
+    def test_a_tile_reads_its_premiere_mark_off_the_same_rule_that_ranked_it(self):
+        """The card glows around series premieres, and "series premiere" already
+        has exactly one definition here. A second spelling of it is a rule that
+        can drift while both copies go on sounding right."""
+        premiere = share_routes.tile_tier(self._series("Premiere", 4))
+        self.assertEqual(premiere, 0)
+        for item in (self._season("Season", 4), self._item("Mid", day=4, season=2, episode=6),
+                     self._item("Film", day=4, media=Media.MOVIE)):
+            with self.subTest(title=item.title):
+                self.assertNotEqual(share_routes.tile_tier(item), premiere)
+
+    def test_the_air_date_is_formatted_for_the_caption(self):
+        """The renderer is handed a finished string because it has no calendar
+        vocabulary, so this is the one place the card's date format lives."""
+        self.assertEqual(share_routes._tile_date_label(self._item("A", day=14)),
+                         "Fri 14 Aug")
+
+    def test_an_unparseable_air_date_becomes_no_caption_rather_than_a_guess(self):
+        item = self._item("A", day=1)
+        item.air_date = "not-a-date"
+        self.assertEqual(share_routes._tile_date_label(item), "")
+
+
+class CardTileOrderTests(unittest.TestCase):
+    """The order the tiles are DRAWN in, which is not the order they were picked
+    in: the selection ranks by strength, and the grid then reads as a single date
+    order across the whole card, left to right and top row first.
+    """
+
+    def _pair(self, title, when):
+        tile = share_card.Tile(title=title, poster=Path("/posters/show") / f"{title}.jpg",
+                               date_label=f"day {when}", is_premiere=False)
+        return tile, when
+
+    def _titles(self, pairs):
+        return [tile.title for tile in share_routes.arrange_tiles(pairs)]
+
+    def test_the_whole_grid_is_drawn_earliest_first(self):
+        """Ten tiles lay out five and five, and the date order runs straight
+        through the break: the sixth-earliest airing opens the bottom row. Which
+        row a tile lands in is decided by its date alone — the selection's tiers
+        chose the ten titles and have no further say."""
+        strong = [self._pair(f"d{n}", n) for n in (8, 1, 4, 2, 3)]
+        rest = [self._pair(f"d{n}", n) for n in (9, 6, 7, 10, 5)]
+        self.assertEqual(self._titles(strong + rest),
+                         [f"d{n}" for n in range(1, 11)])
+
+    def test_a_partial_grid_reads_in_order_across_its_rows(self):
+        """Seven tiles lay out four then three: earliest four on top, next three
+        below. One sorted sequence lands correctly under whatever split the
+        renderer picks, so nothing here restates the row widths."""
+        pairs = [self._pair(f"t{n}", n) for n in (4, 3, 2, 1, 7, 6, 5)]
+        self.assertEqual(self._titles(pairs), ["t1", "t2", "t3", "t4", "t5", "t6", "t7"])
+        self.assertEqual(share_card.tile_rows(len(pairs)), [4, 3])
+
+    def test_an_undated_tile_lands_at_the_end_of_the_grid(self):
+        """Somewhere deterministic, and after everything that does have a date —
+        a zero would sort it to the front of the card, which is the one place a
+        title with no air date should not be. The last cells of the bottom row
+        are where it goes instead."""
+        pairs = [self._pair("no-date", None), self._pair("later", 9),
+                 self._pair("earlier", 2)]
+        pairs += [self._pair(f"b{n}", n) for n in (1, 3, 5)]
+        self.assertEqual(self._titles(pairs),
+                         ["b1", "earlier", "b3", "b5", "later", "no-date"])
+
+    def test_undated_tiles_keep_the_order_they_were_selected_in(self):
+        pairs = [self._pair("first", None), self._pair("second", None),
+                 self._pair("dated", 4)]
+        pairs += [self._pair(f"b{n}", n) for n in (1, 2, 3)]
+        self.assertEqual(self._titles(pairs),
+                         ["b1", "b2", "b3", "dated", "first", "second"])
+
+    def test_a_title_its_date_and_its_artwork_move_together(self):
+        """The failure this guards against is the one that looks almost right: a
+        card whose posters were re-ordered and whose captions were not. Each tile
+        owns its whole caption, so this holds by construction — asserted anyway,
+        because "by construction" is exactly what stops being true later."""
+        pairs = [self._pair(f"t{n}", n) for n in (3, 1, 2)]
+        for tile in share_routes.arrange_tiles(pairs):
+            with self.subTest(title=tile.title):
+                self.assertEqual(tile.poster.name, f"{tile.title}.jpg")
+                self.assertEqual(tile.date_label, f"day {tile.title[1:]}")
+
+    def test_nothing_to_arrange_is_not_an_error(self):
+        self.assertEqual(share_routes.arrange_tiles([]), ())
 
 
 if __name__ == "__main__":

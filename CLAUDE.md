@@ -44,6 +44,15 @@ not poison what another sees from the same rows (`app/calendar_cache.py`). The
 one thing filtered BEFORE storage is the instance-wide content floor, which is
 deliberate and documented there.
 
+**A share link's preview picture renders the SAME view its page does.** Both
+resolve it through `share_routes.resolve_view` and read the month through
+`share_routes._read_month`, so a card can never advertise a count the page does
+not show — there is no override, and a title the page shows is a title the card
+counts. The card is also the one public path that may make an outbound call: it
+warms poster ARTWORK, bounded to what the grid draws and to a wall clock, for
+titles the calendar cache already holds. It never fetches the CALENDAR
+(`allow_fetch=False`), so an empty cached month stays an empty card.
+
 **Trakt does not honour the `days` bound it is given** — a 7-day window has come
 back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
