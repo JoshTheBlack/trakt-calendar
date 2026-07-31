@@ -170,6 +170,27 @@ class OpenGraphMacroTests(unittest.TestCase):
         self.assertIn('property="og:image:alt" content="A preview card for August 2026"', markup)
         self.assertIn('name="twitter:image:alt"', markup)
 
+    def test_the_environment_escapes_what_it_interpolates(self):
+        """The property every assertion below rests on, checked directly rather
+        than assumed: the shared environment autoescapes, so a string reaching a
+        template is escaped at the point it is written out."""
+        self.assertTrue(templates.env.autoescape)
+
+    def test_untrusted_text_cannot_escape_a_meta_attribute(self):
+        """og:title carries the share owner's chosen display name, which is free
+        text they typed and which lands inside a double-quoted attribute. A
+        quote that closed the attribute would let the owner put markup of their
+        choosing into every crawler's copy of the page — including one embedding
+        somebody else's calendar, since a page is only ever fetched by strangers.
+        """
+        source = ("{% import '_head.html' as page with context %}"
+                  "{{ page.og(title, description) }}")
+        html = templates.env.from_string(source).render(
+            title='" onmouseover="x', description="<b>bold</b>")
+        self.assertIn('<meta property="og:title" content="&#34; onmouseover=&#34;x">', html)
+        self.assertIn("&lt;b&gt;bold&lt;/b&gt;", html)
+        self.assertNotIn("<b>", html)
+
     def test_it_reads_the_route_context_rather_than_taking_it_as_an_argument(self):
         """Imported `with context`, which is what lets four pages pass only the
         two strings that actually differ between them. A plain import would drop

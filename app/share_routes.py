@@ -283,6 +283,42 @@ def _expanded_from_code(request: Request) -> str | None:
     return f"{request.url.path}?{query}" if query else request.url.path
 
 
+def _owner_label(share_row) -> str:
+    """Who this page's <title> and its link-preview text say the calendar
+    belongs to.
+
+    THE OWNER'S CHOSEN NAME (`users.display_name`), OR NOBODY. That is one
+    specific one of the three things this app calls a display name: not the admin
+    screen's label for an account, which is the USERNAME on purpose because an
+    admin types it back to confirm a deletion and it therefore has to be unique
+    (see app/auth/admin.py), and not a linked provider's name either. This is the
+    free text the owner typed on their own account page — the only one of the
+    three they chose in order to be seen under, and the only one it is theirs to
+    publish.
+
+    THE USERNAME IS NOT A FALLBACK, deliberately. It is a sign-in identifier the
+    owner never chose to publish, and everything else about a share is built to
+    name nobody who did not ask to be named: the picture draws no name at all,
+    and its URL is the token form even from a /u/ or /c/ link so the markup
+    carries no identifier. Embed text is the one artefact that gets pasted into
+    other people's channels, so repeating the username there would undo that in
+    the one place it counts.
+
+    NO CHOSEN NAME MEANS NO NAME, NOT A GAP. The nameless branch gives the page a
+    subject of its own rather than leaving the title to trail off into a dangling
+    possessive or a stray separator — both strings below stand on their own, and
+    which branch produced which is meant to be readable from here.
+
+    A blank or whitespace-only name counts as unset: `auth.normalize_display_name`
+    is the same trimming the account page stores through, so a value written
+    before that rule existed reads here exactly as one written after it.
+    """
+    chosen = auth.normalize_display_name(share_row["owner_display_name"])
+    if chosen is None:
+        return "Shared calendar"
+    return chosen
+
+
 async def _render(request: Request, share_row) -> Response:
     if share_row is None:
         return _not_found(request)
@@ -329,6 +365,11 @@ async def _render(request: Request, share_row) -> Response:
 
     context = {
         "request": request,
+        # TWO NAMES FOR THE OWNER, AND THEY ARE NOT INTERCHANGEABLE. The label is
+        # what the <head> is allowed to say — see `_owner_label` for why the
+        # username is not a candidate there. The username itself is still what
+        # the page's own body shows a visitor who deliberately opened the link.
+        "owner_label": _owner_label(share_row),
         "owner_username": share_row["owner_username"],
         "og_image": og_image,
         # Told to the unfurler rather than left to be guessed: without them Slack

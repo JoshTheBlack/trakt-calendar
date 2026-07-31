@@ -509,7 +509,8 @@ async def update_owner_defaults(user_id: int, **fields) -> None:
 # render the identical 404 (app/share_routes.py's job, not this module's).
 
 _RESOLVE_SELECT = (
-    "SELECT sl.*, u.username AS owner_username, u.timezone AS owner_account_timezone "
+    "SELECT sl.*, u.username AS owner_username, u.display_name AS owner_display_name, "
+    "u.timezone AS owner_account_timezone "
     "FROM share_links sl JOIN users u ON u.id = sl.user_id "
     "WHERE {condition} AND u.is_disabled = 0"
 )

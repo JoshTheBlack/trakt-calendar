@@ -11,6 +11,7 @@ answered from the cache alone.
 """
 from __future__ import annotations
 
+import re
 import unittest
 import asyncio
 from datetime import date
@@ -397,6 +398,112 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with self._no_network():
             resp = self.client.get("/s/not-a-real-token/details?media=show&id=123&season=2")
         self.assertEqual(resp.status_code, 404)
+
+
+class ShareEmbedTextTests(SharePageTestCase):
+    """The WORDS an unfurler prints around a shared link — the <title> and the
+    Open Graph tags, not the picture, which draws no name at all.
+
+    The owner's chosen display name is the only name any of this may carry. The
+    username is a sign-in identifier they never chose to publish, so where there
+    is no chosen name the text names nobody rather than falling back to it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("embedowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = self.client.get("/api/me/share").json()["token"]
+        self.client.cookies.clear()
+
+    def _head(self, path: str | None = None) -> str:
+        """Everything before <body> — the part a crawler reads. The page's own
+        body still shows a visitor who the calendar belongs to, which is a
+        different audience and a different question."""
+        resp = self.client.get(path or f"/s/{self.token}?year=2026&month=8")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.text.split("<body")[0]
+
+    def _meta(self, head: str, prop: str) -> str:
+        found = re.findall(rf'<meta (?:property|name)="{re.escape(prop)}" content="([^"]*)">', head)
+        self.assertEqual(len(found), 1, f"{prop}: {found}")
+        return found[0]
+
+    def _set_name(self, value: str | None) -> None:
+        asyncio.run(auth.set_display_name(self.user_id, value))
+
+    def test_a_chosen_display_name_is_the_name_the_embed_carries(self):
+        self._set_name("Josh Black")
+        head = self._head()
+        self.assertEqual(self._meta(head, "og:title"), "Josh Black – August 2026")
+        self.assertEqual(self._meta(head, "twitter:title"), "Josh Black – August 2026")
+        self.assertIn("<title>Josh Black – August</title>", head)
+
+    def test_no_chosen_name_omits_it_rather_than_using_the_username(self):
+        """The failure this guards against is the substitution, not the gap: a
+        share link is meant to name only somebody who asked to be named."""
+        head = self._head()
+        self.assertEqual(self._meta(head, "og:title"), "Shared calendar – August 2026")
+        self.assertIn("<title>Shared calendar – August</title>", head)
+
+    def test_the_nameless_text_reads_as_deliberate_rather_than_broken(self):
+        """No dangling possessive, no leading separator, no doubled dash — the
+        nameless branch is a finished phrase of its own, not a title with a hole
+        where a name was."""
+        title = self._meta(self._head(), "og:title")
+        self.assertFalse(title.startswith(("–", "-", "'", "’", " ")), title)
+        for fragment in ("'s", "’s", "– –", "  "):
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, title)
+
+    def test_the_description_names_nobody_either_way(self):
+        for name in (None, "Josh Black"):
+            with self.subTest(name=name):
+                self._set_name(name)
+                head = self._head()
+                # Escaped as the environment writes it: the apostrophe in
+                # "I'm" is what a quoted attribute value looks like here.
+                self.assertEqual(self._meta(head, "og:description"),
+                                 "Shows I&#39;m watching this month")
+
+    def test_the_username_never_reaches_the_head_either_way(self):
+        """The token page, whose URL names nobody. A /u/ link's own URL contains
+        the username by construction and is a separate matter."""
+        for name in (None, "Josh Black"):
+            with self.subTest(name=name):
+                self._set_name(name)
+                self.assertNotIn("embedowner", self._head())
+
+    def test_a_whitespace_only_name_counts_as_no_name(self):
+        """Trimmed before the decision, so a stored value that predates the
+        account page's own normalization cannot render a title made of spaces."""
+        asyncio.run(db.execute(
+            "UPDATE users SET display_name = ? WHERE id = ?", ("   ", self.user_id)))
+        head = self._head()
+        self.assertEqual(self._meta(head, "og:title"), "Shared calendar – August 2026")
+        self.assertNotIn("embedowner", head)
+
+    def test_the_name_is_escaped_into_the_meta_attributes(self):
+        """A display name is free text the owner types, and it lands inside a
+        double-quoted HTML attribute. One that closed the attribute would put
+        markup of the owner's choosing into every crawler's copy of the page."""
+        self._set_name('"><script>alert(1)</script>')
+        head = self._head()
+        self.assertNotIn("<script>alert(1)", head)
+        self.assertEqual(self._meta(head, "og:title"),
+                         "&#34;&gt;&lt;script&gt;alert(1)&lt;/script&gt; – August 2026")
+
+    def test_every_link_form_says_the_same_thing(self):
+        """/s/, /u/ and /c/ open the same page and describe it the same way; the
+        username in a /u/ URL is the URL's business, not the text's."""
+        self._set_name("Josh Black")
+        asyncio.run(share_links.set_enabled(self.user_id, "username", True))
+        asyncio.run(share_links.set_custom_slug(self.user_id, "embed-cal"))
+        asyncio.run(share_links.set_enabled(self.user_id, "slug", True))
+        for path in (f"/s/{self.token}", "/u/embedowner", "/c/embed-cal"):
+            with self.subTest(path=path):
+                head = self._head(f"{path}?year=2026&month=8")
+                self.assertEqual(self._meta(head, "og:title"), "Josh Black – August 2026")
 
 
 class CardTileSelectionTests(unittest.TestCase):

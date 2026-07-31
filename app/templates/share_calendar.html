@@ -1,12 +1,18 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{% call page.head((owner_username or 'Shared calendar') ~ ' – ' ~ month_label,
+{# EVERYTHING IN THIS <head> NAMES THE OWNER THROUGH `owner_label` AND NEVER
+   THROUGH `owner_username`. The label is the owner's chosen display name, or a
+   subject of its own when they have not set one; app/share_routes.py's
+   _owner_label says why a username may not stand in for it. This block is the
+   text an unfurler repeats into somebody else's channel, which is a different
+   audience from the page body below. #}
+{% call page.head(owner_label ~ ' – ' ~ month_label,
                   scripts=assets.scripts('share'), nav_head=false, site_suffix=false) %}
   {# The alt text describes the generated picture rather than the page, since it
      is what a screen reader in a chat client reads out in place of it. No name
      in it, for the same reason the picture itself carries none. #}
-  {{ page.og((owner_username or 'Shared calendar') ~ ' – ' ~ month_label ~ ' ' ~ year,
+  {{ page.og(owner_label ~ ' – ' ~ month_label ~ ' ' ~ year,
              "Shows I'm watching this month",
              image_alt='A preview card for ' ~ month_label ~ ' ' ~ year) }}
 {% endcall %}
