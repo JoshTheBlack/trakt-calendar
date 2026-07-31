@@ -62,4 +62,16 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # signal directly. No --forwarded-allow-ips — Hypercorn has no such option (it
 # was an unrecognized-argument crash on start), and the app reads TRUSTED_PROXY_IPS
 # itself (see the ENV note above), so the server needs no proxy configuration.
-CMD ["hypercorn", "app.main:app", "--bind", "0.0.0.0:8000", "--access-logfile", "-"]
+#
+# NO --access-logfile, AND THAT FLAG IS THE ONLY THING THAT DECIDES IT. Passing it
+# made Hypercorn log a line per static file, per poll and per health check, which
+# is what the app.perf slow-request warnings then had to be found inside — while
+# the dev runner logged none of it, because run.py leaves config.accesslog unset
+# unless ACCESS_LOG=1. Setting the "hypercorn.access" level from Python does NOT
+# work: Hypercorn builds that logger after importing the app and overwrites the
+# level from its own config (see the note in app/main.py). Unset here means the
+# access logger is never created at all.
+# Nothing diagnostic is lost — app/perftrace.py times every request, names the
+# slow ones with their phases broken down, and logs them all at DEBUG. To get the
+# raw log back for an investigation, append --access-logfile - to this command.
+CMD ["hypercorn", "app.main:app", "--bind", "0.0.0.0:8000"]

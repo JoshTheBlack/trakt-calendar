@@ -39,9 +39,9 @@ from hypercorn.config import Config
 # actually wins for the dev runner.
 logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
-# Quiet hypercorn's per-request access log (the "GET /api/... 200" lines) — set to
-# DEBUG to bring them back. App diagnostics above are unaffected by this one.
-logging.getLogger("hypercorn.access").setLevel(logging.WARNING)
+# Nothing here quiets hypercorn's per-request access log, and nothing can: it
+# overwrites that logger's level from its own config after this runs (see the note
+# in app/main.py). What actually decides it is config.accesslog below.
 
 from app.main import app
 

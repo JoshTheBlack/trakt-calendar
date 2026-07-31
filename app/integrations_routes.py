@@ -22,7 +22,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import arr, authz, seer
+from . import arr, authz, perftrace, seer
 from .auth import AuthLevel
 from .config import load_settings
 
@@ -100,6 +100,11 @@ async def _read_all(now: float) -> None:
     exception here would surface only as asyncio's "task exception was never
     retrieved" at some unrelated moment.
     """
+    # This task inherited the trace context of whichever request spawned it, and
+    # it outlives that request by seconds — without detaching, three library reads
+    # get stamped with a request id that finished before the first one started,
+    # and its breakdown grows entries after it was already logged.
+    perftrace.detach()
     settings = load_settings()
     reads = (
         ("sonarr", lambda: arr.library_ids("sonarr", settings)),
