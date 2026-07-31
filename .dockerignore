@@ -19,10 +19,12 @@ data/
 config.php
 .env
 
-# Non-runtime / legacy assets
+# Non-runtime / legacy assets. CHANGELOG.md is deliberately absent: the app
+# SERVES it (app/changelog.py reads it from the project root for the "What's
+# new" modal), so the Dockerfile copies it in and excluding it here breaks the
+# build outright.
 *.php
 images/
 LICENSE
-CHANGELOG.md
 README.md
 PLANNING.md
