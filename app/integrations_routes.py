@@ -14,6 +14,8 @@ administrator's affordance rather than a per-user one.
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 
 import httpx
@@ -23,6 +25,8 @@ from fastapi.responses import JSONResponse
 from . import arr, authz, seer
 from .auth import AuthLevel
 from .config import load_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
@@ -46,25 +50,137 @@ async def refresh_integration_health() -> None:
 LIBRARY_CACHE: dict = {"sonarr": [], "radarr": [], "seer": [], "_ts": 0.0}
 LIBRARY_TTL = 300  # seconds
 
+# How long an id stays believed-present after the last successful read that saw
+# it. LONGER THAN THE TTL ON PURPOSE, and the gap between the two numbers is the
+# whole idea: the TTL says how often we ask, this says how long an answer keeps
+# counting when a later ask fails or comes back short. A title in Sonarr today is
+# still in Sonarr in an hour — additions are routine, removals are rare — so the
+# expensive mistake is not "held a stale id", it is "dropped every id because one
+# request timed out" and told the operator their library was empty.
+LIBRARY_MEMORY_SECONDS = 3600
 
-async def refresh_library(force: bool = False) -> None:
-    if not force and (time.time() - LIBRARY_CACHE["_ts"]) < LIBRARY_TTL:
-        return
+# id -> the last time a successful read saw it, per service. This is what makes a
+# failed refresh degrade to STALE rather than to WRONG: a read that raises leaves
+# these untouched, and the served list is whatever is still inside the window.
+_seen_at: dict[str, dict] = {"sonarr": {}, "radarr": {}, "seer": {}}
+
+# The refresh in flight right now, or None — see _spawn_refresh for why a
+# timestamp alone could not answer the question this holds.
+_refresh_task = None
+
+
+def _remember(kind: str, ids, now: float) -> None:
+    """Fold a successful read into the memory, stamping everything it saw."""
+    seen = _seen_at[kind]
+    for value in ids:
+        seen[value] = now
+
+
+def _remembered(kind: str, now: float) -> list:
+    """What this service is believed to hold, dropping anything not seen inside
+    the memory window. Sorted so the payload is stable between calls and a
+    diffing client is not handed a reshuffle as a change."""
+    seen = _seen_at[kind]
+    for value, at in list(seen.items()):
+        if now - at > LIBRARY_MEMORY_SECONDS:
+            del seen[value]
+    return sorted(seen)
+
+
+async def _read_all(now: float) -> None:
+    """One pass over all three services, each independent of the others.
+
+    PER SERVICE, NOT ALL-OR-NOTHING: Seerr being down must not discard Sonarr's
+    answer, so each read is caught on its own and only a SUCCESSFUL one updates
+    the memory. A failed one still rebuilds the served list from the memory, so
+    that a service which has been unreachable for longer than
+    LIBRARY_MEMORY_SECONDS empties out gradually instead of being served forever.
+
+    NOTHING ESCAPES THIS. It runs as a bare task with nobody awaiting it, so an
+    exception here would surface only as asyncio's "task exception was never
+    retrieved" at some unrelated moment.
+    """
     settings = load_settings()
-    LIBRARY_CACHE["sonarr"] = await arr.library_ids("sonarr", settings)
-    LIBRARY_CACHE["radarr"] = await arr.library_ids("radarr", settings)
-    LIBRARY_CACHE["seer"] = await seer.library_ids(settings)
-    LIBRARY_CACHE["_ts"] = time.time()
+    reads = (
+        ("sonarr", lambda: arr.library_ids("sonarr", settings)),
+        ("radarr", lambda: arr.library_ids("radarr", settings)),
+        ("seer", lambda: seer.library_ids(settings)),
+    )
+    for kind, read in reads:
+        try:
+            _remember(kind, await read(), now)
+        except (arr.LibraryUnavailable, seer.LibraryUnavailable) as exc:
+            # Not a warning: an unconfigured or briefly unreachable service is an
+            # ordinary state for a self-hosted box, and this runs whenever anyone
+            # opens the calendar. The served list simply stays as it was.
+            logger.info("Library read skipped for %s: %s", kind, exc)
+        except Exception:
+            # Anything else is a bug rather than a sulking service, so it is loud
+            # — but it still must not cost the other two services their read.
+            logger.warning("Library read for %s failed unexpectedly", kind, exc_info=True)
+        LIBRARY_CACHE[kind] = _remembered(kind, now)
+    LIBRARY_CACHE["_ts"] = now
+
+
+def library_snapshot() -> dict:
+    """What the add buttons should show, RIGHT NOW, without ever waiting.
+
+    Serves whatever is cached and starts a refresh BEHIND the response when the
+    TTL has lapsed. That is the difference between the calendar's add-state
+    costing a page load nothing and costing it a three-service round trip against
+    services this app does not control and cannot hurry.
+
+    REFRESHING FROM HERE — off a request — RATHER THAN OFF THE HEARTBEAT IS
+    DELIBERATE. The heartbeat runs every minute forever, so owning the refresh
+    there would mean reading three libraries around the clock on an instance
+    nobody has open. Driven from the read, the work happens when somebody is
+    actually looking and stops when they are not, and no request ever pays for it.
+    """
+    if (time.time() - LIBRARY_CACHE["_ts"]) >= LIBRARY_TTL:
+        _spawn_refresh()
+    return {k: LIBRARY_CACHE[k] for k in ("sonarr", "radarr", "seer")}
+
+
+# asyncio keeps only a weak reference to a running task, so one nobody else holds
+# can be collected mid-flight. This is that reference.
+_background: set = set()
+
+
+def _spawn_refresh() -> None:
+    """Start a refresh unless one is already running — the single flight.
+
+    THE GUARD IS THE POINT. The TTL check above is a timestamp, and a timestamp
+    cannot say "somebody is already fetching this": several requests arriving in
+    the same second after it lapses all read it as stale and all start their own
+    three-service read. That is what two overlapping four-second refreshes in the
+    logs were.
+    """
+    global _refresh_task
+    if _refresh_task is not None and not _refresh_task.done():
+        return
+    _refresh_task = asyncio.create_task(_read_all(time.time()))
+    _background.add(_refresh_task)
+    _refresh_task.add_done_callback(_background.discard)
 
 
 def invalidate_library_cache() -> None:
     """Force the next library read to re-pull rather than serve what is held.
 
-    Called after credentials change: the cached ids were fetched with the old
-    URL and API key, so keeping them until the TTL expires would leave the add
-    buttons marked from a library this instance can no longer even reach.
+    Called after credentials change: the cached ids were fetched with the old URL
+    and API key, so keeping them until the TTL expires would leave the add buttons
+    marked from a library this instance can no longer even reach.
+
+    THE MEMORY GOES, THE SERVED LISTS STAY. New credentials mean a DIFFERENT
+    library, so an id remembered from the old one is not stale — it is about
+    somewhere else, and unioning it into the next read would keep it alive for an
+    hour. But emptying what is currently SERVED would un-mark every add button
+    between the save and the next successful read, and that window got longer when
+    the route stopped waiting for the refresh. So the lists stand until something
+    replaces them, which is the next successful read.
     """
     LIBRARY_CACHE["_ts"] = 0.0
+    for seen in _seen_at.values():
+        seen.clear()
 
 
 @guard.get("/api/integrations/status", AuthLevel.ADMIN)
@@ -75,9 +191,14 @@ async def integrations_status():
 
 @guard.get("/api/integrations/library", AuthLevel.ADMIN)
 async def integrations_library():
-    """Ids already in each library, so the UI can mark added items (TTL-cached)."""
-    await refresh_library()
-    return JSONResponse({k: LIBRARY_CACHE[k] for k in ("sonarr", "radarr", "seer")})
+    """Ids already in each library, so the UI can mark added items.
+
+    Answers from cache immediately and refreshes behind the response when it has
+    aged out — this route is polled on a timer by every open calendar page, so a
+    caller that WAITED for the refresh would hand one unlucky poll in each cycle
+    the full cost of reading three services.
+    """
+    return JSONResponse(library_snapshot())
 
 
 @guard.post("/api/integrations/options", AuthLevel.ADMIN)
@@ -95,7 +216,7 @@ async def integrations_options(request: Request):
     if not (url and key):
         return JSONResponse({"ok": False, "error": "Enter the URL and API key first."}, status_code=400)
     try:
-        opts = await arr.fetch_options(url, key)
+        opts = await arr.fetch_options(kind, url, key)
     # The four things an unreachable or wrong-service instance actually raises:
     # a transport failure, a body that is not JSON, and — when the URL turns out
     # to be some other web app answering 200 with JSON of its own — a profile
@@ -130,14 +251,20 @@ async def integrations_add(request: Request):
         return JSONResponse({"ok": False, "error": "Unknown target."}, status_code=400)
 
     # Keep the library cache consistent so the button stays marked on the next load.
+    # THE MEMORY IS STAMPED TOO, not just the served list: the served list is
+    # rebuilt from the memory on every successful read, so an id appended here and
+    # nowhere else would survive exactly until the next refresh and then vanish —
+    # the button un-marking itself minutes after a successful add.
     if result.get("ok"):
         lib_id = data.get("tvdb") if target == "sonarr" else data.get("tmdb")
         if lib_id is not None:
             try:
                 lib_id = int(lib_id)
-                if lib_id not in LIBRARY_CACHE[target]:
-                    LIBRARY_CACHE[target].append(lib_id)
             except (TypeError, ValueError):
                 pass
+            else:
+                _seen_at[target][lib_id] = time.time()
+                if lib_id not in LIBRARY_CACHE[target]:
+                    LIBRARY_CACHE[target].append(lib_id)
 
     return JSONResponse(result, status_code=200 if result.get("ok") else 502)
