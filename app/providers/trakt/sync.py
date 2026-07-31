@@ -19,6 +19,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ...config import Settings
+from ...perftrace import span
 from ..base import collect_ids
 from . import transport
 from .transport import TraktError
@@ -124,9 +125,15 @@ async def fetch_progress_details(settings: Settings,
     if not unique:
         return {}
     client = transport.shared_client()
-    details = await asyncio.gather(*(
-        fetch_show_progress_detail(settings, tid, client=client) for tid in unique
-    ))
+    # ONE CALL PER SHOW, and the count is on the line because that is the number
+    # that explains the duration: the fan-out is issued all at once but paced by
+    # the outbound rate gate, so this scales with the roster divided by that
+    # concurrency, not with the network. A caller wondering why a re-baseline took
+    # four seconds wants to see how many shows it asked about.
+    with span("trakt.progress_details", n=len(unique)):
+        details = await asyncio.gather(*(
+            fetch_show_progress_detail(settings, tid, client=client) for tid in unique
+        ))
     return dict(zip(unique, details))
 
 

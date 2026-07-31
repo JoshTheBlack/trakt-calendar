@@ -461,12 +461,20 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
     if force or _removed_changed(state.get("beacons"), beacons):
         cached = {key: entry for key, entry in (state.get("shows") or {}).items()
                   if _source_id(entry) is not None}
+        # SPLIT, because the two halves fail slowly for unrelated reasons and the
+        # combined number could not tell them apart: the fetch is one provider
+        # call per show, paced by the outbound rate gate, and grows with the
+        # roster; the apply is pure CPU on the event loop over whatever came back.
+        # A rebaseline that is slow in the fetch is waiting on the provider; one
+        # that is slow in the apply is blocking every other request while it runs.
         with span("wh.rebaseline", n=len(cached), reason="force" if force else "unwatch"):
-            details = await port.fetch_progress_details(
-                settings, [_source_id(entry) for entry in cached.values()])
-            for key, entry in cached.items():
-                _set_show_baseline(state, key, entry.get("ids") or {},
-                                   details.get(int(_source_id(entry))) or {})
+            with span("wh.rebaseline.fetch", n=len(cached)):
+                details = await port.fetch_progress_details(
+                    settings, [_source_id(entry) for entry in cached.values()])
+            with span("wh.rebaseline.apply", n=len(cached)):
+                for key, entry in cached.items():
+                    _set_show_baseline(state, key, entry.get("ids") or {},
+                                       details.get(int(_source_id(entry))) or {})
         if force:
             state["last_synced"] = None  # re-seed movie history from the month start
 

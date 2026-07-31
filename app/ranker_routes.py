@@ -31,6 +31,7 @@ from . import (auth, authz, chrome, grid_builder, posters, ranker, ranker_export
                ranker_import, ranker_sources, user_images)
 from .auth import AuthLevel
 from .config import load_settings
+from .perftrace import span
 from .ranker_sources import Media
 from .templating import templates
 
@@ -284,8 +285,12 @@ async def rankings_page(request: Request):
     wanted = request.query_params.get("board") or (boards[0]["uid"] if boards else None)
     board = None
     if wanted:
+        # A board may hold a thousand titles, and this reads all of them plus
+        # every category, so it is the one part of opening this page that grows
+        # with how much somebody has ranked.
         try:
-            board = await ranker.fetch_board(user.user_id, wanted)
+            with span("ranker.fetch_board"):
+                board = await ranker.fetch_board(user.user_id, wanted)
         except ranker.RankerError:
             # A uid that is not this account's lands on the board list rather than
             # a 404 page: somebody following a stale link still gets a working
@@ -575,7 +580,13 @@ async def warm_board_posters(board_uid: str, request: Request):
         return authz.error(f"Warm at most {MAX_WARM_ITEMS} titles at a time.")
 
     pairs = [(item["media"], item["tmdb"]) for item in wanted if item["tmdb"]]
-    generated = await posters.ensure_posters(load_settings(), pairs)
+    # THE HEAVIEST THING THE RANKER ASKS FOR, and until now the least visible: up
+    # to MAX_WARM_ITEMS titles, each a provider lookup plus an image download and
+    # a Pillow re-encode. It is bounded in count but not in time, and a cold board
+    # pays all of it at once.
+    with span("ranker.warm", n=len(pairs)) as sp:
+        generated = await posters.ensure_posters(load_settings(), pairs)
+        sp.set(generated=generated)
     cached = sum(1 for media, tmdb in pairs if posters.cached_poster(media, tmdb))
     # `missing` counts the titles that will render a placeholder: the ones with
     # no tmdb at all as well as the ones whose lookup came back with nothing.
@@ -881,8 +892,17 @@ async def _render(entries: list[grid_builder.GridEntry], options: _ExportOptions
         header_image=header, scale=scale, fmt=fmt,
         show_titles=options.show_titles, podium=options.podium,
     )
-    async with _render_slots:
-        return await anyio.to_thread.run_sync(work)
+    # THE WAIT AND THE WORK ARE TIMED APART, because there are two render slots
+    # instance-wide: a third export does nothing at all until one frees, and a
+    # single span covering both would report that queueing as Pillow being slow
+    # and send the next person reading it to optimise the wrong thing.
+    with span("ranker.export_wait", entries=len(entries)):
+        await _render_slots.acquire()
+    try:
+        with span("ranker.export_render", entries=len(entries), scale=scale, fmt=fmt):
+            return await anyio.to_thread.run_sync(work)
+    finally:
+        _render_slots.release()
 
 
 async def _export_cooldown_remaining(user_id: int) -> int:
