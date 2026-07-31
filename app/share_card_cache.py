@@ -3,8 +3,9 @@ are kept.
 
 CONTENT-ADDRESSED, AND THAT IS THE ENTIRE INVALIDATION STORY. The key hashes
 everything that can change a pixel — the renderer's version, whose calendar it
-is, the month, the count, the exact titles drawn and the exact poster files
-behind them. A month that gained a show hashes differently, so it renders; a
+is, the month, the count, the exact titles drawn, the dates and premiere marks
+drawn under them, and the exact poster files behind them. A month that gained a
+show hashes differently, so it renders; a
 refresh that changed nothing hashes the same, so it does not. There is no
 invalidation table, no per-view bookkeeping, and no case anyone can forget,
 because the picture's inputs ARE its address.
@@ -88,7 +89,15 @@ def render_key(card: share_card.Card, *, owner_id: int, month: int) -> str:
         "month": month,
         "month_label": card.month_label,
         "count": card.count,
-        "tiles": [[tile.title, tile.poster.parent.name, tile.poster.name]
+        # EVERYTHING A TILE DRAWS, not just its picture: the title, the poster,
+        # the air date beneath it and whether it is marked as a series premiere.
+        # The last two are the easiest terms in this whole key to forget, and
+        # forgetting one is invisible — the card keeps rendering, it just keeps
+        # rendering the OLD date, or the old marking, for as long as the file
+        # survives. A tile that starts or stops being a premiere changes the
+        # picture, so it changes the address.
+        "tiles": [[tile.title, tile.poster.parent.name, tile.poster.name,
+                   tile.date_label, tile.is_premiere]
                   for tile in card.tiles],
         # The avatar is drawn, so changing it changes a pixel. Hashed rather than
         # embedded because the key is a hash of a small JSON document and an

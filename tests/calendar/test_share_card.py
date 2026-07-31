@@ -5,9 +5,9 @@ somebody else's Discord channel. There is no user standing in front of it who
 can retry, and the unfurler that fetched it caches what it got. So the things
 worth asserting are the ones that would otherwise be discovered by a stranger:
 that it is the size every unfurler expects, that it is a real JPEG, that a
-hostile title cannot run ink off the canvas, and that the awkward inputs — an
-empty month, a poster that will not decode, an avatar that is not an image —
-produce a card rather than an exception.
+hostile title cannot run ink off the canvas or into the tile next door, and that
+the awkward inputs — an empty month, a poster that will not decode, an avatar
+that is not an image — produce a card rather than an exception.
 
 What a unit test CANNOT see is whether it looks right. That is what rendering
 one to a file and looking at it is for.
@@ -22,13 +22,13 @@ import unittest
 from io import BytesIO
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
-from app import share_card
+from app import imaging, share_card
 
 TMP = Path(tempfile.mkdtemp(prefix="tns-card-files-"))
 
-# Longer than any real title and far longer than the column, in scripts the
+# Longer than any real title and far longer than a caption, in scripts the
 # bundled Latin face has no glyphs for. Nothing here should raise, and nothing
 # should escape its box.
 HOSTILE = "𝕋" + "غاية في الطول " * 20 + "🎬🎬🎬" + "A" * 300
@@ -49,23 +49,41 @@ def an_avatar() -> bytes:
     return buffer.getvalue()
 
 
+def a_tile(title: str = "A Show", poster: Path | None = None, *,
+           date_label: str = "Fri 14 Aug", is_premiere: bool = False) -> share_card.Tile:
+    return share_card.Tile(title=title, poster=poster or a_poster(),
+                           date_label=date_label, is_premiere=is_premiere)
+
+
 def tiles(count: int, title: str = "A Show") -> tuple[share_card.Tile, ...]:
     return tuple(
-        share_card.Tile(title=f"{title} {n}",
-                        poster=a_poster(f"poster-{n}.jpg", (40 + n * 30, 40, 90)))
+        a_tile(f"{title} {n}", a_poster(f"poster-{n}.jpg", (40 + n * 20, 40, 90)),
+               date_label=f"Fri {n + 1} Aug")
         for n in range(count)
     )
 
 
 def a_card(**overrides) -> share_card.Card:
-    base = dict(month_label="August", year=2026, count=12, tiles=tiles(5),
-                avatar=an_avatar())
+    base = dict(month_label="August", year=2026, count=12,
+                tiles=tiles(share_card.MAX_TILES), avatar=an_avatar())
     base.update(overrides)
     return share_card.Card(**base)
 
 
 def rendered(card: share_card.Card) -> Image.Image:
     return Image.open(BytesIO(share_card.build_card(card)))
+
+
+def column_band(index: int) -> tuple[int, int]:
+    """The left and right edge of one column of the ten-tile grid.
+
+    A full grid is five columns wide and centred, so this is where a tile's
+    poster and its caption both live — and therefore the only part of the card a
+    tile is allowed to change.
+    """
+    grid_left = (share_card.CARD_W - share_card.TILE_COLUMNS * share_card.COLUMN_PITCH) // 2
+    left = grid_left + index * share_card.COLUMN_PITCH
+    return left, left + share_card.COLUMN_PITCH
 
 
 class ShapeTests(unittest.TestCase):
@@ -104,6 +122,17 @@ class ShapeTests(unittest.TestCase):
                     self.assertGreater(r, g)
                     self.assertGreater(g, b)
 
+    def test_the_grid_fits_under_the_header_and_inside_the_margins(self):
+        """The tile size is derived from what the header and the captions leave
+        behind, and that arithmetic is the first thing a layout change breaks:
+        two rows that no longer fit would silently overrun the bottom edge."""
+        cell_h = share_card.TILE_H + share_card.CAPTION_H
+        block_h = share_card.TILE_ROWS * cell_h + share_card.ROW_GAP
+        self.assertLessEqual(share_card.grid_top() + block_h,
+                             share_card.CARD_H - share_card.MARGIN_Y)
+        self.assertLessEqual(share_card.TILE_COLUMNS * share_card.COLUMN_PITCH,
+                             share_card.CARD_W - 2 * share_card.MARGIN_X)
+
 
 class UntrustedTextTests(unittest.TestCase):
     """Every string on this card comes from somewhere this app does not control
@@ -111,7 +140,7 @@ class UntrustedTextTests(unittest.TestCase):
     bound, and these are the cases that would find out if it were not."""
 
     def test_a_pathological_title_renders_without_raising(self):
-        card = a_card(tiles=(share_card.Tile(title=HOSTILE, poster=a_poster()),))
+        card = a_card(tiles=(a_tile(HOSTILE),))
         with rendered(card) as img:
             self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
 
@@ -119,38 +148,77 @@ class UntrustedTextTests(unittest.TestCase):
         with rendered(a_card(month_label=HOSTILE)) as img:
             self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
 
-    def test_no_text_crosses_into_the_poster_strip(self):
-        """The text column is bounded away from the artwork. A title long enough
-        to reach it would land ON a poster, which is the visible symptom of an
-        unbounded draw — so everything right of the column must be pixel-for-
-        pixel the same whether the titles are ordinary or absurd."""
-        _, right = share_card.text_column()
-        strip = (right + 1, share_card.EDGE_WIDTH,
-                 share_card.CARD_W - share_card.EDGE_WIDTH,
-                 share_card.CARD_H - share_card.EDGE_WIDTH)
-        posters = tiles(5)
-        plain = rendered(a_card(tiles=posters, month_label="August"))
-        hostile = rendered(a_card(
-            tiles=tuple(share_card.Tile(title=HOSTILE, poster=t.poster)
-                        for t in posters),
-            month_label=HOSTILE))
-        with plain, hostile:
-            self.assertEqual(plain.convert("RGB").crop(strip).tobytes(),
-                             hostile.convert("RGB").crop(strip).tobytes())
+    def test_a_pathological_date_renders_without_raising(self):
+        with rendered(a_card(tiles=(a_tile(date_label=HOSTILE),))) as img:
+            self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
+
+    def test_a_title_stays_inside_its_own_column(self):
+        """A caption sits under a tile in a grid of ten. A title long enough to
+        reach its neighbour would land on somebody else's poster, which is the
+        visible symptom of an unbounded draw — so every column but the one that
+        changed must be pixel-for-pixel identical."""
+        plain = tiles(share_card.MAX_TILES)
+        loud = (share_card.Tile(title=HOSTILE, poster=plain[0].poster,
+                                date_label=HOSTILE),) + plain[1:]
+        before, after = rendered(a_card(tiles=plain)), rendered(a_card(tiles=loud))
+        with before, after:
+            for index in range(1, share_card.TILE_COLUMNS):
+                left, right = column_band(index)
+                box = (left, share_card.EDGE_WIDTH, right,
+                       share_card.CARD_H - share_card.EDGE_WIDTH)
+                with self.subTest(column=index):
+                    self.assertEqual(before.convert("RGB").crop(box).tobytes(),
+                                     after.convert("RGB").crop(box).tobytes())
 
     def test_a_long_string_costs_a_bounded_amount_of_work(self):
         """The text layer trims one character at a time and measures after each,
         so its cost is linear in the input — and this renderer sits behind a
         route anonymous crawlers reach. Past the cap, nothing a reader can see
         changes, so the extra characters buy only CPU."""
-        capped = share_card.Card(month_label="August", year=2026, count=1,
-                                 tiles=(share_card.Tile(title=HOSTILE,
-                                                        poster=a_poster()),))
-        longer = share_card.Card(month_label="August", year=2026, count=1,
-                                 tiles=(share_card.Tile(title=HOSTILE + HOSTILE,
-                                                        poster=a_poster()),))
+        capped = a_card(tiles=(a_tile(HOSTILE),))
+        longer = a_card(tiles=(a_tile(HOSTILE + HOSTILE),))
         self.assertGreater(len(HOSTILE), share_card.MAX_DRAWN_CHARS)
         self.assertEqual(share_card.build_card(capped), share_card.build_card(longer))
+
+    def test_the_cap_is_wide_enough_for_the_box_it_was_derived_from(self):
+        """The cap is an UPPER bound on what a caption could show, so it has to
+        be derived from the narrowest glyph in the face. Derived from a wide one
+        it would be a small number that quietly truncated narrow titles, which is
+        the one failure a character cap must not have."""
+        self.assertGreaterEqual(
+            share_card.MAX_DRAWN_CHARS * share_card.NARROWEST_INKED_ADVANCE,
+            share_card.CAPTION_W)
+
+    def test_the_cheap_cuts_never_change_the_text_that_is_drawn(self):
+        """The whole bargain: the cap and the estimate bound the WORK, and the
+        reader is supposed to be unable to tell. The case that would break it is
+        a string whose narrow characters come first and whose wide ones follow —
+        its average advance understates how much of it fits — so those are what
+        this walks, alongside the scripts that make the loop expensive in the
+        first place."""
+        draw = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+        font = imaging.font(share_card.TITLE_TYPE)
+        cap = share_card.MAX_DRAWN_CHARS
+        cases = ["日本語のタイトル" * 3, "🎬" * 20, "مسلسل عربي طويل جدا " * 3, HOSTILE]
+        # Every third split rather than every one: the property is continuous in
+        # the split point and this file runs on every suite.
+        for split in range(1, cap, 3):
+            cases += ["i" * split + "W" * (cap - split),
+                      "l" * split + "M" * (cap - split),
+                      "W" * split + "." * (cap - split)]
+        for case in cases:
+            with self.subTest(case=case[:20]):
+                self.assertEqual(
+                    imaging.ellipsized(draw, case[:cap], font, share_card.CAPTION_W),
+                    imaging.ellipsized(draw, share_card._drawn(case, share_card.CAPTION_W, font),
+                                       font, share_card.CAPTION_W))
+
+    def test_a_capped_title_is_still_ellipsized_to_the_box(self):
+        """The cap bounds the WORK; the text layer still bounds the INK. A title
+        cut to the cap and drawn raw would run out of its column."""
+        wide = a_card(tiles=(a_tile("W" * share_card.MAX_DRAWN_CHARS),))
+        narrow = a_card(tiles=(a_tile("W" * (share_card.MAX_DRAWN_CHARS * 2)),))
+        self.assertEqual(share_card.build_card(wide), share_card.build_card(narrow))
 
 
 class EmptyMonthTests(unittest.TestCase):
@@ -167,21 +235,47 @@ class EmptyMonthTests(unittest.TestCase):
         self.assertEqual(share_card._count_label(1), "1 airing")
         self.assertEqual(share_card._count_label(12), "12 airings")
 
+    def test_the_count_is_on_the_card(self):
+        """It is the fact the card exists to state, so it is content rather than
+        decoration: a card that dropped it would still pass every other
+        assertion here."""
+        self.assertNotEqual(share_card.build_card(a_card(count=12)),
+                            share_card.build_card(a_card(count=13)))
+
 
 class PosterTests(unittest.TestCase):
-    def test_fewer_tiles_render_rather_than_leaving_a_gap_at_the_edge(self):
-        """The strip is right-aligned however many posters there are, so a thin
-        month keeps its artwork against the edge instead of trailing off."""
-        for count in range(0, 6):
+    def test_every_tile_count_up_to_a_full_grid_renders(self):
+        """A month thinner than the grid is the ordinary case, not an edge one —
+        a title whose artwork never resolved is simply not passed, and there is
+        no placeholder to fill its cell with."""
+        for count in range(0, share_card.MAX_TILES + 1):
             with self.subTest(count=count):
                 with rendered(a_card(tiles=tiles(count))) as img:
                     self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
+
+    def test_a_partial_grid_is_balanced_rather_than_left_over(self):
+        """Seven posters as five-then-two looks like a full design that ran out
+        of material; four-then-three looks like a design for seven. Rows never
+        differ by more than one, and the total is never more than the grid."""
+        self.assertEqual(share_card.tile_rows(0), [])
+        self.assertEqual(share_card.tile_rows(1), [1])
+        self.assertEqual(share_card.tile_rows(7), [4, 3])
+        self.assertEqual(share_card.tile_rows(share_card.MAX_TILES),
+                         [share_card.TILE_COLUMNS, share_card.TILE_COLUMNS])
+        for count in range(0, share_card.MAX_TILES + 2):
+            with self.subTest(count=count):
+                rows = share_card.tile_rows(count)
+                self.assertLessEqual(sum(rows), share_card.MAX_TILES)
+                self.assertLessEqual(len(rows), share_card.TILE_ROWS)
+                self.assertTrue(all(n <= share_card.TILE_COLUMNS for n in rows))
+                if rows:
+                    self.assertLessEqual(max(rows) - min(rows), 1)
 
     def test_the_number_of_posters_changes_the_picture(self):
         """Guards against a strip that silently draws nothing — the assertions
         above would all still pass on a card with no artwork on it at all."""
         self.assertNotEqual(share_card.build_card(a_card(tiles=tiles(0))),
-                            share_card.build_card(a_card(tiles=tiles(5))))
+                            share_card.build_card(a_card(tiles=tiles(share_card.MAX_TILES))))
 
     def test_a_poster_that_will_not_decode_costs_its_tile_and_not_the_card(self):
         """The caller only passes files it saw on disk, but "exists" and
@@ -189,9 +283,9 @@ class PosterTests(unittest.TestCase):
         first. An unfurler must never get a 500 out of one."""
         broken = TMP / "not-an-image.jpg"
         broken.write_bytes(b"this is not a JPEG")
-        card = a_card(tiles=(share_card.Tile(title="Fine", poster=a_poster()),
-                             share_card.Tile(title="Broken", poster=broken),
-                             share_card.Tile(title="Gone", poster=TMP / "nope.jpg")))
+        card = a_card(tiles=(a_tile("Fine"),
+                             a_tile("Broken", broken),
+                             a_tile("Gone", TMP / "nope.jpg")))
         with rendered(card) as img:
             self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
 
@@ -201,7 +295,121 @@ class PosterTests(unittest.TestCase):
         self.assertEqual(share_card.TILE_W * 3, share_card.TILE_H * 2)
 
 
+class CaptionTests(unittest.TestCase):
+    """Each tile names itself and says when it airs. Neither line can be checked
+    by eye at the size an embed renders, so the properties are asserted here."""
+
+    def test_every_tile_gets_its_own_title(self):
+        """Renaming the LAST tile has to change the picture: if the captions ran
+        out of room before it, the tenth show would have a poster and no name."""
+        full = tiles(share_card.MAX_TILES)
+        renamed = full[:-1] + (a_tile("A Completely Different Name", full[-1].poster),)
+        self.assertNotEqual(share_card.build_card(a_card(tiles=full)),
+                            share_card.build_card(a_card(tiles=renamed)))
+
+    def test_every_tile_gets_its_own_date(self):
+        full = tiles(share_card.MAX_TILES)
+        redated = full[:-1] + (a_tile(full[-1].title, full[-1].poster,
+                                      date_label="Tue 30 Jun"),)
+        self.assertNotEqual(share_card.build_card(a_card(tiles=full)),
+                            share_card.build_card(a_card(tiles=redated)))
+
+    def test_a_tile_with_no_date_still_renders(self):
+        """An air date this app could not parse arrives as an empty string, and
+        an empty caption line is a gap rather than an exception."""
+        with rendered(a_card(tiles=(a_tile(date_label=""),))) as img:
+            self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
+
+
+class PremiereTests(unittest.TestCase):
+    """A series premiere is the strongest thing a month can hold, and the card
+    says so with a glow. It has to survive two hostile environments: the JPEG
+    encoder, which rings around hard edges on flat colour, and Discord's embed,
+    which renders this card at about a third of its size."""
+
+    def _accent_pixels(self, img: Image.Image, box: tuple[int, int, int, int]) -> int:
+        raw = img.convert("RGB").crop(box).tobytes()
+        # JPEG moves every value a little, so this is "close to the accent"
+        # rather than an equality test.
+        return sum(1 for offset in range(0, len(raw), 3)
+                   if all(abs(a - b) < 40
+                          for a, b in zip(raw[offset:offset + 3], share_card.ACCENT)))
+
+    def _marked(self, premiere: bool) -> share_card.Card:
+        """A full grid whose FIRST tile is or is not a premiere, on black
+        artwork — so the only accent-coloured pixels that move are the mark's."""
+        black = a_poster("black.jpg", (0, 0, 0))
+        rest = tuple(a_tile(f"Show {n}", black) for n in range(share_card.MAX_TILES - 1))
+        return a_card(tiles=(a_tile("Lead", black, is_premiere=premiere),) + rest)
+
+    def test_a_premiere_is_marked_and_an_ordinary_title_is_not(self):
+        whole = (0, 0, share_card.CARD_W, share_card.CARD_H)
+        with rendered(self._marked(False)) as plain, rendered(self._marked(True)) as marked:
+            self.assertGreater(self._accent_pixels(marked, whole),
+                               self._accent_pixels(plain, whole) + 200)
+
+    def test_the_mark_survives_the_downscale_an_embed_renders_at(self):
+        """A soft glow alone is a smudge at a third of the size, which is why
+        there is a hairline hugging the poster as well. Scaled to the width a
+        Discord embed uses, the marked card must still be visibly different.
+
+        COUNTED AS WARM PIXELS, not as accent-coloured ones, and the difference
+        is the finding: at a third of the size every gold pixel has been averaged
+        with the near-black around it, so almost nothing is still CLOSE to the
+        accent — what survives is that the tile's surround is warm where an
+        unmarked tile's is neutral. That is what a reader actually sees in an
+        embed, so it is what this asserts."""
+        small = (share_card.CARD_W // 3, share_card.CARD_H // 3)
+        counts = []
+        for premiere in (False, True):
+            with rendered(self._marked(premiere)) as img, \
+                    img.resize(small, Image.LANCZOS) as thumb:
+                raw = thumb.convert("RGB").tobytes()
+                counts.append(sum(1 for offset in range(0, len(raw), 3)
+                                  if raw[offset] > raw[offset + 2] + 40))
+        self.assertGreater(counts[1], counts[0] + 100)
+
+    def test_the_glow_stays_inside_its_own_column(self):
+        """The gutters are wider than twice the glow's reach, which is the only
+        reason a marked tile cannot bleed onto its neighbour's poster."""
+        self.assertGreater(share_card.TILE_GAP, 2 * share_card.GLOW_PAD)
+        self.assertGreater(share_card.ROW_GAP, share_card.GLOW_PAD)
+        plain = tiles(share_card.MAX_TILES)
+        marked = plain[:1] + (share_card.Tile(title=plain[1].title, poster=plain[1].poster,
+                                              date_label=plain[1].date_label,
+                                              is_premiere=True),) + plain[2:]
+        before, after = rendered(a_card(tiles=plain)), rendered(a_card(tiles=marked))
+        with before, after:
+            left, right = column_band(0)
+            box = (left, share_card.EDGE_WIDTH, right,
+                   share_card.CARD_H - share_card.EDGE_WIDTH)
+            self.assertEqual(before.convert("RGB").crop(box).tobytes(),
+                             after.convert("RGB").crop(box).tobytes())
+
+
 class AvatarTests(unittest.TestCase):
+    def test_the_avatar_wears_an_accent_ring(self):
+        """A photograph of unknown colour on a near-black field either floats or
+        disappears; the ring is what gives it an edge. Counted along the top of
+        the header row, which nothing else reaches: the month's own gold is
+        centred in the row below this band."""
+        # Inside the card's own accent hairline, which is the other gold thing
+        # this band would otherwise run through.
+        band = (share_card.EDGE_WIDTH, share_card.MARGIN_Y,
+                share_card.CARD_W - share_card.EDGE_WIDTH,
+                share_card.MARGIN_Y + share_card.AVATAR_RING_WIDTH + 1)
+
+        def accent_pixels(card: share_card.Card) -> int:
+            with rendered(card) as img:
+                raw = img.convert("RGB").crop(band).tobytes()
+                return sum(1 for offset in range(0, len(raw), 3)
+                           if all(abs(a - b) < 40
+                                  for a, b in zip(raw[offset:offset + 3],
+                                                  share_card.ACCENT)))
+
+        self.assertGreater(accent_pixels(a_card()), 10)
+        self.assertEqual(accent_pixels(a_card(avatar=None)), 0)
+
     def test_the_avatar_changes_the_card_and_its_absence_does_not_break_it(self):
         with_avatar = share_card.build_card(a_card())
         without = share_card.build_card(a_card(avatar=None))
@@ -209,7 +417,7 @@ class AvatarTests(unittest.TestCase):
         with Image.open(BytesIO(without)) as img:
             self.assertEqual(img.size, (share_card.CARD_W, share_card.CARD_H))
 
-    def test_bytes_that_are_not_an_image_close_the_layout_up(self):
+    def test_bytes_that_are_not_an_image_close_the_header_up(self):
         """A missing or unreadable avatar is the ordinary case, not an error —
         there is no silhouette and no letter tile to fall back to, so the card
         renders exactly as it would for an owner who never uploaded one."""

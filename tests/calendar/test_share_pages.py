@@ -423,27 +423,36 @@ class CardTileSelectionTests(unittest.TestCase):
         return [item.title for item in share_routes.select_tile_items(items)]
 
     def test_series_premieres_fill_the_card_earliest_first(self):
-        items = [self._series(f"S{day}", day) for day in (6, 2, 4, 1, 5, 3)]
+        """More series premieres than the grid holds, so nothing else gets in."""
+        days = range(1, share_routes.MAX_CARD_TILES + 3)
+        items = [self._series(f"S{day}", day) for day in reversed(days)]
         items += [self._season(f"P{day}", day) for day in (1, 2, 3, 4)]
-        self.assertEqual(self._titles(items), ["S1", "S2", "S3", "S4", "S5"])
+        self.assertEqual(self._titles(items),
+                         [f"S{day}" for day in days][:share_routes.MAX_CARD_TILES])
 
     def test_season_premieres_fill_in_behind_them(self):
-        """Tier beats date: both series premieres come first even though five
-        season premieres air before either of them."""
+        """Tier beats date: both series premieres come first even though every
+        season premiere airs before either of them."""
         items = [self._series("Series late", 20), self._series("Series later", 28)]
-        items += [self._season(f"Season {day}", day) for day in (1, 2, 3, 4, 5, 6)]
-        self.assertEqual(self._titles(items),
-                         ["Series late", "Series later", "Season 1", "Season 2", "Season 3"])
+        seasons = range(1, share_routes.MAX_CARD_TILES + 1)
+        items += [self._season(f"Season {day}", day) for day in seasons]
+        expected = ["Series late", "Series later"]
+        expected += [f"Season {day}" for day in seasons]
+        self.assertEqual(self._titles(items), expected[:share_routes.MAX_CARD_TILES])
 
     def test_a_month_of_movies_still_fills_the_card(self):
-        items = [self._item(f"Film {day}", day=day, media=Media.MOVIE) for day in range(1, 9)]
-        self.assertEqual(self._titles(items), [f"Film {day}" for day in range(1, 6)])
+        days = range(1, share_routes.MAX_CARD_TILES + 4)
+        items = [self._item(f"Film {day}", day=day, media=Media.MOVIE) for day in days]
+        self.assertEqual(self._titles(items),
+                         [f"Film {day}" for day in days][:share_routes.MAX_CARD_TILES])
 
     def test_a_month_of_mid_season_episodes_still_fills_the_card(self):
         """Every calendar view has to produce a strip; the All Episodes view is
         the one where nothing is a premiere at all."""
-        items = [self._item(f"Ep {day}", day=day, season=4, episode=7) for day in range(1, 9)]
-        self.assertEqual(self._titles(items), [f"Ep {day}" for day in range(1, 6)])
+        days = range(1, share_routes.MAX_CARD_TILES + 4)
+        items = [self._item(f"Ep {day}", day=day, season=4, episode=7) for day in days]
+        self.assertEqual(self._titles(items),
+                         [f"Ep {day}" for day in days][:share_routes.MAX_CARD_TILES])
 
     def test_a_movie_is_preferred_over_a_mid_season_episode(self):
         items = [self._item("Episode", day=1, season=2, episode=6),
@@ -461,6 +470,28 @@ class CardTileSelectionTests(unittest.TestCase):
     def test_a_thin_month_produces_what_it_has(self):
         self.assertEqual(self._titles([]), [])
         self.assertEqual(self._titles([self._series("Only", 3)]), ["Only"])
+
+    def test_a_tile_reads_its_premiere_mark_off_the_same_rule_that_ranked_it(self):
+        """The card glows around series premieres, and "series premiere" already
+        has exactly one definition here. A second spelling of it is a rule that
+        can drift while both copies go on sounding right."""
+        premiere = share_routes.tile_tier(self._series("Premiere", 4))
+        self.assertEqual(premiere, 0)
+        for item in (self._season("Season", 4), self._item("Mid", day=4, season=2, episode=6),
+                     self._item("Film", day=4, media=Media.MOVIE)):
+            with self.subTest(title=item.title):
+                self.assertNotEqual(share_routes.tile_tier(item), premiere)
+
+    def test_the_air_date_is_formatted_for_the_caption(self):
+        """The renderer is handed a finished string because it has no calendar
+        vocabulary, so this is the one place the card's date format lives."""
+        self.assertEqual(share_routes._tile_date_label(self._item("A", day=14)),
+                         "Fri 14 Aug")
+
+    def test_an_unparseable_air_date_becomes_no_caption_rather_than_a_guess(self):
+        item = self._item("A", day=1)
+        item.air_date = "not-a-date"
+        self.assertEqual(share_routes._tile_date_label(item), "")
 
 
 if __name__ == "__main__":

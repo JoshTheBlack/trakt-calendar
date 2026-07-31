@@ -19,8 +19,10 @@ def _card(**overrides) -> share_card.Card:
     return share_card.Card(**{**fields, **overrides})
 
 
-def _tile(title: str, media: str = "show", tmdb: int = 55) -> share_card.Tile:
-    return share_card.Tile(title=title, poster=Path("/data/posters") / media / f"{tmdb}.jpg")
+def _tile(title: str, media: str = "show", tmdb: int = 55, *,
+          date_label: str = "Fri 14 Aug", is_premiere: bool = False) -> share_card.Tile:
+    return share_card.Tile(title=title, poster=Path("/data/posters") / media / f"{tmdb}.jpg",
+                           date_label=date_label, is_premiere=is_premiere)
 
 
 class RenderKeyTests(unittest.TestCase):
@@ -44,6 +46,16 @@ class RenderKeyTests(unittest.TestCase):
                 self.assertNotEqual(self._key(_card()), self._key(changed))
         self.assertNotEqual(self._key(_card()), self._key(_card(), owner_id=2))
         self.assertNotEqual(self._key(_card()), self._key(_card(), month=9))
+
+    def test_a_tile_whose_date_or_premiere_mark_changed_renders_anew(self):
+        """Both are DRAWN — the date under the title, the glow round the poster
+        — so both are inputs, and an input the key omits is one a viewer can
+        watch change while being handed back the old picture forever."""
+        plain = _card(tiles=(_tile("Show"),))
+        for changed in (_card(tiles=(_tile("Show", date_label="Sat 15 Aug"),)),
+                        _card(tiles=(_tile("Show", is_premiere=True),))):
+            with self.subTest(card=changed):
+                self.assertNotEqual(self._key(plain), self._key(changed))
 
     def test_the_same_title_backed_by_a_different_poster_renders_anew(self):
         self.assertNotEqual(self._key(_card(tiles=(_tile("Show", tmdb=1),))),

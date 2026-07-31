@@ -412,6 +412,28 @@ def tile_tier(item: Item) -> int:
     return _TIER_OTHER
 
 
+def _tile_date_label(item: Item) -> str:
+    """When this airing airs, spelled the way the card draws it.
+
+    THE FORMATTING HAPPENS HERE, not in the renderer: share_card is handed a
+    finished string because it has no calendar vocabulary and no business
+    knowing what an ISO date is (see its module docstring). This is the one
+    place the card's date format lives.
+
+    Weekday, day, month — "Fri 14 Aug". The month is redundant with the card's
+    own heading in the ordinary case and is kept anyway: it costs a caption four
+    characters, and a date reading "Fri 14" beside a heading saying August would
+    be actively wrong for an entry the calendar window carried in from either
+    side of the month. An air date this app could not parse is drawn as nothing
+    rather than as a guess.
+    """
+    try:
+        when = date.fromisoformat(item.air_date)
+    except (TypeError, ValueError):
+        return ""
+    return f"{when:%a} {when.day} {when:%b}"
+
+
 def select_tile_items(items: Sequence[Item], limit: int = MAX_CARD_TILES) -> list[Item]:
     """Which titles lead the card: one stable sort by (tier, air time), then the
     first `limit` of them.
@@ -477,6 +499,11 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     marker recording that every source came up empty — is SETTLED rather than
     pending, and does not hold the cache open forever on a picture that is
     already the best this month can look.
+
+    THE TILE CARRIES MORE THAN A PICTURE. Its air date is formatted here and its
+    "is this a series premiere" flag is read off `tile_tier` — the same function
+    that decided the title was worth a tile in the first place, rather than a
+    second spelling of the same rule. The renderer is handed the answers.
     """
     pairs = _poster_refs(select_tile_items(visible))
     await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)
@@ -486,7 +513,11 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     for item, ref in pairs:
         path = posters.cached_poster(*ref)
         if path is not None:
-            tiles.append(share_card.Tile(title=item.title, poster=path))
+            tiles.append(share_card.Tile(
+                title=item.title, poster=path,
+                date_label=_tile_date_label(item),
+                is_premiere=tile_tier(item) == _TIER_SERIES_PREMIERE,
+            ))
         elif not posters.is_negative(*ref):
             complete = False
     return tuple(tiles), complete
