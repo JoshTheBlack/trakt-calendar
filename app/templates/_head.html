@@ -82,9 +82,19 @@
 {% endmacro %}
 
 
-{% macro og(title, description) %}
+{% macro og(title, description, image_alt=none) %}
   {# Open Graph / link-preview tags. og:url and og:image are absolute, set only
-     when the instance has a configured public base URL to build them from. #}
+     when the instance has a configured public base URL to build them from.
+
+     THE DIMENSIONS ARE PART OF THE IMAGE CLAIM, not decoration: an og:image with
+     no width and height leaves Slack and Discord to work the size out for
+     themselves, and one that guesses wrong renders a thumbnail instead of the
+     wide card `summary_large_image` just promised. They come from the route as
+     og_image_w / og_image_h — whatever produced the picture is what knows how
+     big it is — and are emitted only alongside an image, since a size for a
+     picture that is not there is a contradiction rather than a hint.
+     Written HERE and only here, like every other tag in this macro: a page
+     spelling one out for itself is the second copy that drifts. #}
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="New Shows">
   <meta property="og:title" content="{{ title }}">
@@ -92,8 +102,14 @@
   {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}
   {% if og_image %}
   <meta property="og:image" content="{{ og_image }}">
+  {% if og_image_w and og_image_h %}
+  <meta property="og:image:width" content="{{ og_image_w }}">
+  <meta property="og:image:height" content="{{ og_image_h }}">
+  {% endif %}
+  {% if image_alt %}<meta property="og:image:alt" content="{{ image_alt }}">{% endif %}
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:image" content="{{ og_image }}">
+  {% if image_alt %}<meta name="twitter:image:alt" content="{{ image_alt }}">{% endif %}
   {% else %}
   <meta name="twitter:card" content="summary">
   {% endif %}

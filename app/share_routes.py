@@ -321,7 +321,7 @@ async def _render(request: Request, share_row) -> Response:
     # origin. Absent a configured base there is nothing safe to advertise, so
     # the tags are simply omitted and the link falls back to a bare text preview.
     base = _public_base(settings)
-    og_image = f"{base}/static/images/tvbanner.png" if base else None
+    og_image = _card_url(view, share_row, base)
     og_url = None
     if base:
         urls = share_links.share_urls(share_row, share_row["owner_username"], base)
@@ -331,6 +331,13 @@ async def _render(request: Request, share_row) -> Response:
         "request": request,
         "owner_username": share_row["owner_username"],
         "og_image": og_image,
+        # Told to the unfurler rather than left to be guessed: without them Slack
+        # and Discord size the picture themselves, and one that guesses wrong
+        # renders a thumbnail instead of the wide card the tags claim. Read off
+        # the renderer, so a canvas that changes size cannot leave the markup
+        # advertising the old one.
+        "og_image_w": share_card.CARD_W,
+        "og_image_h": share_card.CARD_H,
         "og_url": og_url,
         "year": view.year,
         "month": view.month,
@@ -369,6 +376,56 @@ async def _render(request: Request, share_row) -> Response:
 # failure does not repeat — and the finished picture is then cached on disk, so
 # the whole cost is paid once per (share, month, content) rather than once per
 # crawl. The CALENDAR itself is still never fetched (see `_read_month`).
+
+def _card_view_params(view: ShareView) -> dict[str, str]:
+    """The resolved view, spelled back out as the params the picture's own URL
+    carries.
+
+    FROM THE RESOLVED VIEW, NEVER FROM THE QUERY STRING THAT ARRIVED. Most of
+    what decides which airings a month shows is defaulted rather than typed — a
+    visitor who spelled out nothing still gets an endpoint, a timezone and a
+    marks filter from the owner's share row — so a URL rebuilt from what they
+    happened to type would leave the picture resolving those defaults again,
+    later, at whatever they are when a crawler arrives. Pinning them here is what
+    makes the card and the page it previews the same view rather than two views
+    that usually agree.
+
+    ONLY WHAT CHANGES WHICH AIRINGS ARE IN IT: `card_style` and `day_packing` are
+    page layout and mean nothing to a picture, and carrying them would mint a
+    second address for a byte-identical card.
+    """
+    params = {
+        "endpoint": view.endpoint.key,
+        "year": str(view.year),
+        "month": str(view.month),
+        "hidenw": "1" if view.hide_not_watching else "0",
+        "tz": view.tz.key,
+    }
+    if view.network_filter:
+        # The one view param the compact code has no field for, which is why
+        # share_links.link_query decides between the short and long spellings
+        # rather than this caller assuming one.
+        params["networks"] = ",".join(view.network_filter)
+    return params
+
+
+def _card_url(view: ShareView, share_row, base: str) -> str | None:
+    """Where this page's preview picture lives, absolutely, or None when the
+    instance has no configured public origin to build a URL from.
+
+    ALWAYS THE TOKEN FORM, from all three kinds of share link, because the token
+    is the most anonymous of the three identifiers this app has: a username or a
+    slug printed into markup that gets pasted into other people's channels names
+    the owner, which is exactly what the picture itself is designed not to do
+    (it carries an avatar and no name). There is one picture route for the same
+    reason — see `share_card_image` and share_links.resolve_for_card, which
+    answers whenever the share is published by ANY form, so a slug-only share
+    still has a preview.
+    """
+    if not base:
+        return None
+    return f"{base}/s/{share_row['token']}/og.jpg{share_links.link_query(_card_view_params(view))}"
+
 
 # How many titles ever get a tile, whatever the month holds. Read from the
 # renderer's own layout bound rather than restated here: the strip is laid out

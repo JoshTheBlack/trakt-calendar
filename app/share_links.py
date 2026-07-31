@@ -280,13 +280,32 @@ def build_url(row, username: str | None, base_url: str, kind: str,
     if path is None:
         return None
     view = {k: str(params[k]) for k in LINK_VIEW_PARAMS if params and k in params}
+    return f"{base}{path}{link_query(view)}"
+
+
+def link_query(params: dict | None) -> str:
+    """How a share URL spells a view: `?p=<code>` when the compact form can
+    carry the whole of it, the long query string when it cannot, and nothing at
+    all when there is no view to carry.
+
+    ONE implementation of that fallback, because two things build share URLs —
+    the three page links above, and the preview picture's URL in
+    app/share_routes.py, which addresses a different path and can carry a param
+    the codebooks have no room for. `p` is a nicer way to WRITE a link, never
+    the only way to express one, so anything the code cannot say goes out
+    verbose rather than going out wrong.
+    """
+    view = {key: str(value) for key, value in (params or {}).items()}
     if not view:
-        return f"{base}{path}"
-    # The short form when it can carry this view, the long one when it can't —
-    # `p` is a nicer way to write a link, never the only way to express one.
-    if code := share_code.encode(view):
-        return f"{base}{path}?p={code}"
-    return f"{base}{path}?{urlencode(view)}"
+        return ""
+    # share_code only knows LINK_VIEW_PARAMS and silently ignores anything else,
+    # so a view carrying more than that has to be checked BEFORE encoding: a code
+    # that dropped a param would resolve back to the owner's default for it, and
+    # the difference between "the view asked for" and "the view served" is
+    # exactly what these URLs exist to pin down.
+    if set(view) <= set(LINK_VIEW_PARAMS) and (code := share_code.encode(view)):
+        return f"?p={code}"
+    return f"?{urlencode(view)}"
 
 
 def share_urls(row, username: str | None, base_url: str) -> dict[str, str | None]:

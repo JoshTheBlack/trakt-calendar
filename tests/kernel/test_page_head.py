@@ -129,9 +129,10 @@ class HeadMacroTests(unittest.TestCase):
 
 
 class OpenGraphMacroTests(unittest.TestCase):
-    def render(self, **ctx) -> str:
+    def render(self, *, image_alt=None, **ctx) -> str:
+        alt = f", image_alt={image_alt!r}" if image_alt else ""
         source = ("{% import '_head.html' as page with context %}"
-                  "{{ page.og('A title', 'A description') }}")
+                  "{{ page.og('A title', 'A description'" + alt + ") }}")
         return templates.env.from_string(source).render(**ctx)
 
     def test_the_absolute_tags_appear_only_with_a_public_base_url(self):
@@ -146,6 +147,28 @@ class OpenGraphMacroTests(unittest.TestCase):
         with_url = self.render(og_url="https://example.test/x", og_image="https://example.test/i.png")
         self.assertIn('content="https://example.test/x"', with_url)
         self.assertIn('name="twitter:card" content="summary_large_image"', with_url)
+
+    def test_an_image_is_advertised_with_its_size(self):
+        """Without them Slack and Discord size the picture themselves, and one
+        that guesses wrong renders a thumbnail rather than the wide card the
+        `summary_large_image` claim beside it just promised."""
+        markup = self.render(og_image="https://example.test/i.jpg",
+                             og_image_w=1200, og_image_h=630)
+        self.assertIn('property="og:image:width" content="1200"', markup)
+        self.assertIn('property="og:image:height" content="630"', markup)
+
+    def test_a_size_is_never_emitted_without_the_image_it_describes(self):
+        """A width for a picture that is not there is a contradiction rather
+        than a hint, and the pages with no configured base URL are exactly the
+        ones that would carry it."""
+        markup = self.render(og_image_w=1200, og_image_h=630)
+        self.assertNotIn("og:image", markup)
+
+    def test_alt_text_rides_along_when_a_page_supplies_it(self):
+        markup = self.render(og_image="https://example.test/i.jpg",
+                             image_alt="A preview card for August 2026")
+        self.assertIn('property="og:image:alt" content="A preview card for August 2026"', markup)
+        self.assertIn('name="twitter:image:alt"', markup)
 
     def test_it_reads_the_route_context_rather_than_taking_it_as_an_argument(self):
         """Imported `with context`, which is what lets four pages pass only the
