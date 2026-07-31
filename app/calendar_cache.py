@@ -470,11 +470,16 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # return_exceptions=True both lets a single window fail without aborting the
     # span and stops a still-running sibling fetch from surfacing as an
     # "exception was never retrieved" warning.
-    results = await asyncio.gather(
-        *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
-          for start in windows),
-        return_exceptions=True,
-    )
+    # THE ONLY AWAITED PHASE IN THIS FUNCTION, which is what makes it worth its
+    # own span: everything below is synchronous CPU on the event loop, so a
+    # read_month that is slow HERE was waiting on Trakt or the database, and one
+    # that is slow below was blocking every other request while it worked.
+    with span("calcache.load_windows", n=len(windows), fetch=allow_fetch):
+        results = await asyncio.gather(
+            *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
+              for start in windows),
+            return_exceptions=True,
+        )
 
     entries: list[dict] = []
     as_of: int | None = None
@@ -507,29 +512,38 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # windows disjoint; this one also covers windows cached BEFORE the trim
     # existed, which overlap and would otherwise keep rendering doubled cards
     # until their TTL expired. It is a no-op once every window has been refetched.
-    entries = dedupe_entries(entries, endpoint.media)
+    # THE THREE PHASES BELOW ARE PURE CPU ON THE EVENT LOOP, and they are timed
+    # separately because they scale with different things and are fixed in
+    # different places. The filter is per-viewer work over RAW entries; the
+    # normalize is per-entry object building and timezone arithmetic, and is the
+    # one that grows with a busy month; the grouping is a sort plus a walk.
+    with span("calcache.filter", entries=len(entries)) as sp:
+        entries = dedupe_entries(entries, endpoint.media)
+        certifications = show_certifications if endpoint.media == "show" else movie_certifications
+        kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries, certifications)
+        sp.set(kept=len(kept))
 
-    certifications = show_certifications if endpoint.media == "show" else movie_certifications
-    kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries, certifications)
+    with span("calcache.normalize", entries=len(kept)) as sp:
+        items: list[Item] = []
+        for entry in kept:
+            item = trakt_calendar.normalize(entry, endpoint, tz)
+            if item is None:
+                continue
+            air_day = date.fromisoformat(item.air_date)  # already in the viewer's tz
+            if start_date <= air_day <= end_date:
+                items.append(item)
+        sp.set(items=len(items))
 
-    items: list[Item] = []
-    for entry in kept:
-        item = trakt_calendar.normalize(entry, endpoint, tz)
-        if item is None:
-            continue
-        air_day = date.fromisoformat(item.air_date)  # already in the viewer's tz
-        if start_date <= air_day <= end_date:
-            items.append(item)
+    with span("calcache.group", items=len(items)):
+        items = calendar_filter.filter_by_network(items, network_filter)
+        items.sort(key=lambda i: i.air_ts)
 
-    items = calendar_filter.filter_by_network(items, network_filter)
-    items.sort(key=lambda i: i.air_ts)
-
-    grouped = [
-        {"date": day,
-         "label": day_label(date.fromisoformat(day)),
-         "items": list(rows)}
-        for day, rows in groupby(items, key=lambda i: i.air_date)
-    ]
+        grouped = [
+            {"date": day,
+             "label": day_label(date.fromisoformat(day)),
+             "items": list(rows)}
+            for day, rows in groupby(items, key=lambda i: i.air_date)
+        ]
 
     nw = not_watching_ids or set()
     not_watching_count = sum(1 for i in items if i.id in nw)

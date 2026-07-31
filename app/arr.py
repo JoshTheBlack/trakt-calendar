@@ -6,6 +6,9 @@ folder, all configured from the Settings panel.
 """
 from __future__ import annotations
 
+import json
+
+import anyio.to_thread
 import httpx
 
 from . import http_pool
@@ -68,6 +71,19 @@ class LibraryUnavailable(Exception):
     """
 
 
+def _ids_from(raw: bytes, field: str) -> list:
+    """SYNCHRONOUS. The library's ids out of one raw JSON body.
+
+    ITS OWN FUNCTION BECAUSE IT RUNS ON A WORKER THREAD. `/api/v3/movie` returns
+    the FULL object for every title — images, ratings, the lot — so a library of a
+    couple of thousand is megabytes of JSON, and parsing it is hundreds of
+    milliseconds of CPU. Left on the event loop that is a stall for every other
+    request in flight, which is exactly what the loop watchdog kept catching a few
+    milliseconds after this read finished.
+    """
+    return [item[field] for item in json.loads(raw) if item.get(field)]
+
+
 async def library_ids(kind: str, settings: Settings) -> list:
     """All ids already in the library — TVDB ids for Sonarr, TMDB ids for Radarr.
 
@@ -85,7 +101,8 @@ async def library_ids(kind: str, settings: Settings) -> list:
                 f"{url}/api/v3/{path}", headers={"X-Api-Key": key})
             if resp.status_code != 200:
                 raise LibraryUnavailable(f"{kind} returned HTTP {resp.status_code}")
-            ids = [item[field] for item in resp.json() if item.get(field)]
+            sp.set(bytes=len(resp.content))
+            ids = await anyio.to_thread.run_sync(_ids_from, resp.content, field)
             sp.set(ids=len(ids))
             return ids
     except (httpx.HTTPError, ValueError) as exc:
