@@ -196,6 +196,17 @@ class Guard:
     def get(self, path: str, level: AuthLevel, **kwargs):
         return self._register("get", path, level, kwargs)
 
+    def head(self, path: str, level: AuthLevel, **kwargs):
+        """Register a HEAD handler, which has to be asked for explicitly.
+
+        Starlette's own Route synthesizes HEAD from GET; FastAPI's does not, so a
+        GET-only route answers 405 to a HEAD — and some link unfurlers HEAD an
+        image before they fetch it. Stack this on the same function as the GET
+        when that matters. HEAD is non-mutating (see MUTATING_METHODS), so it
+        adds no body-shape or origin surface.
+        """
+        return self._register("head", path, level, kwargs)
+
     def post(self, path: str, level: AuthLevel, **kwargs):
         return self._register("post", path, level, kwargs)
 

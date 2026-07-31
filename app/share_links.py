@@ -496,20 +496,61 @@ _RESOLVE_SELECT = (
 )
 
 
-async def resolve_by_token(token: str):
-    """Resolve /s/<token>. The index lookup finds the row; the compare_digest
-    below repeats the equality in constant time, so the one comparison this app
-    makes against a secret is not a byte-at-a-time one that would let a timing
-    attack guess the token. Usernames and slugs are public identifiers and need
-    no such treatment."""
+async def _resolve_token_row(token: str, enabled_condition: str):
+    """The shared body of both token lookups below.
+
+    The index lookup finds the row; the compare_digest repeats the equality in
+    constant time, so the one comparison this app makes against a secret is not a
+    byte-at-a-time one that would let a timing attack guess the token. Usernames
+    and slugs are public identifiers and need no such treatment.
+
+    ONE BODY, because the two callers differ in nothing but which enablement they
+    require — and the constant-time comparison is exactly the kind of rule that
+    gets remembered in one near-copy and forgotten in the other.
+    """
     if not token:
         return None
     row = await db.fetch_one(
-        _RESOLVE_SELECT.format(condition="sl.token = ? AND sl.enabled_token = 1"), (token,),
+        _RESOLVE_SELECT.format(condition=f"sl.token = ? AND ({enabled_condition})"), (token,),
     )
     if row is None or not secrets.compare_digest(str(row["token"]), token):
         return None
     return row
+
+
+async def resolve_by_token(token: str):
+    """Resolve /s/<token> — the page itself, which answers only while the token
+    FORM is the one published."""
+    return await _resolve_token_row(token, "sl.enabled_token = 1")
+
+
+async def resolve_for_card(token: str):
+    """Resolve /s/<token> for a share's ATTACHMENTS rather than for its page —
+    today, the preview picture a pasted link unfurls into.
+
+    Identical to resolve_by_token but for which enablement it requires: this
+    answers whenever the share is published BY ANY FORM, not specifically when
+    the token form is.
+
+    WHY THE DIFFERENCE IS NECESSARY. The picture is addressed by token from all
+    three link forms, because the token is the only one of the three identifiers
+    that names nobody — a /u/ or /c/ image URL would print a username or a chosen
+    name into markup that gets pasted into other people's channels, which is
+    exactly what the picture itself is designed not to say. But a user who
+    publishes only a slug (enabled_slug = 1 with enabled_token = 0, which the
+    Share panel lets them do) has a perfectly live /c/ page — and gating its
+    picture on the token FORM would leave that page's preview resolving to
+    nothing forever, for precisely the users who cared most about how their link
+    looks.
+    IT WIDENS NOTHING. A share with all three forms disabled still resolves to
+    nothing, and _RESOLVE_SELECT's join still excludes a disabled account. The
+    picture stays exactly as public as the page it is attached to, and rotating
+    the token still kills both at once.
+    """
+    return await _resolve_token_row(
+        token,
+        "sl.enabled_token = 1 OR sl.enabled_username = 1 OR sl.enabled_slug = 1",
+    )
 
 
 async def resolve_by_username(username: str):

@@ -250,25 +250,36 @@ def _visible_items(items: Sequence[Item], view: ShareView, not_watching: set[str
     return [item for item in items if not (view.hide_not_watching and item.id in not_watching)]
 
 
-def _expanded_from_code(request: Request) -> str | None:
-    """Where a `?p=` request should go instead, or None when there is no code.
+def _effective_params(request: Request) -> dict[str, str]:
+    """What a share request is actually asking for: a `?p=` code expanded back
+    into ordinary params, with anything the visitor spelled out themselves
+    winning over the same param inside the code.
 
-    A code is only how a link is HANDED OUT. On arrival it is expanded back into
-    the ordinary query params this page has always taken and the visitor is sent
-    there, so from the first paint the URL they can edit, bookmark and re-share
-    is the plain one — and the month arrows, the view controls and every other
-    param-carrying thing on the page need know nothing about the short form.
-
-    Anything the visitor spelled out themselves wins over the same param in the
-    code, and `p` never survives the redirect, even when it decoded to nothing.
+    ONE implementation of that precedence, because two surfaces need the answer
+    and they do different things with it. The PAGE redirects to the expanded URL,
+    so from the first paint the URL a visitor can edit, bookmark and re-share is
+    the plain one and the month arrows need know nothing about the short form.
+    The PICTURE decodes in place and gets on with it: an unfurler fetches it once
+    and never edits it, so a redirect would be a wasted round trip at best.
+    Two copies of a precedence rule drift; this is the rule.
     """
-    if "p" not in request.query_params:
-        return None
     params = share_code.decode(request.query_params.get("p"))
     for key, value in request.query_params.multi_items():
         if key != "p":
             params[key] = value
-    query = urlencode(params)
+    return params
+
+
+def _expanded_from_code(request: Request) -> str | None:
+    """Where a `?p=` request should go instead, or None when there is no code.
+
+    A code is only how a link is HANDED OUT; on arrival the page sends the
+    visitor to the plain form of the same request (see `_effective_params`).
+    `p` never survives the redirect, even when it decoded to nothing.
+    """
+    if "p" not in request.query_params:
+        return None
+    query = urlencode(_effective_params(request))
     return f"{request.url.path}?{query}" if query else request.url.path
 
 
@@ -642,6 +653,73 @@ async def share_by_token(request: Request, token: str):
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     return await _render(request, await share_links.resolve_by_token(token))
+
+
+# The picture this feature degrades to, and the picture it replaced: the app's
+# static banner, which is also what the register and invite pages advertise.
+STATIC_CARD_URL = "/static/images/tvbanner.png"
+
+# DELIBERATELY NOT THE 90 DAYS THE RENDERED FILE IS KEPT FOR, and the two numbers
+# looking like they should match is exactly why this is worth writing down. The
+# retention is how long WE keep a file addressed by its CONTENT; this is how long
+# a crawler may keep a picture it fetched from a URL addressed by its MONTH. The
+# same URL renders a different card the moment that month's line-up changes, so
+# telling Discord to hold it for 90 days would pin a stale picture to every post
+# already made. Short max-age, long disk retention, no contradiction — and never
+# `immutable`, for the same reason.
+_CARD_CACHE_HEADERS = {"Cache-Control": "public, max-age=600"}
+
+
+def _static_card() -> Response:
+    """Every unhappy path except a throttle: the static banner, 302.
+
+    NOT a 404 and NOT a 500, for three reasons. A miss stays identical whatever
+    caused it — an unknown token, a disabled account, a retired slug — which is
+    this module's standing promise that a share link cannot be used to probe
+    which. An unfurler that gets a 404 for an og:image renders a preview with a
+    broken picture and never retries. And the static banner is the thing this
+    feature replaces, so degrading to it is degrading to yesterday's behaviour
+    rather than to nothing.
+    """
+    return RedirectResponse(STATIC_CARD_URL, status_code=302)
+
+
+@guard.get("/s/{token}/og.jpg", AuthLevel.PUBLIC)
+@guard.head("/s/{token}/og.jpg", AuthLevel.PUBLIC)
+async def share_card_image(request: Request, token: str):
+    """The picture a pasted share link unfurls into, for the month it names.
+
+    ONE ROUTE FOR ALL THREE LINK FORMS, addressed by token, and resolved through
+    the resolver that answers whenever the share is published by any of them —
+    see share_links.resolve_for_card for both halves of why.
+
+    HEAD IS DECLARED ALONGSIDE because some unfurlers check an image before they
+    fetch it, and a 405 there is a preview that never appears. Nothing here reads
+    a body, so the same handler answers both.
+    """
+    settings = load_settings()
+    if await _share_rate_limited(request, settings):
+        # THE ONE UNHAPPY PATH THAT IS NOT THE BANNER. Redirecting a throttled
+        # request to a static file is a redirect the throttle was trying to avoid
+        # serving; an unfurler that gets a 429 shows no picture, which is correct
+        # when we are shedding load.
+        return _too_many_requests()
+
+    share_row = await share_links.resolve_for_card(token)
+    if share_row is None:
+        return _static_card()
+
+    view = resolve_view(_effective_params(request), share_row, settings)
+    try:
+        payload = await render_card(view, share_row, settings)
+    except Exception:
+        # Broad, and around the one call that draws: a corrupt cached poster or a
+        # font that vanished must degrade this request, never 500 into somebody's
+        # channel. Logged because unlike a miss it is a fault worth seeing.
+        logger.warning("Share card render failed; serving the static banner",
+                       exc_info=True)
+        return _static_card()
+    return Response(payload, media_type="image/jpeg", headers=_CARD_CACHE_HEADERS)
 
 
 @guard.get("/u/{username}", AuthLevel.PUBLIC)
