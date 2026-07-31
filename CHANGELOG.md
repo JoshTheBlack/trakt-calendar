@@ -28,6 +28,9 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🧹 **A large rearranging of the code behind the app**, into smaller pieces that each do one thing, with the tests reorganized to match. Nothing about using the app changes — this is groundwork, so that what comes next is quicker to build and safer to change.
 - 📦 **Requests that send data now have one size limit.** Every endpoint that accepts a body reads it through the same check instead of each deciding for itself, so an oversized or malformed one is refused the same way everywhere and says so. The limit sits comfortably above the largest thing the app legitimately sends, so uploads and backups are unaffected.
 
+### 🥚
+- 🤝 Two parts of it were reading the same record and quietly disagreeing about it, and the one you could see was the one with it wrong. They agree again — nothing was lost, and nothing needed fetching afresh.
+
 ## 🏷️ [1.1.5] - 2026-07-28
 
 ### Sharing
