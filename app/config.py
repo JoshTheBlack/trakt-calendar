@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import secrets_box
+from .perftrace import span
 
 DATA_DIR = Path(os.environ.get("TRAKT_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 SETTINGS_FILE = DATA_DIR / "settings.json"
@@ -468,9 +469,18 @@ def load_settings(open_secrets: bool = True) -> Settings:
     sealed under a key the current one cannot open (that decrypt would otherwise raise
     SealedButWrongKey), so an administrator can still reach the recovery screen.
     """
-    ensure_data_dir()
-    file_data = _read_settings_file()
-    globals_doc, stored_secrets = _read_db_config()
+    # TIMED BECAUSE THIS IS SYNCHRONOUS WORK ON WHATEVER THREAD ASKED, and almost
+    # every caller is a route handler, which means the event loop. It reads
+    # settings.json off disk, runs two SQLite queries on this thread's connection,
+    # and decrypts every stored secret — none of it awaited, all of it blocking
+    # every other request in flight for as long as it takes. That is affordable
+    # only while it stays sub-millisecond; on a slow or contended filesystem it
+    # stops being, and this span is how that shows up instead of being blamed on
+    # whichever route happened to be holding it.
+    with span("config.load_settings", secrets=open_secrets):
+        ensure_data_dir()
+        file_data = _read_settings_file()
+        globals_doc, stored_secrets = _read_db_config()
     if not open_secrets:
         stored_secrets = {}
 

@@ -9,6 +9,12 @@ Environment:
         app/providers/trakt/, app/calendar_cache.py, and app/trakt_auth.py), plus
         per-request timing spans elsewhere in the app. Also honored by the
         Docker image (app/main.py applies the same setting either way).
+    SLOW_REQUEST_MS (1500), SLOW_SPAN_MS (750), LOOP_STALL_MS (250) — above
+        DEBUG, "app.perf" reports only what crossed one of these, at WARNING:
+        the whole request with its slowest phases named, an individual phase,
+        and any stretch where the event loop itself was blocked. Diagnosing a
+        slow instance means lowering these, not raising LOG_LEVEL, which turns
+        on full per-Trakt-call tracing as well. See app/perftrace.py.
 """
 import logging
 import os

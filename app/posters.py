@@ -226,15 +226,24 @@ async def ensure_posters(settings, refs) -> int:
     1000 items, so callers are expected to pass a bounded subset — the current
     board's visible pool page plus its tiered items — never a whole library.
     """
+    # Two stat calls per ref, on the caller's thread — which is the event loop.
+    # Free on a local disk and emphatically not free on a mounted volume, so it is
+    # measured rather than assumed: a slow scan here delays every request on the
+    # instance before a single poster has been fetched.
+    # Materialized because `refs` is documented as any iterable and the span below
+    # reports how many there were; a generator would be counted by consuming it.
+    refs = list(refs)
     want: set[tuple[str, int]] = set()
-    for media, tmdb in refs:
-        tid = _valid(media, tmdb)
-        if tid is None:
-            continue
-        pair = (media, tid)
-        if _tile_path(*pair).exists() or _none_path(*pair).exists():
-            continue
-        want.add(pair)
+    with span("posters.disk_scan", refs=len(refs)) as sp:
+        for media, tmdb in refs:
+            tid = _valid(media, tmdb)
+            if tid is None:
+                continue
+            pair = (media, tid)
+            if _tile_path(*pair).exists() or _none_path(*pair).exists():
+                continue
+            want.add(pair)
+        sp.set(missing=len(want))
     if not want:
         return 0
 

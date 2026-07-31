@@ -39,6 +39,7 @@ from . import distrakt_routes
 from . import encryption_flow
 from . import encryption_routes
 from . import integrations_routes
+from . import perftrace
 from . import plex_auth
 from . import plex_routes
 from . import posters
@@ -191,9 +192,14 @@ async def lifespan(_app: FastAPI):
     if health != encryption_flow.KEY_MISMATCH:
         await integrations_routes.refresh_integration_health()
     task = asyncio.create_task(_heartbeat_loop())
+    # Observes the loop it runs on and is depended on by nothing — see
+    # perftrace.watch_event_loop for what its one log line is able to say that
+    # no per-request timing can.
+    watchdog = asyncio.create_task(perftrace.watch_event_loop())
     try:
         yield
     finally:
+        watchdog.cancel()
         task.cancel()
         from .providers.trakt import transport as _trakt_transport
         await _trakt_transport.aclose_shared_client()
@@ -257,6 +263,10 @@ guard = authz.Guard(app)
 # from anyone's data.
 authz.declare_mount(app, "/static", AuthLevel.PUBLIC)
 authz.install(app)
+# LAST, and therefore outermost: what it reports has to be the time the client
+# actually waited, which includes the gates authz just installed and the gzip of
+# the response below them.
+perftrace.install(app)
 
 
 # The status codes that get a rendered page rather than Starlette's bare

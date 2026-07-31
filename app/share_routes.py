@@ -38,6 +38,8 @@ from . import authz
 from .authz import Guard
 from .config import load_settings
 from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
+from . import perftrace
+from .perftrace import span
 from .providers.base import Item, Media
 from .timezones import build_options as build_timezone_options
 from .templating import templates
@@ -334,8 +336,16 @@ async def _render(request: Request, share_row) -> Response:
 
     view = resolve_view(request.query_params, share_row, settings)
 
-    items, as_of = await _read_month(view, settings, owner_prefs)
-    nw_ids = await calendar_state.not_watching_ids(owner_id)
+    # The page's own three phases, timed separately because they fail slowly for
+    # three unrelated reasons — a large month to inflate, a database under
+    # contention, and a template proportional to the number of airings — and a
+    # single total for the request cannot tell them apart.
+    with span("share.read_month", ym=f"{view.year}-{view.month:02d}",
+              endpoint=view.endpoint.key) as sp:
+        items, as_of = await _read_month(view, settings, owner_prefs)
+        sp.set(items=len(items))
+    with span("share.not_watching"):
+        nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible = _visible_items(items, view, nw_ids)
 
     # Start resolving the artwork this month's preview picture will want, and do
@@ -401,7 +411,11 @@ async def _render(request: Request, share_row) -> Response:
         "hide_not_watching": view.hide_not_watching,
         "timezone_groups": build_timezone_options(view.tz.key),
     }
-    return templates.TemplateResponse(request, "share_calendar.html", context)
+    # Jinja renders SYNCHRONOUSLY on the event loop, and this template is one
+    # block per airing — a busy month is a lot of string building with every other
+    # request waiting behind it.
+    with span("share.render_page", airings=len(visible)):
+        return templates.TemplateResponse(request, "share_calendar.html", context)
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +677,12 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     rather than across the ones that were hoped for.
     """
     pairs = _poster_refs(select_tile_items(visible))
-    await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)
+    # The one place a card request can wait on the network. `budget` is the wall
+    # clock it is allowed — a span at or just under it means the budget FIRED and
+    # the card that follows is a tile short on purpose, which is a very different
+    # story from the same span reading 30ms.
+    with span("share.warm_posters", refs=len(pairs), budget=budget):
+        await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)
 
     drawn: list[tuple[share_card.Tile, float | None]] = []
     complete = True
@@ -707,7 +726,10 @@ async def assemble_card(view: ShareView, share_row, settings, *,
     """
     owner_id = int(share_row["user_id"])
     owner_prefs = await auth.get_user_prefs(owner_id)
-    items, _as_of = await _read_month(view, settings, owner_prefs)
+    with span("card.read_month", ym=f"{view.year}-{view.month:02d}",
+              endpoint=view.endpoint.key) as sp:
+        items, _as_of = await _read_month(view, settings, owner_prefs)
+        sp.set(items=len(items))
     nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible = _visible_items(items, view, nw_ids)
 
@@ -794,10 +816,22 @@ async def render_card(view: ShareView, share_row, settings) -> bytes:
 
     payload = await anyio.to_thread.run_sync(share_card_cache.cached_render, path)
     if payload is not None:
+        logger.info("share card %s: cache hit (%d bytes)", key, len(payload))
         return payload
 
-    async with _card_render_slots:
-        payload = await anyio.to_thread.run_sync(share_card.build_card, card)
+    # TWO SPANS, BECAUSE THE SEMAPHORE IS INSIDE ONE OF THEM. There are two render
+    # slots instance-wide, so a burst of unfurls makes the third card WAIT without
+    # doing any work — and a single span covering both would report that wait as
+    # render time and send anyone reading it after Pillow.
+    with span("card.await_slot"):
+        await _card_render_slots.acquire()
+    try:
+        with span("card.render", tiles=len(card.tiles), complete=complete):
+            payload = await anyio.to_thread.run_sync(share_card.build_card, card)
+    finally:
+        _card_render_slots.release()
+    logger.info("share card %s: rendered %d bytes, tiles=%d complete=%s",
+                key, len(payload), len(card.tiles), complete)
     if complete:
         # An INCOMPLETE card is served but never kept: some of the artwork it
         # wanted was still on its way, and the next request — by which time the
@@ -809,8 +843,13 @@ async def render_card(view: ShareView, share_row, settings) -> bytes:
 
 
 async def _warm_job(key: tuple, refs, settings) -> None:
+    # This task inherited the spawning request's trace context, and it outlives
+    # that request — without detaching, minutes of poster downloads would be
+    # attributed to a page that finished long ago.
+    perftrace.detach()
     try:
-        await _warm_posters(settings, refs, budget=None)
+        with span("share.warm_job", refs=len(refs)):
+            await _warm_posters(settings, refs, budget=None)
     except Exception:
         # Nobody is waiting on this and there is nothing to tell them. A poster
         # that did not resolve leaves the card a tile short and tries again on
@@ -825,13 +864,18 @@ def _too_many_requests() -> Response:
 
 
 async def _share_rate_limited(request: Request, settings) -> bool:
-    ip = auth.client_ip(request, settings)
-    limited = await auth.rate_limited(
-        "share_ip", ip, max_attempts=SHARE_RATE_MAX_ATTEMPTS, window_seconds=SHARE_RATE_WINDOW_SECONDS,
-    )
-    # Volume-only counter (like registration/invite redemption) — there is no
-    # notion of a "failed" share-page request to distinguish.
-    await auth.record_attempt("share_ip", ip, True)
+    # A read and a WRITE on every public share request, including every crawler
+    # hit — which makes this the one thing on these routes that contends for the
+    # database rather than just reading it, and worth being able to see on its own
+    # when a page is slow before it has done anything.
+    with span("share.rate_limit"):
+        ip = auth.client_ip(request, settings)
+        limited = await auth.rate_limited(
+            "share_ip", ip, max_attempts=SHARE_RATE_MAX_ATTEMPTS, window_seconds=SHARE_RATE_WINDOW_SECONDS,
+        )
+        # Volume-only counter (like registration/invite redemption) — there is no
+        # notion of a "failed" share-page request to distinguish.
+        await auth.record_attempt("share_ip", ip, True)
     return limited
 
 

@@ -53,6 +53,7 @@ from zoneinfo import ZoneInfo
 
 from . import artwork, calendar_filter, db
 from .cache import COMPRESS_LEVEL
+from .perftrace import span
 from .endpoints import ENDPOINTS, Endpoint
 from .providers.base import Item
 from .providers.trakt import TraktError
@@ -313,10 +314,17 @@ async def read_cached_window(endpoint_key: str, start: date) -> tuple[list[dict]
     )
     if row is None:
         return None
-    try:
-        return _decompress(row["payload"]), int(row["cached_at"])
-    except (zlib.error, ValueError):
-        return None
+    # THE READ IS AWAITED, THE INFLATE IS NOT. db.fetch_one handed the compressed
+    # blob back from a worker thread, but expanding it — zlib plus a json.loads of
+    # a whole seven-day window, which can be megabytes — happens right here on the
+    # event loop. A month is five or six of these back to back, so if a share page
+    # is slow while its own fetch spans read as nothing, this is the first place to
+    # look; the byte count is on the line to say how much there was to expand.
+    with span("calcache.inflate", bytes=len(row["payload"] or b"")):
+        try:
+            return _decompress(row["payload"]), int(row["cached_at"])
+        except (zlib.error, ValueError):
+            return None
 
 
 async def store_window(endpoint_key: str, start: date, entries: list[dict],
