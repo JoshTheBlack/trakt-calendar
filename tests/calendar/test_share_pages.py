@@ -17,10 +17,15 @@ from datetime import date
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-from app import auth, cache, calendar_cache, db, share_code, share_links
+from app import auth, cache, calendar_cache, db, posters, share_code, share_links, share_routes
+from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
 from tests.support import AppTestCase, ORIGIN
+
+
+async def _no_poster_warm(settings, refs) -> int:
+    return 0
 
 
 class SharePageTestCase(AppTestCase):
@@ -31,6 +36,15 @@ class SharePageTestCase(AppTestCase):
 
     def setUp(self):
         super().setUp()
+        # Rendering a share page starts resolving the poster artwork its preview
+        # picture will want, in the background and without waiting for it. None
+        # of the tests in this file are about that, and leaving it live would
+        # make them depend on whether a background task happens to get a slice
+        # before the client's event loop is torn down — so the one outbound call
+        # it can make is stubbed here, deterministically.
+        warm = patch.object(posters, "ensure_posters", _no_poster_warm)
+        warm.start()
+        self.addCleanup(warm.stop)
         self.admin_id = self._make_user("admin_user", is_admin=True, calendar_approved=True)
 
     def _make_user(self, username, password="hunter2hunter2", **flags) -> int:
@@ -381,6 +395,72 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with self._no_network():
             resp = self.client.get("/s/not-a-real-token/details?media=show&id=123&season=2")
         self.assertEqual(resp.status_code, 404)
+
+
+class CardTileSelectionTests(unittest.TestCase):
+    """Which titles lead a share link's preview picture.
+
+    A pure function of the month's visible items, so this needs no database, no
+    client and no renderer — which is the point of it being one.
+    """
+
+    def _item(self, title, *, day=1, season=None, episode=None, media=Media.SHOW):
+        return Item(
+            source=Source.TRAKT, media=media, id=f"{media}:{title}",
+            ids={"tmdb": 1}, detail_url="",
+            air_date=f"2026-08-{day:02d}", air_ts=float(day), air_display="",
+            air_time="", day_of_week="", title=title,
+            season=season, episode_number=episode,
+        )
+
+    def _series(self, title, day):
+        return self._item(title, day=day, season=1, episode=1)
+
+    def _season(self, title, day, season=3):
+        return self._item(title, day=day, season=season, episode=1)
+
+    def _titles(self, items):
+        return [item.title for item in share_routes.select_tile_items(items)]
+
+    def test_series_premieres_fill_the_card_earliest_first(self):
+        items = [self._series(f"S{day}", day) for day in (6, 2, 4, 1, 5, 3)]
+        items += [self._season(f"P{day}", day) for day in (1, 2, 3, 4)]
+        self.assertEqual(self._titles(items), ["S1", "S2", "S3", "S4", "S5"])
+
+    def test_season_premieres_fill_in_behind_them(self):
+        """Tier beats date: both series premieres come first even though five
+        season premieres air before either of them."""
+        items = [self._series("Series late", 20), self._series("Series later", 28)]
+        items += [self._season(f"Season {day}", day) for day in (1, 2, 3, 4, 5, 6)]
+        self.assertEqual(self._titles(items),
+                         ["Series late", "Series later", "Season 1", "Season 2", "Season 3"])
+
+    def test_a_month_of_movies_still_fills_the_card(self):
+        items = [self._item(f"Film {day}", day=day, media=Media.MOVIE) for day in range(1, 9)]
+        self.assertEqual(self._titles(items), [f"Film {day}" for day in range(1, 6)])
+
+    def test_a_month_of_mid_season_episodes_still_fills_the_card(self):
+        """Every calendar view has to produce a strip; the All Episodes view is
+        the one where nothing is a premiere at all."""
+        items = [self._item(f"Ep {day}", day=day, season=4, episode=7) for day in range(1, 9)]
+        self.assertEqual(self._titles(items), [f"Ep {day}" for day in range(1, 6)])
+
+    def test_a_movie_is_preferred_over_a_mid_season_episode(self):
+        items = [self._item("Episode", day=1, season=2, episode=6),
+                 self._item("Movie", day=28, media=Media.MOVIE)]
+        self.assertEqual(self._titles(items), ["Movie", "Episode"])
+
+    def test_missing_episode_coordinates_do_not_raise(self):
+        """`season` and `episode_number` are optional on Item and absent on
+        movies, so nothing here may compare None with an integer."""
+        items = [self._item("No coordinates", day=2),
+                 self._item("Half", day=3, season=1),
+                 self._series("Premiere", 9)]
+        self.assertEqual(self._titles(items), ["Premiere", "No coordinates", "Half"])
+
+    def test_a_thin_month_produces_what_it_has(self):
+        self.assertEqual(self._titles([]), [])
+        self.assertEqual(self._titles([self._series("Only", 3)]), ["Only"])
 
 
 if __name__ == "__main__":

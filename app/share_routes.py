@@ -14,27 +14,34 @@ probe which of those three it is.
 """
 from __future__ import annotations
 
+import asyncio
 import calendar as _calendar
 import json
-from collections.abc import Mapping
+import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import groupby
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import anyio
+import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import auth, calendar_cache, calendar_state, route_params, share_code, share_links
+from . import auth, calendar_cache, calendar_state, posters, route_params, share_card, share_code, share_links, user_images
 from .providers.trakt import detail as trakt_detail
 from .auth import AuthLevel
 from . import authz
 from .authz import Guard
 from .config import load_settings
 from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
+from .providers.base import Item, Media
 from .timezones import build_options as build_timezone_options
 from .templating import templates
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = Guard(router)
@@ -206,6 +213,42 @@ def _not_found(request: Request) -> Response:
     return templates.TemplateResponse(request, "share_not_found.html", {"request": request}, status_code=404)
 
 
+async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item], int | None]:
+    """The month a share request is asking for, out of the local cache and only
+    the local cache.
+
+    `allow_fetch=False` is the whole point of every public share surface: a
+    visitor is served whatever is already cached — even stale, even nothing —
+    and never triggers a Trakt call that would spend the owner's rate-limit
+    budget on an anonymous request. An instance with no calendar source has
+    nobody to ask at all, and reads as an empty month rather than raising.
+
+    The prefs come from the OWNER's account rather than from the URL, exactly as
+    they do for the owner's own calendar: genres, countries and certifications
+    are the owner's editorial choices about their calendar, not view options a
+    visitor gets to set.
+    """
+    if not settings.calendar_source_configured:
+        return [], None
+    return await calendar_cache.read_month(
+        view.endpoint, settings, tz=view.tz, year=view.year, month=view.month,
+        genres=owner_prefs["genres"], countries=owner_prefs["countries"],
+        show_certifications=owner_prefs["show_certifications"],
+        movie_certifications=owner_prefs["movie_certifications"],
+        network_filter=view.network_filter, allow_fetch=False,
+    )
+
+
+def _visible_items(items: Sequence[Item], view: ShareView, not_watching: set[str]) -> list[Item]:
+    """The airings this view actually shows.
+
+    The owner's marks are a SET alongside the items rather than a field copied
+    onto each one — one answer to "is this marked" instead of two spellings of
+    it, and no per-item copy of a dataclass that is deliberately awkward to copy.
+    """
+    return [item for item in items if not (view.hide_not_watching and item.id in not_watching)]
+
+
 def _expanded_from_code(request: Request) -> str | None:
     """Where a `?p=` request should go instead, or None when there is no code.
 
@@ -243,27 +286,15 @@ async def _render(request: Request, share_row) -> Response:
 
     view = resolve_view(request.query_params, share_row, settings)
 
-    items: list[dict] = []
-    as_of: int | None = None
-    if settings.calendar_source_configured:
-        # allow_fetch=False is the whole point of a public share page: a
-        # visitor is served whatever is already cached, even stale, even
-        # nothing, and never triggers a Trakt call that would spend the
-        # owner's rate-limit budget on an anonymous request.
-        items, as_of = await calendar_cache.read_month(
-            view.endpoint, settings, tz=view.tz, year=view.year, month=view.month,
-            genres=owner_prefs["genres"], countries=owner_prefs["countries"],
-            show_certifications=owner_prefs["show_certifications"],
-            movie_certifications=owner_prefs["movie_certifications"],
-            network_filter=view.network_filter, allow_fetch=False,
-        )
-
-    # The owner's marks travel to the template as a SET, the same way the
-    # signed-in calendar's own card partial reads them, rather than being copied
-    # onto each item as a field. One less per-item copy, and one answer to "is
-    # this marked" instead of two spellings of it.
+    items, as_of = await _read_month(view, settings, owner_prefs)
     nw_ids = await calendar_state.not_watching_ids(owner_id)
-    visible = [i for i in items if not (view.hide_not_watching and i.id in nw_ids)]
+    visible = _visible_items(items, view, nw_ids)
+
+    # Start resolving the artwork this month's preview picture will want, and do
+    # not wait for it: a crawler fetches the page first and the picture second,
+    # so by the time anyone asks for the card the posters are usually already on
+    # disk.
+    _spawn_poster_warm(view, owner_id, visible, settings)
 
     grouped = [
         {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
@@ -311,6 +342,237 @@ async def _render(request: Request, share_row) -> Response:
         "timezone_groups": build_timezone_options(view.tz.key),
     }
     return templates.TemplateResponse(request, "share_calendar.html", context)
+
+
+# ---------------------------------------------------------------------------
+# the preview picture behind a shared link
+# ---------------------------------------------------------------------------
+# WHAT THIS HALF DOES THAT THE PAGE DOES NOT: it may make an outbound call. That
+# is the one deliberate exception to the rule stated at the top of this module,
+# and it is narrow on purpose. The rule exists so an anonymous request cannot
+# spend the instance's Trakt budget on the owner's behalf, unboundedly, per hit.
+# What happens here is at most a handful of ARTWORK lookups for titles the
+# calendar cache already holds, through the app's one poster resolution chain,
+# into a cache shared by every user on the instance, with a negative marker so a
+# failure does not repeat — and the finished picture is then cached on disk, so
+# the whole cost is paid once per (share, month, content) rather than once per
+# crawl. The CALENDAR itself is still never fetched (see `_read_month`).
+
+# How many titles ever get a tile, whatever the month holds. Read from the
+# renderer's own layout bound rather than restated here: the strip is laid out
+# for exactly this many, so resolving more would be work nothing draws — and a
+# thirty-airing August must not become thirty lookups.
+MAX_CARD_TILES = share_card.MAX_TILES
+
+# A wall clock on resolving artwork, applied ONLY where a request is waiting on
+# the answer. An unfurler gives up in a handful of seconds, and a card that
+# arrives after Discord stopped listening is not a slower embed, it is no embed
+# at all — which is worse than a card with three tiles instead of five. When
+# this expires we draw what landed.
+POSTER_BUDGET_SECONDS = 4.0
+
+# How strong a preview a title is, lowest first. TIER BEATS AIR DATE: a series
+# premiere on the 30th says more about a month than a mid-season episode on the
+# 1st, and "earliest first" — which is what a reader expects — holds within a
+# tier.
+# TIERS RATHER THAN A FILTER, because the card has to work on all five calendar
+# views. On the premieres view every item is already the first tier and the sort
+# collapses to pure date order; on All Episodes the tiers do real work; on movies
+# everything is one tier and it is date order again. One rule, no per-view
+# branching, and no view that renders an empty strip.
+_TIER_SERIES_PREMIERE = 0
+_TIER_SEASON_PREMIERE = 1
+_TIER_MOVIE = 2
+_TIER_OTHER = 3
+
+
+def tile_tier(item: Item) -> int:
+    """Which tier `item` belongs to for the purposes of leading a card.
+
+    `Item.season` and `Item.episode_number` are `int | None` and are absent
+    entirely on movies, so the movie test comes first and nothing below ever
+    compares None with an integer.
+    """
+    if item.media == Media.MOVIE:
+        return _TIER_MOVIE
+    if item.episode_number == 1:
+        return _TIER_SERIES_PREMIERE if item.season == 1 else _TIER_SEASON_PREMIERE
+    return _TIER_OTHER
+
+
+def select_tile_items(items: Sequence[Item], limit: int = MAX_CARD_TILES) -> list[Item]:
+    """Which titles lead the card: one stable sort by (tier, air time), then the
+    first `limit` of them.
+
+    A PURE FUNCTION, on its own, because "which shows represent this month" is a
+    judgement that will still be argued about long after the plumbing around it
+    has settled, and it should be arguable — and testable — without a request, a
+    database or a renderer.
+
+    Stable, so two titles in the same tier at the same moment keep the order the
+    calendar itself gave them. NOT sorted by rating or popularity: that would
+    make the card a different promise ("here are the good ones") than the page it
+    previews makes, and it would change which titles appear as ratings drift,
+    re-rendering the picture for no reason a reader can see.
+    """
+    return sorted(items, key=lambda item: (tile_tier(item), item.air_ts))[:max(0, limit)]
+
+
+def _poster_refs(items: Sequence[Item]) -> list[tuple[Item, tuple[str, object]]]:
+    """Each item paired with the (media, tmdb) ref its poster is filed under.
+
+    A title carrying no tmdb id is DROPPED rather than looked up. posters.py's
+    chain already falls back to a live id-lookup for the ids it does have, and
+    going hunting for an id a calendar entry never carried is the one lookup a
+    link preview is not worth making.
+    """
+    return [(item, (item.media, tmdb)) for item in items if (tmdb := item.ids.get("tmdb"))]
+
+
+async def _warm_posters(settings, refs, *, budget: float | None) -> None:
+    """Resolve poster artwork for `refs`, best-effort.
+
+    Everything about the bound lives in the caller: `refs` is already capped, and
+    `budget` is wall clock in seconds, or None for "nobody is waiting, let it
+    finish". posters.ensure_posters dedupes, skips anything already cached or
+    given up on with a single stat each, and fans the rest out under its own
+    semaphore, so this is the whole of the outbound work.
+    """
+    if not refs:
+        return
+    if budget is None:
+        await posters.ensure_posters(settings, refs)
+        return
+    # Whatever landed inside the budget stays landed: the tiles are read back off
+    # disk afterwards, so cutting this short costs the card a tile, never the
+    # work already done.
+    with anyio.move_on_after(budget):
+        await posters.ensure_posters(settings, refs)
+
+
+async def _resolve_tiles(settings, visible: Sequence[Item], *,
+                         budget: float | None) -> tuple[tuple[share_card.Tile, ...], bool]:
+    """The card's poster tiles, and whether anything it wanted is still coming.
+
+    The second half of the pair is what decides whether the finished picture may
+    be cached. It is False when a chosen title has no poster on disk AND has not
+    been given up on — the artwork is still on its way, or the budget above cut
+    the wait short. Not caching that render is what makes the degradation
+    self-healing: the next request resolves again, by which time the earlier warm
+    has usually landed, and stores the complete one. No retry mechanism needed.
+
+    A title that will never have a poster — no tmdb id at all, or a negative
+    marker recording that every source came up empty — is SETTLED rather than
+    pending, and does not hold the cache open forever on a picture that is
+    already the best this month can look.
+    """
+    pairs = _poster_refs(select_tile_items(visible))
+    await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)
+
+    tiles: list[share_card.Tile] = []
+    complete = True
+    for item, ref in pairs:
+        path = posters.cached_poster(*ref)
+        if path is not None:
+            tiles.append(share_card.Tile(title=item.title, poster=path))
+        elif not posters.is_negative(*ref):
+            complete = False
+    return tuple(tiles), complete
+
+
+def _avatar_bytes(owner_id: int) -> bytes | None:
+    """SYNCHRONOUS. This account's avatar, or None.
+
+    Absent is the ordinary case rather than an error — most accounts have none —
+    and an unreadable file is treated identically, because the card has no
+    placeholder to draw either way: the layout simply closes up. Reading the
+    bytes rather than passing a path is what lets the renderer stay a pure
+    function of what it was handed.
+    """
+    try:
+        return user_images.avatar_path(owner_id).read_bytes()
+    except OSError:
+        return None
+
+
+async def build_card(view: ShareView, share_row, settings, *,
+                     budget: float | None) -> tuple[share_card.Card, bool]:
+    """Everything behind one preview picture: the read, the marks, the tiles and
+    the avatar, assembled into the renderer's value object.
+
+    Returns the card and whether it is COMPLETE — see `_resolve_tiles`. Renders
+    nothing itself; the pixels are share_card's job and the caching is
+    share_card_cache's, which is what keeps "which shows", "what it looks like"
+    and "how long we keep it" as three things that change for three reasons.
+    """
+    owner_id = int(share_row["user_id"])
+    owner_prefs = await auth.get_user_prefs(owner_id)
+    items, _as_of = await _read_month(view, settings, owner_prefs)
+    nw_ids = await calendar_state.not_watching_ids(owner_id)
+    visible = _visible_items(items, view, nw_ids)
+
+    tiles, complete = await _resolve_tiles(settings, visible, budget=budget)
+    avatar = await anyio.to_thread.run_sync(_avatar_bytes, owner_id)
+    card = share_card.Card(
+        month_label=view.month_label, year=view.year, count=len(visible),
+        tiles=tiles, avatar=avatar,
+    )
+    return card, complete
+
+
+# The page pre-warms in flight right now, keyed by the view each one is warming.
+# The set does two jobs at once. It stops the same (share, month) being warmed
+# twice concurrently — a crawler fetching a page, then its picture, then the
+# same page again is the ordinary shape — and its own size is the ceiling on how
+# many a burst of crawls can spawn at all.
+# OVER THE CEILING THE WARM IS DROPPED, not queued: the request that actually
+# wants the artwork does its own bounded, time-boxed warm, so a dropped one costs
+# one render one tile, while a queue of them would still be running long after
+# anybody wanted the result.
+_WARM_CEILING = 4
+_warming: set[tuple] = set()
+
+# asyncio keeps only a weak reference to a running task, so a task nobody else
+# holds can be collected mid-flight. This is that reference.
+_warm_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item], settings) -> None:
+    """Start resolving the artwork this month's card will want, and return
+    immediately.
+
+    A REAL TASK with its exceptions swallowed, not a bare un-awaited coroutine —
+    that is a RuntimeWarning and no warm at all — because nothing here may affect
+    the page that spawned it.
+
+    NOT TIME-BOXED, unlike the request path's own warm: nothing is waiting on
+    this, so cutting it off would only throw away work that was about to land and
+    make the budget on the request path fire more often. It is still bounded in
+    COUNT by the tile selection, which is the bound that matters for outbound
+    load, and in CONCURRENCY by the ceiling above.
+    """
+    key = (owner_id, view.endpoint.key, view.year, view.month)
+    if key in _warming or len(_warming) >= _WARM_CEILING:
+        return
+    refs = [ref for _item, ref in _poster_refs(select_tile_items(visible))]
+    if not refs:
+        return
+    _warming.add(key)
+    task = asyncio.create_task(_warm_job(key, refs, settings))
+    _warm_tasks.add(task)
+    task.add_done_callback(_warm_tasks.discard)
+
+
+async def _warm_job(key: tuple, refs, settings) -> None:
+    try:
+        await _warm_posters(settings, refs, budget=None)
+    except Exception:
+        # Nobody is waiting on this and there is nothing to tell them. A poster
+        # that did not resolve leaves the card a tile short and tries again on
+        # the next request.
+        logger.debug("Share card poster pre-warm failed", exc_info=True)
+    finally:
+        _warming.discard(key)
 
 
 def _too_many_requests() -> Response:
