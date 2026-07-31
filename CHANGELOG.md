@@ -8,6 +8,7 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🍿 **A mistyped address now gets an intermission.** A wrong link used to land on a plain card; it now opens on a cinema curtain with a marching line of concession-stand snacks and the lobby jingle waiting behind a play button. It says exactly what the old page said about where you are and how to get back — a dead end is just the one place with room to be charming about it.
 
 ### What's new
+- 🖼️ **A shared link now previews the month it points at.** Pasting a share link into Discord or Slack used to show the same picture every time, whichever calendar and whichever month it led to. It now unfurls into a card for that month — the month and year, how much is on it, and the titles leading it with their posters and air dates, series premieres marked. It shows exactly what the page behind the link shows, so the number on the picture is the number you'd see if you opened it.
 - 📜 **The changelog is readable from inside the app.** The ☰ menu has a *What's new* entry on every page, opening this file rendered properly — one collapsible section per release, newest already open. It is the same `CHANGELOG.md` that lives in the repository, rendered on the way past rather than copied, so what you read here cannot drift from what was actually written.
 
 ### Changed

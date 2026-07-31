@@ -36,6 +36,7 @@ title for cast, an embedded trailer, and the full episode list.
 - ✅ Mark shows **watching / not watching** — saved server-side, so it follows you across devices — plus a one-click filter to hide the ones you're not watching
 - 📥 **Add to Sonarr / Radarr / Seerr** — one click to send a show to Sonarr, a movie to Radarr, or request either on Seerr (Overseerr/Jellyseerr); buttons show each app's logo, appear only when configured, and auto-disable if the instance is unreachable (background heartbeat). An "Add all" button bulk-adds a whole month.
 - 🎛️ **Layout options** — poster-on-top or poster-beside cards, days stacked or packed beside each other, and a poster-only wall with hover-to-expand details
+- 🖼️ **Share links preview as a picture of the month they point at** — pasted into Discord, Slack or iMessage, a share link unfurls into a generated card naming the month, how much is on it, and the titles leading it. It is drawn only from what the calendar cache already holds, so a link preview never spends the owner's Trakt budget on a stranger's behalf; finished cards are kept in `data/share_cards` and swept on the maintenance heartbeat (age first, then a byte budget)
 - 📈 Tracks premiere counts over time and shows the change since your last visit
 - ⚙️ **Everything configured from the UI** — Trakt credentials, timezone, filters, and layout all live in an in-app Settings panel; no config files to edit
 
@@ -343,6 +344,10 @@ app/
   share_routes.py   Public read-only calendars (/s/, /u/, /c/)
   share_links.py    Share-link settings + URL building
   share_code.py     The compact ?p= code a share link is handed out as
+  share_card.py     The 1200x630 picture a share link unfurls into
+  share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
+  imaging.py        Font, text-in-a-box and circular-mask primitives, shared by
+                     every renderer that draws a string
   calendar_cache.py Global UTC window cache + the read path over it
   calendar_state.py Per-user not-watching marks (show-level, all views) + change detection
   providers/        The calendar-source seam: the Item record, capabilities, the
