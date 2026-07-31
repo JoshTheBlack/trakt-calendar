@@ -498,8 +498,8 @@ class CardTileSelectionTests(unittest.TestCase):
 
 class CardTileOrderTests(unittest.TestCase):
     """The order the tiles are DRAWN in, which is not the order they were picked
-    in: the selection ranks by strength, the grid then reads left to right by air
-    date within each row.
+    in: the selection ranks by strength, and the grid then reads as a single date
+    order across the whole card, left to right and top row first.
     """
 
     def _pair(self, title, when):
@@ -510,40 +510,41 @@ class CardTileOrderTests(unittest.TestCase):
     def _titles(self, pairs):
         return [tile.title for tile in share_routes.arrange_tiles(pairs)]
 
-    def test_a_full_row_is_drawn_earliest_first(self):
-        """Ten tiles lay out five and five. Each row is re-ordered inside itself
-        and neither row's membership moves — the top row is still the stronger
-        half the selection put there."""
-        top = [self._pair(f"top-{n}", n) for n in (5, 1, 4, 2, 3)]
-        bottom = [self._pair(f"bottom-{n}", n) for n in (9, 6, 8, 10, 7)]
-        self.assertEqual(self._titles(top + bottom),
-                         [f"top-{n}" for n in (1, 2, 3, 4, 5)]
-                         + [f"bottom-{n}" for n in (6, 7, 8, 9, 10)])
+    def test_the_whole_grid_is_drawn_earliest_first(self):
+        """Ten tiles lay out five and five, and the date order runs straight
+        through the break: the sixth-earliest airing opens the bottom row. Which
+        row a tile lands in is decided by its date alone — the selection's tiers
+        chose the ten titles and have no further say."""
+        strong = [self._pair(f"d{n}", n) for n in (8, 1, 4, 2, 3)]
+        rest = [self._pair(f"d{n}", n) for n in (9, 6, 7, 10, 5)]
+        self.assertEqual(self._titles(strong + rest),
+                         [f"d{n}" for n in range(1, 11)])
 
-    def test_a_partial_grid_sorts_within_the_rows_it_actually_has(self):
-        """Seven tiles lay out four then three, which is why the sort follows the
-        grid's own row widths rather than a fixed five."""
+    def test_a_partial_grid_reads_in_order_across_its_rows(self):
+        """Seven tiles lay out four then three: earliest four on top, next three
+        below. One sorted sequence lands correctly under whatever split the
+        renderer picks, so nothing here restates the row widths."""
         pairs = [self._pair(f"t{n}", n) for n in (4, 3, 2, 1, 7, 6, 5)]
         self.assertEqual(self._titles(pairs), ["t1", "t2", "t3", "t4", "t5", "t6", "t7"])
         self.assertEqual(share_card.tile_rows(len(pairs)), [4, 3])
 
-    def test_an_undated_tile_lands_at_the_end_of_its_row(self):
+    def test_an_undated_tile_lands_at_the_end_of_the_grid(self):
         """Somewhere deterministic, and after everything that does have a date —
-        a zero would sort it to the front of the row, which is the one place a
-        title with no air date should not be. Six tiles, so the row this is
-        asserting about is a real three-wide one."""
+        a zero would sort it to the front of the card, which is the one place a
+        title with no air date should not be. The last cells of the bottom row
+        are where it goes instead."""
         pairs = [self._pair("no-date", None), self._pair("later", 9),
                  self._pair("earlier", 2)]
-        pairs += [self._pair(f"b{n}", n) for n in (1, 2, 3)]
+        pairs += [self._pair(f"b{n}", n) for n in (1, 3, 5)]
         self.assertEqual(self._titles(pairs),
-                         ["earlier", "later", "no-date", "b1", "b2", "b3"])
+                         ["b1", "earlier", "b3", "b5", "later", "no-date"])
 
     def test_undated_tiles_keep_the_order_they_were_selected_in(self):
         pairs = [self._pair("first", None), self._pair("second", None),
                  self._pair("dated", 4)]
         pairs += [self._pair(f"b{n}", n) for n in (1, 2, 3)]
         self.assertEqual(self._titles(pairs),
-                         ["dated", "first", "second", "b1", "b2", "b3"])
+                         ["b1", "b2", "b3", "dated", "first", "second"])
 
     def test_a_title_its_date_and_its_artwork_move_together(self):
         """The failure this guards against is the one that looks almost right: a

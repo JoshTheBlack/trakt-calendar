@@ -507,33 +507,33 @@ def _air_sort_key(pair: tuple[share_card.Tile, float | None]) -> tuple[bool, flo
     """Earliest first, and everything undated after everything dated.
 
     An airing with no usable timestamp has no place in a date order, so it goes
-    to the END of its row rather than to the front — where a zero would put it —
-    and keeps its selection order among the other undated ones, because the sort
-    is stable. Deterministic either way, and never an exception.
+    to the END of the grid — the last cells of the bottom row — rather than to
+    the front, where a zero would put it. Among themselves the undated ones keep
+    the order the selection gave them, because the sort is stable. Deterministic
+    either way, and never an exception.
     """
     _tile, when = pair
     return (when is None, when if when is not None else 0.0)
 
 
 def arrange_tiles(pairs: Sequence[tuple[share_card.Tile, float | None]]) -> tuple[share_card.Tile, ...]:
-    """The order the card DRAWS its tiles in: by air date, left to right, within
-    each row of the grid.
+    """The order the card DRAWS its tiles in: one date order across the whole
+    grid, filled in reading order — left to right, top row then bottom.
 
     SELECTION AND DISPLAY ARE TWO DIFFERENT ORDERS, and this is the second one.
-    `select_tile_items` decides WHICH titles get a tile by strength — series
-    premieres first, then season premieres, and so on — and that is what fills
-    the rows: the top row still holds the stronger half. This only re-orders
-    each row internally, so a reader scans a row chronologically instead of
-    scanning a ranking they cannot see the criteria for.
+    `select_tile_items` decides WHICH titles get a tile, by strength — series
+    premieres first, then season premieres, and so on. Once that is decided the
+    tier has said everything it has to say: what a reader gets is a month laid
+    out as a month, scanned the way any calendar is scanned, and a card whose
+    dates ran 8/3, 8/5, 8/7 then jumped BACK to 8/4 on the second line reads as
+    a bug even to someone who knows why. The tier picks the titles; the date
+    places them. A series premiere sitting in the second row because it airs
+    late in the month is the correct picture, not a loss.
 
-    PER ROW RATHER THAN ACROSS THE WHOLE GRID, because sorting all ten together
-    would let a late-airing series premiere fall into the second row and a
-    season premiere climb into the first, which would throw away the selection's
-    whole point. It is also the only reading that generalizes: a seven-tile month
-    lays out as four-then-three, where "the first five" names nothing. The grid's
-    row widths are read from `share_card.tile_rows` rather than restated, so the
-    two cannot disagree about where a row ends — and one date order across the
-    whole card is `rows = [len(pairs)]` here, should that turn out to be wanted.
+    NO ROW ARITHMETIC HERE. Where the break falls is the renderer's business —
+    `share_card.tile_rows` balances a partial grid as four-then-three rather
+    than five-then-two — and a single sorted sequence lands correctly under any
+    split it chooses: earliest four on top, next three below.
 
     EACH TILE CARRIES ITS OWN CAPTION, so re-ordering moves a title, its date
     and its artwork together by construction; the timestamp rides alongside
@@ -541,14 +541,7 @@ def arrange_tiles(pairs: Sequence[tuple[share_card.Tile, float | None]]) -> tupl
     STRING ("Fri 14 Aug") that does not sort chronologically, and sorting on what
     is drawn would produce an order that looks almost right.
     """
-    rows = share_card.tile_rows(len(pairs))
-    ordered: list[share_card.Tile] = []
-    start = 0
-    for width in rows:
-        ordered.extend(tile for tile, _when in sorted(pairs[start:start + width],
-                                                      key=_air_sort_key))
-        start += width
-    return tuple(ordered)
+    return tuple(tile for tile, _when in sorted(pairs, key=_air_sort_key))
 
 
 def select_tile_items(items: Sequence[Item], limit: int = MAX_CARD_TILES) -> list[Item]:
@@ -625,7 +618,8 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     THE ORDER THE TILES COME BACK IN IS THE DISPLAY ORDER, not the selection
     order — see `arrange_tiles`. The two are sorted separately and the
     arrangement happens LAST, after the titles with no artwork have dropped out,
-    because a row's width depends on how many tiles there turned out to be.
+    so the dates a reader sees run in order across whatever tiles survived
+    rather than across the ones that were hoped for.
     """
     pairs = _poster_refs(select_tile_items(visible))
     await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)

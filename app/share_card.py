@@ -56,7 +56,7 @@ CARD_W, CARD_H = 1200, 630
 # invisible to everyone who already unfurled a link. THIS IS THIS MODULE'S OWN
 # VERSION and has nothing to do with grid_builder's: the two renderers change
 # independently.
-RENDERER_VERSION = 4
+RENDERER_VERSION = 5
 
 # ---------------------------------------------------------------------------
 # palette — tuned for the surface this lands on, not for the app's own chrome
@@ -473,8 +473,7 @@ def _draw_grid(canvas: Image.Image, draw: ImageDraw.ImageDraw,
     """The poster grid and its captions, in the caller's order.
 
     ROW-MAJOR, READING ORDER: the caller's first tile is the top-left one,
-    because the caller's order is a ranking (the strongest titles in the month)
-    and the eye starts there.
+    because the caller hands these over in date order and the eye starts there.
 
     The block is centred both ways in the space below the header, so a card with
     three posters is a small composition in the middle of the field rather than a
