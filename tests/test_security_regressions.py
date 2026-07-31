@@ -805,7 +805,13 @@ class DistraktDetailsTests(RegressionTestCase):
     # request names it — NOT by the Trakt id the lookup is then placed with.
     KEY = "show:tmdb:1"
 
-    def details(self, watched="[1,2,3]"):
+    # The shape the column actually holds since progress started carrying the
+    # date each episode was watched. Writing the pre-dates list here instead is
+    # what let this route return an empty set to every real user while its tests
+    # stayed green.
+    WATCHED = '{"1": "2026-07-01T00:00:00Z", "2": "2026-07-02T00:00:00Z", "3": ""}'
+
+    def details(self, watched=WATCHED):
         if watched is not None:
             asyncio.run(db.execute(
                 "INSERT OR REPLACE INTO distrakt_show_progress "
@@ -821,6 +827,12 @@ class DistraktDetailsTests(RegressionTestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(len(body["episodes"]), 5)
         self.assertEqual(body["watched_episodes"], [1, 2, 3])
+
+    def test_a_pre_dates_progress_row_still_reads(self):
+        """Rows written before episodes carried dates hold a bare list. They are
+        read as dates-unknown everywhere else; this route is not an exception."""
+        self.assertEqual(self.details(watched="[1,2,3]").json()["watched_episodes"],
+                         [1, 2, 3])
 
     def test_the_slug_comes_from_the_roster_not_the_caller(self):
         """The Trakt links are built from it, so a caller must not be able to

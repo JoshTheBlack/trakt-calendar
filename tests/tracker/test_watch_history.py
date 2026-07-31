@@ -190,9 +190,9 @@ class StorageRoundTripTests(WatchStateTestCase):
     async def test_the_pre_dates_shape_is_read_as_dates_unknown(self):
         """A backup taken before episodes carried dates still restores: the old
         bare list of numbers keeps its counts and simply has no dates."""
-        self.assertEqual(wh._episodes([1, 2, 3]), {"1": "", "2": "", "3": ""})
+        self.assertEqual(wh.episode_watches([1, 2, 3]), {"1": "", "2": "", "3": ""})
         self.assertEqual(wh.season_completed_map(
-            {"shows": {SHOW(101): _show(101, {"1": wh._episodes([1, 2, 3])})}}), {})
+            {"shows": {SHOW(101): _show(101, {"1": wh.episode_watches([1, 2, 3])})}}), {})
 
     async def test_save_replaces_rather_than_accumulates(self):
         await wh._save(self.user_id, {"last_synced": "a", "beacons": None,

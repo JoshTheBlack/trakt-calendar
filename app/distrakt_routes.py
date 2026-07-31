@@ -615,11 +615,16 @@ async def api_distrakt_details(request: Request):
         "AND media = ? AND match_source = ? AND match_id = ? AND season = ?",
         (user_id, key.media, key.match_source, key.match_id, season),
     )
+    # watch_history owns what that column holds — {episode: watched_at} now, a
+    # bare list of numbers before dates were stored — so the shape is read there
+    # rather than guessed at again here. Guessing at it here is exactly how this
+    # route came to answer "nothing watched" for everyone: it read the dated
+    # mapping as a list and dropped every entry.
     watched: list[int] = []
     if progress is not None:
         try:
-            parsed = json.loads(progress["watched_episodes_json"] or "[]")
-            watched = [int(n) for n in parsed if isinstance(n, (int, float))]
+            stored = json.loads(progress["watched_episodes_json"] or "{}")
+            watched = sorted(int(ep) for ep in watch_history.episode_watches(stored))
         except (TypeError, ValueError):
             watched = []
     return JSONResponse({

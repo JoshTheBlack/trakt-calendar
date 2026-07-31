@@ -115,7 +115,7 @@ async def _load(user_id: int) -> dict:
     shows: dict = {}
     for row in prog:
         entry = shows.setdefault(_row_key(row), {"ids": _row_ids(row), "seasons": {}})
-        entry["seasons"][str(int(row["season"]))] = _episodes(
+        entry["seasons"][str(int(row["season"]))] = episode_watches(
             json.loads(row["watched_episodes_json"] or "{}")
         )
     state["shows"] = shows
@@ -166,7 +166,7 @@ async def _save(user_id: int, state: dict) -> None:
             for season_s, eps in (entry.get("seasons") or {}).items():
                 conn.execute(progress_sql, (
                     user_id, *_key_params(key), int(season_s),
-                    json.dumps(_episodes(eps or {})), *_ids_params(entry),
+                    json.dumps(episode_watches(eps or {})), *_ids_params(entry),
                 ))
         conn.execute("DELETE FROM distrakt_movie_watches WHERE user_id = ?", (user_id,))
         for key, movie in movies.items():
@@ -183,12 +183,17 @@ async def _save(user_id: int, state: dict) -> None:
 # Pure state folders / readers (no I/O — unit-tested directly)
 # ---------------------------------------------------------------------------
 
-def _episodes(stored) -> dict[str, str]:
+def episode_watches(stored) -> dict[str, str]:
     """Stored season episodes as {episode: watched_at}.
 
     Accepts the pre-dates shape (a bare list of episode numbers) and reads it as
     dates-unknown, so a backup taken before dates existed still restores rather
     than being refused or silently losing its counts.
+
+    Public because it is the ONLY reader of what
+    `distrakt_show_progress.watched_episodes_json` holds. Anything else that opens
+    that column — the tracker's details route does — goes through here, so the
+    column's shape has one place to change rather than one per call site.
     """
     if isinstance(stored, dict):
         return {str(int(k)): str(v or "") for k, v in stored.items()}
@@ -231,7 +236,7 @@ def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict) -> None
     state.setdefault("shows", {})[str(key)] = {
         "ids": collect_ids(ids or {}),
         "seasons": {
-            str(int(season)): _episodes(eps)
+            str(int(season)): episode_watches(eps)
             for season, eps in (season_to_eps or {}).items()
         },
     }
