@@ -98,6 +98,18 @@ def draw_text(
     draw.text((x, y), shown, font=font, fill=fill)
 
 
+@lru_cache(maxsize=8192)
+def _advance(font: ImageFont.FreeTypeFont, char: str) -> float:
+    """How far the pen travels across one character, cached per face and size.
+
+    A title is mostly the same few dozen letters, so measuring each one once and
+    remembering it turns "how much of this fits?" into arithmetic. Keyed on the
+    font OBJECT, which is safe because `font()` above hands out one shared
+    instance per size.
+    """
+    return font.getlength(char)
+
+
 def ellipsized(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont,
                box_w: int) -> str:
     """`text`, trimmed until it fits `box_w`, with an ellipsis marking the cut."""
@@ -105,13 +117,55 @@ def ellipsized(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFon
         bbox = draw.textbbox((0, 0), value, font=font)
         return bbox[2] - bbox[0]
 
-    if width(text) <= box_w:
-        return text
     ellipsis = "…"
-    trimmed = text
-    while trimmed and width(trimmed + ellipsis) > box_w:
-        trimmed = trimmed[:-1]
-    return trimmed.rstrip() + ellipsis if trimmed else ""
+
+    # ESTIMATE, then CONFIRM. Laying out glyphs is the expensive part, so the
+    # cut is guessed by adding up per-character widths — no layout at all — and
+    # only then checked against a real measurement.
+    #
+    # The old approach dropped one character at a time and re-measured, which
+    # costs a layout per character discarded, each proportional to what is left:
+    # quadratic in the length of a string this app does not control. A title
+    # from a provider, a display name someone chose. Five hundred characters
+    # took thirteen seconds to draw, on the path that renders a share card for
+    # an anonymous visitor.
+    estimate = sum(_advance(font, char) for char in text)
+
+    # "Does the whole thing fit?" has to be answered before anything is cut, and
+    # measuring the WHOLE string to answer it was the most expensive step left
+    # here — it alone was most of the cost of ellipsizing a normal title. So it
+    # is only asked when the answer is in doubt. A string the estimate puts well
+    # clear of its box is not going to fit however the glyphs are laid out, and
+    # the margin is wide enough that no amount of kerning closes it.
+    if estimate <= box_w * 1.25 and width(text) <= box_w:
+        return text
+
+    budget = box_w - _advance(font, ellipsis)
+    cut, used = 0, 0.0
+    for char in text:
+        used += _advance(font, char)
+        if used > budget:
+            break
+        cut += 1
+
+    # The MEASUREMENT is the authority and the estimate is only a starting
+    # point, which is what makes this safe against how the glyphs are laid out.
+    # Summing per-character widths assumes each one is independent of its
+    # neighbours — true of the basic layout Pillow uses when it is built without
+    # libraqm, and NOT true with it, where kerning and ligatures make a pair
+    # measure differently from its parts. Rather than depending on which build
+    # is installed, the estimate is walked to the real answer here: it lands
+    # exactly right under basic layout and within a character or two otherwise,
+    # so this costs a couple of measurements either way and cannot be wrong.
+    #
+    # That matters because the box is the bound that keeps untrusted text from
+    # running across the image, so an estimate must never be the last word on
+    # where the cut goes.
+    while cut > 0 and width(text[:cut] + ellipsis) > box_w:
+        cut -= 1
+    while cut < len(text) and width(text[:cut + 1] + ellipsis) <= box_w:
+        cut += 1
+    return text[:cut].rstrip() + ellipsis if cut else ""
 
 
 def circular(raw: bytes, size: int) -> Image.Image | None:

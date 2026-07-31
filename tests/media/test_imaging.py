@@ -18,7 +18,7 @@ from __future__ import annotations
 import unittest
 from io import BytesIO
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from app import imaging
 
@@ -70,6 +70,56 @@ class EllipsisTests(unittest.TestCase):
         canvas, draw = a_canvas(400, 60)
         self.assertEqual(imaging.ellipsized(draw, LONG_TITLE, imaging.font(30), 2), "")
 
+    def test_it_cuts_where_measuring_every_prefix_would(self):
+        """THE ONE THAT KEEPS THE FAST PATH HONEST.
+
+        `ellipsized` guesses the cut by adding up per-character widths, which is
+        only equal to laying the glyphs out while each character's width is
+        independent of its neighbours. Pillow built WITH libraqm kerns and forms
+        ligatures, and the guess would drift; the guess is therefore confirmed
+        against a real measurement rather than trusted.
+
+        This compares it against the obvious, slow, obviously-correct thing —
+        walk every prefix and keep the longest that fits — so it fails if the
+        two ever disagree, WHATEVER the cause. That is deliberately not a check
+        of which layout engine is installed: pinning the expectation to the
+        build would pass on a machine that happens to match and say nothing
+        about the one that doesn't.
+        """
+        canvas, draw = a_canvas(600, 80)
+
+        def longest_prefix_that_fits(text, font, box_w):
+            def width(value):
+                bbox = draw.textbbox((0, 0), value, font=font)
+                return bbox[2] - bbox[0]
+
+            if width(text) <= box_w:
+                return text
+            trimmed = text
+            while trimmed and width(trimmed + "…") > box_w:
+                trimmed = trimmed[:-1]
+            return trimmed.rstrip() + "…" if trimmed else ""
+
+        # Widths either side of a character boundary, and text whose spacing a
+        # shaping engine would be most likely to alter: kerning pairs, an
+        # f-ligature, repeated narrow and wide glyphs.
+        # Kept short on purpose: the REFERENCE is the quadratic scan this
+        # replaced, so the corpus is sized for what it costs to check rather
+        # than for what the fast path can take. Length is not the interesting
+        # axis here — where a cut lands is — and a long string is already
+        # covered by the box-bound test below.
+        texts = [LONG_TITLE, "AV Wave Tourist", "WWWWWWWWWW", "iiiiiiiiii",
+                 "fi fl ffi office", "Yo. To, Ta.", "The Office", "A",
+                 "", " leading and trailing "]
+        for size in (20, 40):
+            font = imaging.font(size)
+            for text in texts:
+                for box_w in (0, 1, 7, 23, 60, 121, 250, 599):
+                    with self.subTest(size=size, text=text[:20], box_w=box_w):
+                        self.assertEqual(
+                            imaging.ellipsized(draw, text, font, box_w),
+                            longest_prefix_that_fits(text, font, box_w))
+
 
 class DrawTextTests(unittest.TestCase):
     def test_left_aligned_text_starts_at_its_box_rather_than_floating_in_it(self):
@@ -99,11 +149,18 @@ class DrawTextTests(unittest.TestCase):
         canvas, draw = a_canvas(400, 200)
         box = (100, 60, 300, 140)
         imaging.draw_text(draw, box, "W" * 500, imaging.font(40), imaging.TEXT_COLOUR)
-        for x in range(400):
-            for y in range(200):
-                inside = box[0] <= x < box[2] and box[1] <= y < box[3]
-                if not inside and canvas.getpixel((x, y)) != imaging.BACKGROUND:
-                    self.fail(f"ink at {(x, y)}, outside {box}")
+
+        # Fill the box back in with the background and anything still standing
+        # out is ink that escaped it. Done with whole-image operations rather
+        # than by walking all eighty thousand pixels from Python, which is the
+        # same assertion at a fraction of the cost; getbbox returns None when
+        # there is no difference at all, and otherwise bounds the escape, which
+        # is the part worth reading in a failure.
+        outside = canvas.copy()
+        outside.paste(imaging.BACKGROUND, box)
+        blank = Image.new(outside.mode, outside.size, imaging.BACKGROUND)
+        stray = ImageChops.difference(outside, blank).getbbox()
+        self.assertIsNone(stray, f"ink within {stray}, outside {box}")
 
     def test_an_empty_string_and_an_empty_box_draw_nothing(self):
         for text, box in (("", (0, 0, 100, 40)), ("Hi", (0, 0, 0, 40)),
