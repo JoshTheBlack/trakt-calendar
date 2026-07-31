@@ -7,12 +7,27 @@ from __future__ import annotations
 
 import logging
 
+from . import http_pool
 from .perftrace import span
 
 logger = logging.getLogger(__name__)
 
 API = "https://api.themoviedb.org/3"
 IMG = "https://image.tmdb.org/t/p"
+
+# TMDB'S OWN POOL. This module used to reach into the Trakt provider package for
+# a client, which put two unrelated services on one set of connections: a poster
+# warm pulling eight images at once could hold every slot while a calendar
+# refresh waited, and neither service's limits had anything to do with the other's.
+# TMDB publishes no per-second cap worth gating on, so there is no concurrency
+# gate here — the fan-out bound that matters lives at the call site
+# (app/posters.py caps how many tiles it resolves at all).
+#
+# ONE POOL FOR THE API AND THE IMAGE CDN, deliberately: httpx pools per host
+# internally, so api.themoviedb.org and image.tmdb.org already get their own
+# connections out of it, and splitting them here would buy a second set of
+# knobs for the same behaviour.
+POOL = http_pool.Pool("tmdb", max_connections=8, timeout=20)
 
 
 def _is_v4_token(key: str) -> bool:
@@ -24,7 +39,6 @@ async def get_json(settings, path: str, label: str) -> dict | None:
     """GET a TMDB API path (auth via v4 bearer or v3 api_key). Returns parsed
     JSON, or None on any failure — network error, non-200, or an unparsable
     body — so a caller can degrade rather than raise."""
-    from .providers.trakt.transport import shared_client
     key = (settings.tmdb_api_key or "").strip()
     headers, params = {}, {}
     if _is_v4_token(key):
@@ -34,7 +48,7 @@ async def get_json(settings, path: str, label: str) -> dict | None:
     auth = "v4/bearer" if _is_v4_token(key) else "v3/api_key"
     with span(label, path=path, auth=auth) as sp:
         try:
-            resp = await shared_client().get(f"{API}{path}", params=params, headers=headers)
+            resp = await POOL.client().get(f"{API}{path}", params=params, headers=headers)
         except Exception as exc:  # network / client error
             logger.warning("TMDB %s failed: %s", path, exc)
             return None
@@ -52,10 +66,9 @@ async def download(url: str) -> bytes | None:
     """GET raw bytes from any URL — a TMDB image, or a previously-recorded
     registry URL from another provider. No auth: TMDB's image CDN and Trakt's
     poster URLs are both unauthenticated. None on any failure."""
-    from .providers.trakt.transport import shared_client
     with span("tmdb.download") as sp:
         try:
-            resp = await shared_client().get(url)
+            resp = await POOL.client().get(url)
         except Exception as exc:
             logger.warning("download %s failed: %s", url, exc)
             return None

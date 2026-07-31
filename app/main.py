@@ -38,6 +38,7 @@ from . import db
 from . import distrakt_routes
 from . import encryption_flow
 from . import encryption_routes
+from . import http_pool
 from . import integrations_routes
 from . import perftrace
 from . import plex_auth
@@ -201,8 +202,10 @@ async def lifespan(_app: FastAPI):
     finally:
         watchdog.cancel()
         task.cancel()
-        from .providers.trakt import transport as _trakt_transport
-        await _trakt_transport.aclose_shared_client()
+        # Every pooled client at once, rather than naming each service here — a
+        # list in the composition root is one a new provider would silently fall
+        # out of, leaving its connections open at shutdown.
+        await http_pool.aclose_all()
 
 
 # Every load carries the page's scripts/style.css/fonts plus (mostly) whatever

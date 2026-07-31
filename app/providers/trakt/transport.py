@@ -16,6 +16,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ... import cache
+from ... import http_pool
 from ...config import Settings
 
 logger = logging.getLogger(__name__)
@@ -64,35 +65,48 @@ def api_headers(settings: Settings, paginate: bool = True) -> dict:
     return headers
 
 
-# One httpx.AsyncClient reused for the whole app lifetime. Constructing a client
-# is expensive on Windows (~250-290ms loading the SSL trust store) and each new
-# one re-does the DNS/TLS handshake, so per-call/per-batch clients dominated the
-# distrakt load. A single shared, connection-pooled client pays that cost ONCE.
-# Keyed by event loop so test isolation (fresh loop per test) can't reuse a client
-# bound to a dead loop.
+# TRAKT'S OWN POOL. Constructing a client re-does the SSL trust store load and
+# the DNS/TLS handshake, so per-call clients dominated the distrakt load; one
+# pooled client pays that once. The pooling itself now comes from
+# app/http_pool.py, because every other outbound service needs the same thing and
+# two of them had taken to borrowing THIS client rather than declaring their own.
+#
+# SEPARATE FROM EVERY OTHER SERVICE'S POOL, which is the point of per-service
+# pools: TMDB image downloads are slow and bursty, and when they shared these
+# eight connections a poster warm could leave a calendar refresh queued behind it.
 _POOL_LIMIT = 8
-_shared: dict = {"loop": None, "client": None}
+
+# Smooth the distrakt Refresh fan-out's opening burst. A large roster fires ~2
+# requests per tracked show all at once; the connection pool caps how many are
+# in flight but not how fast they leave, so hundreds can go out in the same few
+# milliseconds — well over the 1000-per-5-minute average — before any 429 comes
+# back to self-correct. This gate paces that burst without serializing it, sized
+# well under _POOL_LIMIT. The retry/backoff loop is the real defense against the
+# 5-minute window; this just keeps the opening spike from tripping it needlessly.
+# IT LIVES ON THE POOL because it is the same kind of fact — how hard may this
+# app lean on this one service — and declaring it here keeps it beside the
+# connection limit it is deliberately sized under. Trakt's QUOTA is Trakt's
+# business; the 429 handling below stays here for the same reason.
+_SEND_CONCURRENCY = 4
+
+POOL = http_pool.Pool("trakt", max_connections=_POOL_LIMIT, timeout=30,
+                      concurrency=_SEND_CONCURRENCY)
 
 
 def shared_client() -> httpx.AsyncClient:
-    """The app-wide pooled Trakt client (created lazily on first use, on the
-    current running loop). Callers must NOT close it — see aclose_shared_client."""
-    loop = asyncio.get_event_loop()
-    client = _shared["client"]
-    if client is None or client.is_closed or _shared["loop"] is not loop:
-        limits = httpx.Limits(max_connections=_POOL_LIMIT, max_keepalive_connections=_POOL_LIMIT)
-        _shared["client"] = httpx.AsyncClient(timeout=30, limits=limits)
-        _shared["loop"] = loop
-    return _shared["client"]
+    """The pooled Trakt client (created lazily on first use, on the current
+    running loop). Callers must NOT close it — see aclose_shared_client.
+
+    Kept as a function rather than collapsed into POOL.client(): this is the seam
+    the test suite patches to hand Trakt calls a recording double, and a name two
+    dozen tests reach for is worth keeping stable.
+    """
+    return POOL.client()
 
 
 async def aclose_shared_client() -> None:
-    """Close the shared client (call on app shutdown)."""
-    client = _shared["client"]
-    _shared["client"] = None
-    _shared["loop"] = None
-    if client is not None and not client.is_closed:
-        await client.aclose()
+    """Close the Trakt client (call on app shutdown)."""
+    await POOL.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -112,29 +126,14 @@ async def aclose_shared_client() -> None:
 _SEND_MAX_ATTEMPTS = 3
 _SEND_MAX_ELAPSED = 30.0
 
-# Smooth the distrakt Refresh fan-out's opening burst. A large roster fires ~2
-# requests per tracked show all at once; the connection pool caps how many are
-# in flight but not how fast they leave, so hundreds can go out in the same few
-# milliseconds — well over the 1000-per-5-minute average — before any 429 comes
-# back to self-correct. This gate paces that burst without serializing it, sized
-# well under _POOL_LIMIT. The retry/backoff loop is the real defense against the
-# 5-minute window; this just keeps the opening spike from tripping it needlessly.
-# Loop-keyed for the SAME reason shared_client() is: a Semaphore created at import
-# time binds to whatever loop is current then and raises "bound to a different
-# event loop" under the test suite's fresh-loop-per-test isolation.
-_SEND_CONCURRENCY = 4
-_send_sem: dict = {"loop": None, "sem": None}
-
-
 def _rate_limit_semaphore() -> asyncio.Semaphore:
-    """The app-wide outbound-request gate, created lazily on the running loop."""
-    loop = asyncio.get_event_loop()
-    sem = _send_sem["sem"]
-    if sem is None or _send_sem["loop"] is not loop:
-        sem = asyncio.Semaphore(_SEND_CONCURRENCY)
-        _send_sem["sem"] = sem
-        _send_sem["loop"] = loop
-    return sem
+    """Trakt's outbound-request gate — see _SEND_CONCURRENCY, where it is sized.
+
+    Created lazily on the running loop, which the pool handles: a Semaphore bound
+    at import time raises "bound to a different event loop" under the suite's
+    fresh-loop-per-test isolation.
+    """
+    return POOL.gate()
 
 
 def _retry_after_seconds(resp: httpx.Response) -> float | None:

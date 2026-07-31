@@ -56,6 +56,21 @@ import httpx
 # patching app.providers.trakt.transport.send reaches this copy too.
 from .providers.trakt import transport
 from .providers.trakt.transport import API_BASE, TraktRateLimitError
+from . import http_pool
+
+# OAUTH GETS ITS OWN POOL, SEPARATE FROM THE TRAKT DATA API'S, and that is the
+# one deliberate exception to "one pool per service" in this app. These calls go
+# to the same host as every other Trakt request, but they must not queue behind
+# them: the token refresh on the heartbeat is what keeps the app's Trakt access
+# alive, and letting it wait on a distrakt fan-out that has taken every
+# connection is how an instance loses its authorization while "just" being busy.
+# A sign-in is the same story from the user's side.
+#
+# NO CONCURRENCY GATE, unlike the data pool: there are never more than a handful
+# of these in flight, and pacing the call that renews the credentials would be
+# protecting Trakt's quota at the expense of the thing that must not fail. The
+# 429 retry in transport.send still applies — these calls route through it.
+POOL = http_pool.Pool("trakt_auth", max_connections=4, timeout=15)
 
 # Same "app.perf" DEBUG channel the Trakt transport's cached_get and
 # app/calendar_cache.py's fetch_window_raw log their own outbound calls to —
@@ -116,14 +131,14 @@ async def exchange_code(
     application the authorization was issued to, and rejects a mismatch.
     """
     t0 = _time.perf_counter()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await transport.send(client, "POST", TOKEN_URL, timeout=15, json={
-            "code": code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "redirect_uri": redirect_uri(public_base_url),
-            "grant_type": "authorization_code",
-        })
+    client = POOL.client()
+    resp = await transport.send(client, "POST", TOKEN_URL, timeout=15, json={
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": redirect_uri(public_base_url),
+        "grant_type": "authorization_code",
+    })
     _perf.debug("netPOST   oauth/token (code) -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
@@ -156,15 +171,15 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     """
     try:
         t0 = _time.perf_counter()
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await transport.send(
-                client, "GET", ACCOUNT_URL, timeout=15,
-                headers={
-                    "Authorization": f"Bearer {access_token}",
-                    "trakt-api-version": "2",
-                    "trakt-api-key": client_id,
-                },
-            )
+        client = POOL.client()
+        resp = await transport.send(
+            client, "GET", ACCOUNT_URL, timeout=15,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "trakt-api-version": "2",
+                "trakt-api-key": client_id,
+            },
+        )
         _perf.debug("netGET    %s -> %s  %.0fms", ACCOUNT_PATH, resp.status_code,
                     (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
@@ -207,8 +222,8 @@ async def request_device_code(client_id: str) -> dict:
     """Start a device-auth session. Returns the raw Trakt payload (device_code,
     user_code, verification_url, expires_in, interval)."""
     t0 = _time.perf_counter()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await transport.send(client, "POST", DEVICE_CODE_URL, timeout=15, json={"client_id": client_id})
+    client = POOL.client()
+    resp = await transport.send(client, "POST", DEVICE_CODE_URL, timeout=15, json={"client_id": client_id})
     _perf.debug("netPOST   oauth/device/code -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
@@ -223,12 +238,12 @@ async def poll_device_token(client_id: str, client_secret: str, device_code: str
     can distinguish "still waiting" from "give up and restart".
     """
     t0 = _time.perf_counter()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(DEVICE_TOKEN_URL, json={
-            "code": device_code,
-            "client_id": client_id,
-            "client_secret": client_secret,
-        })
+    client = POOL.client()
+    resp = await client.post(DEVICE_TOKEN_URL, json={
+        "code": device_code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    })
     _perf.debug("netPOST   oauth/device/token -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     if resp.status_code == 200:
@@ -252,13 +267,13 @@ async def poll_device_token(client_id: str, client_secret: str, device_code: str
 async def refresh_access_token(client_id: str, client_secret: str, refresh_token: str) -> dict:
     """Exchange a refresh_token for a new access_token + refresh_token pair."""
     t0 = _time.perf_counter()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await transport.send(client, "POST", TOKEN_URL, timeout=15, json={
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "grant_type": "refresh_token",
-        })
+    client = POOL.client()
+    resp = await transport.send(client, "POST", TOKEN_URL, timeout=15, json={
+        "refresh_token": refresh_token,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "grant_type": "refresh_token",
+    })
     _perf.debug("netPOST   oauth/token (refresh) -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()
@@ -276,12 +291,12 @@ async def revoke_token(client_id: str, client_secret: str, access_token: str) ->
     they are told.
     """
     t0 = _time.perf_counter()
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await transport.send(client, "POST", REVOKE_URL, timeout=15, json={
-            "token": access_token,
-            "client_id": client_id,
-            "client_secret": client_secret,
-        })
+    client = POOL.client()
+    resp = await transport.send(client, "POST", REVOKE_URL, timeout=15, json={
+        "token": access_token,
+        "client_id": client_id,
+        "client_secret": client_secret,
+    })
     _perf.debug("netPOST   oauth/revoke -> %s  %.0fms", resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0)
     resp.raise_for_status()

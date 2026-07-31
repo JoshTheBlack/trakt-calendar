@@ -8,13 +8,28 @@ from __future__ import annotations
 
 import httpx
 
+from . import http_pool
 from .config import Settings
+from .perftrace import span
 
 # (base_url_attr, api_key_attr) per service
 _SERVICE = {
     "sonarr": ("sonarr_url", "sonarr_api_key"),
     "radarr": ("radarr_url", "radarr_api_key"),
 }
+
+# ONE POOL PER SERVICE, not one for this module. Sonarr and Radarr are two
+# separate instances on two hosts that happen to speak the same API, and this
+# module is a single implementation of that API rather than a single service —
+# so the pools are keyed the same way the credentials are.
+#
+# WHY THIS MODULE HAS POOLS AT ALL: it used to build a fresh httpx.AsyncClient
+# for every call, and building one loads the system trust store INLINE, on the
+# event loop. The library read below runs on a five-minute cycle whether or not
+# anyone is using the app, so that cost was landing on unrelated requests
+# forever. Small pools because these are one or two boxes on a LAN answering a
+# handful of calls, not an API being fanned out to.
+_POOLS = {kind: http_pool.Pool(kind, max_connections=4, timeout=20) for kind in _SERVICE}
 
 
 def credentials(kind: str, settings: Settings) -> tuple[str, str]:
@@ -33,37 +48,64 @@ async def check_health(kind: str, settings: Settings) -> dict:
         return {"configured": False, "reachable": False}
     url, key = credentials(kind, settings)
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            resp = await client.get(f"{url}/api/v3/system/status", headers={"X-Api-Key": key})
+        with span("arr.health", service=kind):
+            resp = await _POOLS[kind].client().get(
+                f"{url}/api/v3/system/status", headers={"X-Api-Key": key}, timeout=8)
         return {"configured": True, "reachable": resp.status_code == 200}
     except httpx.HTTPError:
         return {"configured": True, "reachable": False}
 
 
+class LibraryUnavailable(Exception):
+    """This service could not be read — as distinct from having nothing in it.
+
+    THE WHOLE REASON THIS TYPE EXISTS: `library_ids` used to answer an
+    unreachable Sonarr with an empty list, which its caller then cached as the
+    truth. One timeout and the calendar quietly stopped marking anything as
+    already-added, for as long as the cache held — the app confidently reporting
+    an empty library it had never actually seen. An empty list must mean "this
+    library is empty", so every other outcome has to be able to say so.
+    """
+
+
 async def library_ids(kind: str, settings: Settings) -> list:
-    """All ids already in the library — TVDB ids for Sonarr, TMDB ids for Radarr."""
+    """All ids already in the library — TVDB ids for Sonarr, TMDB ids for Radarr.
+
+    Raises LibraryUnavailable when the answer is unknown rather than empty; an
+    unconfigured service is a real, knowable empty.
+    """
     if not is_configured(kind, settings):
         return []
     url, key = credentials(kind, settings)
     path = "series" if kind == "sonarr" else "movie"
     field = "tvdbId" if kind == "sonarr" else "tmdbId"
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(f"{url}/api/v3/{path}", headers={"X-Api-Key": key})
-        if resp.status_code != 200:
-            return []
-        return [item[field] for item in resp.json() if item.get(field)]
-    except (httpx.HTTPError, ValueError):
-        return []
+        with span("arr.library", service=kind) as sp:
+            resp = await _POOLS[kind].client().get(
+                f"{url}/api/v3/{path}", headers={"X-Api-Key": key})
+            if resp.status_code != 200:
+                raise LibraryUnavailable(f"{kind} returned HTTP {resp.status_code}")
+            ids = [item[field] for item in resp.json() if item.get(field)]
+            sp.set(ids=len(ids))
+            return ids
+    except (httpx.HTTPError, ValueError) as exc:
+        raise LibraryUnavailable(f"{kind} could not be read: {exc}") from exc
 
 
-async def fetch_options(url: str, key: str) -> dict:
-    """Quality profiles + root folders, for the Settings dropdowns (explicit creds)."""
+async def fetch_options(kind: str, url: str, key: str) -> dict:
+    """Quality profiles + root folders, for the Settings dropdowns (explicit creds).
+
+    Takes `kind` only to pick the right pool — the URL and key are the caller's,
+    and may be a not-yet-saved value being tested. httpx pools per host, so
+    probing an unsaved address costs this service's pool one host entry and
+    nothing else.
+    """
     url = url.strip().rstrip("/")
     headers = {"X-Api-Key": key.strip()}
-    async with httpx.AsyncClient(timeout=10) as client:
-        qp = await client.get(f"{url}/api/v3/qualityprofile", headers=headers)
-        rf = await client.get(f"{url}/api/v3/rootfolder", headers=headers)
+    client = _POOLS[kind].client()
+    with span("arr.options", service=kind):
+        qp = await client.get(f"{url}/api/v3/qualityprofile", headers=headers, timeout=10)
+        rf = await client.get(f"{url}/api/v3/rootfolder", headers=headers, timeout=10)
     profiles = [{"id": p["id"], "name": p["name"]} for p in qp.json()] if qp.status_code == 200 else []
     folders = [{"path": f["path"]} for f in rf.json()] if rf.status_code == 200 else []
     return {"profiles": profiles, "folders": folders}
@@ -101,8 +143,9 @@ async def add_media(kind: str, settings: Settings, ids: dict, title: str) -> dic
             return {"ok": False, "error": "This movie has no TMDB id, so Radarr can't add it."}
         lookup_url, term = f"{url}/api/v3/movie/lookup", f"tmdb:{tmdb}"
 
+    client = _POOLS[kind].client()
     try:
-        async with httpx.AsyncClient(timeout=20) as client:
+        with span("arr.add", service=kind):
             look = await client.get(lookup_url, params={"term": term}, headers={"X-Api-Key": key})
             if look.status_code != 200:
                 return {"ok": False, "error": f"Lookup failed ({_error_text(look)})."}

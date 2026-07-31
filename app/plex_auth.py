@@ -26,8 +26,16 @@ from urllib.parse import quote, urlencode
 import httpx
 
 from . import db
+from . import http_pool
 
 BASE_URL = "https://plex.tv"
+
+# PLEX'S OWN POOL. Small, because this is a sign-in flow rather than a data feed:
+# a PIN request, a poll every couple of seconds while one person approves it, and
+# one account lookup. Pooled anyway, because the POLL is the point — a fresh
+# client per poll meant rebuilding the SSL context on the event loop every couple
+# of seconds for as long as somebody left the popup open.
+POOL = http_pool.Pool("plex", max_connections=4, timeout=15)
 PINS_URL = f"{BASE_URL}/api/v2/pins"
 ACCOUNT_URL = f"{BASE_URL}/api/v2/user"
 # The human-facing approval screen lives on the app site, not the API host.
@@ -82,8 +90,7 @@ async def request_pin(client_id: str) -> dict:
     linked, rather than the weaker four-digit code meant for TV-style manual
     entry — this flow reads the token straight off the poll response instead.
     """
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(PINS_URL, headers=_headers(client_id), data={"strong": "true"})
+    resp = await POOL.client().post(PINS_URL, headers=_headers(client_id), data={"strong": "true"})
     if resp.status_code not in (200, 201):
         raise PinError(f"plex.tv PIN request returned HTTP {resp.status_code}.")
     try:
@@ -122,8 +129,7 @@ async def poll_pin(pin_id: int, client_id: str) -> str | None:
     lifetime there is independent of this app's handshake row, and either can
     lapse first.
     """
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(f"{PINS_URL}/{pin_id}", headers=_headers(client_id))
+    resp = await POOL.client().get(f"{PINS_URL}/{pin_id}", headers=_headers(client_id))
     if resp.status_code == 404:
         raise PinError("This sign-in code is no longer valid.")
     if resp.status_code != 200:
@@ -148,8 +154,7 @@ async def fetch_account(auth_token: str, client_id: str) -> dict:
     headers = _headers(client_id)
     headers["X-Plex-Token"] = auth_token
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(ACCOUNT_URL, headers=headers)
+        resp = await POOL.client().get(ACCOUNT_URL, headers=headers)
         if resp.status_code != 200:
             raise AccountLookupError(f"plex.tv /api/v2/user returned HTTP {resp.status_code}.")
         payload = resp.json()
