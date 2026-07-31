@@ -187,9 +187,12 @@ body.chips-tucked .day-chips:hover { transform: none; pointer-events: auto; tran
 @media (prefers-reduced-motion: reduce) { .day-chips { transition: none; } }
 .day-chip { min-width: 26px; text-align: center; padding: 3px 6px; border-radius: 7px; border: 1px solid var(--card-border); font-size: 0.72rem; line-height: 1.2; color: var(--gold-soft); text-decoration: none; transition: all .15s ease; }
 a.day-chip:hover { background: rgba(232,181,69,0.9); color: #12151c; border-color: var(--gold); }
-/* `empty` is the server's answer at render time, `unreachable` app.js's after a
-   toggle collapsed the day. Both mean the same thing to the viewer: there is
-   nothing to scroll to, so the chip is greyed and doesn't take the click. */
+/* `empty` marks a day holding nothing at all; `unreachable` marks a day holding
+   something this viewer is not being shown, set by the server at render time and
+   by calendar/layout.js on every toggle after it. Both mean the same thing to
+   the viewer: there is nothing to scroll to, so the chip is greyed and doesn't
+   take the click. The `unreachable` chip is still an <a> underneath, which is
+   what lets the toggle give it back. */
 .day-chip.empty, .day-chip.unreachable { color: #4b5261; border-color: #232734; pointer-events: none; }
 
 /* ---- Grid / cards ---- */
@@ -1207,9 +1210,21 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
 .ranker-pool, .ranker-rows { display: flex; flex-direction: column; gap: 5px; min-height: 40px; }
 /* The scrolling part of the pinned column: it takes whatever height is left
    under the search box and the source buttons, so the pool is as tall as the
-   window allows rather than a fixed fraction of it. */
-.ranker-pool { flex: 1 1 auto; overflow-y: auto; padding-right: 4px; }
-@media (max-width: 900px) { .ranker-pool { max-height: 62vh; } }
+   window allows rather than a fixed fraction of it.
+
+   SCROLLING AND SORTING ARE TWO ELEMENTS. The paging sentinel has to live inside
+   whatever scrolls — an IntersectionObserver never fires for something already
+   permanently in view — and outside whatever Sortable rearranges, or a page
+   arriving mid-drag rewrites the list being dragged. One element cannot be both,
+   so the wrapper scrolls and the pool inside it is the drop target. The pool
+   still GROWS to fill the wrapper, because the blank space under the last row is
+   where a title dragged out of a tier gets dropped. */
+.ranker-pool-scroll {
+    flex: 1 1 auto; overflow-y: auto; padding-right: 4px;
+    display: flex; flex-direction: column;
+}
+@media (max-width: 900px) { .ranker-pool-scroll { max-height: 62vh; } }
+.ranker-pool { flex: 1 0 auto; }
 
 /* Height reserved from a count the server already knew, so a page of cards or a
    tier's rows slot into space made for them instead of shoving the page down. */
@@ -1356,3 +1371,34 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
     font-size: 0.85rem;
     opacity: 0.7;
 }
+
+
+/* ==========================================================================
+   MONTH PICKER: the landing page at "/", where a month and year are chosen.
+   Bundled here rather than carried in that page's own <head>, like the four
+   per-page stylesheets that were merged in before it. A boosted navigation
+   swaps <body> and leaves <head> in place, so a page reached by a click would
+   never apply CSS of its own — it would arrive with the styling of whichever
+   page loaded first in the session, which for this one meant no styling at all.
+   ========================================================================== */
+
+/* No 100vh now that a header sits above it: the panel centres in what is left
+   rather than pushing the page taller than the viewport. */
+.pick-wrap { display: flex; align-items: center; justify-content: center; padding: 40px 6vw; }
+.pick-panel { width: 100%; max-width: 720px; text-align: center; }
+.pick-panel .brand { height: 56px; margin-bottom: 22px; filter: drop-shadow(0 4px 12px rgba(0,0,0,0.55)); }
+.pick-panel h1 { font-family: 'Bebas Neue', sans-serif; font-size: clamp(2rem, 6vw, 3.2rem); letter-spacing: 2px;
+    background: linear-gradient(90deg, var(--gold-soft), var(--gold) 40%, var(--crimson)); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: 6px; }
+.pick-panel .sub { color: var(--text-dim); font-size: 0.9rem; margin-bottom: 26px; }
+.year-nav { display: flex; align-items: center; justify-content: center; gap: 20px; margin-bottom: 26px; }
+.year-nav .year { font-family: 'Bebas Neue', sans-serif; font-size: 2.2rem; letter-spacing: 2px; color: var(--gold-soft); min-width: 110px; }
+/* A deliberate 4x3 rectangle rather than auto-fit, which packed 5-5-2 at this
+   width and read as a ragged list instead of a calendar year. */
+.month-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+@media (max-width: 620px) { .month-grid { grid-template-columns: repeat(2, 1fr); } }
+.month-btn { display: block; padding: 18px 10px; background: var(--card); border: 1px solid var(--card-border); border-radius: 12px;
+    color: var(--text); font-weight: 700; font-size: 1rem; transition: all .18s ease; }
+.month-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.1); transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,0.4); }
+.month-btn.current { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
+.month-btn .num { display: block; color: var(--text-faint); font-size: 0.72rem; font-weight: 400; margin-top: 5px; }
+.pick-foot { margin-top: 30px; }

@@ -32,6 +32,7 @@ from tests.support import ORIGIN, STATIC_DIR, TEMPLATES_DIR, new_db_path
 # template added later has to be considered rather than silently skipped.
 RANKER_TEMPLATES = (
     "ranker.html", "_ranker_board_shell.html", "_ranker_pool_page.html",
+    "_ranker_pool_rows.html", "_ranker_pool_sentinel.html",
     "_ranker_category_rows.html", "_ranker_row.html", "_ranker_failed.html",
 )
 
@@ -127,12 +128,16 @@ class InlineAndLazyAgreeTests(FragmentTestCase):
     thing it exists not to be."""
 
     def test_the_first_pool_page_is_byte_identical_inline_and_lazily(self):
+        """The ROWS are what has to match. Their wrapping differs by
+        construction — inline they are already inside #rankerPool, while a page
+        that arrives later has to say where to put them — so the lazy response
+        must CONTAIN the shell's rows verbatim."""
         board = self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
         shell = self.client.get("/rankings").text
-        inline = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>(.*?)\n        </div>',
+        inline = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>(.*?)\n            </div>',
                            shell, re.S)
         self.assertIsNotNone(inline, "the shell should render the pool inline")
-        self.assertEqual(inline.group(1).strip(), self.pool_html(board, 0).strip())
+        self.assertIn(inline.group(1).strip(), self.pool_html(board, 0))
 
     def test_a_tiers_rows_are_byte_identical_inline_and_lazily(self):
         board = self.board_with(tiered=4)
@@ -156,6 +161,40 @@ class InlineAndLazyAgreeTests(FragmentTestCase):
         self.assertIn('id="tierBody-tier-s"', shell)
         body = re.search(r'<div class="ranker-rows" id="tierBody-tier-s".*?</div>', shell, re.S)
         self.assertNotIn("ranker-item", body.group(0))
+
+
+class PoolSentinelPlacementTests(FragmentTestCase):
+    """WHERE the sentinel sits, and where the rows it fetches land.
+
+    The pool is a Sortable container. A drag moves its children about, which
+    scrolls the sentinel into view, so `intersect` fires MID-DRAG — and while the
+    sentinel was a child of the pool, the swap that followed rewrote the list
+    Sortable was holding. The displaced row juddered as the placeholder was
+    recomputed against DOM that had changed underneath it, and the dragged title
+    could be dropped into a region the swap had already replaced, which detached
+    it from the page. Keeping the sentinel out of that container is what makes a
+    mid-drag page arrival harmless; appending the rows is the one mutation that
+    moves nothing already in the list.
+    """
+
+    def test_the_sentinel_is_not_inside_the_sortable_pool(self):
+        self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
+        shell = self.client.get("/rankings").text
+        pool = re.search(r'<div class="ranker-pool" id="rankerPool"[^>]*>(.*?)\n            </div>',
+                         shell, re.S)
+        self.assertIsNotNone(pool, "the shell should render the pool inline")
+        self.assertNotIn("ranker-pool-sentinel", pool.group(1))
+        # It is still inside what SCROLLS, or `intersect` would fire immediately
+        # and every page would arrive at once.
+        scroll = re.search(r'<div class="ranker-pool-scroll">(.*?)\n        </div>', shell, re.S)
+        self.assertIsNotNone(scroll, "the pool should sit in a scrolling wrapper")
+        self.assertIn("ranker-pool-sentinel", scroll.group(1))
+
+    def test_a_late_page_appends_its_rows_rather_than_replacing_anything(self):
+        board = self.board_with(pool=ranker_routes.POOL_PAGE_SIZE + 5)
+        html = self.pool_html(board, 1)
+        self.assertIn('<div id="rankerPool" hx-swap-oob="beforeend">', html)
+        self.assertIn('class="ranker-item"', html)
 
 
 class PoolSentinelTests(FragmentTestCase):
@@ -254,6 +293,75 @@ class BoostedFormTests(FragmentTestCase):
         html = self.rendered()
         self.assertIn('hx-boost="true"', html)
         self.assertRegex(html, r'<a class="ranker-board-link[^"]*"\s+href="/rankings\?board=')
+
+
+class TierOrderTests(FragmentTestCase):
+    """Tiers are drawn highest priority first, which is the order the ranking
+    they describe is already built in."""
+
+    def board_with_priorities(self, *priorities: tuple[str, int]) -> str:
+        asyncio.run(ranker.create_board(self.user_id, uid="b1", name="Top 2026", year=2026))
+        fresh = asyncio.run(ranker.fetch_board(self.user_id, "b1"))
+        asyncio.run(ranker.save_layout(self.user_id, "b1", {
+            "version": fresh["version"],
+            "categories": [{"uid": f"tier-{label.lower()}", "label": label,
+                            "rank_priority": priority, "items": []}
+                           for label, priority in priorities],
+            "pool": [],
+        }))
+        return "b1"
+
+    def labels_in_order(self) -> list[str]:
+        html = self.client.get("/rankings").text
+        return re.findall(r'<span class="ranker-tier-label">([^<]*)</span>', html)
+
+    def test_the_board_draws_its_tiers_highest_priority_first(self):
+        """Created in the wrong order on purpose: nothing reorders tiers by hand,
+        so the order they were made in is not something a viewer can correct."""
+        self.board_with_priorities(("F", 10), ("S", 60), ("B", 40))
+        self.assertEqual(self.labels_in_order(), ["S", "B", "F"])
+
+    def test_tiers_sharing_a_priority_keep_the_order_they_had(self):
+        """A stable sort, so two tiers at the same priority do not swap places
+        between one render and the next."""
+        self.board_with_priorities(("First", 30), ("Second", 30), ("Top", 60))
+        self.assertEqual(self.labels_in_order(), ["Top", "First", "Second"])
+
+
+class DropTargetTests(FragmentTestCase):
+    """A container is a drop target only once it holds what it claims to.
+
+    Sortable treats a CHILDLESS drop target as somewhere to insert, and scans
+    every one of them against the pointer on every move. A tier that has not
+    been opened yet is childless — its rows are still on the server — so binding
+    it let an off-screen container take the drag away from the tier below it and
+    give it back, over and over, which is what the shudder was.
+    """
+
+    def dnd_source(self) -> str:
+        return (STATIC_DIR / "js" / "ranker" / "dnd.js").read_text(encoding="utf-8")
+
+    def test_a_tier_body_is_a_drop_target_only_once_its_rows_are_there(self):
+        self.assertIn(".ranker-rows[data-loaded]", self.dnd_source())
+        self.assertNotIn("'.ranker-pool, .ranker-rows'", self.dnd_source())
+
+    def test_the_swap_marks_a_body_loaded_before_rebinding_the_containers(self):
+        """Order matters: the binding pass reads data-loaded, so a tier whose
+        rows have just landed has to be marked first or it waits for the next
+        swap to become droppable."""
+        boot = (STATIC_DIR / "js" / "ranker" / "boot.js").read_text(encoding="utf-8")
+        self.assertLess(boot.index("dataset.loaded = '1'"),
+                        boot.index("initSortable(document)", boot.index("afterSwap")))
+
+    def test_an_inline_tier_body_says_it_is_loaded_and_a_deferred_one_does_not(self):
+        self.board_with(tiered=4)
+        inline = self.client.get("/rankings").text
+        self.assertRegex(inline, r'<div class="ranker-rows" id="tierBody-tier-s"[^>]*data-loaded="1"')
+        with mock.patch.object(ranker_routes, "EAGER_ROW_LIMIT", 0):
+            deferred = self.client.get("/rankings").text
+        body = re.search(r'<div class="ranker-rows" id="tierBody-tier-s"[^>]*>', deferred)
+        self.assertIsNotNone(body)
+        self.assertNotIn("data-loaded", body.group(0))
 
 
 class NoBrowserDialogTests(FragmentTestCase):

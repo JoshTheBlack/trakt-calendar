@@ -53,8 +53,8 @@ if __name__ == "__main__":
 
 
 def test_pick_page_renders_the_shared_chrome_context(client, settings):
-    """/pick is the simplest page fed by chrome.page_context — no Trakt config
-    required to reach it, unlike the calendar itself."""
+    """The picker at "/" is the simplest page fed by chrome.page_context — no
+    Trakt config required to reach it, unlike the calendar itself."""
     from app import auth
 
     user_id = asyncio.run(auth.create_user(
@@ -63,7 +63,7 @@ def test_pick_page_renders_the_shared_chrome_context(client, settings):
     session_id = asyncio.run(auth.create_session(user_id))
     client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
 
-    resp = client.get("/pick")
+    resp = client.get("/")
 
     assert resp.status_code == 200
     # The asset token reaches the page through the head macro rather than

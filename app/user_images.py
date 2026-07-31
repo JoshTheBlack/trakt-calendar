@@ -56,6 +56,25 @@ WEBP_QUALITY = 90
 # near this large; it exists to bound how much a client can make Pillow chew on.
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 
+# The one thing to SAY about an image that is too big, wherever it is caught.
+# The rule is stated in the units a person chose the file in, and it is the same
+# sentence whether the size was noticed while reading the request or while
+# decoding the payload — see MAX_UPLOAD_BODY_BYTES.
+TOO_LARGE_MESSAGE = f"Images must be {MAX_UPLOAD_BYTES // (1024 * 1024)} MB or smaller."
+
+# The largest REQUEST an image upload can legitimately be. The file travels
+# base64-encoded inside a JSON object, which adds a third, and the wrapper around
+# it (field names, quotes, an optional `data:` URL prefix, a name) adds a little
+# more; the slack covers that with room to spare.
+#
+# WHY A ROUTE-LEVEL CAP AT ALL: authz.MAX_BODY_BYTES is the app-wide backstop and
+# knows nothing about images, so it can only refuse in the request's terms —
+# "that request is too large", which tells the person nothing they can act on.
+# These two routes are the ones whose body has a KNOWN smaller ceiling, so they
+# pass it, and the refusal reads as the image rule at every size instead of
+# switching to the transport's wording once the file got big enough.
+MAX_UPLOAD_BODY_BYTES = MAX_UPLOAD_BYTES * 4 // 3 + 64 * 1024
+
 # Checked against the image header before any pixel is decoded.
 MAX_SOURCE_DIMENSION = 6000
 
@@ -228,9 +247,7 @@ def _decode_upload(image_b64: str) -> bytes:
     except (binascii.Error, ValueError) as exc:
         raise ValidationError("That doesn't look like a valid image upload.") from exc
     if len(raw) > MAX_UPLOAD_BYTES:
-        raise ValidationError(
-            f"Images must be {MAX_UPLOAD_BYTES // (1024 * 1024)} MB or smaller.",
-        )
+        raise ValidationError(TOO_LARGE_MESSAGE)
     return raw
 
 

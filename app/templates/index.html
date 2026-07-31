@@ -45,7 +45,9 @@
             <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}&amp;endpoint={{ endpoint.key }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
             </a>
-            <a class="month-title-link" href="/pick?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
+            {# The picker at the app's root, so stepping back out of a month lands
+               on the address somebody would type or bookmark. #}
+            <a class="month-title-link" href="/?year={{ year }}&amp;endpoint={{ endpoint.key }}" title="Pick a month / year">
                 <h1>{{ month_label }} {{ year }}</h1>
             </a>
             <a class="month-nav-btn next" href="?month={{ nav.next_month }}&amp;year={{ nav.next_year }}&amp;endpoint={{ endpoint.key }}" title="Next month" aria-label="Next month">
@@ -162,9 +164,18 @@
    descendants — a catcher inside it would slide off-screen along with it. #}
 <div class="day-chips-peek" aria-hidden="true"></div>
 <nav class="day-chips" aria-label="Jump to a day">
+    {# WHICH ELEMENT a chip is renders from `count` — what the day HOLDS — and
+       never from `shown`, which is what this viewer sees of it. `shown` follows
+       hide-not-watching and a not-watching mark, both of which the header
+       changes client-side with no reload, and calendar/layout.js answers by
+       adding and removing a class. A class cannot turn a <span> back into an
+       <a>, so a day baked as a span while it was hidden could never become a
+       destination again. A day with items is therefore always an anchor, greyed
+       by `unreachable` when the viewer would see none of them; only a day
+       holding nothing at all — a fact no toggle can change — is a span. #}
     {% for chip in day_chips %}
-    {% if chip.shown %}<a class="day-chip" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
-    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="{% if chip.count %}Nothing shown on this day{% else %}Nothing on this day{% endif %}">{{ chip.day }}</span>{% endif %}
+    {% if chip.count %}<a class="day-chip{% if not chip.shown %} unreachable{% endif %}" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
+    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="Nothing on this day">{{ chip.day }}</span>{% endif %}
     {% endfor %}
 </nav>
 
@@ -444,8 +455,10 @@
                     <label for="s_networks">Networks</label>
                     <textarea id="s_networks" name="network_filter" spellcheck="false"
                               placeholder="HBO, Netflix, BBC One"></textarea>
-                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them.
-                        Blank means every network is cached.</span>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells
+                        them &mdash; capitals included, because <code>tvN</code> and <code>TVN</code> are
+                        two different networks. Put a <code>-</code> in front of a name to exclude it
+                        instead (<code>-Netflix</code>). Blank means every network is cached.</span>
                 </div>
                 <div class="two-col">
                     <div class="field">
@@ -583,8 +596,10 @@
                     <label for="f_networks">Networks</label>
                     <textarea id="f_networks" name="network_filter" spellcheck="false"
                               placeholder="HBO, Netflix, BBC One"></textarea>
-                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells them.
-                        Blank means every network.</span>
+                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells
+                        them &mdash; capitals included, because <code>tvN</code> and <code>TVN</code> are
+                        two different networks. Put a <code>-</code> in front of a name to exclude it
+                        instead (<code>-Netflix</code>). Blank means every network.</span>
                 </div>
                 {# Genre and country filtering is a Trakt VIP feature only when
                    Trakt does it. This app filters the cached result itself, so

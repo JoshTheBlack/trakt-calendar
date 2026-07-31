@@ -1,0 +1,33 @@
+{# The trigger that asks for the page after this one, and WHERE IT SITS IS THE
+   POINT: inside .ranker-pool-scroll, which scrolls, but outside #rankerPool,
+   which is a Sortable container.
+
+   It has to be inside the scroller because an IntersectionObserver only fires
+   for something that comes INTO view — a sentinel below a fixed-height scrolling
+   pool would be permanently on screen and every page would arrive at once.
+
+   It must not be inside the pool because a drag moves that container's children
+   about, which scrolls the sentinel into view mid-drag. htmx then swapped a
+   child of the list Sortable was holding: the placeholder was recomputed against
+   DOM that had changed underneath it (the shuffle-aside animation firing over
+   and over), and a title dropped into a region the swap had already replaced
+   landed in a detached subtree and vanished from the screen. Being a sibling,
+   nothing htmx does here touches the sortable list; the rows it fetches arrive
+   by an out-of-band append, which only ever adds to the end.
+
+   `intersect once` rather than `revealed`, for the reason _day_skeleton.html
+   records: revealed reads getBoundingClientRect, which a display:none element
+   answers with zeros, so a sentinel inside a collapsed panel would count as
+   on-screen and fetch immediately. An IntersectionObserver never reports a
+   hidden element, and it fires when one BECOMES visible without waiting for a
+   scroll.
+
+   THE LAST PAGE CARRIES NO SENTINEL. The response is then empty, the outerHTML
+   swap removes the sentinel that asked, and that is what ends the chain — there
+   is no count for the client to keep and no off-by-one for it to get wrong. #}
+{% if next_url %}
+<div class="ranker-pool-sentinel" style="--skeleton-rows: {{ next_rows }}"
+     hx-get="{{ next_url }}" hx-trigger="intersect once" hx-swap="outerHTML">
+    <span class="ranker-sentinel-label">Loading more…</span>
+</div>
+{% endif %}

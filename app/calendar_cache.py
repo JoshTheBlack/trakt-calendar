@@ -513,9 +513,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         if start_date <= air_day <= end_date:
             items.append(item)
 
-    if network_filter:
-        allow = set(network_filter)
-        items = [i for i in items if i.network in allow]
+    items = calendar_filter.filter_by_network(items, network_filter)
     items.sort(key=lambda i: i.air_ts)
 
     grouped = [

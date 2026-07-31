@@ -163,6 +163,20 @@ class EveryPageAgreesTests(unittest.TestCase):
                 self.assertIn("page.head(", read(name),
                               f"{name} builds its own <head>")
 
+    def test_no_page_carries_styling_of_its_own_in_its_head(self):
+        """A page's own <style> applies only when that page is the one the
+        browser loaded cold. Reached by a click, the swap replaces <body> and
+        leaves <head> exactly as the session's first page left it — so the rules
+        never exist, and a page whose whole layout was in that block arrives with
+        no styling at all. Page CSS goes in the bundled stylesheet, which every
+        <head> links; error_lobby.html is the one exception and is excluded above
+        for a reason that does not generalize."""
+        for name in PAGES:
+            source = markup(name)
+            with self.subTest(page=name):
+                self.assertNotIn("<style", source[:source.index("<body")],
+                                 f"{name} carries CSS a boosted arrival will not apply")
+
     def test_no_page_writes_an_asset_path_of_its_own(self):
         """Asset filenames live in app/assets.py. A template restating one is a
         second place to edit when a file is renamed, and the copy does not
@@ -431,6 +445,40 @@ class PageScriptTests(unittest.TestCase):
                               f"script it loads declares it")
 
 
+class LateArrivingDayBlockTests(unittest.TestCase):
+    """What a day block that fetches itself in gets, and how.
+
+    The calendar's swap handler splits on purpose: a boosted arrival re-runs the
+    page init, a CONTENT swap must not — re-running it would re-arm listeners and
+    redo one-time setup. So everything a late block needs has to be named in the
+    content-swap branch explicitly, and anything it names has to be able to work
+    on one subtree rather than the whole document.
+    """
+
+    def setUp(self):
+        self.boot = js_source("static/js/calendar/boot.js")
+        self.arr = js_source("static/js/calendar/arr-buttons.js")
+
+    def content_swap_branch(self) -> str:
+        return self.boot.split("function applyViewStateTo(root)")[1].split("\n}")[0]
+
+    def test_a_swapped_in_block_gets_its_sonarr_radarr_seerr_marks(self):
+        """Without this the buttons on a late day showed as plain Adds — for a
+        title already in the library as much as for one that is not — until the
+        60s poll's next whole-document sweep happened to catch up."""
+        self.assertIn("applyArrStateTo(root)", self.content_swap_branch())
+
+    def test_the_content_swap_does_not_reach_for_the_page_init(self):
+        self.assertNotIn("initCalendarPage", self.content_swap_branch())
+
+    def test_the_arr_appliers_walk_from_a_root_rather_than_the_document(self):
+        """Hard-wired to `document`, neither could be pointed at the block that
+        just landed, which is the only cheap way to mark it."""
+        self.assertIn("function applyLibraryStatus(root = document)", self.arr)
+        self.assertIn("function applyArrStatus(root = document)", self.arr)
+        self.assertNotIn("document.querySelectorAll('.arr-btn')", self.arr)
+
+
 class BundledStylesheetTests(unittest.TestCase):
     def setUp(self):
         self.css = (assets.BASE_DIR / assets.STYLESHEET).read_text(encoding="utf-8")
@@ -442,8 +490,11 @@ class BundledStylesheetTests(unittest.TestCase):
 
     def test_each_page_family_survived_the_merge(self):
         """One representative selector per merged file, so a section dropped
-        wholesale is caught rather than showing up as an unstyled page."""
-        for selector in (".auth-shell", ".distrakt-brand", ".ranker-shell", ".share-owner"):
+        wholesale is caught rather than showing up as an unstyled page.
+        `.month-grid` is the picker's, which reached the bundle later and by the
+        same argument: it was the last page styling itself in its own <head>."""
+        for selector in (".auth-shell", ".distrakt-brand", ".ranker-shell", ".share-owner",
+                         ".month-grid"):
             with self.subTest(selector=selector):
                 self.assertIn(selector, self.css)
 

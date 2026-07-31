@@ -866,7 +866,7 @@ class SiteHeaderTests(RegressionTestCase):
     had drifted into three different bars, and the admin calendar's had swollen
     onto a second row."""
 
-    PAGES = ("/pick", "/?month=7&year=2026", "/distrakt", "/me", "/admin")
+    PAGES = ("/", "/?month=7&year=2026", "/distrakt", "/me", "/admin")
 
     def setUp(self):
         super().setUp()
@@ -1248,6 +1248,26 @@ class SharedBodyGuardTests(RegressionTestCase):
         below that would refuse every ordinary upload with a 413 that says
         nothing about images."""
         self.assertGreater(authz.MAX_BODY_BYTES, user_images.MAX_UPLOAD_BYTES * 4 / 3)
+        # The route's own ceiling sits between the two: above any legitimate
+        # image, below the app-wide backstop, so it is the one that answers.
+        self.assertGreater(user_images.MAX_UPLOAD_BODY_BYTES,
+                           user_images.MAX_UPLOAD_BYTES * 4 / 3)
+        self.assertLess(user_images.MAX_UPLOAD_BODY_BYTES, authz.MAX_BODY_BYTES)
+
+    def test_an_oversized_image_is_refused_in_the_image_rules_words(self):
+        """The app-wide guard can only describe the REQUEST — it does not know
+        the body was going to be an image — so past a certain size the refusal
+        used to stop naming a limit anyone could act on and start saying "that
+        request is too large". The two image routes carry their own ceiling, so
+        the wording no longer changes with the size of the file."""
+        pad = b"x" * user_images.MAX_UPLOAD_BODY_BYTES
+        for path in ("/api/me/avatar", "/api/me/images"):
+            with self.subTest(path=path):
+                resp = self.client.post(
+                    path, content=b'{"image_b64": "' + pad + b'"}',
+                    headers={"Content-Type": "application/json"})
+                self.assertEqual(resp.status_code, 413)
+                self.assertIn(user_images.TOO_LARGE_MESSAGE, resp.json()["error"])
 
 
 if __name__ == "__main__":  # pragma: no cover

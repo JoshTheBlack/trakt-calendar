@@ -126,7 +126,8 @@ def declare(func: Callable, level: AuthLevel) -> Callable:
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
 
-async def json_body(request: Request, limit: int = MAX_BODY_BYTES) -> dict:
+async def json_body(request: Request, limit: int = MAX_BODY_BYTES,
+                    too_large: str = "That request is too large.") -> dict:
     """The JSON object a mutating route was called with.
 
     ONE implementation, called by every route that reads a body, because the
@@ -149,10 +150,17 @@ async def json_body(request: Request, limit: int = MAX_BODY_BYTES) -> dict:
     defence-in-depth layer behind the session cookie's SameSite=Lax — a
     form-encoded cross-origin POST is a CORS "simple request" that a browser
     sends with cookies and no preflight — and it is documented at the middleware.
+
+    A ROUTE THAT KNOWS WHAT ITS BODY IS passes both `limit` and `too_large`
+    together: the default wording can only describe the request, because this
+    layer does not know what the bytes were going to be. A route whose body has
+    one known shape — an image, a board restore — can say the thing the person
+    can act on, and passing it here keeps that to ONE size check per route
+    rather than a second one inside the handler.
     """
     body = await request.body()
     if len(body) > limit:
-        raise HTTPException(status_code=413, detail="That request is too large.")
+        raise HTTPException(status_code=413, detail=too_large)
     try:
         data = await request.json()
     except ValueError:
