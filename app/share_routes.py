@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import calendar as _calendar
 import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import groupby
 from urllib.parse import quote, urlencode
@@ -30,7 +32,7 @@ from .auth import AuthLevel
 from . import authz
 from .authz import Guard
 from .config import load_settings
-from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
+from .endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from .timezones import build_options as build_timezone_options
 from .templating import templates
 
@@ -65,16 +67,26 @@ def _carry_query(request: Request) -> str:
 
 
 # ---------------------------------------------------------------------------
-# view-option resolution — query param -> owner's share_links default -> app
+# view-option resolution — request param -> owner's share_links default -> app
 # default, whitelisted at every tier, never erroring on an invalid value
 # ---------------------------------------------------------------------------
+# EVERY RESOLVER BELOW TAKES A PLAIN MAPPING OF PARAMS RATHER THAN THE REQUEST,
+# because the page and the share card do not read them from the same place: the
+# page reads the query string, while the card reads a compact `p=` code expanded
+# in place into a dict (a page REDIRECTS to the expanded form instead, which is
+# the wrong move for an image an unfurler fetches once). Taking the mapping is
+# what lets both surfaces ask these functions the same question and get the same
+# answer — see `resolve_view`.
 
-def _resolve_endpoint(request: Request, share_row, settings):
+_Params = Mapping[str, str]
+
+
+def _resolve_endpoint(params: _Params, share_row, settings) -> Endpoint:
     def _valid(key):
         return key if key in ENDPOINTS else None
 
     key = (
-        _valid(request.query_params.get("endpoint"))
+        _valid(params.get("endpoint"))
         or _valid(share_row["endpoint"])
         or _valid(settings.endpoint)
         or DEFAULT_ENDPOINT
@@ -89,8 +101,8 @@ def _resolve_choice(value, share_default, app_default, choices):
     return choices[0]
 
 
-def _resolve_hide_not_watching(request: Request, share_row, settings) -> bool:
-    raw = request.query_params.get("hidenw")
+def _resolve_hide_not_watching(params: _Params, share_row, settings) -> bool:
+    raw = params.get("hidenw")
     if raw in ("0", "1"):
         return raw == "1"
     if share_row["hide_not_watching"] is not None:
@@ -98,9 +110,9 @@ def _resolve_hide_not_watching(request: Request, share_row, settings) -> bool:
     return bool(settings.hide_not_watching)
 
 
-def _resolve_networks(request: Request, share_row, settings) -> list[str] | None:
-    if "networks" in request.query_params:
-        names = [n.strip() for n in (request.query_params.get("networks") or "").split(",") if n.strip()]
+def _resolve_networks(params: _Params, share_row, settings) -> list[str] | None:
+    if "networks" in params:
+        names = [n.strip() for n in (params.get("networks") or "").split(",") if n.strip()]
         return names or None
     stored = json.loads(share_row["network_filter_json"] or "[]")
     if stored:
@@ -121,14 +133,69 @@ def _resolve_owner_tz(share_row, settings) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
-def _resolve_tz(request: Request, share_row, settings) -> ZoneInfo:
-    requested = (request.query_params.get("tz") or "").strip()
+def _resolve_tz(params: _Params, share_row, settings) -> ZoneInfo:
+    requested = (params.get("tz") or "").strip()
     if requested:
         try:
             return ZoneInfo(requested)
         except (ZoneInfoNotFoundError, ValueError):
             pass  # invalid -> owner default, never an error
     return _resolve_owner_tz(share_row, settings)
+
+
+@dataclass(frozen=True)
+class ShareView:
+    """Which view of a shared calendar a request is asking for, after every
+    fallback tier has been applied.
+
+    A VALUE, NOT A REQUEST. Once this exists, "what is being looked at" is
+    settled and nothing downstream needs the query string again — which is the
+    point, because the same shared month is rendered by two different surfaces
+    (the HTML page and its preview card) and a card advertising a count the page
+    does not show is worse than no card at all. One resolver, one answer, nothing
+    to drift.
+
+    `card_style` and `day_packing` are page layout and mean nothing to the card;
+    everything else changes WHICH AIRINGS are in the view and therefore changes
+    both.
+    """
+    year: int
+    month: int
+    endpoint: Endpoint
+    tz: ZoneInfo
+    hide_not_watching: bool
+    network_filter: list[str] | None
+    card_style: str
+    day_packing: str
+
+    @property
+    def month_label(self) -> str:
+        return _calendar.month_name[self.month]
+
+
+def resolve_view(params: _Params, share_row, settings) -> ShareView:
+    """The one place a share request's view options are worked out.
+
+    `params` is whatever the caller has already established the request means —
+    the raw query string for a page, a `p=` code expanded in place for the card.
+    Every value is whitelisted on the way through and an unusable one falls back
+    rather than raising, because these arrive from strangers editing URLs.
+    """
+    today = date.today()
+    return ShareView(
+        year=route_params.valid_year(params.get("year"), today.year),
+        month=route_params.valid_month(params.get("month"), today.month),
+        endpoint=_resolve_endpoint(params, share_row, settings),
+        tz=_resolve_tz(params, share_row, settings),
+        hide_not_watching=_resolve_hide_not_watching(params, share_row, settings),
+        network_filter=_resolve_networks(params, share_row, settings),
+        card_style=_resolve_choice(
+            params.get("card"), share_row["card_style"], settings.card_style, _CARD_STYLES,
+        ),
+        day_packing=_resolve_choice(
+            params.get("packing"), share_row["day_packing"], settings.day_packing, _DAY_PACKINGS,
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -174,19 +241,7 @@ async def _render(request: Request, share_row) -> Response:
     owner_id = int(share_row["user_id"])
     owner_prefs = await auth.get_user_prefs(owner_id)
 
-    today = date.today()
-    year = route_params.valid_year(request.query_params.get("year"), today.year)
-    month = route_params.valid_month(request.query_params.get("month"), today.month)
-    endpoint = _resolve_endpoint(request, share_row, settings)
-    tz = _resolve_tz(request, share_row, settings)
-    card_style = _resolve_choice(
-        request.query_params.get("card"), share_row["card_style"], settings.card_style, _CARD_STYLES,
-    )
-    day_packing = _resolve_choice(
-        request.query_params.get("packing"), share_row["day_packing"], settings.day_packing, _DAY_PACKINGS,
-    )
-    hide_not_watching = _resolve_hide_not_watching(request, share_row, settings)
-    network_filter = _resolve_networks(request, share_row, settings)
+    view = resolve_view(request.query_params, share_row, settings)
 
     items: list[dict] = []
     as_of: int | None = None
@@ -196,11 +251,11 @@ async def _render(request: Request, share_row) -> Response:
         # nothing, and never triggers a Trakt call that would spend the
         # owner's rate-limit budget on an anonymous request.
         items, as_of = await calendar_cache.read_month(
-            endpoint, settings, tz=tz, year=year, month=month,
+            view.endpoint, settings, tz=view.tz, year=view.year, month=view.month,
             genres=owner_prefs["genres"], countries=owner_prefs["countries"],
             show_certifications=owner_prefs["show_certifications"],
             movie_certifications=owner_prefs["movie_certifications"],
-            network_filter=network_filter, allow_fetch=False,
+            network_filter=view.network_filter, allow_fetch=False,
         )
 
     # The owner's marks travel to the template as a SET, the same way the
@@ -208,13 +263,13 @@ async def _render(request: Request, share_row) -> Response:
     # onto each item as a field. One less per-item copy, and one answer to "is
     # this marked" instead of two spellings of it.
     nw_ids = await calendar_state.not_watching_ids(owner_id)
-    visible = [i for i in items if not (hide_not_watching and i.id in nw_ids)]
+    visible = [i for i in items if not (view.hide_not_watching and i.id in nw_ids)]
 
     grouped = [
         {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
         for day, rows in groupby(visible, key=lambda i: i.air_date)
     ]
-    as_of_label = datetime.fromtimestamp(as_of, tz=tz).strftime("%Y-%m-%d %H:%M %Z") if as_of else None
+    as_of_label = datetime.fromtimestamp(as_of, tz=view.tz).strftime("%Y-%m-%d %H:%M %Z") if as_of else None
 
     # Open Graph tags for link unfurlers (Discord/Slack/etc.). Both URLs are
     # absolute and built only from the configured public_base_url — never the
@@ -234,14 +289,14 @@ async def _render(request: Request, share_row) -> Response:
         "owner_username": share_row["owner_username"],
         "og_image": og_image,
         "og_url": og_url,
-        "year": year,
-        "month": month,
-        "month_label": _calendar.month_name[month],
-        "nav": route_params.adjacent_months(year, month),
+        "year": view.year,
+        "month": view.month,
+        "month_label": view.month_label,
+        "nav": route_params.adjacent_months(view.year, view.month),
         "grouped": grouped,
         "not_watching": nw_ids,
         "total": len(visible),
-        "view": {"card_style": card_style, "day_packing": day_packing},
+        "view": {"card_style": view.card_style, "day_packing": view.day_packing},
         "as_of": as_of_label,
         "query_extra": _carry_query(request),
         # The visitor's own view controls. Everything they drive is a GET with
@@ -249,11 +304,11 @@ async def _render(request: Request, share_row) -> Response:
         # add no write surface and need no session — they just save the visitor
         # from editing the query string by hand.
         "endpoints": endpoint_choices(),
-        "endpoint_key": endpoint.key,
+        "endpoint_key": view.endpoint.key,
         "card_styles": _CARD_STYLES,
         "day_packings": _DAY_PACKINGS,
-        "hide_not_watching": hide_not_watching,
-        "timezone_groups": build_timezone_options(tz.key),
+        "hide_not_watching": view.hide_not_watching,
+        "timezone_groups": build_timezone_options(view.tz.key),
     }
     return templates.TemplateResponse(request, "share_calendar.html", context)
 
