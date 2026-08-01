@@ -22,7 +22,8 @@ from unittest.mock import patch
 
 from cryptography.fernet import Fernet
 
-from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box, trakt_routes
+from app import auth, db, encryption_flow, main, secrets_backfill, secrets_box
+from app.auth import trakt_routes
 from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings, load_settings, save_settings
 from app.endpoints import get_endpoint

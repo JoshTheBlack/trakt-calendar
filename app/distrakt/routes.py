@@ -31,7 +31,8 @@ from . import backfill, discord_fmt, watch_history
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, db, route_params, trakt_routes
+from .. import auth, authz, chrome, db, route_params
+from ..auth import trakt_routes
 from ..auth import AuthLevel
 from ..calendar import share_links, state as calendar_state
 from ..config import load_settings

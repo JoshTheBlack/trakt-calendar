@@ -32,7 +32,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from .. import trakt_routes
+from ..auth import trakt_routes
 from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
 from ..config import Settings, load_settings
 # Re-exported deliberately: `sources.Media` and `sources.parse_media` are what

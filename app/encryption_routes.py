@@ -2,7 +2,7 @@
 the later opt-in, and the lost-key recovery screen.
 
 The decisions and the crypto live in app/encryption_flow; this module is the thin
-routing over them, the same shape app/admin_routes is over app/auth. Two things here
+routing over them, the same shape app/auth/admin_routes.py is over app/auth. Two things here
 are load-bearing and must survive any restyling:
 
   - The recovery page is deliberately PUBLIC and self-gating rather than declared

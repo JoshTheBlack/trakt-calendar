@@ -43,7 +43,7 @@ def insert_linked_identity(
     ts = db.now() if now is None else now
     # The token pair is sealed at rest when a key is configured (a pass-through
     # otherwise); it is opened again at the point it is used to call a provider, in
-    # app/trakt_routes.py. seal(None) stays None, so an identity that carries no
+    # trakt_routes.py beside it. seal(None) stays None, so an identity that carries no
     # token (e.g. a Plex link) writes NULLs exactly as before.
     cur = conn.execute(
         "INSERT INTO linked_identities (user_id, provider, provider_user_id, display_name, "

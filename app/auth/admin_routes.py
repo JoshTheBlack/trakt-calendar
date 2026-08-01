@@ -1,7 +1,7 @@
 """The admin screen: accounts, invites, and retired identifiers.
 
 Every route here is `AuthLevel.ADMIN`. The business rules — the last-admin
-guards chief among them — live in app/auth/admin.py; this module is just the HTTP
+guards chief among them — live in admin.py beside it; this module is just the HTTP
 surface over them, following the same shape as POST /api/admin/invites below:
 a thin route that validates the request and hands off, so the rule lives in
 one place no matter which URL prefix reaches it.
@@ -16,9 +16,9 @@ import secrets
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, authz, chrome
-from .auth import AuthLevel
-from .templating import templates
+from .. import auth, authz, chrome
+from ..templating import templates
+from .levels import AuthLevel
 
 router = APIRouter()
 guard = authz.Guard(router)
@@ -226,7 +226,7 @@ async def admin_unlink_identity(user_id: int, request: Request):
     if provider not in ("trakt", "plex"):
         return authz.error("Unknown provider.")
     force = bool(data.get("force"))
-    from . import trakt_routes  # deferred: trakt_routes reads app.auth_routes
+    from . import trakt_routes  # deferred: trakt_routes reads routes.py
 
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — a first call that comes back asking for
@@ -250,7 +250,7 @@ async def admin_unlink_identity(user_id: int, request: Request):
 # ---------------------------------------------------------------------------
 # invites
 # ---------------------------------------------------------------------------
-# Issuing one is POST /api/admin/invites, kept in app/auth_routes.py — it was
+# Issuing one is POST /api/admin/invites, kept in routes.py — it was
 # built there first, minimal, just enough to mint a token and exercise
 # registration end to end, before this fuller screen existed. The rest of the
 # screen — list, revoke, redemptions — extends the same /api/admin/invites

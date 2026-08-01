@@ -36,11 +36,17 @@ import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import auth, authz, chrome, db, trakt_auth
-from .auth import AuthLevel
-from .config import load_settings, save_settings
-from .media import user_images
-from .templating import templates
+# `auth` is the package this module lives in, reached through the parent so the
+# routes read the public surface app/auth/__init__.py exposes rather than
+# knowing which submodule each name is defined in.
+from .. import auth, authz, chrome, db
+from ..config import load_settings, save_settings
+from ..media import user_images
+from ..templating import templates
+# Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
+# Trakt SOURCE (app/providers/trakt/); this is the login flow.
+from . import trakt as trakt_auth
+from .levels import AuthLevel
 
 logger = logging.getLogger(__name__)
 
@@ -565,7 +571,7 @@ async def unlink_identity(request: Request):
     provider = str(data.get("provider") or "").strip().lower()
     if provider not in ("trakt", "plex"):
         return authz.error("Unknown provider.")
-    # Imported here rather than at module scope: app.trakt_routes reads this
+    # Imported here rather than at module scope: trakt_routes.py reads this
     # module's message constants, so the dependency only runs one way at import
     # time.
     from . import trakt_routes

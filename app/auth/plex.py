@@ -25,8 +25,8 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from . import db
-from . import http_pool
+from .. import db
+from .. import http_pool
 
 BASE_URL = "https://plex.tv"
 

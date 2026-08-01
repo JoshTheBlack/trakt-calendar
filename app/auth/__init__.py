@@ -2,19 +2,27 @@
 dependencies that express the app's five authorization levels.
 
 This package owns the primitives; the routes attach the dependencies at their own
-definitions (see app/authz.py and app/auth_routes.py), and the provider login
-flows build on `linked_identities` through the helpers here.
+definitions (see app/authz.py and routes.py), and the provider login flows —
+trakt.py and plex.py, driven by trakt_routes.py and plex_routes.py — build on
+`linked_identities` through the helpers here.
 
 Three things in here are security-load-bearing and are explained where they are
 defined rather than here: the off-thread Argon2id hashing (passwords.py), the
 two-clock session lifetime (sessions.py), and the cookie Secure policy
 (cookies.py).
 
-THIS MODULE IS THE PACKAGE'S PUBLIC SURFACE. Every name a caller outside
-app/auth/ uses is re-exported below, so `from . import auth` followed by
-`auth.current_user(...)` reads the same as it did when this was one file, and
-which submodule a name lives in stays an internal detail that can change without
-touching a call site.
+THIS MODULE IS THE PACKAGE'S PUBLIC SURFACE FOR THE AUTH CORE. Every core name a
+caller outside app/auth/ uses is re-exported below, so `from . import auth`
+followed by `auth.current_user(...)` reads the same as it did when this was one
+file, and which submodule a name lives in stays an internal detail that can
+change without touching a call site.
+
+THE ROUTE MODULES AND THE TWO PROVIDER CLIENTS ARE NOT RE-EXPORTED, deliberately.
+A router object and a login flow are things to mount and to run, not facts a
+caller reads as `auth.X`, so main.py and the Settings screen import the module
+they want on purpose (`from .auth import routes as auth_routes`,
+`from .auth import trakt as trakt_auth`). Adding them here would make every
+router reachable by two paths and put a second name on each one to keep in step.
 
 Submodules call ACROSS each other through the module object — `sessions.
 validate_session(...)`, never a name imported at module load. A name bound at

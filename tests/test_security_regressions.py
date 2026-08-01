@@ -259,7 +259,7 @@ class HandshakeStartThrottleTests(RegressionTestCase):
         self.make_user("resident")
 
     def test_plex_start_is_throttled(self):
-        with patch("app.plex_auth.request_pin",
+        with patch("app.auth.plex.request_pin",
                    return_value={"id": 1, "code": "ABCD"}) as pin:
             for _ in range(auth.HANDSHAKE_MAX_ATTEMPTS):
                 self.assertEqual(self.client.get("/auth/plex/start").status_code, 200)
@@ -273,7 +273,7 @@ class HandshakeStartThrottleTests(RegressionTestCase):
             trakt_client_id="cid", trakt_client_secret="sec",
             public_base_url="https://testserver",
         ))
-        with patch("app.plex_auth.request_pin", return_value={"id": 1, "code": "ABCD"}):
+        with patch("app.auth.plex.request_pin", return_value={"id": 1, "code": "ABCD"}):
             for _ in range(auth.HANDSHAKE_MAX_ATTEMPTS):
                 self.client.get("/auth/plex/start")
         # Trakt's start route reads the same counter, so it is already spent.
@@ -282,7 +282,7 @@ class HandshakeStartThrottleTests(RegressionTestCase):
 
     def test_a_normal_flow_is_nowhere_near_the_limit(self):
         """A person retrying a flaky popup a few times must never hit this."""
-        with patch("app.plex_auth.request_pin", return_value={"id": 1, "code": "ABCD"}):
+        with patch("app.auth.plex.request_pin", return_value={"id": 1, "code": "ABCD"}):
             for _ in range(5):
                 self.assertEqual(self.client.get("/auth/plex/start").status_code, 200)
 
@@ -995,7 +995,7 @@ class SharedAddressLockoutTests(RegressionTestCase):
         which is exactly how this was reported."""
         self.make_user("josh")
         self.fail_login(auth.LOGIN_MAX_ATTEMPTS)
-        with self.assertLogs("app.auth_routes", level="WARNING") as captured:
+        with self.assertLogs("app.auth.routes", level="WARNING") as captured:
             self.login()
         self.assertTrue(any("locked out" in line for line in captured.output))
 
@@ -1085,8 +1085,8 @@ class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
         asyncio.run(db.set_meta("trakt_reconnect_notice", "1"))
 
     def poll(self):
-        with patch("app.trakt_auth.poll_device_token", return_value=self.TOKEN), \
-             patch("app.trakt_auth.fetch_account", return_value=self.ACCOUNT):
+        with patch("app.auth.trakt.poll_device_token", return_value=self.TOKEN), \
+             patch("app.auth.trakt.fetch_account", return_value=self.ACCOUNT):
             return self.client.post("/api/auth/device/poll", json={"device_code": "dc"})
 
     def test_a_successful_authorization_links_the_admin_and_clears_the_notice(self):
@@ -1115,9 +1115,9 @@ class DeviceAuthAdoptsTheTokenTests(RegressionTestCase):
     def test_a_lookup_failure_leaves_the_notice_up_and_still_saves_the_token(self):
         """Adoption is best effort — it must never fail an authorization that
         actually succeeded."""
-        from app import trakt_auth
-        with patch("app.trakt_auth.poll_device_token", return_value=self.TOKEN), \
-             patch("app.trakt_auth.fetch_account",
+        from app.auth import trakt as trakt_auth
+        with patch("app.auth.trakt.poll_device_token", return_value=self.TOKEN), \
+             patch("app.auth.trakt.fetch_account",
                    side_effect=trakt_auth.AccountLookupError("no")):
             body = self.client.post("/api/auth/device/poll", json={"device_code": "dc"}).json()
         self.assertTrue(body["ok"])
@@ -1160,7 +1160,7 @@ class PlexPopupUrlTests(RegressionTestCase):
     well-formed."""
 
     def test_it_carries_the_client_id_the_code_and_the_product(self):
-        from app import plex_auth
+        from app.auth import plex as plex_auth
         url = plex_auth.popup_url("abc123", "PINCODE")
         self.assertTrue(url.startswith("https://app.plex.tv/auth#?"))
         self.assertIn("clientID=abc123", url)
@@ -1170,7 +1170,7 @@ class PlexPopupUrlTests(RegressionTestCase):
     def test_spaces_are_percent_encoded_not_plus_encoded(self):
         """`+`-means-space is a form-encoding convention; this is a URL fragment,
         and every working Plex client builds it with encodeURIComponent."""
-        from app import plex_auth
+        from app.auth import plex as plex_auth
         url = plex_auth.popup_url("abc123", "PINCODE")
         self.assertIn("%20", url)
         self.assertNotIn("+", url)

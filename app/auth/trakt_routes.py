@@ -31,11 +31,14 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
-from . import auth, authz, db, secrets_box, trakt_auth
-from .auth import AuthLevel
-from .auth_routes import INVALID_CREDENTIALS, INVALID_INVITE, TRAKT_RECONNECT_NOTICE
-from .config import Settings, load_settings
-from .templating import templates
+from .. import auth, authz, db, secrets_box
+from ..config import Settings, load_settings
+from ..templating import templates
+# Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
+# Trakt SOURCE (app/providers/trakt/); this is the login flow.
+from . import trakt as trakt_auth
+from .levels import AuthLevel
+from .routes import INVALID_CREDENTIALS, INVALID_INVITE, TRAKT_RECONNECT_NOTICE
 
 logger = logging.getLogger(__name__)
 

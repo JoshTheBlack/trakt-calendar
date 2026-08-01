@@ -54,9 +54,12 @@ import httpx
 # budget, and no interpretation — rather than transport.cached_get. Reached
 # through the module object rather than bound as a name at import, so that
 # patching app.providers.trakt.transport.send reaches this copy too.
-from .providers.trakt import transport
-from .providers.trakt.transport import API_BASE, TraktRateLimitError
-from . import http_pool
+# The Trakt SOURCE's transport, not this package's: the login flow exchanges its
+# codes on the same pooled client and against the same API base the source uses,
+# so the two cannot drift apart.
+from ..providers.trakt import transport
+from ..providers.trakt.transport import API_BASE, TraktRateLimitError
+from .. import http_pool
 
 # OAUTH GETS ITS OWN POOL, SEPARATE FROM THE TRAKT DATA API'S, and that is the
 # one deliberate exception to "one pool per service" in this app. These calls go

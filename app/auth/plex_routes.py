@@ -34,10 +34,13 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, authz, plex_auth
-from .auth import AuthLevel
-from .auth_routes import INVALID_CREDENTIALS, INVALID_INVITE
-from .config import load_settings
+from .. import auth, authz
+from ..config import load_settings
+# `plex` is the flow's client; bound as plex_auth to keep it distinct from the
+# Plex-shaped names in this module.
+from . import plex as plex_auth
+from .levels import AuthLevel
+from .routes import INVALID_CREDENTIALS, INVALID_INVITE
 
 logger = logging.getLogger(__name__)
 

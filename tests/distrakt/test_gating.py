@@ -252,7 +252,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         than to a direct read of the identity row, so an expired token is
         refreshed on this path exactly as it is everywhere else."""
         user_id = self.tracker_user(token="STORED")
-        with patch("app.trakt_routes.access_token_for_user", return_value="FROM-THE-SOURCE") as spy:
+        with patch("app.auth.trakt_routes.access_token_for_user", return_value="FROM-THE-SOURCE") as spy:
             async def _fake(uid, settings=None):
                 return "FROM-THE-SOURCE"
             spy.side_effect = _fake

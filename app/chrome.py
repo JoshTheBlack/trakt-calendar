@@ -3,7 +3,7 @@ static-asset cache-busting token.
 
 Its own module rather than a helper in app/main.py because every page carrying
 the header needs these flags, including the ones whose routes live in
-app/auth_routes.py, app/admin_routes.py and app/ranker/routes.py — and those
+app/auth/routes.py, app/auth/admin_routes.py and app/ranker/routes.py — and those
 are imported BY main, so reaching back into it would be a circular import.
 Same reasoning as app/assets.py.
 

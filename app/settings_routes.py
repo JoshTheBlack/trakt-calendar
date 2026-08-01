@@ -15,7 +15,7 @@ refresh_token on every refresh and the old one stops working, so there must be
 one place that knows how to store a token pair.
 
 The per-user "Log in with Trakt" redirect flow is a different thing entirely and
-lives in app/trakt_routes.py; this module only ever touches the ONE app-wide
+lives in app/auth/trakt_routes.py; this module only ever touches the ONE app-wide
 connection stored in settings.json.
 """
 from __future__ import annotations
@@ -27,8 +27,8 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, auth_routes, authz, db, encryption_flow, encryption_routes
-from . import trakt_auth, trakt_routes
+from . import auth, authz, db, encryption_flow, encryption_routes
+from .auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
 from .integrations import routes as integrations_routes
 from .auth import AuthLevel
 from .config import (
