@@ -2,8 +2,8 @@
 month.
 
 These are seam tests. The machinery each one drives is proven elsewhere — the
-export/restore round trip in tests/tracker/test_backup.py, the store in
-tests/tracker/test_store.py — so what is pinned here is that the control on the
+export/restore round trip in tests/distrakt/test_backup.py, the store in
+tests/distrakt/test_store.py — so what is pinned here is that the control on the
 page reaches it, that the destructive one cannot be reached by accident, and
 that removing a row does the right thing to the calendar it came from.
 
