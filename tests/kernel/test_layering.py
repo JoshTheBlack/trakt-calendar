@@ -27,10 +27,12 @@ WHAT IS CHECKED, and why each part earns its place:
      Requiring a sentence is what makes declaring an edge cost more than the
      thirty seconds it takes to think about whether it should exist.
 
-THE RESOLVER IS THE RISK, NOT THE POLICY. `from .. import discord_fmt` inside
-app/distrakt/live.py means app.discord_fmt; `from . import cache` inside
-app/calendar/ means app.calendar.cache. A resolver that reads only `node.module`
-maps both to the wrong group and then reports green while checking nothing.
+THE RESOLVER IS THE RISK, NOT THE POLICY. `from ..perftrace import span` inside
+app/distrakt/live.py means app.perftrace, not app.distrakt.perftrace; `from .
+import cache` inside app/calendar/routes.py means app.calendar.cache, not the
+kernel's app.cache — and that second one names a module that really exists, so
+getting it wrong raises nothing. A resolver that reads only `node.module` maps
+both to the wrong group and then reports green while checking nothing.
 ResolverTests below exercises it on synthetic sources for exactly that reason,
 and it is the part of this file to distrust first if something here surprises
 you.
@@ -69,9 +71,9 @@ MAIN = "main"
 
 # Dotted path under app/ -> group, matched longest-prefix-first, so
 # "providers.base" wins over "providers" and a package name covers everything
-# inside it. Both a module's current location and the package it belongs to are
-# listed where they differ; a package name here is not a promise the directory
-# exists yet.
+# inside it. Every feature now lives in a package, so one key per package covers
+# its whole contents; the three keys naming a single root-level module are the
+# declared exceptions to "the root of app/ is the kernel" and each says why below.
 GROUPS: dict[str, str] = {
     # The kernel: configuration, storage, HTTP plumbing, rendering. Depends on
     # no feature, which is what makes it safe for every feature to depend on it.
@@ -94,32 +96,21 @@ GROUPS: dict[str, str] = {
     # feature may depend on it, and it depends on no feature. authz.py sits at
     # the root of app/ but belongs here: it imports auth and exists to attach
     # auth dependencies to routes.
-    "auth": AUTH, "authz": AUTH, "auth_routes": AUTH, "trakt_auth": AUTH,
-    "plex_auth": AUTH, "plex_routes": AUTH, "trakt_routes": AUTH,
-    "admin_routes": AUTH,
+    "auth": AUTH, "authz": AUTH,
 
     # Pictures: where they are fetched from, how they are cached, how they are
-    # drawn. tmdb.py is here rather than with the integrations because network
-    # logos and poster art are the only things that read it.
-    "media": MEDIA, "posters": MEDIA, "logos": MEDIA, "user_images": MEDIA,
-    "artwork": MEDIA, "imaging": MEDIA, "tmdb": MEDIA,
+    # drawn. media/tmdb.py is here rather than with the integrations because
+    # network logos and poster art are the only things that read it.
+    "media": MEDIA,
 
     # The three services a user points at their OWN server and adds titles to.
-    "integrations": INTEGRATIONS, "arr": INTEGRATIONS, "seer": INTEGRATIONS,
-    "integrations_routes": INTEGRATIONS,
+    "integrations": INTEGRATIONS,
 
-    "calendar": CALENDAR, "calendar_cache": CALENDAR,
-    "calendar_filter": CALENDAR, "calendar_routes": CALENDAR,
-    "calendar_state": CALENDAR, "share_card": CALENDAR,
-    "share_card_cache": CALENDAR, "share_code": CALENDAR,
-    "share_links": CALENDAR, "share_routes": CALENDAR,
+    "calendar": CALENDAR,
 
-    "distrakt": DISTRAKT, "distrakt_backfill": DISTRAKT,
-    "distrakt_routes": DISTRAKT, "watch_history": DISTRAKT,
-    "discord_fmt": DISTRAKT,
+    "distrakt": DISTRAKT,
 
-    "ranker": RANKER, "ranker_export": RANKER, "ranker_import": RANKER,
-    "ranker_routes": RANKER, "ranker_sources": RANKER, "grid_builder": RANKER,
+    "ranker": RANKER,
 
     # The admin Settings screen's API, plus the app-wide Trakt device-code flow.
     # Feature tier despite sitting at the root: it reaches sideways into two

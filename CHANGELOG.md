@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.1.7] - 2026-08-01
+
+### Under the hood
+- 🗂️ **The code behind the app is filed by what it does.** Each part of the app — the calendar, the tracker, the boards, sign-in, pictures — now lives together in one place instead of being spread across a long flat list of files, and which parts are allowed to depend on which is written down and checked automatically. Nothing about using the app changes; it just makes the next change easier to make and harder to get wrong.
+
 ## 🏷️ [1.1.6] - 2026-07-31
 
 ### Look and feel

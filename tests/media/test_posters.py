@@ -1,5 +1,5 @@
-"""The poster URL registry (app/artwork.py) and the poster tile cache
-(app/posters.py).
+"""The poster URL registry (app/media/artwork.py) and the poster tile cache
+(app/media/posters.py).
 
 MEDIA NAMESPACING is the property this file cares about most: TMDB ids are
 namespaced per media type, so movie 550 and show 550 must never share a row, a
@@ -35,7 +35,7 @@ def _jpeg_bytes(size=(300, 450)) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# app/artwork.py — the registry
+# app/media/artwork.py — the registry
 # ---------------------------------------------------------------------------
 
 class ArtworkTestCase(unittest.TestCase):
@@ -120,7 +120,7 @@ class RegistryTests(ArtworkTestCase):
 
 
 # ---------------------------------------------------------------------------
-# app/posters.py — the tile cache and resolution chain
+# app/media/posters.py — the tile cache and resolution chain
 # ---------------------------------------------------------------------------
 
 class PosterCacheTests(unittest.IsolatedAsyncioTestCase):

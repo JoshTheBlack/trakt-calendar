@@ -17,8 +17,8 @@ ENV PYTHONUNBUFFERED=1 \
 # limiting becomes instance-wide.
 #
 # The APP reads this env var, not the server: config.py seeds the admin-editable
-# `trusted_proxy_ips` setting from it on first run, and app/auth.py does all the
-# X-Forwarded-For parsing itself off the raw connection peer. Hypercorn is left
+# `trusted_proxy_ips` setting from it on first run, and app/auth/cookies.py does
+# all the X-Forwarded-For parsing itself off the raw connection peer. Hypercorn is left
 # out of it deliberately — it only rewrites the client via an opt-in ProxyFix
 # middleware this app does not use, so it always hands the app the true peer.
 ENV TRUSTED_PROXY_IPS=127.0.0.1/32

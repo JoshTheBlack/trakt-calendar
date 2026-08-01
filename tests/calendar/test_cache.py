@@ -1,5 +1,5 @@
-"""Unit tests for the global calendar cache and its read path (app/calendar_cache,
-app/calendar_filter).
+"""Unit tests for the global calendar cache and its read path (app/calendar/cache.py,
+app/calendar/filter.py).
 
 Covers: window alignment is stable across viewers (independent of "today"); the
 viewer-dependent month boundary (an item at 02:00 UTC on the 1st lands in the

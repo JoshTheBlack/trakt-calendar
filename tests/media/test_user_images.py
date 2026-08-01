@@ -1,4 +1,4 @@
-"""Per-user avatar/image upload and storage (app/user_images.py).
+"""Per-user avatar/image upload and storage (app/media/user_images.py).
 
 The six rules an upload has to satisfy are each pinned by their own test: an oversized
 decoded payload, unreadable bytes, a disallowed format, declared dimensions

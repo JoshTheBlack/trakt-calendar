@@ -315,54 +315,90 @@ Hypercorn directly and never reads `.env`.
 
 ## Project layout
 
+A shared kernel flat at the root of `app/`, plus one package per feature. Which
+package may import which is not a convention but a test —
+`tests/kernel/test_layering.py` declares every permitted edge with its reason and
+fails on an undeclared one.
+
 ```
 app/
-  main.py           App construction, lifespan/heartbeat, error pages
+  main.py           App construction, lifespan/heartbeat, error pages. The
+                     composition root: it registers every feature's router
+  ── the kernel: no feature, so every feature may depend on it ──
   config.py         Settings model + persistence (secrets/globals in data/app.db, two
                      recovery fields in data/settings.json)
   db.py             SQLite connection policy + schema migrations (data/app.db)
-  authz.py          Route authorization: declare-or-denied, CSRF/origin rules,
-                     the shared JSON body guard
+  cache.py          TTL blob cache for detail lookups (shares api_cache)
+  secrets_box.py    At-rest encryption primitive (seal/open, key from ENCRYPTION_KEY)
+  http_pool.py      One pooled httpx client per outbound service
   chrome.py         The page context every route merges in (nav flags, version)
   assets.py         The cache-busted asset registry each page's <head> renders from
   templating.py     The one Jinja environment
-  secrets_box.py    At-rest encryption primitive (seal/open, key from ENCRYPTION_KEY)
-  secrets_backfill.py  Seal-in-place conversion shared by the enable flow and Settings
-  encryption_flow.py   Enable/verify/encrypt lifecycle, key-health canary, lost-key recovery
-  encryption_routes.py Admin encryption endpoints + the recovery screen
-  auth/             Passwords, sessions, identities, invites, lockout, cookie policy,
-                     admin operations, access levels
-  auth_routes.py    Onboarding, register, sign in/out, account page
-  admin_routes.py   Admin screen: accounts, invites, retired identifiers
-  trakt_routes.py   "Log in with Trakt" (OAuth redirect flow)
-  plex_routes.py    "Log in with Plex" (PIN flow)
-  calendar_routes.py   The calendar, the month picker, and the tile/detail endpoints
-  distrakt_routes.py   The tracker page and its API
-  settings_routes.py   Settings and the Trakt device-authorization flow
-  integrations_routes.py  Sonarr / Radarr / Seerr
   route_params.py   The query coercions the route modules share
-  share_routes.py   Public read-only calendars (/s/, /u/, /c/)
-  share_links.py    Share-link settings + URL building
-  share_code.py     The compact ?p= code a share link is handed out as
-  share_card.py     The 1200x630 picture a share link unfurls into
-  share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
-  imaging.py        Font, text-in-a-box and circular-mask primitives, shared by
-                     every renderer that draws a string
-  calendar_cache.py Global UTC window cache + the read path over it
-  calendar_state.py Per-user not-watching marks (show-level, all views) + change detection
+  endpoints.py      Calendar endpoint registry
+  changelog.py      CHANGELOG.md, parsed once, for the in-app modal
+  perftrace.py      Where a request's time went
+  timezones.py      Curated IANA timezone list
+  ── at the root without being kernel ──
+  authz.py          Route authorization: declare-or-denied, CSRF/origin rules,
+                     the shared JSON body guard. Auth tier, not kernel
+  settings_routes.py   Settings and the Trakt device-authorization flow
+  ── auth: a layer every feature may depend on, not a peer feature ──
+  auth/             passwords, sessions, cookies, identities, handshakes, invites,
+                     lockout, prefs, users, levels, admin
+    routes.py         Onboarding, register, sign in/out, account page
+    admin_routes.py   Admin screen: accounts, invites, retired identifiers
+    trakt.py          The Trakt OAuth flows and refresh-token renewal
+    trakt_routes.py   "Log in with Trakt" (OAuth redirect flow)
+    plex.py           The Plex PIN flow
+    plex_routes.py    "Log in with Plex" (PIN flow)
+    encryption_flow.py   Enable/verify/encrypt lifecycle, key-health canary, recovery
+    encryption_routes.py Admin encryption endpoints + the recovery screen
+    secrets_backfill.py  Seal-in-place conversion shared by the enable flow and Settings
+  ── the features ──
+  calendar/
+    routes.py         The calendar, the month picker, and the tile/detail endpoints
+    cache.py          Global UTC window cache + the read path over it
+    filter.py         The read-time genre/country/certification/network filter
+    state.py          Per-user not-watching marks (all views) + change detection
+    share_routes.py   Public read-only calendars (/s/, /u/, /c/)
+    share_links.py    Share-link settings + URL building
+    share_code.py     The compact ?p= code a share link is handed out as
+    share_card.py     The 1200x630 picture a share link unfurls into
+    share_card_cache.py  Rendered cards on disk (data/share_cards), keyed by content
+  distrakt/         The watch tracker: store, live counts, month rollover, backup,
+                     per-user prefs, and the calendar premiere import
+    routes.py         The tracker page and its API
+    backfill.py       Filling in never-tracked months from watch history
+    watch_history.py  The incremental per-user watch cache the tracker reads
+    discord_fmt.py    Which bucket a show is in, and the two Discord posts
+  ranker/
+    core.py           The board data layer: tiers, entries, ordering
+    routes.py         The rankings page and its board API
+    sources.py        Where rankable titles come from
+    imports.py        Seeding a board from what the viewer has finished
+    exports.py        Turning a board into the thing a user takes away
+    grid_builder.py   The exported poster grid: pixels, and nothing else
+  media/
+    posters.py        Poster tiles on disk (fetch, normalize, cache)
+    logos.py          Network logo tiles
+    artwork.py        Poster URL bookkeeping (show_posters); no downloads
+    user_images.py    Per-user avatar and grid-header images
+    imaging.py        Font, text-in-a-box and circular-mask primitives, shared by
+                       every renderer that draws a string
+    tmdb.py           The TMDB client posters and logos fetch through
+  integrations/     The three services a user points at their OWN server
+    routes.py         Sonarr / Radarr / Seerr: status, options, add-to-library
+    arr.py            Sonarr / Radarr
+    seer.py           Overseerr / Jellyseerr
   providers/        The calendar-source seam: the Item record, capabilities, the
                      registry — and trakt/ (transport, calendar, detail, sync)
-  distrakt/         The watch tracker: store, live counts, month rollover, backup
-  distrakt_backfill.py  Filling in never-tracked months from watch history
-  ranker*.py        The ranking boards, their sources, and the export/grid renderer
-  endpoints.py      Calendar endpoint registry
-  timezones.py      Curated IANA timezone list
-  cache.py          TTL blob cache for detail lookups (shares api_cache)
   templates/        Jinja2 templates
   static/           CSS (one bundled stylesheet), JS (one directory per page), images
 run.py              Dev runner (Hypercorn)
-tests/              Mirrors app/ — kernel, providers, calendar, tracker, ranker,
-                     auth, encryption, media
+tests/              Mirrors app/ — kernel, providers, calendar, distrakt, ranker,
+                     auth, media, integrations — plus encryption/, which is named
+                     for a concern because the at-rest key path spans two packages
 ```
 
 ## License

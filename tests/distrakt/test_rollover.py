@@ -4,7 +4,7 @@ Covers ensure_month's orchestration (freeze prior -> carry forward minus
 completed/abandoned -> premieres minus not-watching -> in-progress history) and
 the staleness helpers, with every Trakt call mocked out. The main-calendar
 not-watching overlay is NOT mocked: real rows go into not_watching_shows
-through app/calendar_state, since "the roster is built from this user's own
+through app/calendar/state.py, since "the roster is built from this user's own
 calendar decisions" is exactly the wiring worth proving.
 
 Also covers the per-user guarantees the shared-document model could not make:
