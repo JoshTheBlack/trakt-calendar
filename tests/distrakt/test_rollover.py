@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app import auth, db, distrakt
-from app.distrakt import watch_history
+from app.distrakt import rollover, watch_history
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from tests.support import new_db_path
@@ -650,6 +650,112 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
             )
         self.assertNotEqual(shows[0]["bucket"], "completed")
         self.assertEqual(shows[0]["completed_on"], "")
+
+
+class NotWatchingBeforeAMonthExistsTests(RolloverTestCase):
+    """WHEN the mark was made decides what it means.
+
+    Marked not-watching BEFORE a month was first built, the title never enters
+    that month: the decision predates the month, so there is nothing in there for
+    it to be a verdict about. Marked AFTER, against a month that already lists it,
+    the title is promoted to Abandoned — that IS a verdict, and the month is
+    where it is recorded.
+
+    Every month here is derived from the real clock rather than written as a
+    literal. `ensure_month` and the payload both compare the month against today,
+    so a hardcoded 'YYYY-MM' would be testing a different rule every month and the
+    wrong one most of them.
+    """
+
+    def setUp(self):
+        # date.today(), not a frozen date: these tests assert what the tracker does
+        # on the day it runs, which is the only day the rule is ever applied on.
+        self.today = date.today()
+        self.current = distrakt.month_key(self.today.year, self.today.month)
+        self.prior = rollover.prev_month_key(self.current)
+
+    def _settings(self):
+        """SETTINGS plus the fields the payload's share link reads."""
+        return SimpleNamespace(**vars(SETTINGS), public_base_url="")
+
+    async def _ensure_current(self, premieres=(), progress=()):
+        async def fake_read_month(endpoint, settings, **kw):
+            return list(premieres), None
+
+        async def fake_progress(settings, since_days=60):
+            return list(progress)
+
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
+            return await distrakt.ensure_month(self.user_id, self.today.year, self.today.month,
+                                               SETTINGS, today=self.today)
+
+    async def test_a_carried_title_already_marked_never_enters_the_new_month(self):
+        """The reported case: the marks were all made on the calendar first, and
+        the month's first build listed every one of them as Abandoned."""
+        await distrakt.add_show(self.user_id, self.prior, {
+            "ids": _ids(101), "season": 1, "title": "Not For Me", "network": "Net"})
+        await self._mark_not_watching(self.user_id, self.today.year, self.today.month, "slug-101")
+
+        doc = await self._ensure_current()
+
+        self.assertEqual(await self._keys(doc), set())
+        stored = await distrakt.load_month(self.user_id, self.current)
+        self.assertEqual(stored["shows"], [])  # pruned, not carried in as abandoned
+
+    async def test_a_history_title_already_marked_never_enters_the_new_month(self):
+        """The same rule for the third source. Recent watch history is a fact
+        about the past; a title the user has since said they are not watching is
+        not one this month should be seeded with either."""
+        await self._mark_not_watching(self.user_id, self.today.year, self.today.month, "slug-401")
+
+        doc = await self._ensure_current(progress=[
+            {"ids": _ids(401), "season": 1, "watched": 3, "title": "Backlog", "network": "Net"},
+        ])
+
+        self.assertEqual(await self._keys(doc), set())
+
+    async def test_an_unmarked_title_is_still_carried_forward(self):
+        """The filter has to be about the mark and not about the source — a
+        prior-month title nobody has said anything about still rolls over."""
+        await distrakt.add_show(self.user_id, self.prior, {
+            "ids": _ids(101), "season": 1, "title": "Still Watching", "network": "Net"})
+
+        doc = await self._ensure_current()
+
+        self.assertEqual(await self._keys(doc), {(101, 1)})
+
+    async def test_marking_it_after_the_month_exists_abandons_it_instead(self):
+        """The other half, and the half that must NOT change: once the month
+        lists a title, saying you are not watching it is a verdict on this month,
+        and the month records it as Abandoned rather than forgetting it."""
+        from app.distrakt import routes as distrakt_routes
+
+        await self._ensure_current(premieres=[_cal_item(101, 1, "Was Watching")])
+        self.assertEqual(await self._keys(await distrakt.load_month(self.user_id, self.current)),
+                         {(101, 1)})
+
+        # The mark arrives now, against a month that already lists the title.
+        await self._mark_not_watching(self.user_id, self.today.year, self.today.month, "slug-101")
+
+        async def no_premieres(endpoint, settings, **kw):
+            return [], None
+
+        with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
+             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+            payload, status = await distrakt_routes._distrakt_month_payload(
+                self.user_id, self.today.year, self.today.month, self._settings())
+
+        self.assertEqual(status, 200)
+        self.assertEqual([s["bucket"] for s in payload["shows"]], [distrakt.Bucket.ABANDONED])
+        stored = await distrakt.load_month(self.user_id, self.current)
+        self.assertTrue(stored["shows"][0]["abandoned"])
 
 
 if __name__ == "__main__":

@@ -271,6 +271,18 @@ async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
     present: set[tuple[str, int]] = set()
     year, month = int(month_key[:4]), int(month_key[5:7])
 
+    # Read ONCE and applied to all three sources below, because the rule is about
+    # the month rather than about where a title came from: a title the user had
+    # already marked not-watching on their calendar when this month was first
+    # built does not enter it AT ALL. The mark predates the month, so there is
+    # nothing in here for it to be a decision about, and a month that opens with
+    # it listed as Abandoned is announcing a verdict on a show the user had
+    # already said they were not following. A mark made LATER, against a month
+    # that already exists, is the other statement — that one promotes the row to
+    # Abandoned (see routes._apply_not_watching), which is why this filter belongs
+    # at initialization and not at read time.
+    nw_ids = await calendar_state.not_watching_ids(user_id)
+
     # Carry forward everything except Completed / Abandoned. An open (not-yet-
     # frozen) prior is bucketed live so a preview rollover still drops the right
     # titles; a frozen prior reuses its stored buckets.
@@ -282,18 +294,21 @@ async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
             if s.get("abandoned") or s.get("bucket") in (
                     store.Bucket.COMPLETED, store.Bucket.ABANDONED):
                 continue
+            if calendar_import.matches_not_watching(s, nw_ids):
+                continue
             key = live_key(s)
             if key in present:
                 continue
             doc["shows"].append(normalize_show(identity_record(s)))
             present.add(key)
 
-    # This month's premieres, minus not-watching (excluded before commit).
-    nw_ids = await calendar_state.not_watching_ids(user_id)
+    # This month's premieres, minus not-watching.
     await calendar_import.add_premieres(doc, present, user_id, settings, year, month, nw_ids)
 
     # In-progress-but-unfinished titles from recent history.
     for rec in await history_records(settings, present):
+        if calendar_import.matches_not_watching(rec, nw_ids):
+            continue
         key = (str(record_key(rec)), int(rec["season"]))
         if key in present:
             continue
