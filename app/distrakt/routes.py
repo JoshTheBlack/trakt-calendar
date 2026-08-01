@@ -537,7 +537,12 @@ async def api_distrakt_import(request: Request):
     shows/premieres minus new -> Returning; skips existing + not-watching). The
     manual "Import from calendar" action — e.g. to seed the current month when its
     doc already exists (so lazy-init's one-shot premiere seeding was skipped).
-    Returns the same shape as GET /api/distrakt/month."""
+    Returns the same shape as GET /api/distrakt/month.
+
+    Bounded to a month the tracker may actually build — the one under way or the
+    preview immediately after it (see rollover.month_reachable). The page inherits
+    its month from whatever view the user came from, so without that bound one
+    click out ahead created a month nobody had asked about."""
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
@@ -549,6 +554,13 @@ async def api_distrakt_import(request: Request):
     month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key):
         return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
+    if not distrakt_store.month_reachable(month_key, today):
+        # Said out loud rather than left to no-op. ensure_month will not build a
+        # month this far ahead (see month_reachable), so importing into it would
+        # write nothing while the toast claimed it had.
+        return JSONResponse(
+            {"ok": False, "error": "Can't import a month the calendar hasn't reached yet."},
+            status_code=400)
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)

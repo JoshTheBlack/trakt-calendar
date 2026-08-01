@@ -652,6 +652,82 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         self.assertEqual(shows[0]["completed_on"], "")
 
 
+def _months_ahead(today: date, n: int) -> tuple[int, int]:
+    """The (year, month) `n` months after `today`'s own.
+
+    Derived rather than written out as a literal: every rule below compares a
+    month against the real clock, so a fixed "2026-10" would be a different
+    distance from today every month and the wrong one most of them.
+    """
+    index = today.month - 1 + n
+    return today.year + index // 12, index % 12 + 1
+
+
+class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
+    """The tracker inherits whichever month the page it was opened from was
+    showing, and that page can be pointed anywhere. It may build the month that
+    has begun and the one immediately ahead of it (the preview), and no other.
+    """
+
+    def setUp(self):
+        self.today = date.today()
+
+    async def _ensure(self, offset: int):
+        """ensure_month for the month `offset` after this one, with every Trakt
+        read recorded so a month that should not be built can be shown not to
+        have asked for anything."""
+        calls: list[str] = []
+
+        async def fake_read_month(endpoint, settings, **kw):
+            calls.append(f"calendar:{kw.get('year')}-{kw.get('month'):02d}")
+            return [_cal_item(201, 1, "Premiere")], None
+
+        async def fake_progress(settings, since_days=60):
+            calls.append("history")
+            return []
+
+        year, month = _months_ahead(self.today, offset)
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
+            doc = await distrakt.ensure_month(self.user_id, year, month, SETTINGS, today=self.today)
+        return doc, calls, distrakt.month_key(year, month)
+
+    async def test_a_month_past_the_preview_is_not_built_and_asks_for_nothing(self):
+        doc, calls, key = await self._ensure(2)
+        self.assertEqual(doc["shows"], [])
+        self.assertIsNone(await distrakt.load_month(self.user_id, key))  # nothing written
+        self.assertEqual(calls, [])                                     # and nothing fetched
+
+    async def test_the_preview_month_is_still_built(self):
+        """The month immediately ahead is a real feature — before the 1st it
+        auto-populates so the roster tracks the calendar."""
+        doc, _calls, key = await self._ensure(1)
+        self.assertEqual(await self._keys(doc), {(201, 1)})
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
+
+    async def test_the_month_in_progress_is_still_built(self):
+        doc, _calls, key = await self._ensure(0)
+        self.assertEqual(await self._keys(doc), {(201, 1)})
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
+
+    async def test_looking_ahead_does_not_consume_the_months_in_between(self):
+        """The expensive half of the old behaviour. A store only grows forward,
+        so a month built out ahead put every month before it permanently out of
+        reach — including the one actually in progress."""
+        await self._ensure(3)
+        doc, _calls, key = await self._ensure(0)
+        self.assertEqual(await self._keys(doc), {(201, 1)})
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
+
+    def test_reachability_allows_exactly_one_month_of_slack(self):
+        self.assertTrue(distrakt.month_reachable("2026-12", date(2026, 12, 20)))   # in progress
+        self.assertTrue(distrakt.month_reachable("2026-11", date(2026, 12, 20)))   # already past
+        self.assertTrue(distrakt.month_reachable("2027-01", date(2026, 12, 20)))   # the preview
+        self.assertFalse(distrakt.month_reachable("2027-02", date(2026, 12, 20)))  # past it
+
+
 class NotWatchingBeforeAMonthExistsTests(RolloverTestCase):
     """WHEN the mark was made decides what it means.
 

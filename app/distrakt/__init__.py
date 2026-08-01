@@ -52,6 +52,7 @@ from .rollover import (
     is_stale,
     maybe_freeze_prior,
     month_committed,
+    month_reachable,
 )
 from .store import (
     ADDED_BY_CALENDAR,
@@ -91,6 +92,7 @@ __all__ = [
     "frozen_shows", "get_emoji_prefs", "import_premieres", "is_backfill_blocked",
     "is_calendar_premiere", "is_stale", "list_months", "live_key", "load_month",
     "matches_not_watching", "maybe_freeze_prior", "month_committed", "month_key",
+    "month_reachable",
     "months_with_shows", "new_month_doc", "normalize_show", "record_key",
     "register_networks", "remove_show", "restore_user_data", "row_to_show",
     "save_month", "set_abandoned", "set_emoji_prefs", "set_month_movies",

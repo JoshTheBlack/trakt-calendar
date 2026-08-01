@@ -15,6 +15,7 @@ from __future__ import annotations
 import unittest
 import asyncio
 import re
+from datetime import date
 from unittest.mock import patch
 
 from app import distrakt as distrakt_store
@@ -138,6 +139,52 @@ class BackupPanelTests(TrackerPanelTestCase):
         self.sign_in_as(self.user_id)
         still_there = self.client.get("/api/distrakt/list?year=2026&month=7").json()
         self.assertEqual([s["title"] for s in still_there["shows"]], ["Mine"])
+
+
+class ImportingAMonthTests(TrackerPanelTestCase):
+    """The ⤓ Import control, and the one month it is allowed to act on.
+
+    The tracker opens on whichever month the page it was reached from was
+    showing, so the month in the request is only as sensible as that page was.
+    """
+
+    def make_settings(self):
+        # The route refuses outright without Trakt credentials, so the instance
+        # has to carry a client id for the month rule to be what is under test.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.tracker_user()
+        self.sign_in_as(self.user_id)
+        self.today = date.today()
+
+    def _import(self, offset: int):
+        """Import the month `offset` after this one. Derived from the clock: the
+        route decides by comparing the month against today."""
+        index = self.today.month - 1 + offset
+        year, month = self.today.year + index // 12, index % 12 + 1
+        # Building the month also consults recent viewing, and the route ends by
+        # recomputing the whole month; neither is what is under test here.
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(303, 1)), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", return_value=[]), \
+             patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
+            return self.client.post("/api/distrakt/import", json={"year": year, "month": month})
+
+    def test_a_month_the_calendar_has_not_reached_is_refused(self):
+        """Not a silent no-op: the month cannot be built out there, so an import
+        into it would write nothing while the page said it had imported."""
+        resp = self._import(2)
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("hasn't reached", resp.json()["error"])
+        self.assertEqual(asyncio.run(distrakt_store.list_months(self.user_id)), [])
+
+    def test_the_month_in_progress_imports(self):
+        resp = self._import(0)
+        self.assertEqual(resp.status_code, 200)
+        month = distrakt_store.month_key(self.today.year, self.today.month)
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, month))
+        self.assertEqual([s["ids"]["trakt"] for s in doc["shows"]], [303])
 
 
 class RemovingFromTheTrackerTests(TrackerPanelTestCase):

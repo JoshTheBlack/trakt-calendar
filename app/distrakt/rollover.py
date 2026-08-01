@@ -50,6 +50,26 @@ def month_committed(month_key: str, today: date | None = None) -> bool:
     return (today.year, today.month) >= (year, month)
 
 
+def month_reachable(month_key: str, today: date | None = None) -> bool:
+    """Whether the tracker may BUILD `month_key` yet: it has begun, or it is the
+    single month immediately ahead of the one that has (the preview).
+
+    The tracker inherits whichever month the page it was opened from was showing,
+    and that page can be pointed at any month at all. Without this bound, opening
+    it on a month three ahead built that month there and then — pulling in its
+    premieres, and seeding it with titles carried forward and with whatever the
+    user had been watching recently, which is this month's material and not that
+    one's. It also consumed the months in between: a store only ever grows forward
+    (see can_initialize), so a month created out ahead makes every month before it
+    unreachable for good.
+
+    ONE month of slack rather than none, because the preview is a real feature:
+    before the 1st, next month auto-populates from premieres so the roster tracks
+    the calendar. Anything past that is a month nobody can say anything about yet.
+    """
+    return month_committed(month_key, today) or month_committed(prev_month_key(month_key), today)
+
+
 async def can_initialize(user_id: int, month_key: str) -> bool:
     """No backfill of months earlier than a user's initial seed. Only a brand-new
     store (no months yet -> seed) or a month strictly AFTER their latest tracked
@@ -229,7 +249,8 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     _initialize_month for what goes in and in what order.
 
     An already-initialized month is returned untouched (aside from the prior-month
-    freeze), so PAST months never re-run initialization.
+    freeze), so PAST months never re-run initialization. A month further ahead
+    than the preview is not initialized at all (month_reachable).
     """
     today = today or date.today()
     month_key = store.month_key(year, month)
@@ -247,6 +268,12 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
         # Initialization needs Trakt (premieres + history); without credentials
         # return a transient, UNPERSISTED empty doc so a proper init still happens
         # once Trakt is configured (rather than baking in an empty month).
+        return new_month_doc(month_key)
+    if not month_reachable(month_key, today):
+        # A month the calendar has not got to yet (and is not the preview of).
+        # Same treatment as a blocked past month: a transient, UNPERSISTED empty
+        # doc, so navigating out ahead shows nothing rather than importing a month
+        # nobody asked about — see month_reachable.
         return new_month_doc(month_key)
     if not await can_initialize(user_id, month_key):
         # Backward / gap navigation to a never-tracked past month: DO NOT backfill
