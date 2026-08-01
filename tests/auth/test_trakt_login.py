@@ -22,7 +22,8 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from app import auth, auth_routes, db, trakt_auth, trakt_routes
+from app import auth, db
+from app.auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
 from app.config import Settings, public_base_url_error, save_settings
 from app.main import app
 from tests.support import AppTestCase, ORIGIN
@@ -475,7 +476,7 @@ class LinkOutcomeTests(TraktOAuthTestCase):
     def test_a_fresh_link_is_refused_while_encryption_is_unhealthy(self):
         user = self.make_user("linker", calendar_approved=True)
         self.sign_in_as(user)
-        with patch("app.encryption_flow.secret_writes_blocked", return_value=True):
+        with patch("app.auth.encryption_flow.secret_writes_blocked", return_value=True):
             resp = self.callback(self.start("/auth/trakt/link"))
         self.assertEqual(resp.status_code, 409)
         self.assertEqual(self.identities(), [])
@@ -491,7 +492,7 @@ class LinkOutcomeTests(TraktOAuthTestCase):
         self.callback(self.start("/auth/trakt/link"))
         original_access = self.identities()[0]["access_token"]
 
-        with patch("app.encryption_flow.secret_writes_blocked", return_value=True):
+        with patch("app.auth.encryption_flow.secret_writes_blocked", return_value=True):
             resp = self.callback(self.start("/auth/trakt/link"),
                                  token=_Token(access="access-2", refresh="refresh-2"))
         self.assertEqual(resp.status_code, 409)
@@ -574,7 +575,7 @@ class IdentityKeyTests(TraktOAuthTestCase):
 
     def test_fetch_account_reads_the_uuid_from_users_settings(self):
         client, seen = self._stub_client(self.SETTINGS_BODY)
-        with patch("app.trakt_auth.httpx.AsyncClient", return_value=client):
+        with patch("app.auth.trakt.httpx.AsyncClient", return_value=client):
             account = asyncio.run(trakt_auth.fetch_account("cid", "token"))
         self.assertEqual(account, {"id": "30ee8617b5f3f670f90d88012b30adf4",
                                    "name": "JoshTheBlack"})
@@ -585,7 +586,7 @@ class IdentityKeyTests(TraktOAuthTestCase):
         """The settings response carries a Trakt-internal `account.token`. It must
         never end up on the identity row or anywhere near a log."""
         client, _ = self._stub_client(self.SETTINGS_BODY)
-        with patch("app.trakt_auth.httpx.AsyncClient", return_value=client):
+        with patch("app.auth.trakt.httpx.AsyncClient", return_value=client):
             account = asyncio.run(trakt_auth.fetch_account("cid", "token"))
         self.assertNotIn("unrelated-internal-value", str(account))
 
@@ -595,7 +596,7 @@ class IdentityKeyTests(TraktOAuthTestCase):
         for body in ({"user": {"ids": {"slug": "josh"}}}, {"user": {}}, {}):
             with self.subTest(body=body):
                 client, _ = self._stub_client(body)
-                with patch("app.trakt_auth.httpx.AsyncClient", return_value=client):
+                with patch("app.auth.trakt.httpx.AsyncClient", return_value=client):
                     with self.assertRaises(trakt_auth.AccountLookupError):
                         asyncio.run(trakt_auth.fetch_account("cid", "token"))
 

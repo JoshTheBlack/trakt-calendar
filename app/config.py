@@ -85,7 +85,7 @@ class Settings:
     countries: str = DEFAULT_COUNTRIES
     # The instance-wide certification floor, split by media type because shows
     # and movies use different rating vocabularies (TV Parental Guidelines vs.
-    # the MPA film ratings) — see calendar_filter.py.
+    # the MPA film ratings) — see app/calendar/filter.py.
     show_certifications: str = DEFAULT_SHOW_CERTIFICATIONS
     movie_certifications: str = DEFAULT_MOVIE_CERTIFICATIONS
     network_filter: list[str] = field(default_factory=list)
@@ -543,7 +543,8 @@ def save_settings(settings: Settings) -> None:
     the destinations moved.
     """
     ensure_data_dir()
-    from . import db, encryption_flow
+    from . import db
+    from .auth import encryption_flow  # local: encryption_flow -> config would cycle
 
     data = settings.to_dict()
     globals_doc = {name: data[name] for name in sorted(global_field_names())}

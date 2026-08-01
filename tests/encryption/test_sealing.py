@@ -9,7 +9,7 @@ the intact ciphertext, while a WRONG key fails loud.
 
 Three boundaries are covered:
   - the linked_identities token writers (app/auth) and the two read sites that feed
-    a Trakt call (app/trakt_routes);
+    a Trakt call (app/auth/trakt_routes.py);
   - the app-level SECRET_FIELDS on the save/load path through app/config;
   - the reusable backfill that converts existing plaintext rows to sealed in place.
 
@@ -24,7 +24,8 @@ import unittest
 
 from cryptography.fernet import Fernet
 
-from app import auth, config, db, secrets_backfill, secrets_box, trakt_routes
+from app import auth, config, db, secrets_box
+from app.auth import secrets_backfill, trakt_routes
 from app.config import Settings, load_settings, save_settings
 from tests.support import TMP, migrated_db, new_db_path
 

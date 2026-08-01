@@ -24,7 +24,8 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from app import imaging, share_card
+from app.calendar import share_card
+from app.media import imaging
 
 TMP = Path(tempfile.mkdtemp(prefix="tns-card-files-"))
 

@@ -10,6 +10,25 @@ break.
 Every entry names its home. An invariant with no stated owner is how three
 modules quietly stopped restating one and a survey read that as a hole.
 
+**Which package may import which is declared, and the declaration is checked.**
+`tests/kernel/test_layering.py` owns it. `app/` is a kernel — config, db, cache,
+templating, endpoints and the rest, flat at the root — plus feature packages
+(`calendar/`, `distrakt/`, `ranker/`, `media/`, `integrations/`, `providers/`),
+with `auth/` as a LAYER rather than a peer: every feature may depend on it and it
+depends on no feature. The kernel imports no feature, with two declared
+exceptions — config.py reaching the provider registry, and reaching auth's
+`encryption_flow` to refuse writing a secret while the at-rest key is unhealthy.
+Both are function-local, both are declared DEFERRED, and hoisting either to
+module level fails the test: that placement is the only reason they do not close
+an import cycle at load time. Every cross-package import must appear in that file's `DECLARED_EDGES`
+with a sentence saying why; an undeclared edge fails and the failure names the
+file, the line and the target. A declaration nothing exercises fails too, so the
+table cannot rot into a blanket permission nobody has read since. Three modules
+sit at the root without being kernel and are named there with the reason:
+`main.py` (the composition root, exempt as an importer because registering every
+feature's router is what it is for), `authz.py` (auth tier) and
+`settings_routes.py`.
+
 **Mutating requests must be `application/json`.** Enforced app-wide, for every
 route at once, by `request_shape_guard` in `app/authz.py` — before routing, and
 by exact type match. It is CSRF defence-in-depth behind the session cookie's
@@ -40,15 +59,15 @@ package separates public per-title lookups (`detail.py`) from per-user reads
 
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days).**
 Per-viewer filtering happens at READ time, so one viewer excluding a genre does
-not poison what another sees from the same rows (`app/calendar_cache.py`). The
+not poison what another sees from the same rows (`app/calendar/cache.py`). The
 one thing filtered BEFORE storage is the instance-wide content floor, which is
 deliberate and documented there.
 
 **A share link's preview picture renders the SAME view its page does.** Both
-resolve it through `share_routes.resolve_view` and read the month through
-`share_routes._read_month`, so a card can never advertise a count the page does
-not show — there is no override, and a title the page shows is a title the card
-counts. The card is also the one public path that may make an outbound call: it
+resolve it through `resolve_view` and read the month through `_read_month`, both
+in `app/calendar/share_routes.py`, so a card can never advertise a count the page
+does not show — there is no override, and a title the page shows is a title the
+card counts. The card is also the one public path that may make an outbound call: it
 warms poster ARTWORK, bounded to what the grid draws and to a wall clock, for
 titles the calendar cache already holds. It never fetches the CALENDAR
 (`allow_fetch=False`), so an empty cached month stays an empty card.
@@ -104,6 +123,9 @@ written out, and that part is worth matching.
 
 Run targeted files while iterating and the full suite before committing.
 `tests/` mirrors `app/`, so where a test lives says which part it covers.
+`tests/encryption/` is named for a concern instead of a package because the
+at-rest key path it covers end to end genuinely spans two: the kernel's
+`app/secrets_box.py` and auth's encryption modules.
 `tests/conftest.py` owns the data directory and an autouse guard that fails any
 test reaching the network; `tests/support.py` owns the database, the client and
 the base classes. A new test file should need no setup of its own.

@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from .. import discord_fmt
+from . import discord_fmt
 from ..perftrace import span
-from .store import record_key
+from .store import Bucket, record_key
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
 
     Watched counts (`x`) come from `user_id`'s incremental watch-history cache
-    (app/watch_history) — the caller may pass a pre-synced `watched_lookup`
+    (watch_history.py) — the caller may pass a pre-synced `watched_lookup`
     (avoids re-syncing when it also needs the movies from the same state); if
     omitted we sync here. Totals/dates (`y`, cadence, premiere/finale) come from
     one season call per record; `fresh=True` bypasses the 24h season cache.
@@ -117,7 +117,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     Every show that comes back carries `key`, whether or not the record handed in
     did: it is what the browser names a row by, and deriving it here means a
     record assembled anywhere is addressable once it has been through this."""
-    from .. import watch_history
+    from . import watch_history
     if not records:
         return []
 
@@ -154,7 +154,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
         # finished on a date the history cache cannot name.
         show["completed_on"] = (
             (completed_lookup or {}).get(key, "")
-            if show["bucket"] == discord_fmt.Bucket.COMPLETED else ""
+            if show["bucket"] == Bucket.COMPLETED else ""
         )
         shows.append(show)
 

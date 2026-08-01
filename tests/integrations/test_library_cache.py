@@ -12,7 +12,7 @@ import asyncio
 import unittest
 from unittest.mock import patch
 
-from app import arr, integrations_routes as ir, seer
+from app.integrations import arr, routes as ir, seer
 
 
 class _Settings:

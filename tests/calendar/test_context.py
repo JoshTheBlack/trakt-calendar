@@ -1,4 +1,4 @@
-"""The five answers app/calendar_routes.py builds the calendar shell out of.
+"""The five answers app/calendar/routes.py builds the calendar shell out of.
 
 Each of these used to be inline in one 200-line route and could only be
 exercised by loading a whole month through a TestClient. They are unit-tested
@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
-from app import calendar_routes
+from app.calendar import routes as calendar_routes
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Item, Media, Source
@@ -64,7 +64,7 @@ class AssembleMonthTests(unittest.TestCase):
     def test_no_configured_source_reports_it_and_assembles_nothing(self):
         """The one path that must not touch the cache at all — there is nobody to
         ask, so it says so instead of failing a fetch."""
-        with patch("app.calendar_cache.assemble_range") as fetch:
+        with patch("app.calendar.cache.assemble_range") as fetch:
             assembly = self._run(settings=Settings())
         fetch.assert_not_called()
         self.assertEqual(assembly.error, calendar_routes.NOT_CONFIGURED)
@@ -81,8 +81,8 @@ class AssembleMonthTests(unittest.TestCase):
             return {"new_ids": {"b"}, "delta": {"text": "+1", "kind": "up"},
                     "history": [{"when": "now"}]}
 
-        with patch("app.calendar_cache.assemble_range", fake_range), \
-             patch("app.calendar_state.resolve_view", fake_view):
+        with patch("app.calendar.cache.assemble_range", fake_range), \
+             patch("app.calendar.state.resolve_view", fake_view):
             assembly = self._run()
 
         self.assertIsNone(assembly.error)
@@ -101,8 +101,8 @@ class AssembleMonthTests(unittest.TestCase):
         async def fake_view(*a, **kw):
             return {"new_ids": set(), "delta": {"text": "", "kind": "none"}, "history": []}
 
-        with patch("app.calendar_cache.assemble_range", fake_range), \
-             patch("app.calendar_state.resolve_view", fake_view):
+        with patch("app.calendar.cache.assemble_range", fake_range), \
+             patch("app.calendar.state.resolve_view", fake_view):
             assembly = self._run()
         self.assertTrue(assembly.partial)
         self.assertIsNone(assembly.error)
@@ -112,7 +112,7 @@ class AssembleMonthTests(unittest.TestCase):
         async def boom(*a, **kw):
             raise TraktError("Trakt is unreachable")
 
-        with patch("app.calendar_cache.assemble_range", boom):
+        with patch("app.calendar.cache.assemble_range", boom):
             assembly = self._run()
         self.assertEqual(assembly.error, "Trakt is unreachable")
         self.assertEqual(assembly.grouped, [])
@@ -128,8 +128,8 @@ class AssembleMonthTests(unittest.TestCase):
         async def boom(*a, **kw):
             raise TraktError("rate limited")
 
-        with patch("app.calendar_cache.assemble_range", fake_range), \
-             patch("app.calendar_state.resolve_view", boom):
+        with patch("app.calendar.cache.assemble_range", fake_range), \
+             patch("app.calendar.state.resolve_view", boom):
             assembly = self._run()
         self.assertEqual(assembly.error, "rate limited")
         self.assertEqual(len(assembly.grouped), 1)

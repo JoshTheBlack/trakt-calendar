@@ -378,7 +378,7 @@ class TokenRevocationOnUnlinkTests(SettingsSurfaceTestCase):
         async def _revoke(client_id, client_secret, access_token):
             self.revoked.append(access_token)
 
-        patcher = patch("app.trakt_auth.revoke_token", side_effect=_revoke)
+        patcher = patch("app.auth.trakt.revoke_token", side_effect=_revoke)
         self.revoke_mock = patcher.start()
         self.addCleanup(patcher.stop)
 

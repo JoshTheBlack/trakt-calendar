@@ -19,7 +19,8 @@ from threading import Barrier
 from unittest.mock import patch
 
 
-from app import auth, auth_routes, db, plex_auth
+from app import auth, db
+from app.auth import plex as plex_auth, routes as auth_routes
 from app.config import Settings, save_settings
 from app.main import app
 from tests.support import AppTestCase

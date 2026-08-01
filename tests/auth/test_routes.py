@@ -1,4 +1,4 @@
-"""Unit tests for first-run setup and sign-in (app/auth_routes).
+"""Unit tests for first-run setup and sign-in (app/auth/routes.py).
 
 The UI these routes render is placeholder and will be replaced, but three things
 they do are not: the first-run race guard, the upgrade path for an instance that
@@ -18,7 +18,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, auth_routes, config, db
+from app import auth, config, db
+from app.auth import routes as auth_routes
 from app.config import Settings, load_settings, save_settings
 from app.main import app
 from tests.support import TMP, migrated_db
@@ -175,7 +176,7 @@ class UpgradePathTests(RouteTestCase):
             async def get(self, *a, **kw):
                 return _Resp()
 
-        with patch("app.trakt_auth.httpx.AsyncClient", return_value=_Client()):
+        with patch("app.auth.trakt.httpx.AsyncClient", return_value=_Client()):
             resp = self.setup_account()
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["trakt_adopted"])

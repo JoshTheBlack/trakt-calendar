@@ -1,5 +1,5 @@
-"""Unit tests for the global calendar cache and its read path (app/calendar_cache,
-app/calendar_filter).
+"""Unit tests for the global calendar cache and its read path (app/calendar/cache.py,
+app/calendar/filter.py).
 
 Covers: window alignment is stable across viewers (independent of "today"); the
 viewer-dependent month boundary (an item at 02:00 UTC on the 1st lands in the
@@ -23,7 +23,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
-from app import cache, calendar_cache, calendar_filter, db
+from app import cache, db
+from app.calendar import cache as calendar_cache, filter as calendar_filter
 from app.providers.trakt import TraktError
 from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
@@ -384,7 +385,7 @@ class ReadPathTests(CacheTestCase):
             [_entry("first", "2026-07-06T12:00:00Z")],
             [_entry("second", "2026-07-06T12:00:00Z")],
         ])
-        with patch("app.calendar_cache.fetch_window_raw", fetch):
+        with patch("app.calendar.cache.fetch_window_raw", fetch):
             entries, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000)
             self.assertEqual(entries[0]["show"]["ids"]["slug"], "first")
@@ -402,7 +403,7 @@ class ReadPathTests(CacheTestCase):
     async def test_public_read_never_fetches_and_serves_what_is_cached(self):
         # Nothing cached, fetch disabled -> empty, and Trakt is never asked.
         fetch = AsyncMock(side_effect=AssertionError("must not fetch"))
-        with patch("app.calendar_cache.fetch_window_raw", fetch):
+        with patch("app.calendar.cache.fetch_window_raw", fetch):
             entries, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), allow_fetch=False)
         self.assertEqual(entries, [])
@@ -412,11 +413,11 @@ class ReadPathTests(CacheTestCase):
     async def test_public_read_serves_stale_cache_without_refetching(self):
         self.settings.calendar_cache_ttl_minutes = 10
         first = AsyncMock(return_value=[_entry("cached", "2026-07-06T12:00:00Z")])
-        with patch("app.calendar_cache.fetch_window_raw", first):
+        with patch("app.calendar.cache.fetch_window_raw", first):
             await calendar_cache.load_window(SHOWS, self.settings, date(2026, 7, 6), now=1000)
         # Long past the TTL, but a public read must serve the stale copy, not fetch.
         never = AsyncMock(side_effect=AssertionError("must not fetch"))
-        with patch("app.calendar_cache.fetch_window_raw", never):
+        with patch("app.calendar.cache.fetch_window_raw", never):
             entries, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), allow_fetch=False, now=10 ** 9)
         self.assertEqual(entries[0]["show"]["ids"]["slug"], "cached")
@@ -431,7 +432,7 @@ class ReadPathTests(CacheTestCase):
                 return [_entry("boundary", "2026-03-01T02:00:00Z")]
             return []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             items, _ = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo(tz_name), year=year, month=month)
         return {i.id for i in items}
@@ -447,7 +448,7 @@ class ReadPathTests(CacheTestCase):
     async def test_read_month_reports_the_oldest_window_as_of(self):
         async def fake(endpoint, settings, start):
             return []
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             _, as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=555)
         self.assertEqual(as_of, 555)
@@ -472,7 +473,7 @@ class AssembleRangeTests(CacheTestCase):
             seen.append(start)
             return []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 15), end_date=date(2026, 7, 15))
@@ -499,7 +500,7 @@ class AssembleRangeTests(CacheTestCase):
                 return [after]
             return []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=tz,
                 start_date=date(2026, 7, 13), end_date=date(2026, 7, 13))
@@ -520,7 +521,7 @@ class AssembleRangeTests(CacheTestCase):
             entries.append(entry)
 
         async def read(networks):
-            with patch("app.calendar_cache.fetch_window_raw",
+            with patch("app.calendar.cache.fetch_window_raw",
                        AsyncMock(return_value=entries)):
                 grouped, _ = await calendar_cache.assemble_range(
                     SHOWS, self.settings, tz=ZoneInfo("UTC"),
@@ -553,7 +554,7 @@ class AssembleRangeTests(CacheTestCase):
                 return [from_w2]
             return []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
@@ -574,7 +575,7 @@ class AssembleRangeTests(CacheTestCase):
                 raise TraktError("Trakt unreachable", 503)
             return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
@@ -588,7 +589,7 @@ class AssembleRangeTests(CacheTestCase):
         async def fake(endpoint, settings, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             with self.assertRaises(TraktError):
                 await calendar_cache.assemble_range(
                     SHOWS, self.settings, tz=ZoneInfo("UTC"),
@@ -602,7 +603,7 @@ class AssembleRangeTests(CacheTestCase):
         async def fake(endpoint, settings, start):
             return [a, b] if start == target else []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31),
@@ -625,7 +626,7 @@ class AssembleRangeTests(CacheTestCase):
                 raise TraktError("Trakt unreachable", 503)
             return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
 
-        with patch("app.calendar_cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
             items, _as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7)
         self.assertEqual({i.id for i in items}, {"good"})
@@ -647,14 +648,14 @@ class PrewarmTests(CacheTestCase):
     async def test_disabled_setting_skips_even_with_a_qualifying_ttl(self):
         self.settings.calendar_prewarm_enabled = False
         self.settings.calendar_cache_ttl_minutes = 1440
-        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
             await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
         mocked.assert_not_called()
 
     async def test_enabled_but_ttl_below_a_day_skips(self):
         self.settings.calendar_prewarm_enabled = True
         self.settings.calendar_cache_ttl_minutes = 1439
-        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
             await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
         mocked.assert_not_called()
 
@@ -663,7 +664,7 @@ class PrewarmTests(CacheTestCase):
         self.settings.calendar_cache_ttl_minutes = 1440
         now = 1_753_000_000  # an arbitrary but fixed instant
         today = datetime.fromtimestamp(now, tz=timezone.utc).date()
-        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], None)
             await calendar_cache.prewarm_calendar_cache(self.settings, now=now)
         expected_windows = calendar_cache.aligned_windows(
@@ -675,7 +676,7 @@ class PrewarmTests(CacheTestCase):
     async def test_runs_at_most_once_per_ttl(self):
         self.settings.calendar_prewarm_enabled = True
         self.settings.calendar_cache_ttl_minutes = 1440  # ttl = 86400 seconds
-        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
             mocked.return_value = ([], None)
             await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)
             first_count = mocked.call_count
@@ -687,7 +688,7 @@ class PrewarmTests(CacheTestCase):
     async def test_a_failed_window_does_not_raise(self):
         self.settings.calendar_prewarm_enabled = True
         self.settings.calendar_cache_ttl_minutes = 1440
-        with patch("app.calendar_cache.load_window", new_callable=AsyncMock) as mocked:
+        with patch("app.calendar.cache.load_window", new_callable=AsyncMock) as mocked:
             mocked.side_effect = TraktError("Trakt unreachable", 503)
             await calendar_cache.prewarm_calendar_cache(self.settings, now=1_000_000)  # must not raise
 

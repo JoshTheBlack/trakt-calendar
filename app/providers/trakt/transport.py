@@ -298,7 +298,7 @@ async def cached_get(
     fetched and cached, without a public request ever spending the owner's Trakt
     rate limit — the read-only-cache half of the calendar cache's
     allow_fetch=False rule, applied to the detail lookups. Serving stale here
-    mirrors calendar_cache.load_window's `not allow_fetch` bypass: a share visitor
+    mirrors app/calendar/cache.py's load_window `not allow_fetch` bypass: a share visitor
     can never trigger a refresh, so stale-but-real data beats a blank card.
 
     `private=True` means the RESPONSE DEPENDS ON WHOSE TOKEN ASKED — a watch

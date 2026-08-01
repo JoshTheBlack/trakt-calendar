@@ -17,7 +17,8 @@ import unittest
 
 from cryptography.fernet import Fernet
 
-from app import config, db, encryption_flow, secrets_box
+from app import config, db, secrets_box
+from app.auth import encryption_flow
 from app.config import Settings, save_settings
 from tests.support import new_db_path
 

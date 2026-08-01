@@ -55,7 +55,7 @@ class GzipResponseTests(unittest.TestCase):
             for i in range(120)
         ]
         fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar_cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -139,7 +139,7 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
 
         entries = [_entry("show-a", "Show A", "2026-07-10T20:00:00Z")]
         fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar_cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
         patcher.start()
         self.addCleanup(patcher.stop)
 

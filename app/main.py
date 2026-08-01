@@ -24,33 +24,32 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import admin_routes
-from . import artwork
 from . import auth
-from . import auth_routes
 from . import authz
 from . import cache
-from . import calendar_cache
-from . import calendar_routes
 from . import changelog
 from . import chrome
 from . import db
-from . import distrakt_routes
-from . import encryption_flow
-from . import encryption_routes
 from . import http_pool
-from . import integrations_routes
 from . import perftrace
-from . import plex_auth
-from . import plex_routes
-from . import posters
-from . import ranker_routes
-from . import secrets_backfill
 from . import secrets_box
 from . import settings_routes
-from . import share_card_cache
-from . import share_routes
-from . import trakt_routes
+from .auth import admin_routes
+from .auth import encryption_flow
+from .auth import encryption_routes
+from .auth import plex as plex_auth
+from .auth import plex_routes
+from .auth import routes as auth_routes
+from .auth import secrets_backfill
+from .auth import trakt_routes
+from .calendar import cache as calendar_cache
+from .calendar import routes as calendar_routes
+from .calendar import share_card_cache
+from .calendar import share_routes
+from .distrakt import routes as distrakt_routes
+from .integrations import routes as integrations_routes
+from .media import artwork, posters
+from .ranker import routes as ranker_routes
 from .auth import AuthLevel
 from .config import load_settings
 from .templating import templates
@@ -62,7 +61,7 @@ logger = logging.getLogger(__name__)
 # app.* diagnostics and Trakt-call tracing as the dev runner, instead of
 # Python's silent WARNING-only default. LOG_LEVEL controls the app's own
 # loggers (including "app.perf", which every outbound Trakt call logs a line
-# to at DEBUG — see app/providers/trakt/, app/calendar_cache.py, app/trakt_auth.py);
+# to at DEBUG — see app/providers/trakt/, app/calendar/cache.py, app/auth/trakt.py);
 # third-party libraries stay at WARNING regardless, since their own DEBUG
 # output is rarely what anyone actually wants. basicConfig() only attaches a
 # handler if the root logger doesn't already have one, so when run.py has

@@ -6,7 +6,7 @@ Environment:
     HOST (default 0.0.0.0), PORT (default 8000), RELOAD (default 1)
     LOG_LEVEL (default INFO) — set to DEBUG to see every outbound Trakt API
         call (the "app.perf" logger's netGET/netPOST/cacheHIT lines from
-        app/providers/trakt/, app/calendar_cache.py, and app/trakt_auth.py), plus
+        app/providers/trakt/, app/calendar/cache.py, and app/auth/trakt.py), plus
         per-request timing spans elsewhere in the app. Also honored by the
         Docker image (app/main.py applies the same setting either way).
     SLOW_REQUEST_MS (1500), SLOW_SPAN_MS (750), LOOP_STALL_MS (250) — above

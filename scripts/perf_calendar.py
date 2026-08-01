@@ -2,7 +2,7 @@
 
 Seeds a synthetic month sized like a busy "All Episodes" view (~1,100 items
 spread across the aligned 7-day windows a month spans), behind the same
-app.calendar_cache.fetch_window_raw patch point tests/calendar/test_routes.py
+app.calendar.cache.fetch_window_raw patch point tests/calendar/test_routes.py
 uses, so the real read_month -> group -> Jinja render pipeline runs for real
 instead of a guess. A small per-window sleep stands in for the Trakt round
 trip so a cold (uncached) run still shows the cost of fetching every window
@@ -47,8 +47,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import auth, calendar_cache, db  # noqa: E402
-from app import calendar_routes  # noqa: E402
+from app import auth, db  # noqa: E402
+from app.calendar import cache as calendar_cache  # noqa: E402
+from app.calendar import routes as calendar_routes  # noqa: E402
 from app.config import Settings, save_settings  # noqa: E402
 from app.main import app  # noqa: E402
 

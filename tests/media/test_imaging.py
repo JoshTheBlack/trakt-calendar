@@ -20,7 +20,7 @@ from io import BytesIO
 
 from PIL import Image, ImageChops, ImageDraw
 
-from app import imaging
+from app.media import imaging
 
 LONG_TITLE = "An Extremely Long Title Indeed"
 

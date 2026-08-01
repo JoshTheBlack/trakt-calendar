@@ -1,5 +1,5 @@
 """Public calendar sharing: the /s/, /u/, /c/ read-only pages and the
-share_links data layer behind them (app/share_links.py, app/share_routes.py).
+share_links data layer behind them (app/calendar/share_links.py, app/calendar/share_routes.py).
 
 Covers: all three URL shapes resolving to the same account; a disabled,
 deleted, or never-existent identifier all 404 IDENTICALLY; a public request
@@ -9,7 +9,7 @@ slug/username collisions rejected in both directions; deleting an account
 retires its slug and token and leaves zero orphan rows; and the share-page
 rate limiter.
 
-No network — the Trakt window fetch is patched at app.calendar_cache's own
+No network — the Trakt window fetch is patched at app.calendar.cache's own
 module boundary, same as tests/calendar/test_routes.py.
 """
 from __future__ import annotations
@@ -21,7 +21,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, calendar_cache, calendar_state, db, share_links
+from app import auth, db
+from app.calendar import cache as calendar_cache, state as calendar_state, share_links
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.main import app
@@ -175,7 +176,7 @@ class NeverFetchTests(ShareTestCase):
         async def _raise(*args, **kwargs):
             raise AssertionError("a public share request must never fetch from Trakt")
 
-        patcher = patch("app.calendar_cache.fetch_window_raw", side_effect=_raise)
+        patcher = patch("app.calendar.cache.fetch_window_raw", side_effect=_raise)
         patcher.start()
         self.addCleanup(patcher.stop)
 

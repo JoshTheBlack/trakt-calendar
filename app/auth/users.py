@@ -279,7 +279,7 @@ async def username_availability_error(username: str) -> str | None:
     # the same public URL namespace (/u/<name>), so letting them collide would
     # let a later registration silently hijack an earlier share link's path.
     # share_links.slug_error enforces the same rule in the other direction.
-    # Queried directly rather than importing app.share_links, which itself
+    # Queried directly rather than importing app.calendar.share_links, which itself
     # imports this module.
     if await db.fetch_one("SELECT 1 FROM share_links WHERE custom_slug = ?", (candidate,)):
         return "That username is taken."

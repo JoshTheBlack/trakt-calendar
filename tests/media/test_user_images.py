@@ -1,4 +1,4 @@
-"""Per-user avatar/image upload and storage (app/user_images.py).
+"""Per-user avatar/image upload and storage (app/media/user_images.py).
 
 The six rules an upload has to satisfy are each pinned by their own test: an oversized
 decoded payload, unreadable bytes, a disallowed format, declared dimensions
@@ -20,7 +20,8 @@ from unittest.mock import patch
 from PIL import Image, PngImagePlugin
 from fastapi.testclient import TestClient
 
-from app import auth, db, user_images
+from app import auth, db
+from app.media import user_images
 from app.config import Settings, save_settings
 from app.main import app
 from tests.support import migrated_db, new_db_path

@@ -35,12 +35,13 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import auth, db, ranker_routes, ranker_sources
-from app import trakt_routes
+from app import auth, db
+from app.auth import trakt_routes
 from app.providers.trakt import detail as trakt_detail, sync as trakt_sync
 from app.config import Settings, save_settings
 from app.main import app
-from app.ranker_sources import Media, RatedTitle, TitleRef
+from app.ranker import routes as ranker_routes, sources as ranker_sources
+from app.ranker.sources import Media, RatedTitle, TitleRef
 from tests.support import APP_DIR, ORIGIN, migrated_db
 
 
@@ -338,16 +339,23 @@ class ModuleIsolationTests(unittest.TestCase):
     by accident.
     """
 
-    # Every module in this feature EXCEPT the one optional adapter. Modules a
-    # later session adds are listed here now: a name that does not exist yet is
-    # skipped, and starts being checked the moment it lands.
-    RANKER_MODULES = (
-        "ranker.py", "ranker_routes.py", "ranker_sources.py",
-        "grid_builder.py", "ranker_export.py", "posters.py", "artwork.py",
-    )
+    # READ OFF THE PACKAGE, NOT LISTED BY HAND. A hardcoded tuple of filenames
+    # empties itself the moment somebody renames a module, and this test skips
+    # names that do not exist — so it would go on reporting green while checking
+    # nothing. Reading the directory means a module renamed or added tomorrow is
+    # covered the moment it lands, which is the property the assertion needs.
+    RANKER_PACKAGE = APP_DIR / "ranker"
     # The single module allowed to know, which is what keeps the coupling
-    # deletable rather than diffuse.
-    ADAPTER = "ranker_import.py"
+    # deletable rather than diffuse. `imports.py` and not `import.py`: `import`
+    # is a keyword, so that filename could never be reached by an import
+    # statement at all.
+    ADAPTER = "imports.py"
+    # Not in the package, but the ranker's routes and its export path draw on
+    # them, so a tracker import in either would reach the ranker through the
+    # back door. Listed by hand because they live in app/media/, which the
+    # calendar shares — they cannot be derived from the ranker's own directory,
+    # and the `.exists()` guard below is what lets that list survive a move.
+    SHARED_MODULES = ("media/posters.py", "media/artwork.py")
 
     # ANY mention, not merely an import statement. The adapter reads the other
     # feature's tables through app/db.py rather than importing its module, so a
@@ -357,30 +365,50 @@ class ModuleIsolationTests(unittest.TestCase):
     # one pattern catches both kinds of coupling.
     MENTIONS_THE_TRACKER = re.compile(r"distrakt", re.IGNORECASE)
 
+    def _checked_modules(self) -> list:
+        """Every module the isolation rule covers: the whole ranker package bar
+        its __init__ and the one adapter, plus the shared image modules it
+        draws on."""
+        found = [
+            path for path in sorted(self.RANKER_PACKAGE.glob("*.py"))
+            if path.name not in {"__init__.py", self.ADAPTER}
+        ]
+        found += [
+            path for name in self.SHARED_MODULES
+            if (path := APP_DIR / name).exists()
+        ]
+        return found
+
     def test_no_ranker_module_touches_the_tracker(self):
         offenders = sorted(
-            name for name in self.RANKER_MODULES
-            if (path := APP_DIR / name).exists()
-            and self.MENTIONS_THE_TRACKER.search(path.read_text(encoding="utf-8"))
+            path.relative_to(APP_DIR).as_posix() for path in self._checked_modules()
+            if self.MENTIONS_THE_TRACKER.search(path.read_text(encoding="utf-8"))
         )
         self.assertEqual(offenders, [], f"ranker modules coupled to the tracker: {offenders}")
 
     def test_at_least_one_of_those_modules_actually_exists(self):
-        """Guards the test above against passing because it checked nothing."""
-        present = [name for name in self.RANKER_MODULES if (APP_DIR / name).exists()]
+        """Guards the test above against passing because it checked nothing.
+
+        Deriving the list from the directory removes the rename hazard, but not
+        this one: an empty or missing package directory would still yield an
+        empty list and a green run."""
+        present = [path.relative_to(APP_DIR).as_posix() for path in self._checked_modules()]
         self.assertGreaterEqual(len(present), 5, present)
 
     def test_the_adapter_is_where_the_coupling_lives(self):
         """The inverse assertion, so the pattern above is known to match
         something real rather than nothing at all."""
-        text = (APP_DIR / self.ADAPTER).read_text(encoding="utf-8")
+        text = (self.RANKER_PACKAGE / self.ADAPTER).read_text(encoding="utf-8")
         self.assertTrue(self.MENTIONS_THE_TRACKER.search(text))
 
     def test_the_data_layer_imports_no_provider_either(self):
-        """app/ranker.py stores what it is given. A provider import there would
-        mean a title's origin had leaked into how it is stored."""
-        text = (APP_DIR / "ranker.py").read_text(encoding="utf-8")
-        self.assertNotRegex(text, r"^\s*from\s+\.\s+import\s+[^\n]*\btrakt\b", )
+        """app/ranker/core.py stores what it is given. A provider import there
+        would mean a title's origin had leaked into how it is stored."""
+        text = (self.RANKER_PACKAGE / "core.py").read_text(encoding="utf-8")
+        # `\.+` and not `\.`: core.py sits one level deeper than it used to, so
+        # a sibling of app/ is now `from .. import`, and a pattern pinned to a
+        # single dot would quietly stop matching the thing it was written for.
+        self.assertNotRegex(text, r"^\s*from\s+\.+\s+import\s+[^\n]*\btrakt\b")
         self.assertNotIn("import trakt", text)
 
 

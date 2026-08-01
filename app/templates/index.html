@@ -324,7 +324,7 @@
                     </div>
 
                     {# At-rest encryption for the stored credentials and per-user
-                       tokens. The whole flow is driven by app/encryption_routes and
+                       tokens. The whole flow is driven by app/auth/encryption_routes.py and
                        rendered by renderEncryption() in
                        calendar/settings-encryption.js from /api/admin/encryption —
                        the key is never held by this app, only revealed once for the
@@ -554,7 +554,7 @@
 
 {# Filters: what this VIEWER's calendar contains, so it sits outside the admin
    block. The filters are applied per viewer at read time against one shared
-   cache (app/calendar_filter.py), which is what lets two people filter the same
+   cache (app/calendar/filter.py), which is what lets two people filter the same
    cached month differently — the UI was the only piece missing. #}
 <div id="filtersModal" class="modal-overlay" onclick="if(event.target===this) closeFilters()">
     <div class="modal">

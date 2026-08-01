@@ -10,15 +10,22 @@ the reason it changes:
 
   store.py            the two tables, and the record shape they hold
   live.py             a record plus what the provider says about it right now
+  watch_history.py    the incremental per-user cache of what has been watched
   calendar_import.py  the calendar's premieres becoming roster records
   rollover.py         what a new month contains, and when a month freezes
+  backfill.py         months nobody was tracking, rebuilt from watch history
   prefs.py            the per-user network -> emoji map
   backup.py           the JSON export and its inverse
+  discord_fmt.py      which bucket a show is in, and the two Discord posts
+  routes.py           the tracker page and the whole /api/distrakt/* API
 
-Callers import this package, not its modules: `distrakt.load_month` says what it
-does, while `distrakt.store.load_month` would make every caller responsible for
-knowing which half of the tracker a name lives in. Inside the package the modules
-call each other directly.
+The names re-exported below are the DATA LAYER — what a caller means when it says
+`distrakt.load_month`, versus `distrakt.store.load_month`, which would make every
+caller responsible for knowing which half of the tracker a name lives in. The
+router and the backfill job are deliberately NOT among them: they are jobs to run
+rather than facts to read, and their callers import the module (`from .distrakt
+import routes`) precisely because that is what they want. Inside the package the
+modules call each other directly.
 
 The provider reads (premieres, season detail, watch history) authenticate with
 whatever token is on the `settings` they are handed; `user_id` scopes the STORAGE.
@@ -51,6 +58,7 @@ from .store import (
     ADDED_BY_HISTORY,
     ADDED_BY_MANUAL,
     ADDED_BY_VALUES,
+    Bucket,
     ID_COLUMNS,
     IDENTITY_COLUMNS,
     SHOW_COLUMNS,
@@ -75,7 +83,7 @@ from .store import (
 __all__ = [
     "ADDED_BY_CALENDAR", "ADDED_BY_HISTORY", "ADDED_BY_MANUAL", "ADDED_BY_VALUES",
     "DEFAULT_EMOJI", "EXPORT_SCHEMA", "SUPPORTED_EXPORT_SCHEMAS",
-    "ID_COLUMNS", "IDENTITY_COLUMNS", "SHOW_COLUMNS",
+    "Bucket", "ID_COLUMNS", "IDENTITY_COLUMNS", "SHOW_COLUMNS",
     "TOTALS_STALE_HOURS", "WATCHED_RECENCY_DAYS",
     "RestoreError", "UnkeyableRecord",
     "add_show", "can_initialize", "compute_live_shows",

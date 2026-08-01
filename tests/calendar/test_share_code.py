@@ -10,9 +10,9 @@ from __future__ import annotations
 import hashlib
 import unittest
 
-from app import share_code
+from app.calendar import share_code
 from app.endpoints import ENDPOINTS
-from app.share_links import CARD_STYLES, DAY_PACKINGS
+from app.calendar.share_links import CARD_STYLES, DAY_PACKINGS
 from app.timezones import CANONICAL
 
 

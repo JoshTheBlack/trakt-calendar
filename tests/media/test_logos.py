@@ -9,7 +9,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app import logos
+from app.media import logos
 from app.providers.trakt import sync as trakt_sync
 
 
@@ -54,9 +54,9 @@ class EnsureLogosTests(unittest.IsolatedAsyncioTestCase):
             seen.append((network, tmdb))
             return logos._tile_path(network)
 
-        with patch("app.logos._tile_path", side_effect=lambda n: __import__("pathlib").Path(f"/nope/{n}.png")), \
-             patch("app.logos.is_negative", return_value=False), \
-             patch("app.logos.ensure_logo", side_effect=fake):
+        with patch("app.media.logos._tile_path", side_effect=lambda n: __import__("pathlib").Path(f"/nope/{n}.png")), \
+             patch("app.media.logos.is_negative", return_value=False), \
+             patch("app.media.logos.ensure_logo", side_effect=fake):
             generated = await logos.ensure_logos(self.CFG, roster)
 
         self.assertEqual(sorted(seen), [("AMC", 11), ("Netflix", 20)])
@@ -67,9 +67,9 @@ class EnsureLogosTests(unittest.IsolatedAsyncioTestCase):
             return logos._tile_path(network)
 
         # AMC has a tile already; HBO is negative-cached; only Netflix is missing.
-        with patch("app.logos._tile_path") as tile, \
-             patch("app.logos.is_negative", side_effect=lambda n: n == "HBO"), \
-             patch("app.logos.ensure_logo", side_effect=fake) as gen:
+        with patch("app.media.logos._tile_path") as tile, \
+             patch("app.media.logos.is_negative", side_effect=lambda n: n == "HBO"), \
+             patch("app.media.logos.ensure_logo", side_effect=fake) as gen:
             tile.side_effect = lambda n: SimpleNamespace(exists=lambda: n == "AMC")
             await logos.ensure_logos(self.CFG, [("AMC", 1), ("HBO", 2), ("Netflix", 3)])
 
@@ -77,7 +77,7 @@ class EnsureLogosTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called, {"Netflix"})
 
     async def test_no_tmdb_key_is_a_noop(self):
-        with patch("app.logos.ensure_logo") as gen:
+        with patch("app.media.logos.ensure_logo") as gen:
             n = await logos.ensure_logos(SimpleNamespace(tmdb_configured=False), [("AMC", 1)])
         self.assertEqual(n, 0)
         gen.assert_not_called()
@@ -88,9 +88,9 @@ class EnsureLogosTests(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("tmdb down")
             return logos._tile_path(network)
 
-        with patch("app.logos._tile_path", side_effect=lambda n: __import__("pathlib").Path(f"/nope/{n}.png")), \
-             patch("app.logos.is_negative", return_value=False), \
-             patch("app.logos.ensure_logo", side_effect=fake):
+        with patch("app.media.logos._tile_path", side_effect=lambda n: __import__("pathlib").Path(f"/nope/{n}.png")), \
+             patch("app.media.logos.is_negative", return_value=False), \
+             patch("app.media.logos.ensure_logo", side_effect=fake):
             generated = await logos.ensure_logos(self.CFG, [("AMC", 1), ("Netflix", 2)])
         self.assertEqual(generated, 1)  # Netflix survived
 

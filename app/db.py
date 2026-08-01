@@ -1019,7 +1019,7 @@ ALTER TABLE users ADD COLUMN display_name TEXT;
 # So each row records who added it: 'calendar' (premiere import), 'history'
 # (in-progress from watch history), 'manual' (added on the tracker), or '' for a
 # row written before this column existed. Only 'calendar' rows write the mark;
-# see app/distrakt_routes.py's api_distrakt_remove for how the legacy '' case is resolved.
+# see app/distrakt/routes.py's api_distrakt_remove for how the legacy '' case is resolved.
 MIGRATION_16 = """
 ALTER TABLE distrakt_shows ADD COLUMN source TEXT NOT NULL DEFAULT '';
 """
@@ -1145,7 +1145,7 @@ CREATE TABLE distrakt_shows_new (
     started_airing  INTEGER NOT NULL DEFAULT 0,
     finished_airing INTEGER NOT NULL DEFAULT 0,
     -- Was `source`. Who put this row on the roster, which decides whether taking
-    -- it off says anything to the calendar; see distrakt_routes' remove route.
+    -- it off says anything to the calendar; see app/distrakt/routes.py's remove route.
     added_by        TEXT    NOT NULL DEFAULT '',
     UNIQUE (user_id, month, media, match_source, match_id, season)
 );

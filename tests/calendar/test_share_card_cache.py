@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from app import share_card, share_card_cache
+from app.calendar import share_card, share_card_cache
 
 
 def _card(**overrides) -> share_card.Card:

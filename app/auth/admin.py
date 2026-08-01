@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import anyio.to_thread
 
-from .. import db, user_images
+from .. import db
+from ..media import user_images
 from . import identities, users
 
 

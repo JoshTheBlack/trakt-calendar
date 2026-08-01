@@ -1,8 +1,8 @@
 """Static-asset cache busting, and the one list of what a page's <head> loads.
 
 Its own module rather than a constant in app/main.py because every page needs the
-token, including the ones whose routes live in app/auth_routes.py and
-app/admin_routes.py — and those are imported BY main, so reaching back into it
+token, including the ones whose routes live in app/auth/routes.py and
+app/auth/admin_routes.py — and those are imported BY main, so reaching back into it
 would be a circular import.
 
 The token is the newest mtime across the files browsers cache, recomputed once

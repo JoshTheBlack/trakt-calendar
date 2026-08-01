@@ -1,4 +1,4 @@
-"""Unit tests for the per-user calendar state layer (app/calendar_state).
+"""Unit tests for the per-user calendar state layer (app/calendar/state.py).
 
 Covers: the not-watching delta (idempotent, per (user, endpoint, year, month)),
 the whole-document save/load round trip in app/state.py's shape, the distrakt
@@ -12,7 +12,8 @@ from __future__ import annotations
 import unittest
 
 
-from app import calendar_state, db
+from app import db
+from app.calendar import state as calendar_state
 from tests.support import new_db_path
 
 async def _make_user(username="viewer") -> int:
