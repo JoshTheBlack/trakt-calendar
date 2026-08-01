@@ -27,7 +27,6 @@ import logging
 from typing import Any
 
 from . import auth, db, distrakt, ranker_sources
-from .distrakt import discord_fmt
 from .providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
 from .config import load_settings
 from .media import artwork
@@ -208,7 +207,7 @@ async def _completed_in(user_id: int, month: str, closed: bool) -> list[dict[str
         # id columns become the `ids` map every caller below expects, and this
         # module does not need a second opinion about the roster's storage shape.
         return [distrakt.row_to_show(row) for row in rows
-                if row["bucket"] == discord_fmt.Bucket.COMPLETED]
+                if row["bucket"] == distrakt.Bucket.COMPLETED]
 
     settings = await ranker_sources.user_trakt_settings(user_id)
     if settings is None or not settings.trakt_configured:
@@ -224,7 +223,7 @@ async def _completed_in(user_id: int, month: str, closed: bool) -> list[dict[str
     shows = await distrakt.compute_live_shows(
         user_id, records, settings, allow_degrade=True)
     return [show for show in shows
-            if show.get("bucket") == discord_fmt.Bucket.COMPLETED]
+            if show.get("bucket") == distrakt.Bucket.COMPLETED]
 
 
 # ---------------------------------------------------------------------------

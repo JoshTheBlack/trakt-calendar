@@ -7,6 +7,7 @@ pure, and the store runs against a throwaway SQLite file per test.
 """
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -46,6 +47,25 @@ class DistraktTestCase(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         db.close_thread_connection()
+
+
+class BucketVocabularyTests(unittest.TestCase):
+    """The closed set of values the `bucket` column holds. Read all over — stored
+    on a frozen record, shipped to the browser, compared against by the rollover,
+    the backfill and the ranker's import — so it is stated once, here."""
+
+    def test_a_bucket_is_the_string_it_has_always_been(self):
+        """No conversion at any boundary: the value goes into a database column
+        and a JSON payload as-is, which is what a StrEnum buys over a class of
+        constants. These strings are in stored rows, so they cannot change."""
+        self.assertEqual(distrakt.Bucket.COMPLETED, "completed")
+        self.assertEqual(f"{distrakt.Bucket.KEEPUP}", "keepup")
+        self.assertEqual(json.dumps({"b": distrakt.Bucket.CLEANUP}), '{"b": "cleanup"}')
+
+    def test_the_column_and_the_enum_name_the_same_thing(self):
+        """`bucket` is a distrakt_shows column, and this enum is what its values
+        are allowed to be; a reader who finds one should find the other."""
+        self.assertIn("bucket", distrakt.SHOW_COLUMNS)
 
 
 class DeriveSeasonTests(unittest.TestCase):

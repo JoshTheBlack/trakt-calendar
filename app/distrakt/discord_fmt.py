@@ -24,27 +24,9 @@ harder-to-misread source of truth.
 """
 from __future__ import annotations
 
-from enum import StrEnum
-
-
-class Bucket(StrEnum):
-    """Where a show sits in the month's lifecycle.
-
-    A StrEnum, and it lives here beside the state machine that decides it, because
-    the vocabulary is read outside this module — the rollover refuses to carry a
-    COMPLETED or ABANDONED show into a new month, the backfill writes COMPLETED
-    rows, and the value is stored on a frozen record and shipped to the browser as
-    a plain string. Each member IS that string, so nothing needs converting at
-    either boundary; what the enum buys is that the closed set is stated once
-    instead of being spelled out at each of those places.
-    """
-    NEW = "new"
-    RETURNING = "returning"
-    KEEPUP = "keepup"
-    CLEANUP = "cleanup"
-    COMPLETED = "completed"
-    ABANDONED = "abandoned"
-
+# The vocabulary is the `bucket` column's, so it is named beside the record shape
+# in store.py; this module is what DECIDES which member a show gets.
+from .store import Bucket
 
 # Keepup groups shows by air weekday, Sun..Sat; only weekdays with at least one
 # show get a header, so a quiet Tuesday doesn't leave an empty section in the post.

@@ -13,7 +13,6 @@ hand-verify against a real sample month's posts, with two corrections applied:
 """
 from __future__ import annotations
 
-import json
 import re
 import unittest
 
@@ -374,17 +373,8 @@ class RenderPost2Tests(unittest.TestCase):
 
 
 class BucketVocabularyTests(unittest.TestCase):
-    """The bucket names are read outside this module — stored on a frozen record,
-    shipped to the browser, and tested against by the rollover and the backfill —
-    so the closed set is stated once here."""
-
-    def test_a_bucket_is_the_string_it_has_always_been(self):
-        """No conversion at any boundary: the value goes into a database column
-        and a JSON payload as-is, which is what a StrEnum buys over a class of
-        constants."""
-        self.assertEqual(fmt.Bucket.COMPLETED, "completed")
-        self.assertEqual(f"{fmt.Bucket.KEEPUP}", "keepup")
-        self.assertEqual(json.dumps({"b": fmt.Bucket.CLEANUP}), '{"b": "cleanup"}')
+    """This module DECIDES a bucket; the closed set of them is named beside the
+    column that stores it, and its own tests live with it in test_store.py."""
 
     def test_bucket_of_answers_with_a_member(self):
         show = {"watched": 8, "total": 8, "started_airing": True}

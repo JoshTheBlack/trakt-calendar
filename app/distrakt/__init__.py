@@ -58,6 +58,7 @@ from .store import (
     ADDED_BY_HISTORY,
     ADDED_BY_MANUAL,
     ADDED_BY_VALUES,
+    Bucket,
     ID_COLUMNS,
     IDENTITY_COLUMNS,
     SHOW_COLUMNS,
@@ -82,7 +83,7 @@ from .store import (
 __all__ = [
     "ADDED_BY_CALENDAR", "ADDED_BY_HISTORY", "ADDED_BY_MANUAL", "ADDED_BY_VALUES",
     "DEFAULT_EMOJI", "EXPORT_SCHEMA", "SUPPORTED_EXPORT_SCHEMAS",
-    "ID_COLUMNS", "IDENTITY_COLUMNS", "SHOW_COLUMNS",
+    "Bucket", "ID_COLUMNS", "IDENTITY_COLUMNS", "SHOW_COLUMNS",
     "TOTALS_STALE_HOURS", "WATCHED_RECENCY_DAYS",
     "RestoreError", "UnkeyableRecord",
     "add_show", "can_initialize", "compute_live_shows",

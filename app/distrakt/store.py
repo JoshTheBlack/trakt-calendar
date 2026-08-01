@@ -30,11 +30,36 @@ from __future__ import annotations
 
 import json
 import re
+from enum import StrEnum
 
 from .. import db
 from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+class Bucket(StrEnum):
+    """The closed set of values the `bucket` column holds.
+
+    A StrEnum, so the member IS the stored string: it goes into the column and
+    out into the browser's JSON with no conversion at either boundary, which is
+    the whole reason to prefer it over a class of constants. What the enum buys
+    beyond that is that the set is written down once, here with the record shape,
+    instead of being spelled out again at every place that compares against it.
+
+    NAMING the set is this module's job; DECIDING which one a show is in is
+    discord_fmt.bucket_of's, from the show's live counts and dates. The two are
+    separate because most readers only ever want the vocabulary — the rollover
+    refuses to carry a COMPLETED or ABANDONED show into a new month, the backfill
+    writes COMPLETED rows, and the ranker's import asks for the finished ones —
+    and none of them render anything.
+    """
+    NEW = "new"
+    RETURNING = "returning"
+    KEEPUP = "keepup"
+    CLEANUP = "cleanup"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
 
 # The identity columns, in key order. Named once because three tables and every
 # lookup in this package are built from them.

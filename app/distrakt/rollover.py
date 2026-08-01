@@ -16,7 +16,7 @@ from datetime import date
 from .. import db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
-from . import calendar_import, discord_fmt, store
+from . import calendar_import, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
@@ -280,7 +280,7 @@ async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
             else await compute_live_shows(user_id, prior.get("shows") or [], settings)
         for s in prior_shows:
             if s.get("abandoned") or s.get("bucket") in (
-                    discord_fmt.Bucket.COMPLETED, discord_fmt.Bucket.ABANDONED):
+                    store.Bucket.COMPLETED, store.Bucket.ABANDONED):
                 continue
             key = live_key(s)
             if key in present:

@@ -258,7 +258,7 @@ async def _apply_not_watching(user_id: int, month_key: str,
         )
         show["abandoned"] = True
         show["abandoned_form"] = form
-        show["bucket"] = discord_fmt.Bucket.ABANDONED
+        show["bucket"] = distrakt_store.Bucket.ABANDONED
     return shows
 
 
@@ -1028,7 +1028,7 @@ async def api_distrakt_add_completed(request: Request):
             "finale": (detail or {}).get("finale"),
             "started_airing": True,
             "finished_airing": True,
-            "bucket": discord_fmt.Bucket.COMPLETED,
+            "bucket": distrakt_store.Bucket.COMPLETED,
             "added_by": distrakt_store.ADDED_BY_MANUAL,
         })
     except distrakt_store.UnkeyableRecord as exc:

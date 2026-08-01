@@ -42,7 +42,7 @@ import logging
 import re
 from datetime import date
 
-from . import discord_fmt, watch_history
+from . import watch_history
 # The roster is reached through this package's own public surface, the same names
 # an outside caller uses, rather than through the modules those names are defined
 # in — a backfill job has no business knowing which half of the tracker
@@ -361,7 +361,7 @@ def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dic
         "cadence": detail.get("cadence"),
         "premiere": detail.get("premiere"),
         "finale": detail.get("finale"),
-        "bucket": discord_fmt.Bucket.COMPLETED,
+        "bucket": distrakt.Bucket.COMPLETED,
         "started_airing": True,
         "finished_airing": True,
         "added_by": distrakt.ADDED_BY_HISTORY,
