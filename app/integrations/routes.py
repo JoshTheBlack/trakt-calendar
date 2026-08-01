@@ -1,8 +1,8 @@
 """Sonarr / Radarr / Seerr: the admin-only status, options and add endpoints,
 plus the two in-memory caches they answer from.
 
-The caches live here rather than beside the clients in app/arr.py and
-app/seer.py because they are a fact about THIS PROCESS's view of those services —
+The caches live here rather than beside the clients in app/integrations/arr.py and
+app/integrations/seer.py because they are a fact about THIS PROCESS's view of those services —
 refreshed by the heartbeat and after a settings save, read by the calendar page's
 add buttons — while arr.py and seer.py are stateless callers that hold nothing.
 Anything that wants either cache asks this module; that is what keeps "when was
@@ -22,9 +22,10 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import arr, authz, perftrace, seer
-from .auth import AuthLevel
-from .config import load_settings
+from . import arr, seer
+from .. import authz, perftrace
+from ..auth import AuthLevel
+from ..config import load_settings
 
 logger = logging.getLogger(__name__)
 

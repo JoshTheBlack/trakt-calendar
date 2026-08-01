@@ -11,9 +11,9 @@ import json
 import anyio.to_thread
 import httpx
 
-from . import http_pool
-from .config import Settings
-from .perftrace import span
+from .. import http_pool
+from ..config import Settings
+from ..perftrace import span
 
 # (base_url_attr, api_key_attr) per service
 _SERVICE = {

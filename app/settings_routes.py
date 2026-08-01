@@ -28,7 +28,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from . import auth, auth_routes, authz, db, encryption_flow, encryption_routes
-from . import integrations_routes, trakt_auth, trakt_routes
+from . import trakt_auth, trakt_routes
+from .integrations import routes as integrations_routes
 from .auth import AuthLevel
 from .config import (
     SECRET_FIELDS,

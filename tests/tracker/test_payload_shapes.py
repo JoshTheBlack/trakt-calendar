@@ -6,7 +6,7 @@ plus a notice when Trakt cannot be reached. Only the live path needs Trakt, and
 only the live path was reachable in a test before; the frozen and empty renders
 are pure functions of a stored document and are pinned directly here.
 
-Also covers app/integrations_routes.py's library cache, whose TTL and
+Also covers app/integrations/routes.py's library cache, whose TTL and
 invalidation were an in-place dict poke from another module until the module
 grew a verb for it.
 """
@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import unittest
 
-from app import distrakt, distrakt_routes, integrations_routes
+from app import distrakt, distrakt_routes
+from app.integrations import routes as integrations_routes
 
 EMOJIS = {"HBO": "🟪"}
 DEFAULT_EMOJI = "📺"

@@ -10,9 +10,9 @@ import json
 import anyio.to_thread
 import httpx
 
-from . import http_pool
-from .config import Settings
-from .perftrace import span
+from .. import http_pool
+from ..config import Settings
+from ..perftrace import span
 
 # How many media records to ask for per page. Seerr's default page size is 20 and
 # this endpoint has no "give me everything" form, so the only lever on how many
@@ -23,7 +23,7 @@ from .perftrace import span
 # more and nothing breaks.
 PAGE_SIZE = 500
 
-# SEER'S OWN POOL — same reasoning as app/arr.py: this module built a fresh
+# SEER'S OWN POOL — same reasoning as app/integrations/arr.py: this module built a fresh
 # client per call, and building one loads the system trust store inline on the
 # event loop. The library read below is the worst offender because it PAGINATES,
 # so a large Seerr was paying that cost once and then holding a connection
@@ -56,7 +56,7 @@ async def check_health(settings: Settings) -> dict:
 def _page(raw: bytes) -> tuple[list, int, int]:
     """SYNCHRONOUS. One page of /api/v1/media as (ids, records, library total).
 
-    ON A WORKER THREAD, like app/arr.py's equivalent and for the same reason:
+    ON A WORKER THREAD, like app/integrations/arr.py's equivalent and for the same reason:
     parsing the page is CPU, and at PAGE_SIZE records a page it is enough of it to
     stall every other request if it runs on the event loop.
 
@@ -73,7 +73,7 @@ def _page(raw: bytes) -> tuple[list, int, int]:
 class LibraryUnavailable(Exception):
     """Seerr could not be read — as distinct from having nothing in it.
 
-    Mirrors app/arr.py's type of the same name, for the same reason: a caller
+    Mirrors app/integrations/arr.py's type of the same name, for the same reason: a caller
     that cannot tell a failed read from an empty library will cache the failure
     as truth and quietly stop marking anything as already-requested. Separate
     types rather than one shared one, because "which service is down" is what the

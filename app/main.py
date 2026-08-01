@@ -38,7 +38,6 @@ from . import distrakt_routes
 from . import encryption_flow
 from . import encryption_routes
 from . import http_pool
-from . import integrations_routes
 from . import perftrace
 from . import plex_auth
 from . import plex_routes
@@ -49,6 +48,7 @@ from . import settings_routes
 from . import share_card_cache
 from . import share_routes
 from . import trakt_routes
+from .integrations import routes as integrations_routes
 from .media import artwork, posters
 from .auth import AuthLevel
 from .config import load_settings
