@@ -110,10 +110,11 @@ ItemT = TypeVar("ItemT", bound=_HasNetwork)
 def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None) -> list[ItemT]:
     """Keep the normalized `items` whose network survives `networks`.
 
-    Takes normalized items rather than raw entries because that is what both
-    callers hold when they filter — the instance-wide pass in the Trakt
-    provider's fetch_calendar, and the per-viewer pass in calendar_cache. An
-    empty spec is a pass-through.
+    Takes normalized items rather than raw entries because that is what the
+    caller holds when it filters: calendar_cache's per-viewer read-time pass runs
+    after the stored entries have been replayed through the provider's
+    normalizer, and `network` only exists on the far side of that. An empty spec
+    is a pass-through.
     """
     inc, exc = parse_network_spec(networks)
     if not (inc or exc):

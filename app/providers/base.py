@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
     from ..config import Settings
-    from ..endpoints import Endpoint
 
 
 class Media(StrEnum):
@@ -324,13 +323,23 @@ class SyncPort(Protocol):
 
 
 class Provider(Protocol):
-    """The whole of what the calendar route needs from a source.
+    """What the registry needs in order to offer a source at all: who it is,
+    what it can answer, and whether it is usable right now.
 
     KEPT NARROW ON PURPOSE. Detail lookups and search are each a different
     consumer with a different degradation story, and folding them in here would
     mean a source that only publishes a calendar could not be registered at all.
     They become their own protocols when a second source actually needs them —
     which is what `sync_port` below already is.
+
+    THERE IS DELIBERATELY NO CALENDAR VERB HERE, and the gap is load-bearing.
+    There used to be a `fetch_calendar(endpoint, settings, year, month)`, but
+    nothing reached a user through it: the live path is a WINDOW fetch — a start
+    date and a day count — driven by the calendar cache, because a month is not
+    the unit Trakt is asked about and is not the unit the cache stores. A second
+    source should be given the window shape the app actually uses, so an empty
+    slot here is better than a method the first implementer would have to
+    contradict.
     """
     source: Source
     label: str
@@ -346,8 +355,4 @@ class Provider(Protocol):
         """Whether this source has the credentials it needs to be asked
         anything. The registry uses it to pick a usable calendar source, so it
         must answer without making a network call."""
-        ...
-
-    async def fetch_calendar(self, endpoint: Endpoint, settings: Settings,
-                             year: int, month: int) -> list[Item]:
         ...

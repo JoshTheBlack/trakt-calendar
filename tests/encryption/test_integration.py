@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import os
 import unittest
+from datetime import date
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
@@ -28,6 +29,13 @@ from app.endpoints import get_endpoint
 from tests.support import migrated_db
 
 SHOWS = get_endpoint("shows")
+
+# Any window will do — the assertion is about the Authorization header, not the
+# entries — but it has to be the shape the LIVE path uses: fetch_window is what
+# the calendar cache calls, and it takes a start date and a day count rather
+# than a year and a month.
+WINDOW_START = date(2026, 7, 1)
+WINDOW_DAYS = 31
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
@@ -113,7 +121,7 @@ class IdentityToProviderCallTests(EncryptionIntegrationTestCase):
         settings = dataclasses.replace(load_settings(), trakt_access_token=token)
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
+            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
         self.assertEqual(recorder.authorizations, ["Bearer alice-token"])
 
 
@@ -138,7 +146,7 @@ class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
 
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
+            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
         self.assertEqual(recorder.authorizations, ["Bearer operator-token"])
 
     def test_with_no_key_the_same_fetch_still_carries_the_plaintext_token(self):
@@ -149,7 +157,7 @@ class AppLevelTraktTokenTests(EncryptionIntegrationTestCase):
         settings = load_settings()
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
+            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
         self.assertEqual(recorder.authorizations, ["Bearer plain-token"])
 
 
@@ -161,7 +169,7 @@ class EndToEndEnableAndRecoverTests(EncryptionIntegrationTestCase):
         settings = load_settings()
         recorder = _RecordingClient()
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            asyncio.run(trakt_calendar.fetch_calendar(SHOWS, settings, 2026, 7))
+            asyncio.run(trakt_calendar.fetch_window(SHOWS, settings, WINDOW_START, WINDOW_DAYS))
         self.assertEqual(recorder.authorizations, [f"Bearer {expected_token}"])
 
     def test_enable_encrypt_lose_key_restore_key_door_one(self):

@@ -2,7 +2,7 @@
 error contract.
 
 The rest of the client is reached through its own module — `transport` for the
-pooled client and the sender, `calendar` for the month fetch and the
+pooled client and the sender, `calendar` for the window fetch and the
 normalizer, `detail` for public per-title lookups, `sync` for the reads that
 belong to whoever's token asked. This file deliberately does NOT re-export
 those: a second name for `detail.fetch_details` is a second thing to keep in
@@ -16,11 +16,10 @@ writes it is saying "Trakt could not answer", not "the transport layer raised".
 from __future__ import annotations
 
 from ...config import Settings
-from ...endpoints import ENDPOINTS, Endpoint
+from ...endpoints import ENDPOINTS
 from .. import register
-from ..base import Capabilities, Item, Source
+from ..base import Capabilities, Source
 from . import sync
-from .calendar import fetch_calendar
 from .transport import TraktError, TraktRateLimitError
 
 __all__ = ["TraktError", "TraktRateLimitError"]
@@ -58,10 +57,11 @@ class _TraktSyncPort:
 
 class _TraktProvider:
     """Trakt as the registry sees it: an id, a label, what it can answer, and
-    the one calendar call. Everything else this package exposes is still called
-    directly by the code that needs Trakt specifically (the detail modal, the
-    tracker's private reads) — the Protocol stays narrow on purpose, and this
-    class is not a facade over the package."""
+    whether it is configured. Everything this package actually DOES is called
+    directly by the code that needs Trakt specifically — `calendar.fetch_window`
+    from the calendar cache, `detail` from the detail modal, `sync` from the
+    tracker's private reads. The Protocol stays narrow on purpose, and this class
+    is not a facade over the package."""
 
     source = Source.TRAKT
     label = "Trakt"
@@ -83,10 +83,6 @@ class _TraktProvider:
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured
-
-    async def fetch_calendar(self, endpoint: Endpoint, settings: Settings,
-                             year: int, month: int) -> list[Item]:
-        return await fetch_calendar(endpoint, settings, year, month)
 
 
 register(_TraktProvider())

@@ -2,23 +2,24 @@
 into the uniform `Item` every calendar source produces.
 
 Fetching and normalizing are kept together here because they are two halves of
-one answer to one question — "what airs this month" — but normalize() itself is
-pure: it takes a raw entry and returns an Item, and is called with entries that
-never came from this module at all (the calendar cache replays stored ones
+one answer to one question — "what airs in this window" — but normalize() itself
+is pure: it takes a raw entry and returns an Item, and is called with entries
+that never came from this module at all (the calendar cache replays stored ones
 through it).
+
+NOTHING IN THIS MODULE FILTERS. Filtering is the calendar feature's job and it
+happens on the far side of the cache, which is what keeps this package free of
+any import back into app/calendar_filter.py — the one edge that used to make
+the calendar and the provider mutually dependent.
 """
 from __future__ import annotations
 
-# The stdlib module, aliased only so a reader of a file that is itself called
-# calendar.py can tell the two apart at the call site.
-import calendar as _calendar
 import logging
 import time as _time
 from datetime import date, datetime
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
-from ... import calendar_filter
 from ...config import Settings
 from ...endpoints import Endpoint
 from ..base import Item, Media, Source, collect_ids
@@ -46,16 +47,17 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     """One window of Trakt's calendar, exactly as Trakt returned it.
 
     THE ONLY PLACE THIS APP ASKS TRAKT WHAT AIRS. Everything downstream — the
-    month fetch below, and the cache's own pruned-window fetch — is this plus
-    what that caller does with the answer. It was two copies until they began to
-    drift, which is what a second copy looks like: the same thirty lines, and two
-    different wordings of the same pagination warning.
+    calendar cache's pruned-window fetch, and through it every month a viewer
+    sees — is this plus what that caller does with the answer. It was two copies
+    until they began to drift, which is what a second copy looks like: the same
+    thirty lines, and two different wordings of the same pagination warning.
 
-    Returns the raw entries, unfiltered and unnormalized, because the two callers
-    filter differently: an uncached month applies the viewer-facing genre/country
-    reproduction, while the cache applies the instance-wide content floor
-    (certifications included) before anything is stored. Deciding that here would
-    make one of them wrong.
+    Returns the raw entries, unfiltered and unnormalized. Filtering is not
+    declined here for want of somewhere to put it: the calendar cache stores the
+    unfiltered window once and applies the instance-wide content floor before
+    storage and the per-viewer genre/country/network spec at read time, so a
+    filter applied here would either be the wrong one or would have to be
+    re-applied anyway.
 
     genres/countries are NOT sent as query params. The calendar cache stores the
     complete unfiltered result so those can be read-time per-viewer filters —
@@ -96,33 +98,6 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     except ValueError:
         raise TraktError("Trakt API returned an unreadable response.")
     return raw if isinstance(raw, list) else []
-
-
-async def fetch_calendar(endpoint: Endpoint, settings: Settings, year: int, month: int) -> list[Item]:
-    """Fetch and normalize a month of calendar items for the given endpoint."""
-    days = _calendar.monthrange(year, month)[1]
-    start_date = f"{year:04d}-{month:02d}-01"
-    end_date = f"{year:04d}-{month:02d}-{days:02d}"
-
-    raw = await fetch_window(endpoint, settings, date(year, month, 1), days)
-
-    # Trakt used to filter by the genres/countries query params server-side;
-    # those are no longer sent, so the same filtering is reproduced here on the
-    # raw genre slugs (before normalization, which would rewrite "game-show" to
-    # "Game Show"), giving an item set identical to what Trakt returned before.
-    raw = calendar_filter.filter_entries(raw, endpoint.media, settings.genres, settings.countries)
-
-    tz = ZoneInfo(settings.timezone)
-    items = [normalize(entry, endpoint, tz) for entry in raw]
-    items = [i for i in items if i and start_date <= i.air_date <= end_date]
-
-    # Network filter: the operator-configured names, kept or excluded, matched
-    # case-sensitively against Trakt's own network naming (calendar_filter says
-    # why the case matters).
-    items = calendar_filter.filter_by_network(items, settings.network_filter)
-
-    items.sort(key=lambda i: i.air_ts)
-    return items
 
 
 def poster(media: dict) -> str | None:
