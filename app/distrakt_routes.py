@@ -25,10 +25,11 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, authz, calendar_state, chrome, db, discord_fmt
+from . import auth, authz, chrome, db, discord_fmt
 from . import distrakt as distrakt_store
-from . import distrakt_backfill, route_params, share_links, trakt_routes, watch_history
+from . import distrakt_backfill, route_params, trakt_routes, watch_history
 from .auth import AuthLevel
+from .calendar import share_links, state as calendar_state
 from .config import load_settings
 from .endpoints import endpoint_choices
 from .media import logos

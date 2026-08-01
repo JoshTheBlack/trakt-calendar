@@ -37,7 +37,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter
 
-from .media import imaging
+from ..media import imaging
 
 # ---------------------------------------------------------------------------
 # the canvas

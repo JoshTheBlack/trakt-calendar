@@ -9,7 +9,7 @@ through it).
 
 NOTHING IN THIS MODULE FILTERS. Filtering is the calendar feature's job and it
 happens on the far side of the cache, which is what keeps this package free of
-any import back into app/calendar_filter.py — the one edge that used to make
+any import back into app/calendar/filter.py — the one edge that used to make
 the calendar and the provider mutually dependent.
 """
 from __future__ import annotations
@@ -63,7 +63,7 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     complete unfiltered result so those can be read-time per-viewer filters —
     one viewer including JP/KR shows and another excluding them from the same
     cached data — and the equivalent filtering is reproduced client-side via
-    app/calendar_filter.py.
+    app/calendar/filter.py.
 
     Pagination headers are not sent either: Trakt's calendar endpoints ignore
     them and return the whole window in one response (verified live). The warning

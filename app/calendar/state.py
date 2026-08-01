@@ -25,9 +25,9 @@ import logging
 import re
 from datetime import date, datetime, timedelta
 
-from . import db
-from .config import DATA_DIR
-from .endpoints import ENDPOINTS
+from .. import db
+from ..config import DATA_DIR
+from ..endpoints import ENDPOINTS
 
 logger = logging.getLogger(__name__)
 

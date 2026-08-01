@@ -17,7 +17,8 @@ import asyncio
 import re
 from unittest.mock import patch
 
-from app import calendar_state, distrakt as distrakt_store
+from app import distrakt as distrakt_store
+from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from app.providers.trakt import TraktError
 from app.config import Settings, load_settings, save_settings
@@ -202,7 +203,7 @@ class RemovingFromTheTrackerTests(TrackerPanelTestCase):
         month's premieres exactly as a page load does."""
         self._remove()
 
-        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(202, 1)):
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(202, 1)):
             asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
 
         doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
@@ -227,7 +228,7 @@ class RemovingFromTheTrackerTests(TrackerPanelTestCase):
     def test_an_imported_premiere_records_where_it_came_from(self):
         """The provenance has to be written by the import itself, or every row on
         a preview month would look hand-added the moment it mattered."""
-        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(606, 1)):
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(606, 1)):
             asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
         doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
         added = next(s for s in doc["shows"] if s["ids"]["trakt"] == 606)
@@ -261,14 +262,14 @@ class LegacyRowRemovalTests(TrackerPanelTestCase):
 
     def test_a_legacy_row_the_calendar_would_re_add_is_marked(self):
         self._add_legacy(707, "slug-707")
-        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(707, 1)):
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(707, 1)):
             resp = self._remove(707)
         self.assertTrue(resp.json()["hidden_on_calendar"])
         self.assertIn("slug-707", asyncio.run(calendar_state.not_watching_ids(self.user_id)))
 
     def test_a_legacy_row_the_calendar_knows_nothing_about_is_left_alone(self):
         self._add_legacy(808, "slug-808")
-        with patch("app.calendar_cache.read_month", side_effect=_fake_premiere_read(707, 1)):
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(707, 1)):
             resp = self._remove(808)
         self.assertFalse(resp.json()["hidden_on_calendar"])
         self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
@@ -280,7 +281,7 @@ class LegacyRowRemovalTests(TrackerPanelTestCase):
             raise TraktError("unreachable")
 
         self._add_legacy(909, "slug-909")
-        with patch("app.calendar_cache.read_month", side_effect=boom):
+        with patch("app.calendar.cache.read_month", side_effect=boom):
             resp = self._remove(909)
         self.assertEqual(resp.status_code, 200)
         self.assertFalse(resp.json()["hidden_on_calendar"])

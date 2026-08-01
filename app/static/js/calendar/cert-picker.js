@@ -3,7 +3,7 @@
 // vocabulary (US TV Parental Guidelines and the MPA film ratings), so unlike
 // the free-text genre/country fields they get click-to-pick chips. Each chip
 // cycles through three states, and the set serializes to the same comma-joined
-// "-token" spec calendar_filter.parse_spec already reads on the server — so the
+// "-token" spec app/calendar/filter.py's parse_spec already reads on the server — so the
 // backend never has to know a picker produced the string. The same component
 // backs both the instance-floor copy and the per-user Filters copy; only the
 // vocabulary (declared per-picker in data-vocab) differs.

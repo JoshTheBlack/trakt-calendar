@@ -21,7 +21,8 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app import auth, calendar_state, db, distrakt, watch_history
+from app import auth, db, distrakt, watch_history
+from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from tests.support import new_db_path
 
@@ -175,7 +176,7 @@ class RolloverTests(RolloverTestCase):
             return [{"ids": _ids(401), "season": 1, "watched": 3,
                      "title": "Backlog", "network": "Net"}]
 
-        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
@@ -195,7 +196,7 @@ class RolloverTests(RolloverTestCase):
         # not-watching stores the calendar card id = slug (preferred) or trakt id.
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-202")
 
-        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             doc = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
@@ -218,7 +219,7 @@ class RolloverTests(RolloverTestCase):
         async def fake_progress(settings, since_days=60):
             return []
 
-        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
@@ -250,7 +251,7 @@ class RolloverTests(RolloverTestCase):
         doc = await distrakt.load_month(self.user_id, "2026-05")
         doc["closed"] = True
         await distrakt.save_month(self.user_id, doc)
-        with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
+        with patch("app.calendar.cache.read_month", new=AsyncMock()) as cal, \
              patch("app.providers.trakt.sync.fetch_watched_progress", new=AsyncMock()) as prog:
             out = await distrakt.ensure_month(self.user_id, 2026, 5, SETTINGS)
         self.assertTrue(out["closed"])
@@ -268,7 +269,7 @@ class RolloverTests(RolloverTestCase):
                                 {"ids": _ids(700), "season": 1, "title": "Seed"})
         # July is earlier than the only tracked month (Aug) -> blocked.
         self.assertTrue(await distrakt.is_backfill_blocked(self.user_id, "2026-07"))
-        with patch("app.calendar_cache.read_month", new=AsyncMock()) as cal, \
+        with patch("app.calendar.cache.read_month", new=AsyncMock()) as cal, \
              patch("app.providers.trakt.sync.fetch_watched_progress", new=AsyncMock()) as prog:
             out = await distrakt.ensure_month(self.user_id, 2026, 7, SETTINGS)
         self.assertEqual(out["shows"], [])
@@ -288,7 +289,7 @@ class RolloverTests(RolloverTestCase):
         async def fake_progress(settings, since_days=60):
             return []
 
-        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
@@ -308,7 +309,7 @@ class RolloverTests(RolloverTestCase):
 
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-203")
 
-        with patch("app.calendar_cache.read_month", side_effect=fake_read_month):
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month):
             await distrakt.import_premieres(self.user_id, "2026-08", SETTINGS)
 
         doc = await distrakt.load_month(self.user_id, "2026-08")
@@ -340,7 +341,7 @@ class _Resp:
 class _FixedClient:
     """Replies with the same canned window body to every request, regardless of
     the window's date range — fetch_window_raw's own in_window trim (see
-    app/calendar_cache.py) is what actually decides which entries survive for
+    app/calendar/cache.py) is what actually decides which entries survive for
     which window, so this only needs to hand back the full candidate set."""
     def __init__(self, entries):
         self.entries = entries
@@ -452,7 +453,7 @@ class PerUserIsolationTests(RolloverTestCase):
 
         await self._mark_not_watching(self.user_id, 2026, 8, "slug-201")
 
-        with patch("app.calendar_cache.read_month", side_effect=fake_read_month), \
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail):
             mine = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS)
@@ -476,7 +477,7 @@ class PerUserIsolationTests(RolloverTestCase):
             return []
 
         patches = (
-            patch("app.calendar_cache.read_month", side_effect=fake_read_month),
+            patch("app.calendar.cache.read_month", side_effect=fake_read_month),
             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress),
             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail),
             patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline),
@@ -620,7 +621,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.calendar_cache.read_month", side_effect=no_premieres), \
+             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
             payload, status = await distrakt_routes._distrakt_month_payload(self.user_id, 2026, 8, settings)
 

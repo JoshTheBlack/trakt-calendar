@@ -28,7 +28,8 @@ from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
 
-from app import auth, db, distrakt_routes, share_code, share_links
+from app import auth, db, distrakt_routes
+from app.calendar import share_code, share_links
 from app.config import Settings, save_settings
 from app.main import app
 from tests.support import AppTestCase, ORIGIN

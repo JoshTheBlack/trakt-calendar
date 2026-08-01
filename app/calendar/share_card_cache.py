@@ -39,7 +39,7 @@ import time
 from pathlib import Path
 
 from . import share_card
-from .config import DATA_DIR
+from ..config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 

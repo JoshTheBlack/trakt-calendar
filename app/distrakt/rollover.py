@@ -6,14 +6,15 @@ access, which is why each of them has to be idempotent.
 
 This is the orchestrator layer over the row store: it is the part that reaches
 out to a provider (for premieres, watch history and season detail) and reads the
-per-user main-calendar not-watching store (app/calendar_state.py).
+per-user main-calendar not-watching store (app/calendar/state.py).
 """
 from __future__ import annotations
 
 import asyncio
 from datetime import date
 
-from .. import calendar_state, db, discord_fmt
+from .. import db, discord_fmt
+from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
 from . import calendar_import, store
 from .live import compute_live_shows, live_key

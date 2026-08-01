@@ -507,7 +507,7 @@ body.hide-not-watching .card.not-watching { display: none; }
 /* Certification chip pickers (Content floor + Filters). The vocabulary is a
    small frozen external standard, so these replace free-text entry: each chip
    cycles grey (ignored) -> green (keep only these) -> red (exclude these), the
-   three states calendar_filter reads back as an include token, a `-` exclude
+   three states app/calendar/filter.py reads back as an include token, a `-` exclude
    token, or absence. */
 .chip-picker { display: flex; flex-wrap: wrap; gap: 8px; }
 .cert-chip {

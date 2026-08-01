@@ -9,7 +9,7 @@ working link; the human-readable forms are opt-in (a user whose username here
 differs from what they go by elsewhere may not want it handed out).
 
 This module owns storage and the cross-namespace validation rule. Resolving a
-public request to a page is app/share_routes.py's job.
+public request to a page is app/calendar/share_routes.py's job.
 """
 from __future__ import annotations
 
@@ -18,13 +18,14 @@ import secrets
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import auth, db, share_code
-from .endpoints import ENDPOINTS
+from . import share_code
+from .. import auth, db
+from ..endpoints import ENDPOINTS
 
 PREFERRED_KINDS = ("token", "username", "slug")
 
 # The view vocabulary a public share page understands, kept here rather than in
-# app/share_routes.py so the link BUILDER and the page's own param resolver
+# app/calendar/share_routes.py so the link BUILDER and the page's own param resolver
 # cannot drift apart — a value this module will happily put in a URL that the
 # page then rejects would be silently ignored at the far end.
 CARD_STYLES = ("vertical", "horizontal", "poster")
@@ -57,7 +58,7 @@ def _insert_row(conn: db.Connection, user_id: int, now: int) -> None:
     """Seed the owner-default view columns from this user's CURRENT prefs and
     timezone at the moment the row is created — the same seed-then-diverge
     pattern user_prefs itself uses against settings.json. After this, the
-    owner defaults are their own copy: app/calendar_routes.py's prefs/timezone writes
+    owner defaults are their own copy: app/calendar/routes.py's prefs/timezone writes
     keep them in sync going forward (see their docstrings), but nothing here
     re-reads user_prefs on every share request."""
     prefs = conn.execute(
@@ -290,7 +291,7 @@ def link_query(params: dict | None) -> str:
 
     ONE implementation of that fallback, because two things build share URLs —
     the three page links above, and the preview picture's URL in
-    app/share_routes.py, which addresses a different path and can carry a param
+    app/calendar/share_routes.py, which addresses a different path and can carry a param
     the codebooks have no room for. `p` is a nicer way to WRITE a link, never
     the only way to express one, so anything the code cannot say goes out
     verbose rather than going out wrong.
@@ -501,12 +502,12 @@ async def update_owner_defaults(user_id: int, **fields) -> None:
 
 
 # ---------------------------------------------------------------------------
-# public resolution — the only reads app/share_routes.py needs
+# public resolution — the only reads app/calendar/share_routes.py needs
 # ---------------------------------------------------------------------------
 # Each resolver is a single query joining the owning user, so a disabled
 # account's link resolves to nothing in the same lookup rather than a second
 # check the caller could forget. A miss here and a miss for any other reason
-# render the identical 404 (app/share_routes.py's job, not this module's).
+# render the identical 404 (app/calendar/share_routes.py's job, not this module's).
 
 _RESOLVE_SELECT = (
     "SELECT sl.*, u.username AS owner_username, u.display_name AS owner_display_name, "

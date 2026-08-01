@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, calendar_state, db, distrakt, distrakt_backfill as backfill, watch_history
+from app import auth, db, distrakt, distrakt_backfill as backfill, watch_history
+from app.calendar import state as calendar_state
 from app.providers.base import ItemKey
 from app.config import Settings, save_settings
 from app.main import app
@@ -563,7 +564,7 @@ class FilmsAreVisibleTests(unittest.TestCase):
         async def no_events(settings, start_at=None, limit=100, max_pages=50):
             return []
 
-        with patch("app.calendar_cache.read_month", side_effect=no_premieres), \
+        with patch("app.calendar.cache.read_month", side_effect=no_premieres), \
              patch("app.providers.trakt.sync.fetch_watched_progress", return_value=[]), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", side_effect=no_events), \

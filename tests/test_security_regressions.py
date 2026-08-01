@@ -38,7 +38,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, authz, db, distrakt, share_links
+from app import auth, authz, db, distrakt
+from app.calendar import share_links
 from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,
                         save_settings)
 from app.media import user_images
@@ -241,7 +242,7 @@ class ShareTokenComparisonTests(RegressionTestCase):
     def test_resolution_goes_through_compare_digest(self):
         user_id = self.make_user()
         row = asyncio.run(share_links.get_or_create(user_id))
-        with patch("app.share_links.secrets.compare_digest", return_value=False) as spy:
+        with patch("app.calendar.share_links.secrets.compare_digest", return_value=False) as spy:
             self.assertIsNone(asyncio.run(share_links.resolve_by_token(row["token"])))
         spy.assert_called_once()
 

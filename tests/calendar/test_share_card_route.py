@@ -25,8 +25,10 @@ from unittest.mock import patch
 import anyio
 from PIL import Image
 
-from app import (calendar_cache, calendar_state, db, share_card,
-                 share_card_cache, share_code, share_links, share_routes)
+from app import db
+from app.calendar import (cache as calendar_cache, share_card, share_card_cache,
+                          share_code, share_links, share_routes,
+                          state as calendar_state)
 from app.config import Settings
 from app.media import posters, user_images
 from tests.support import APP_DIR, AppTestCase, ORIGIN
@@ -249,7 +251,7 @@ class CardSizeTests(ShareCardTestCase):
 
 
 class CardInvalidationTests(ShareCardTestCase):
-    """The key IS the invalidation (see app/share_card_cache.py). These are the
+    """The key IS the invalidation (see app/calendar/share_card_cache.py). These are the
     same three cases from the route's end, where the bookkeeping this design
     replaced would have been."""
 

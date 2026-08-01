@@ -16,7 +16,10 @@ no request can ask for somebody else's view or for an unfiltered one.
 """
 from __future__ import annotations
 
-import calendar
+# The STDLIB calendar, not the package around this module. Absolute imports mean
+# the bare name resolves to the stdlib either way — this package is app.calendar,
+# not calendar — but standing in app/calendar/ it reads as though it might not.
+import calendar as _calendar
 import dataclasses
 import re
 from collections import Counter
@@ -28,18 +31,18 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import auth, authz, calendar_cache, calendar_state, chrome
-from . import route_params, share_links
-from .auth import AuthLevel
-from .config import load_settings
-from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
-from .integrations import routes as integrations_routes
-from .media import logos
-from .perftrace import span
-from .providers.trakt import TraktError
-from .providers.trakt.detail import fetch_details, fetch_tile_info
-from .timezones import build_options as build_timezone_options
-from .templating import templates
+from . import cache as calendar_cache, share_links, state as calendar_state
+from .. import auth, authz, chrome, route_params
+from ..auth import AuthLevel
+from ..config import load_settings
+from ..endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
+from ..integrations import routes as integrations_routes
+from ..media import logos
+from ..perftrace import span
+from ..providers.trakt import TraktError
+from ..providers.trakt.detail import fetch_details, fetch_tile_info
+from ..timezones import build_options as build_timezone_options
+from ..templating import templates
 
 router = APIRouter()
 guard = authz.Guard(router)
@@ -67,7 +70,7 @@ def _picker_context(request: Request, settings, year: int, endpoint, user=None):
         # the account or admin screens made those reachable only by typing a URL.
         "endpoints": endpoint_choices(),
         **chrome.page_context(user),
-        "months": [{"num": m, "name": calendar.month_name[m]} for m in range(1, 13)],
+        "months": [{"num": m, "name": _calendar.month_name[m]} for m in range(1, 13)],
         "current_month": today.month if year == today.year else None,
         "today_month": today.month,
         "today_year": today.year,
@@ -202,7 +205,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.error = NOT_CONFIGURED
         return assembly
 
-    days = calendar.monthrange(year, month)[1]
+    days = _calendar.monthrange(year, month)[1]
     try:
         # The whole month is fetched, filtered, and grouped before any HTML is
         # sent, so this span is the server-side "time to first byte" for the
@@ -341,7 +344,7 @@ async def calendar_page(request: Request):
     endpoint = _requested_endpoint(request, prefs, settings)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     tz = _resolve_viewer_tz(user, settings)
-    days = calendar.monthrange(year, month)[1]
+    days = _calendar.monthrange(year, month)[1]
 
     # This viewer's marks, read ONCE and handed to the assembly so the cards come
     # out of the template already carrying the class. The client used to add it
@@ -377,10 +380,10 @@ async def calendar_page(request: Request):
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,
         "month": month,
-        "month_label": calendar.month_name[month],
+        "month_label": _calendar.month_name[month],
         # For the Share panel's "opens on" month picker, which names months
         # rather than numbering them.
-        "month_names": [calendar.month_name[m] for m in range(1, 13)],
+        "month_names": [_calendar.month_name[m] for m in range(1, 13)],
         "nav": route_params.adjacent_months(year, month),
         # The days rendered INLINE. The whole month is what every number on the
         # page is computed from; this is only what is painted now.
@@ -653,7 +656,7 @@ _DAY_PACKINGS = ("stacked", "packed")
 def _filter_spec(value) -> str:
     """Normalize a `-anime, drama` genre/country spec to comma-separated tokens.
 
-    Only tidying — app/calendar_filter.py lowercases and splits on ',' itself, so
+    Only tidying — app/calendar/filter.py lowercases and splits on ',' itself, so
     this exists to keep what the user typed from being echoed back with the empty
     tokens and ragged spacing a half-edited list leaves behind.
     """
@@ -703,7 +706,7 @@ async def post_me_prefs(request: Request):
     that table's owner-default columns are seeded from user_prefs at creation and
     otherwise have no editor of their own, so keeping them in sync here is what
     makes a public share page track the owner's own view without a second save
-    action (see app/share_links.py's module docstring).
+    action (see app/calendar/share_links.py's module docstring).
     """
     user = await auth.current_user(request)
     data = await authz.json_body(request)

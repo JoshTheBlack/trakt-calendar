@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from .. import calendar_state
+from ..calendar import state as calendar_state
 from ..providers.base import Item, Media, collect_ids
 from .store import ADDED_BY_CALENDAR, load_month, normalize_show, record_key, save_month
 
@@ -58,7 +58,8 @@ async def premiere_records(user_id: int, settings, year: int, month: int) -> lis
     """
     from zoneinfo import ZoneInfo
 
-    from .. import auth, calendar_cache
+    from .. import auth
+    from ..calendar import cache as calendar_cache
     from ..endpoints import get_endpoint
     prefs = await auth.get_user_prefs(user_id)
     tz = ZoneInfo(settings.timezone)

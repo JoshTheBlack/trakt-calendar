@@ -66,7 +66,7 @@ def parse_network_spec(networks: Iterable[str] | None) -> tuple[set[str], set[st
     network, so matching stays exact, as it has since this filter was added.
 
     Networks arrive as a LIST (the textarea's commas are split before storage,
-    see calendar_routes._network_list), which is why this takes an iterable
+    see routes._network_list), which is why this takes an iterable
     where parse_spec takes one string.
     """
     includes: set[str] = set()
@@ -111,7 +111,7 @@ def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None) ->
     """Keep the normalized `items` whose network survives `networks`.
 
     Takes normalized items rather than raw entries because that is what the
-    caller holds when it filters: calendar_cache's per-viewer read-time pass runs
+    caller holds when it filters: cache.py's per-viewer read-time pass runs
     after the stored entries have been replayed through the provider's
     normalizer, and `network` only exists on the far side of that. An empty spec
     is a pass-through.

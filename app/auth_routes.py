@@ -251,7 +251,7 @@ def _og_context(settings, path: str) -> dict:
     templates fall back to a bare text preview.
 
     THE STATIC BANNER HERE IS NOT AN OVERSIGHT. A shared calendar's preview is a
-    generated picture of the month it points at (app/share_routes.py); a
+    generated picture of the month it points at (app/calendar/share_routes.py); a
     registration form has no calendar behind it to render, so it advertises the
     app's own banner. Two different facts that happen to name one file today."""
     base = _public_base(settings)

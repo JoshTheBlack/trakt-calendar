@@ -19,7 +19,7 @@ locked by live measurement against the real Trakt API:
     time, as the instance-wide content floor: an item any of those four
     Settings fields excludes is filtered out of the raw response before it is
     ever pruned and stored, so it never reaches api_cache at all (see
-    app/calendar_filter.py). Every OTHER filter dimension — a signed-in
+    app/calendar/filter.py). Every OTHER filter dimension — a signed-in
     viewer's own genre/country/certification/network choices — is a separate,
     read-time layer applied per viewer against that same floored cache.
 
@@ -51,14 +51,17 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from zoneinfo import ZoneInfo
 
-from . import calendar_filter, db
-from .cache import COMPRESS_LEVEL
-from .media import artwork
-from .perftrace import span
-from .endpoints import ENDPOINTS, Endpoint
-from .providers.base import Item
-from .providers.trakt import TraktError
-from .providers.trakt import calendar as trakt_calendar
+from . import filter as calendar_filter
+from .. import db
+# The kernel's app/cache.py, not this package's sibling — inside app/calendar/
+# `cache` is this very module, so the blob store has to be named the long way.
+from ..cache import COMPRESS_LEVEL
+from ..media import artwork
+from ..perftrace import span
+from ..endpoints import ENDPOINTS, Endpoint
+from ..providers.base import Item
+from ..providers.trakt import TraktError
+from ..providers.trakt import calendar as trakt_calendar
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -280,7 +283,7 @@ async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[di
     # country, or certification here means it never enters the shared cache for
     # ANY viewer, not just their own — applied on the raw entries, before
     # pruning, the same way the Trakt client's uncached fetch path already reproduces
-    # Trakt's old server-side genre/country filtering (see calendar_filter.py).
+    # Trakt's old server-side genre/country filtering (see filter.py).
     certifications = (
         settings.show_certifications if endpoint.media == "show" else settings.movie_certifications
     )
