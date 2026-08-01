@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -780,12 +780,35 @@ class BackfillRouteTests(unittest.TestCase):
                                 json={"start": "2026-06", "end": "2026-01"})
         self.assertEqual(resp.status_code, 400)
 
-    def test_the_dialog_is_offered_a_range_that_stops_at_what_is_tracked(self):
-        asyncio.run(distrakt.add_show(self.user_id, "2026-07", {
+    def test_the_dialog_opens_on_january_to_last_month_whatever_is_tracked(self):
+        """The offered range is January of the current year up to last month, and
+        it is NOT clamped to stop before whatever is already tracked — see
+        backfill.default_range, which says so and gives its reasons. A tracked
+        month inside the range is skipped by the SURVEY, not withheld from the
+        offer.
+
+        Both the range and the month it tracks are derived from today rather than
+        written as literals. A fixed pair of months only agrees with that rule for
+        as long as the calendar stays inside one month: this test asserted the end
+        was "2026-06" and passed all July 2026 purely because last-month and
+        tracked-month-minus-one were the same string that month, then went red on
+        1 August having never checked the rule it was named for.
+        """
+        today = date.today()
+        start = f"{today.year:04d}-01"
+        previous = date(today.year, today.month, 1) - timedelta(days=1)
+        # max() because January has no last month within the current year, and the
+        # range must not run backwards; default_range makes the same clamp.
+        end = max(start, f"{previous.year:04d}-{previous.month:02d}")
+        # Tracking the range's own end month is what makes the "not clamped" half
+        # a real assertion: the tracked month is inside the offered range by
+        # construction, on any date this ever runs.
+        asyncio.run(distrakt.add_show(self.user_id, end, {
             "ids": {"trakt": 1, "tmdb": 1, "slug": "t"}, "season": 1, "title": "T"}))
         body = self.client.get("/api/distrakt/backfill").json()
-        self.assertEqual(body["end"], "2026-06")
-        self.assertEqual(body["tracked"], ["2026-07"])
+        self.assertEqual(body["start"], start)
+        self.assertEqual(body["end"], end)
+        self.assertEqual(body["tracked"], [end])
 
 
 if __name__ == "__main__":
