@@ -11,6 +11,7 @@ recover from a lockout with no app or database tooling.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
@@ -20,8 +21,24 @@ from urllib.parse import urlsplit
 from . import secrets_box
 from .perftrace import span
 
+logger = logging.getLogger(__name__)
+
 DATA_DIR = Path(os.environ.get("TRAKT_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 SETTINGS_FILE = DATA_DIR / "settings.json"
+
+# Startup fallback for `public_base_url` when nothing is stored for it. This is
+# the way back into an instance nobody can sign in to: the login page refuses a
+# provider sign-in without a base URL, and the only screen that can set one is
+# behind that login. Without an out-of-band lever the operator's sole option is
+# to hand-edit data/settings.json, which is a far riskier thing to reach for.
+# An environment variable is the shape used here because it needs no running app
+# and no database tooling, matching TRUSTED_PROXY_IPS below.
+#
+# A STORED VALUE ALWAYS WINS, and this is never written to the database on its
+# own: it stays a live fallback, so unsetting the variable removes the override
+# again, and whatever the operator later types into Settings takes over the
+# moment it is saved.
+PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
 
 # Seed for the admin-editable `trusted_proxy_ips` setting below. Hypercorn reads
 # the same env var for --forwarded-allow-ips at process start and cannot be
@@ -331,6 +348,24 @@ def public_base_url_error(value: str) -> str | None:
     return None
 
 
+def _seed_public_base_url() -> str:
+    """The PUBLIC_BASE_URL environment variable, or "" when it is unset or unusable.
+
+    Validated with the same rule the Settings screen applies, because a value that
+    only looks right produces a redirect URI Trakt refuses byte-for-byte and the
+    failure surfaces much later as an unreadable OAuth error. A bad one is logged
+    and ignored rather than raised: this exists to rescue an instance nobody can
+    sign in to, so it must never be the reason the process will not start.
+    """
+    candidate = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/")
+    if not candidate:
+        return ""
+    if error := public_base_url_error(candidate):
+        logger.warning("Ignoring %s=%r: %s", PUBLIC_BASE_URL_ENV, candidate, error)
+        return ""
+    return candidate
+
+
 def apply_update(current: Settings, update: dict) -> Settings:
     """Merge a partial update onto the current settings.
 
@@ -491,6 +526,7 @@ def load_settings(open_secrets: bool = True) -> Settings:
         return Settings(
             trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
             trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
+            public_base_url=_seed_public_base_url(),
         )
 
     # Decrypt the stored secrets here so every downstream reader (trakt.py, arr.py,
@@ -530,17 +566,44 @@ def load_settings(open_secrets: bool = True) -> Settings:
         # load reduces the file safely. Skipped entirely while `degraded`, because
         # re-saving would seal the blanked-out secrets and destroy the values the
         # restored key could still recover.
+        #
+        # THIS SAVE MUST NEVER CLEAR A SECRET, which is why it relies on
+        # save_settings' default. `settings` here can legitimately carry blank
+        # credentials that are not blank in storage: every open_secrets=False
+        # caller (the request-shape guard, sign-in, the session lookup) loads
+        # exactly that way, and one of them runs on essentially every request.
+        # Letting this write treat "blank" as "delete" meant a hand-edited
+        # settings.json — the documented recovery path — wiped every stored
+        # credential the moment anybody used the app.
         if not db.connection().in_transaction:
             save_settings(settings)
+
+    # Last, so the fallback is never what the reduction above persists: the
+    # environment variable overrides nothing that is stored and leaves no trace
+    # of its own in the database.
+    if not settings.public_base_url:
+        settings.public_base_url = _seed_public_base_url()
 
     return settings
 
 
-def save_settings(settings: Settings) -> None:
+def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> None:
     """Persist to the three homes: the globals JSON to app_settings, each set
-    secret to app_secrets (an unset one is deleted, not stored empty), and the two
-    recovery fields to settings.json. The Settings dataclass API is unchanged; only
-    the destinations moved.
+    secret to app_secrets, and the two recovery fields to settings.json. The
+    Settings dataclass API is unchanged; only the destinations moved.
+
+    A BLANK SECRET IS LEFT ALONE UNLESS `clear_unset_secrets` SAYS OTHERWISE.
+    A Settings object cannot tell "the operator emptied this field" apart from
+    "this value was never loaded" — both read as "" — and the two want opposite
+    outcomes. Deleting by default made the second one destructive: any caller
+    holding a partially-populated Settings (load_settings(open_secrets=False), or
+    one assembled over a hand-edited settings.json) silently removed every
+    credential the instance had, with nothing left to restore them from.
+    So the deleting behaviour is opt-in, and only a path that has genuinely
+    resolved the operator's intent asks for it — settings_routes' save, where
+    config.apply_update has already turned "omitted" into keep and an explicit
+    null into clear. Deleting a row that is not there is a no-op, so an
+    intentional clear still leaves nothing behind.
     """
     ensure_data_dir()
     from . import db
@@ -578,10 +641,12 @@ def save_settings(settings: Settings) -> None:
                     "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
                     (name, secrets_box.seal(value)),
                 )
-            else:
+            elif clear_unset_secrets:
                 # An unset secret is absence of a row, so `secrets_set` and storage
                 # agree and a cleared credential leaves nothing behind.
                 conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
+            # Otherwise the stored row stands: see the docstring — a blank field
+            # on this object is not evidence that anybody asked for it to go.
 
     conn = db.connection()
     owns = not conn.in_transaction

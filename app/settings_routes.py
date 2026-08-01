@@ -203,7 +203,12 @@ async def post_settings(request: Request):
         return JSONResponse({"ok": False, "error": err}, status_code=400)
     if "cookie_secure" in data and (err := _cookie_secure_error(settings, request)):
         return JSONResponse({"ok": False, "error": err}, status_code=400)
-    save_settings(settings)
+    # The one save path allowed to remove a credential. apply_update above has
+    # already resolved what the administrator meant — absent and blank keep the
+    # stored value, an explicit null empties the field — so a blank secret on
+    # this object is a decision rather than a gap, which is what save_settings
+    # otherwise (correctly) refuses to assume.
+    save_settings(settings, clear_unset_secrets=True)
     # Re-check Sonarr/Radarr/Seerr immediately so buttons reflect the new config right away,
     # and invalidate the library cache so the next fetch re-pulls with the new credentials
     # (rather than serving the stale/empty cache until the TTL expires or a restart).

@@ -341,7 +341,9 @@ class SettingsRedactionTests(GatingTestCase):
         payload = self.client.get("/api/settings").json()
         self.assertEqual(set(payload["secrets_set"]), set(config.SECRET_FIELDS))
         self.assertTrue(all(payload["secrets_set"].values()))
-        save_settings(Settings())
+        # An explicit clear, because a blank secret alone no longer removes a
+        # stored one — see config.save_settings.
+        save_settings(Settings(), clear_unset_secrets=True)
         payload = self.client.get("/api/settings").json()
         self.assertFalse(any(payload["secrets_set"].values()))
 

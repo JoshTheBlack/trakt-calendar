@@ -122,6 +122,20 @@ removes any dependency on proxy configuration for URL correctness. Trakt also co
 `redirect_uri` byte for byte against what you registered, so a header-derived value would
 break sign-in. Required before "Log in with Trakt" and public share links can work.
 
+**If it is unset and that has locked you out**, set the `PUBLIC_BASE_URL` environment
+variable and restart. "Log in with Trakt" needs a base URL and the only screen that can set
+one is behind that login, so this is the supported way back in without editing files by
+hand. The variable is a fallback, not an override: it applies only while nothing is stored,
+it is never written to the database on its own, and the value you save in Settings
+afterwards takes over. An unusable value (a path, a trailing slash, no scheme) is logged and
+ignored rather than stopping the app.
+
+```bash
+docker run -p 8000:8000 -v trakt-data:/data \
+  -e PUBLIC_BASE_URL=https://shows.example.com \
+  ghcr.io/<owner>/trakt-new-shows:latest
+```
+
 Setting it also tightens the same-origin check on mutating requests to exactly one origin.
 Until it is set, an instance accepts either scheme for its own `Host` — the host match is
 what refuses a hostile origin, and the scheme cannot be observed through a TLS-terminating

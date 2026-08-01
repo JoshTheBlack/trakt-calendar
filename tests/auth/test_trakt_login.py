@@ -294,7 +294,9 @@ class StartRouteTests(TraktOAuthTestCase):
 
     def test_start_is_unavailable_until_the_instance_is_configured(self):
         for missing in ("trakt_client_id", "trakt_client_secret", "public_base_url"):
-            save_settings(_settings(**{missing: ""}))
+            # Cleared explicitly: emptying a field on a Settings object no longer
+            # removes the stored credential on its own — see config.save_settings.
+            save_settings(_settings(**{missing: ""}), clear_unset_secrets=True)
             resp = self.client.get("/auth/trakt/start", follow_redirects=False)
             self.assertEqual(resp.status_code, 503, missing)
         self.assertEqual(int(asyncio.run(db.fetch_value(
