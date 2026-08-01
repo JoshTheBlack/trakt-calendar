@@ -27,10 +27,11 @@ from fastapi.responses import JSONResponse
 
 from . import auth, authz, calendar_state, chrome, db, discord_fmt
 from . import distrakt as distrakt_store
-from . import distrakt_backfill, logos, route_params, share_links, trakt_routes, watch_history
+from . import distrakt_backfill, route_params, share_links, trakt_routes, watch_history
 from .auth import AuthLevel
 from .config import load_settings
 from .endpoints import endpoint_choices
+from .media import logos
 from .perftrace import span
 from .providers.base import ID_KEYS, ItemKey, Media, collect_ids, parse_item_key
 from .providers.trakt import TraktError, TraktRateLimitError

@@ -19,11 +19,12 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
-from app import (auth, cache, calendar_cache, db, posters, share_card, share_code,
+from app import (auth, cache, calendar_cache, db, share_card, share_code,
                  share_links, share_routes)
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
+from app.media import posters
 from tests.support import AppTestCase, ORIGIN
 
 

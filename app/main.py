@@ -25,7 +25,6 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
 
 from . import admin_routes
-from . import artwork
 from . import auth
 from . import auth_routes
 from . import authz
@@ -43,7 +42,6 @@ from . import integrations_routes
 from . import perftrace
 from . import plex_auth
 from . import plex_routes
-from . import posters
 from . import ranker_routes
 from . import secrets_backfill
 from . import secrets_box
@@ -51,6 +49,7 @@ from . import settings_routes
 from . import share_card_cache
 from . import share_routes
 from . import trakt_routes
+from .media import artwork, posters
 from .auth import AuthLevel
 from .config import load_settings
 from .templating import templates

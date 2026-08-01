@@ -22,8 +22,9 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import auth, authz, db, ranker, ranker_routes, user_images
+from app import auth, authz, db, ranker, ranker_routes
 from app.config import Settings, save_settings
+from app.media import user_images
 from app.main import app
 from tests.support import ORIGIN, STATIC_DIR, TEMPLATES_DIR, new_db_path
 

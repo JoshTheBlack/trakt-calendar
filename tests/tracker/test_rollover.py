@@ -621,7 +621,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar_cache.read_month", side_effect=no_premieres), \
-             patch("app.logos.ensure_logos", new=AsyncMock(return_value=None)):
+             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
             payload, status = await distrakt_routes._distrakt_month_payload(self.user_id, 2026, 8, settings)
 
         self.assertEqual(status, 200)

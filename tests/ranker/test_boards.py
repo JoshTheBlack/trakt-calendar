@@ -23,11 +23,11 @@ from unittest import mock
 
 from PIL import Image
 
-from app import auth, authz, db, distrakt, posters, ranker, ranker_export
+from app import auth, authz, db, distrakt, ranker, ranker_export
 from app import ranker_import, ranker_routes, ranker_sources
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail
-from app import user_images
+from app.media import posters, user_images
 from app.config import Settings
 from app.main import app
 from app.ranker_sources import Media, TitleRef

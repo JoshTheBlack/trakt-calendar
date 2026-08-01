@@ -21,7 +21,8 @@ from unittest import mock
 
 from PIL import Image
 
-from app import grid_builder, imaging, ranker_export
+from app import grid_builder, ranker_export
+from app.media import imaging
 from tests.support import TMP
 
 TMP = Path(tempfile.mkdtemp(prefix="tns-grid-files-"))

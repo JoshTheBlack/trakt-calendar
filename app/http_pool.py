@@ -9,7 +9,7 @@ time it talks to anything. Reusing one client per service removes that cost
 entirely and keeps the connections warm besides.
 
 The Trakt transport already knew this and had its own pooled client. Everything
-else in the app did not, and app/tmdb.py had resorted to importing Trakt's — a
+else in the app did not, and app/media/tmdb.py had resorted to importing Trakt's — a
 provider package handing out sockets to modules that are not providers. This
 module is that one good implementation, extracted so there is exactly one copy of
 the awkward part (see LOOP-KEYED below) and no reason for the next service to

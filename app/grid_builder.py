@@ -34,7 +34,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from . import imaging
+from .media import imaging
 
 # ---------------------------------------------------------------------------
 # constants — each one with the reason it has the value it has

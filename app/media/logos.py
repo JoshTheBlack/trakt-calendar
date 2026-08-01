@@ -21,8 +21,8 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from . import tmdb
-from .config import DATA_DIR
-from .perftrace import span
+from ..config import DATA_DIR
+from ..perftrace import span
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")

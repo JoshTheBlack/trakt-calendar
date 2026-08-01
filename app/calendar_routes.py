@@ -29,10 +29,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from . import auth, authz, calendar_cache, calendar_state, chrome
-from . import integrations_routes, logos, route_params, share_links
+from . import integrations_routes, route_params, share_links
 from .auth import AuthLevel
 from .config import load_settings
 from .endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
+from .media import logos
 from .perftrace import span
 from .providers.trakt import TraktError
 from .providers.trakt.detail import fetch_details, fetch_tile_info

@@ -1,7 +1,7 @@
 """Poster tiles on disk (TMDB + Pillow). Fetch, normalize, cache — no DB schema
-knowledge beyond calling app/artwork.py for the URL registry.
+knowledge beyond calling app/media/artwork.py for the URL registry.
 
-Mirrors app/logos.py's shape: disk cache, negative markers, best-effort
+Mirrors app/media/logos.py's shape: disk cache, negative markers, best-effort
 degradation. Never called on a render path — warming is explicit (ensure_poster
 / ensure_posters), and a render resolves whatever is already on disk.
 
@@ -34,10 +34,10 @@ from PIL import Image
 
 from . import artwork
 from . import tmdb as tmdb_client
-from .providers.trakt import calendar as trakt_calendar, transport as trakt_transport
-from .config import DATA_DIR
-from .perftrace import span
-from .providers.base import Media
+from ..providers.trakt import calendar as trakt_calendar, transport as trakt_transport
+from ..config import DATA_DIR
+from ..perftrace import span
+from ..providers.base import Media
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ async def _try_source(url: str) -> bytes | None:
 async def _fresh_provider_lookup(settings, media: str, tmdb: int) -> str | None:
     """A live Trakt id-lookup by tmdb id, cached like any other Trakt call
     through cached_get. Tried only once TMDB and the registry have both come
-    up empty. Whatever URL this finds is recorded through app/artwork.py so the
+    up empty. Whatever URL this finds is recorded through app/media/artwork.py so the
     next poster this cold doesn't pay for the lookup twice."""
     media_type = "show" if media == "show" else "movie"
     results = await trakt_transport.cached_get(

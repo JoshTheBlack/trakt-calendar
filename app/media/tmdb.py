@@ -1,14 +1,14 @@
 """Shared TMDB API client: auth branching (v3 api_key vs v4 bearer token) plus a
 bare GET-JSON / GET-bytes helper. Everything that talks to TMDB — network logos
-(app/logos.py) and poster art (app/posters.py) — goes through this rather than
-each re-deriving the auth branch.
+(app/media/logos.py) and poster art (app/media/posters.py) — goes through this
+rather than each re-deriving the auth branch.
 """
 from __future__ import annotations
 
 import logging
 
-from . import http_pool
-from .perftrace import span
+from .. import http_pool
+from ..perftrace import span
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ IMG = "https://image.tmdb.org/t/p"
 # refresh waited, and neither service's limits had anything to do with the other's.
 # TMDB publishes no per-second cap worth gating on, so there is no concurrency
 # gate here — the fan-out bound that matters lives at the call site
-# (app/posters.py caps how many tiles it resolves at all).
+# (app/media/posters.py caps how many tiles it resolves at all).
 #
 # ONE POOL FOR THE API AND THE IMAGE CDN, deliberately: httpx pools per host
 # internally, so api.themoviedb.org and image.tmdb.org already get their own

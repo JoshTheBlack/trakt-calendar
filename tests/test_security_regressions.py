@@ -38,9 +38,10 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, authz, db, distrakt, share_links, user_images
+from app import auth, authz, db, distrakt, share_links
 from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,
                         save_settings)
+from app.media import user_images
 from app.main import app
 from tests.support import AppTestCase
 

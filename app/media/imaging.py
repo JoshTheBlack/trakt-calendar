@@ -36,7 +36,9 @@ from PIL import Image, ImageDraw, ImageFont
 BACKGROUND = (17, 19, 21)          # #111315
 TEXT_COLOUR = (255, 255, 255)
 
-_FONT_PATH = Path(__file__).resolve().parent / "static" / "fonts" / "Inter-Bold.ttf"
+# app/media/imaging.py -> app/static/fonts/: two parents up from this file,
+# not one, because this module moved one directory deeper than app/ itself.
+_FONT_PATH = Path(__file__).resolve().parent.parent / "static" / "fonts" / "Inter-Bold.ttf"
 
 if not _FONT_PATH.exists():
     # Loud at import rather than quiet at render. The fallback Pillow offers,

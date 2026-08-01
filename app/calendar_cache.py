@@ -51,8 +51,9 @@ from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
 from zoneinfo import ZoneInfo
 
-from . import artwork, calendar_filter, db
+from . import calendar_filter, db
 from .cache import COMPRESS_LEVEL
+from .media import artwork
 from .perftrace import span
 from .endpoints import ENDPOINTS, Endpoint
 from .providers.base import Item

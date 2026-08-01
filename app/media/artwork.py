@@ -12,7 +12,7 @@ the PAIR (media, tmdb), never tmdb alone.
 """
 from __future__ import annotations
 
-from . import db
+from .. import db
 
 # Rows are tiny and are the fallback for exactly the moment a primary source
 # fails; pruning them re-spends API calls already paid for. Three years.

@@ -27,10 +27,11 @@ import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import (auth, authz, chrome, grid_builder, posters, ranker, ranker_export,
-               ranker_import, ranker_sources, user_images)
+from . import (auth, authz, chrome, grid_builder, ranker, ranker_export,
+               ranker_import, ranker_sources)
 from .auth import AuthLevel
 from .config import load_settings
+from .media import posters, user_images
 from .perftrace import span
 from .ranker_sources import Media
 from .templating import templates

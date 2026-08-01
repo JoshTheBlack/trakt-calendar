@@ -25,9 +25,10 @@ from unittest.mock import patch
 import anyio
 from PIL import Image
 
-from app import (calendar_cache, calendar_state, db, posters, share_card,
-                 share_card_cache, share_code, share_links, share_routes, user_images)
+from app import (calendar_cache, calendar_state, db, share_card,
+                 share_card_cache, share_code, share_links, share_routes)
 from app.config import Settings
+from app.media import posters, user_images
 from tests.support import APP_DIR, AppTestCase, ORIGIN
 
 # Artwork with the frequency content of a real poster, which is what the encoded

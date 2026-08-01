@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import user_images
+from .media import user_images
 from .providers.base import item_key
 
 logger = logging.getLogger(__name__)

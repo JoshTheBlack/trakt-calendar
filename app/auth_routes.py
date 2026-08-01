@@ -36,9 +36,10 @@ import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import auth, authz, chrome, db, trakt_auth, user_images
+from . import auth, authz, chrome, db, trakt_auth
 from .auth import AuthLevel
 from .config import load_settings, save_settings
+from .media import user_images
 from .templating import templates
 
 logger = logging.getLogger(__name__)

@@ -43,7 +43,7 @@ from pathlib import Path
 import anyio.to_thread
 from PIL import Image
 
-from .config import DATA_DIR
+from ..config import DATA_DIR
 
 logger = logging.getLogger(__name__)
 
