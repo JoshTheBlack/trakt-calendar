@@ -96,8 +96,7 @@ GROUPS: dict[str, str] = {
     # auth dependencies to routes.
     "auth": AUTH, "authz": AUTH, "auth_routes": AUTH, "trakt_auth": AUTH,
     "plex_auth": AUTH, "plex_routes": AUTH, "trakt_routes": AUTH,
-    "admin_routes": AUTH, "encryption_flow": AUTH, "encryption_routes": AUTH,
-    "secrets_backfill": AUTH,
+    "admin_routes": AUTH,
 
     # Pictures: where they are fetched from, how they are cached, how they are
     # drawn. tmdb.py is here rather than with the integrations because network
@@ -445,10 +444,10 @@ class ResolverTests(unittest.TestCase):
     def test_async_function_local_imports_too(self):
         tree = ast.parse(
             "async def f():\n"
-            "    from . import encryption_flow\n"
+            "    from . import providers\n"
         )
         found = [(resolve_import(n, ("app",)), d) for n, d in walk_imports(tree)]
-        self.assertEqual(found, [(["app.encryption_flow"], True)])
+        self.assertEqual(found, [(["app.providers"], True)])
 
     def test_type_checking_imports_are_seen_and_marked_deferred(self):
         tree = ast.parse(

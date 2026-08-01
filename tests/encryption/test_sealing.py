@@ -24,8 +24,8 @@ import unittest
 
 from cryptography.fernet import Fernet
 
-from app import auth, config, db, secrets_backfill, secrets_box
-from app.auth import trakt_routes
+from app import auth, config, db, secrets_box
+from app.auth import secrets_backfill, trakt_routes
 from app.config import Settings, load_settings, save_settings
 from tests.support import TMP, migrated_db, new_db_path
 

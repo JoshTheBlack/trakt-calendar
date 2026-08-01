@@ -66,7 +66,8 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import BaseRoute, Match
 
-from . import auth, db, encryption_flow
+from . import auth, db
+from .auth import encryption_flow
 from .auth import DEPENDENCY_FOR_LEVEL, AuthError, AuthLevel
 from .config import Settings, load_settings
 
@@ -507,7 +508,7 @@ def _install_key_mismatch_gate(app: FastAPI) -> None:
         if path in KEY_MISMATCH_PATHS or path.startswith(KEY_MISMATCH_PREFIXES):
             return await call_next(request)
         if _wants_html(request):
-            from .encryption_routes import RECOVERY_PATH
+            from .auth.encryption_routes import RECOVERY_PATH
             return RedirectResponse(RECOVERY_PATH, status_code=303)
         return _deny(
             503, "key_mismatch",

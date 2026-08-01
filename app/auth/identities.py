@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .. import db, encryption_flow, secrets_box
+from .. import db, secrets_box
 from ..config import Settings, load_settings
-from . import invites, prefs, users
+from . import encryption_flow, invites, prefs, users
 
 
 def insert_linked_identity(

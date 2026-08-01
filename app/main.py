@@ -30,17 +30,17 @@ from . import cache
 from . import changelog
 from . import chrome
 from . import db
-from . import encryption_flow
-from . import encryption_routes
 from . import http_pool
 from . import perftrace
-from . import secrets_backfill
 from . import secrets_box
 from . import settings_routes
 from .auth import admin_routes
+from .auth import encryption_flow
+from .auth import encryption_routes
 from .auth import plex as plex_auth
 from .auth import plex_routes
 from .auth import routes as auth_routes
+from .auth import secrets_backfill
 from .auth import trakt_routes
 from .calendar import cache as calendar_cache
 from .calendar import routes as calendar_routes

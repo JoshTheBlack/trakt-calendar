@@ -27,7 +27,8 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, authz, db, encryption_flow, encryption_routes
+from . import auth, authz, db
+from .auth import encryption_flow, encryption_routes
 from .auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
 from .integrations import routes as integrations_routes
 from .auth import AuthLevel

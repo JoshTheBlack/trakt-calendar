@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 
-from . import db, secrets_box
+from .. import db, secrets_box
 
 logger = logging.getLogger(__name__)
 

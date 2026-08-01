@@ -2,8 +2,9 @@
 key survived a restart, and recovering when the key is lost or replaced.
 
 The crypto itself lives in app/secrets_box (seal/open) and the bulk conversion in
-app/secrets_backfill (plaintext rows -> sealed). This module owns the operator's
-decisions and the health of the key over time, both recorded in app_meta:
+secrets_backfill.py beside this module (plaintext rows -> sealed). This module
+owns the operator's decisions and the health of the key over time, both recorded
+in app_meta:
 
   - `encryption_phase` — where an instance is in the enable flow, one of PHASE_*
     below. It advances on admin choice (offer -> chose to enable -> key verified in
@@ -43,7 +44,8 @@ import os
 
 from cryptography.fernet import Fernet
 
-from . import db, secrets_backfill, secrets_box
+from .. import db, secrets_box
+from . import secrets_backfill
 
 logger = logging.getLogger(__name__)
 

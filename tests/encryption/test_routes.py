@@ -19,9 +19,10 @@ import unittest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
-from app import config, db, encryption_flow, secrets_box
+from app import config, db, secrets_box
+from app.auth import encryption_flow
 from app.config import Settings, save_settings
-from app.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE
+from app.auth.encryption_routes import RECOVERY_PATH, RESET_CONFIRM_PHRASE
 from app.main import app
 from tests.support import migrated_db
 

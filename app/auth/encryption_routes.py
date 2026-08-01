@@ -1,9 +1,9 @@
 """The HTTP surface for the at-rest-encryption lifecycle: the admin consent flow,
 the later opt-in, and the lost-key recovery screen.
 
-The decisions and the crypto live in app/encryption_flow; this module is the thin
-routing over them, the same shape app/auth/admin_routes.py is over app/auth. Two things here
-are load-bearing and must survive any restyling:
+The decisions and the crypto live in encryption_flow.py beside it; this module is
+the thin routing over them, the same shape app/auth/admin_routes.py is over
+app/auth. Two things here are load-bearing and must survive any restyling:
 
   - The recovery page is deliberately PUBLIC and self-gating rather than declared
     ADMIN. When the key is wrong the whole app is gated to this one screen, and an
@@ -25,9 +25,13 @@ import os
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from . import auth, authz, chrome, db, encryption_flow, secrets_backfill, secrets_box
-from .auth import AuthLevel
-from .templating import templates
+# `auth` is this module's OWN package, read through the package object one level
+# up: auth.current_user is the surface app/auth/__init__.py exists to present, and
+# a route has no business knowing which submodule happens to define it.
+from .. import auth, authz, chrome, db, secrets_box
+from ..templating import templates
+from . import encryption_flow, secrets_backfill
+from .levels import AuthLevel
 
 logger = logging.getLogger(__name__)
 

@@ -543,7 +543,8 @@ def save_settings(settings: Settings) -> None:
     the destinations moved.
     """
     ensure_data_dir()
-    from . import db, encryption_flow
+    from . import db
+    from .auth import encryption_flow  # local: encryption_flow -> config would cycle
 
     data = settings.to_dict()
     globals_doc = {name: data[name] for name in sorted(global_field_names())}
