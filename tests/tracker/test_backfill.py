@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, db, distrakt, distrakt_backfill as backfill, watch_history
+from app import auth, db, distrakt
+from app.distrakt import backfill, watch_history
 from app.calendar import state as calendar_state
 from app.providers.base import ItemKey
 from app.config import Settings, save_settings
@@ -391,8 +392,8 @@ class ManualCompletedRouteTests(unittest.TestCase):
             return {"total": total, "cadence": "Mon", "premiere": "3/1", "finale": "4/5",
                     "started_airing": True, "finished_airing": True}
 
-        with patch("app.distrakt_routes.fetch_season_detail", side_effect=fake_season), \
-             patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt.routes.fetch_season_detail", side_effect=fake_season), \
+             patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/add-completed", json={
                 "year": year, "month": month, "season": season,
                 "ids": {"trakt": 321, "tmdb": 4321, "slug": "elsewhere"},
@@ -413,8 +414,8 @@ class ManualCompletedRouteTests(unittest.TestCase):
         async def fake_season(settings, trakt_id, season_no, fresh=False, client=None):
             return {"total": 10}
 
-        with patch("app.distrakt_routes.fetch_season_detail", side_effect=fake_season), \
-             patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt.routes.fetch_season_detail", side_effect=fake_season), \
+             patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             self.client.post("/api/distrakt/add-completed", json={
                 "year": 2026, "month": 3, "season": 1,
                 "ids": {"trakt": 321, "tmdb": 4321},
@@ -478,7 +479,7 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
         asyncio.run(distrakt.save_month(self.user_id, doc))
 
     def _remove(self):
-        with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/remove", json={
                 "year": 2026, "month": 3, "key": "show:tmdb:601", "season": 1})
 
@@ -591,7 +592,7 @@ class AddingAFilmByHandTests(unittest.TestCase):
         db.close_thread_connection()
 
     def _add(self, watched_on, trakt_id=900, title="Hand Added"):
-        with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/add-movie", json={
                 "ids": {"trakt": trakt_id, "tmdb": trakt_id}, "title": title, "year": 2011,
                 "watched_on": watched_on, "year_view": 2026, "month_view": 7})
@@ -666,7 +667,7 @@ class RemovingAFilmTests(unittest.TestCase):
         db.close_thread_connection()
 
     def _remove(self, tmdb=91):
-        with patch("app.distrakt_routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
+        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/remove-movie", json={
                 "key": f"movie:tmdb:{tmdb}", "year": 2026, "month": 7})
 

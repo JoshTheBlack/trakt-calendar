@@ -25,26 +25,30 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, authz, chrome, db, discord_fmt
-from . import distrakt as distrakt_store
-from . import distrakt_backfill, route_params, trakt_routes, watch_history
-from .auth import AuthLevel
-from .calendar import share_links, state as calendar_state
-from .config import load_settings
-from .endpoints import endpoint_choices
-from .media import logos
-from .perftrace import span
-from .providers.base import ID_KEYS, ItemKey, Media, collect_ids, parse_item_key
-from .providers.trakt import TraktError, TraktRateLimitError
-from .providers.trakt.detail import (
+from . import backfill, discord_fmt, watch_history
+# The data layer is reached through this package's own public surface, the same
+# names an outside caller uses, rather than through the six modules those names
+# are defined in: a route handler has no business knowing which half of the
+# tracker `load_month` or `compute_live_shows` lives in.
+from .. import distrakt as distrakt_store
+from .. import auth, authz, chrome, db, route_params, trakt_routes
+from ..auth import AuthLevel
+from ..calendar import share_links, state as calendar_state
+from ..config import load_settings
+from ..endpoints import endpoint_choices
+from ..media import logos
+from ..perftrace import span
+from ..providers.base import ID_KEYS, ItemKey, Media, collect_ids, parse_item_key
+from ..providers.trakt import TraktError, TraktRateLimitError
+from ..providers.trakt.detail import (
     fetch_details,
     fetch_season_detail,
     fetch_show_seasons,
     search_shows,
     search_titles,
 )
-from .providers.trakt.sync import fetch_watched_map
-from .templating import templates
+from ..providers.trakt.sync import fetch_watched_map
+from ..templating import templates
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +113,7 @@ def _row_target(data: dict) -> tuple[ItemKey, int]:
 def _merge_live_show(rec: dict, watched_lookup: dict, detail: dict) -> dict:
     """Combine a stored record (identity + abandoned/abandoned_form) with its
     live Trakt-derived fields into the flat "LIVE SHOW SHAPE" discord_fmt
-    expects (see app/discord_fmt.py's module docstring), plus the computed
+    expects (see discord_fmt.py's module docstring), plus the computed
     `bucket` for the UI to group by."""
     show = {
         **rec,
@@ -1047,7 +1051,7 @@ async def api_distrakt_backfill_range(request: Request):
     """The range the backfill dialog opens on, and what is already tracked."""
     user_id = await _distrakt_user_id(request)
     tracked = await distrakt_store.list_months(user_id)
-    start, end = distrakt_backfill.default_range()
+    start, end = backfill.default_range()
     return JSONResponse({"ok": True, "start": start, "end": end, "tracked": tracked})
 
 
@@ -1065,18 +1069,18 @@ async def api_distrakt_backfill_survey(request: Request):
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
-    default_start, default_end = distrakt_backfill.default_range()
-    start = distrakt_backfill.valid_month(data.get("start")) or default_start
-    end = distrakt_backfill.valid_month(data.get("end")) or default_end
-    if not distrakt_backfill.month_range(start, end):
+    default_start, default_end = backfill.default_range()
+    start = backfill.valid_month(data.get("start")) or default_start
+    end = backfill.valid_month(data.get("end")) or default_end
+    if not backfill.month_range(start, end):
         return JSONResponse(
             {"ok": False, "error": "That range covers no months — check the order."},
             status_code=400)
     try:
-        plan = await distrakt_backfill.survey(user_id, settings, start, end)
+        plan = await backfill.survey(user_id, settings, start, end)
     except TraktError as exc:
         return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
-    return JSONResponse({"ok": True, **distrakt_backfill.summarize(plan)})
+    return JSONResponse({"ok": True, **backfill.summarize(plan)})
 
 
 @guard.post("/api/distrakt/backfill/apply", AuthLevel.DISTRAKT_APPROVED)
@@ -1085,8 +1089,8 @@ async def api_distrakt_backfill_apply(request: Request):
     only thing that can produce records, and it expires."""
     user_id = await _distrakt_user_id(request)
     try:
-        written = await distrakt_backfill.apply(user_id)
-    except distrakt_backfill.BackfillExpired as exc:
+        written = await backfill.apply(user_id)
+    except backfill.BackfillExpired as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
     months = await distrakt_store.list_months(user_id)
     return JSONResponse({"ok": True, **written, "tracked": months})

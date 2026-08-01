@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from app import auth, db, distrakt
 from app.providers.base import ItemKey
-from app import watch_history as wh
+from app.distrakt import watch_history as wh
 from app.config import Settings, save_settings
 from app.main import app
 from tests.support import ORIGIN, migrated_db, new_db_path

@@ -821,7 +821,7 @@ class DistraktDetailsTests(RegressionTestCase):
                 "trakt_id) VALUES (?,?,?,?,?,?,?)",
                 (self.user_id, "show", "tmdb", "1", 3, watched, 7)))
         self.login("josh")
-        with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
+        with patch("app.distrakt.routes.fetch_details", return_value=self.DETAILS):
             return self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3")
 
     def test_it_returns_the_episodes_and_this_users_watched_set(self):
@@ -842,7 +842,7 @@ class DistraktDetailsTests(RegressionTestCase):
         body = self.details().json()
         self.assertEqual(body["slug"], "silo")
         self.login("josh")
-        with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
+        with patch("app.distrakt.routes.fetch_details", return_value=self.DETAILS):
             spoofed = self.client.get(
                 f"/api/distrakt/details?key={self.KEY}&season=3&slug=evil").json()
         self.assertEqual(spoofed["slug"], "silo")
@@ -852,7 +852,7 @@ class DistraktDetailsTests(RegressionTestCase):
         self.client.post("/logout", json={})
         other = self.tracker("other")
         self.login("other")
-        with patch("app.distrakt_routes.fetch_details", return_value=self.DETAILS):
+        with patch("app.distrakt.routes.fetch_details", return_value=self.DETAILS):
             body = self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").json()
         self.assertEqual(body["watched_episodes"], [])
 

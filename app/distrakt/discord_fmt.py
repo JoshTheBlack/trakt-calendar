@@ -1,8 +1,8 @@
 """Bucketing state machine + POST 1/POST 2 markdown renderer.
 
 Pure, offline functions — no I/O, no Trakt calls, no persistence. Callers
-(app/distrakt/live.py) merge each show's stored record (app/distrakt/store.py,
-identity + `abandoned`/`abandoned_form`) with its live Trakt-derived fields
+(live.py) merge each show's stored record (store.py, identity +
+`abandoned`/`abandoned_form`) with its live Trakt-derived fields
 (app/providers/trakt/ `fetch_season_detail` + the watch-history cache) into one
 flat dict before calling anything here.
 
@@ -215,7 +215,7 @@ def freeze_form(show: dict) -> str:
 
     Deliberately does not call bucket_of / look at `abandoned` — this freezes
     what the state WOULD be right now, independent of the toggle being applied.
-    Reused both by app/distrakt_routes.py's abandon endpoint (to freeze `abandoned_form`)
+    Reused both by routes.py's abandon endpoint (to freeze `abandoned_form`)
     and by `_abandoned_line` below as the fallback for abandoned records
     written before `abandoned_form` existed, where it is still None.
     """

@@ -42,8 +42,14 @@ import logging
 import re
 from datetime import date
 
-from . import cache, db, discord_fmt, distrakt, providers, watch_history
-from .providers.base import Media, resolve_key
+from . import discord_fmt, watch_history
+# The roster is reached through this package's own public surface, the same names
+# an outside caller uses, rather than through the modules those names are defined
+# in — a backfill job has no business knowing which half of the tracker
+# `load_month` or `save_month` lives in.
+from .. import distrakt
+from .. import cache, db, providers
+from ..providers.base import Media, resolve_key
 
 logger = logging.getLogger(__name__)
 
@@ -382,8 +388,8 @@ async def _progress_by_show(settings, port, show_ids: list[int]) -> dict[int, di
 async def _season_totals(settings, candidates: list[dict]) -> dict[tuple[str, int], dict]:
     """{(item key, season): season detail} — the episode total that decides
     whether a season is finished, plus the dates a frozen row carries."""
-    from .providers.trakt.detail import fetch_season_detail
-    from .providers.trakt.transport import shared_client
+    from ..providers.trakt.detail import fetch_season_detail
+    from ..providers.trakt.transport import shared_client
     if not candidates:
         return {}
     client = shared_client()

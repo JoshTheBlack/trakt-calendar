@@ -65,8 +65,8 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
 
 
 # ---------------------------------------------------------------------------
-# Incremental watch-history cache primitives (app/watch_history.py). The cache
-# baselines a show once (progress -> completed episode numbers), then applies
+# Incremental watch-history cache primitives (app/distrakt/watch_history.py).
+# The cache baselines a show once (progress -> completed episode numbers), then applies
 # only NEW plays from /users/me/history since the last sync, gated by
 # /sync/last_activities. Movies come through the same history sweep.
 # ---------------------------------------------------------------------------
@@ -205,7 +205,7 @@ def watched_progress_from(events: list[dict]) -> list[dict]:
     hand: [{ids, season, watched, title, network}].
 
     Split out so a caller that needs BOTH the seasons and the movies from one
-    window (app/distrakt_backfill) can sweep the history once and read it twice,
+    window (app/distrakt/backfill.py) can sweep the history once and read it twice,
     rather than paying for the same paged sweep twice over.
 
     THE WHOLE ID MAP TRAVELS, not the two ids the first caller happened to need:

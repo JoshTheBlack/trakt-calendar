@@ -16,7 +16,8 @@ from unittest.mock import patch
 
 import httpx
 
-from app import db, distrakt as distrakt_store, watch_history
+from app import db, distrakt as distrakt_store
+from app.distrakt import watch_history
 from app.providers.trakt import transport
 from app.config import Settings
 from app.providers.trakt import TraktRateLimitError
@@ -264,7 +265,7 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_prereq_rate_limit_returns_stale_plus_notice(self):
         from datetime import date
 
-        from app.distrakt_routes import _distrakt_month_payload
+        from app.distrakt.routes import _distrakt_month_payload
 
         today = date.today()
         month_key = f"{today.year:04d}-{today.month:02d}"
@@ -280,7 +281,7 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
 
         # The watch-history sync is the documented shared prerequisite: a 429 there
         # can't be pinned on one show, so the whole month degrades.
-        with patch("app.watch_history.sync_and_baseline", _boom):
+        with patch("app.distrakt.watch_history.sync_and_baseline", _boom):
             payload, status = await _distrakt_month_payload(
                 self.user_id, today.year, today.month, settings)
 

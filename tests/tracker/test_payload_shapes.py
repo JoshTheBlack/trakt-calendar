@@ -1,6 +1,6 @@
 """The tracker month payloads that are now separately reachable.
 
-app/distrakt_routes.py builds a month in one of three shapes — a frozen past
+app/distrakt/routes.py builds a month in one of three shapes — a frozen past
 month from its own snapshot, an open month computed live, or last-known totals
 plus a notice when Trakt cannot be reached. Only the live path needs Trakt, and
 only the live path was reachable in a test before; the frozen and empty renders
@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import unittest
 
-from app import distrakt, distrakt_routes
+from app import distrakt
+from app.distrakt import routes as distrakt_routes
 from app.integrations import routes as integrations_routes
 
 EMOJIS = {"HBO": "🟪"}

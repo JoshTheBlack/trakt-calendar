@@ -54,9 +54,9 @@ import json
 import logging
 from datetime import date, datetime, timezone
 
-from . import db, providers
-from .distrakt import ID_COLUMNS, IDENTITY_COLUMNS, record_key
-from .providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
+from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
+from .. import db, providers
+from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
@@ -444,7 +444,7 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
     Fast path: the activity beacon is unchanged -> return cache, no history pull.
     Change path: re-baseline on unwatch/force, then fold in new history events.
     """
-    from .perftrace import span
+    from ..perftrace import span
     port = _port()
     if port is None:
         return await _load(user_id)
@@ -501,7 +501,7 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     Takes the roster RECORDS rather than a list of ids, because filing a baseline
     needs the shared identity and fetching one needs the source's id, and only the
     record carries both."""
-    from .perftrace import span
+    from ..perftrace import span
     state = await sync(settings, user_id, force=force, today=today)
     port = _port()
     if port is None:

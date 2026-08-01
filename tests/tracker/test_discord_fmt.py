@@ -1,4 +1,4 @@
-"""Unit tests for app/discord_fmt.py.
+"""Unit tests for app/distrakt/discord_fmt.py.
 
 Pure/offline — no network, no persistence. The render_post1/render_post2 tests
 hand-verify against a real sample month's posts, with two corrections applied:
@@ -17,7 +17,7 @@ import json
 import re
 import unittest
 
-from app import discord_fmt as fmt
+from app.distrakt import discord_fmt as fmt
 
 _NEXT_ID = [1000]
 

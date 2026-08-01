@@ -13,10 +13,10 @@ from __future__ import annotations
 import asyncio
 from datetime import date
 
-from .. import db, discord_fmt
+from .. import db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
-from . import calendar_import, store
+from . import calendar_import, discord_fmt, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
@@ -116,7 +116,7 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     """Compute one final live snapshot for `doc`, persist counts/dates/bucket onto
     each stored record, mark it closed, stamp totals_refreshed_at, save. After
     this the month renders forever from the frozen snapshot with no Trakt calls."""
-    from .. import watch_history
+    from . import watch_history
     records = doc.get("shows") or []
     state = await watch_history.sync_and_baseline(settings, user_id, records, force=True)
     watched_lookup = watch_history.watched_map(state)
@@ -165,7 +165,7 @@ async def drop_seasons_finished_earlier(user_id: int, month_key: str,
     (nothing dated for it, or a title that predates dated history and has not been
     re-baselined yet) is left exactly where it is.
     """
-    from .. import watch_history
+    from . import watch_history
     start, _ = watch_history.month_bounds(month_key)
     keep, stale = [], []
     for show in shows:

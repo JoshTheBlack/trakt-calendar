@@ -32,7 +32,6 @@ from . import cache
 from . import changelog
 from . import chrome
 from . import db
-from . import distrakt_routes
 from . import encryption_flow
 from . import encryption_routes
 from . import http_pool
@@ -48,6 +47,7 @@ from .calendar import cache as calendar_cache
 from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
+from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, posters
 from .auth import AuthLevel

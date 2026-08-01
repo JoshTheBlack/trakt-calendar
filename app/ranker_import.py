@@ -26,7 +26,8 @@ import asyncio
 import logging
 from typing import Any
 
-from . import auth, db, discord_fmt, distrakt, ranker_sources
+from . import auth, db, distrakt, ranker_sources
+from .distrakt import discord_fmt
 from .providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
 from .config import load_settings
 from .media import artwork

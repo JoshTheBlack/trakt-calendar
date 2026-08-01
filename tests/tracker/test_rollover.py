@@ -21,7 +21,8 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app import auth, db, distrakt, watch_history
+from app import auth, db, distrakt
+from app.distrakt import watch_history
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from tests.support import new_db_path
@@ -222,7 +223,7 @@ class RolloverTests(RolloverTestCase):
         with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
+             patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
             # today >= Aug 1 -> August has begun, so July freezes on this access.
             aug = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
                                               today=date(2026, 8, 1))
@@ -292,7 +293,7 @@ class RolloverTests(RolloverTestCase):
         with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
              patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
+             patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
             aug = await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS,
                                               today=date(2026, 7, 20))
 
@@ -480,7 +481,7 @@ class PerUserIsolationTests(RolloverTestCase):
             patch("app.calendar.cache.read_month", side_effect=fake_read_month),
             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress),
             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail),
-            patch("app.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline),
+            patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline),
         )
         with patches[0], patches[1], patches[2], patches[3]:
             await distrakt.ensure_month(self.user_id, 2026, 8, SETTINGS, today=date(2026, 8, 1))
@@ -599,7 +600,7 @@ class CompletedBelongsToTheMonthItHappenedInTests(RolloverTestCase):
         Only Trakt itself is mocked — the watch-history cache, the completion
         dates it derives, the bucketing and the payload assembly are all real.
         """
-        from app import distrakt_routes
+        from app.distrakt import routes as distrakt_routes
 
         await distrakt.add_show(self.user_id, "2026-08", {
             "ids": _ids(102), "season": 1, "title": "Finished In July",

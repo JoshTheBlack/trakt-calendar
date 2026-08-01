@@ -65,7 +65,7 @@ _BOOL_FIELDS = ("abandoned",)
 # of a preview month, and only they mean "the calendar says you're watching
 # this" — which is why removing one marks the show not-watching there and
 # removing any other kind does not. "" is a row written before the column
-# existed; see distrakt_routes.api_distrakt_remove.
+# existed; see routes.api_distrakt_remove.
 ADDED_BY_CALENDAR = "calendar"
 ADDED_BY_HISTORY = "history"
 ADDED_BY_MANUAL = "manual"

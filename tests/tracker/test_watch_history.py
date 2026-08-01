@@ -1,5 +1,5 @@
 """Unit tests for the per-user incremental watch-history cache
-(app/watch_history).
+(app/distrakt/watch_history.py).
 
 Pure state folders/readers are tested directly on the in-memory state dict (they
 are unchanged by the move to per-user storage); the gated `sync` is tested with
@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from app import db
-from app import watch_history as wh
+from app.distrakt import watch_history as wh
 from tests.support import new_db_path
 
 SETTINGS = SimpleNamespace(configured=True)
