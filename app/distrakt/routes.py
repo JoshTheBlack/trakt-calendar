@@ -264,6 +264,7 @@ async def _apply_not_watching(user_id: int, month_key: str,
 
 
 def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
+                         standing: distrakt_store.MonthStanding,
                          readonly: bool = False, link_url: str | None = None) -> dict:
     """Headers-only render for a month with no roster + no Trakt call: an
     unconfigured/uninitialized month (readonly=False) or a never-tracked past
@@ -275,13 +276,14 @@ def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
         "movies": [],
         "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url, month=month_key),
-        "post2": discord_fmt.render_post2([], emojis, default_emoji),
+        "post2": discord_fmt.render_post2([], emojis, default_emoji, standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, default_emoji: str,
-                               link_url: str | None, rate_limited: bool) -> dict:
+                               link_url: str | None, rate_limited: bool,
+                               standing: distrakt_store.MonthStanding) -> dict:
     """Render a month WITHOUT any Trakt call, from whatever is last persisted — the
     top-level fallback when a shared refresh prerequisite hit Trakt's rate limit or
     was unreachable. Stored records already carry each show's last-known
@@ -290,7 +292,7 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     500. `rate_limited` only chooses the notice wording; both cases degrade
     identically and return HTTP 200."""
     doc = await distrakt_store.load_month(user_id, month_key)
-    shows = distrakt_store.frozen_shows(doc) if doc else []
+    shows = discord_fmt.month_view(distrakt_store.frozen_shows(doc) if doc else [], standing)
     notice = (
         "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
         if rate_limited else
@@ -307,7 +309,8 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         # appearing anywhere on the page, which reads as them not being there.
         "movies": (doc or {}).get("movies") or [],
         "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
-        "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=(doc or {}).get("movies")),
+        "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
+                                          movies=(doc or {}).get("movies"), standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # Reports the ACTUAL cause: True only when Trakt rate-limited us, False when
         # it was simply unreachable. The client shows the banner off `notice`
@@ -318,17 +321,19 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     }
 
 
-def _closed_month_payload(doc: dict, month_key: str, emojis: dict,
-                          default_emoji: str, link_url: str | None) -> dict:
+def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji: str,
+                          link_url: str | None,
+                          standing: distrakt_store.MonthStanding) -> dict:
     """A frozen past month, rendered straight from its own snapshot with NO Trakt
     calls. The snapshot is the record of what that month WAS — recomputing it
     against today's watch history would rewrite history every time it was opened."""
-    shows = distrakt_store.frozen_shows(doc)
+    shows = discord_fmt.month_view(distrakt_store.frozen_shows(doc), standing)
     return {
         "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
         "movies": doc.get("movies") or [],
         "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
-        "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies")),
+        "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
+                                          movies=doc.get("movies"), standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -408,6 +413,12 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # A season finished before this month began belongs to the month it was
     # finished in, not to this one — see drop_seasons_finished_earlier.
     shows = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
+    # What this month is allowed to present, decided once for the page and the
+    # posts alike — see discord_fmt.MONTH_BUCKETS. Applied after the roster
+    # bookkeeping above, so a row that is merely not shown here is still stored,
+    # still refreshed, and still there when the calendar reaches its month.
+    standing = distrakt_store.month_standing(month_key, today)
+    shows = discord_fmt.month_view(shows, standing)
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
@@ -423,7 +434,8 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
 
     with span("payload.render"):
         post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
-        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies)
+        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies,
+                                         standing=standing)
     return {
         "ok": True,
         "month": month_key,
@@ -457,6 +469,10 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     """
     today = date.today()
     month_key = distrakt_store.month_key(year, month)
+    # Where this month stands relative to the calendar decides which sections it
+    # may show at all (discord_fmt.MONTH_BUCKETS), so every shape below is handed
+    # the same answer rather than working one out for itself.
+    standing = distrakt_store.month_standing(month_key, today)
     link_url = await _distrakt_post_link(user_id, settings, year, month)
     # This user's own map, fetched once and handed to every render below. It is
     # not on `settings` any more — see _distrakt_settings.
@@ -468,7 +484,8 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
             # persisted, no Trakt call. `readonly` hides the add/edit affordances.
             return _empty_month_payload(
-                month_key, emojis, default_emoji, readonly=blocked, link_url=link_url,
+                month_key, emojis, default_emoji, standing,
+                readonly=blocked, link_url=link_url,
             ), 200
 
     try:
@@ -476,16 +493,19 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
         month_key = doc["month"]
         if doc.get("closed"):
-            return _closed_month_payload(doc, month_key, emojis, default_emoji, link_url), 200
+            return _closed_month_payload(doc, month_key, emojis, default_emoji,
+                                         link_url, standing), 200
         return await _live_month_payload(
             user_id, doc, month_key, settings, emojis, default_emoji, link_url,
             force_fresh, today)
     except TraktRateLimitError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt rate-limited): %s", month_key, exc)
-        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url, rate_limited=True), 200
+        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
+                                          rate_limited=True, standing=standing), 200
     except TraktError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt unreachable): %s", month_key, exc)
-        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url, rate_limited=False), 200
+        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
+                                          rate_limited=False, standing=standing), 200
 
 
 @guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)

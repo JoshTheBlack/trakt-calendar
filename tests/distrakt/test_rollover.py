@@ -728,6 +728,49 @@ class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
         self.assertFalse(distrakt.month_reachable("2027-02", date(2026, 12, 20)))  # past it
 
 
+class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
+    """The whole way through, on the month the tracker can actually be pointed at
+    ahead of today: a title still being watched now does not appear in a month
+    that has not started. It stays on the roster — it just is not that month's to
+    talk about until the calendar gets there.
+    """
+
+    async def test_a_month_that_has_not_begun_shows_no_work_in_hand(self):
+        from app.distrakt import routes as distrakt_routes
+
+        today = date.today()
+        year, month = _months_ahead(today, 1)
+        preview = distrakt.month_key(year, month)
+        # 101 is a weekly season part-way through: work in hand, and Keepup in
+        # any month that is entitled to say so.
+        await distrakt.add_show(self.user_id, preview, {
+            "ids": _ids(101), "season": 1, "title": "Still Airing",
+            "network": "Net", "media": "show"})
+
+        async def no_premieres(endpoint, settings, **kw):
+            return [], None
+
+        settings = SimpleNamespace(**vars(SETTINGS), public_base_url="")
+        with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
+             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+            payload, status = await distrakt_routes._distrakt_month_payload(
+                self.user_id, year, month, settings)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["shows"], [])
+        self.assertNotIn("Keepup", payload["post2"])
+        self.assertNotIn("Cleanup", payload["post2"])
+        self.assertIn("**New Shows**", payload["post2"])  # what it CAN announce
+        # Hidden from that month's view, not removed: it is still on the roster
+        # and still rolls forward when the calendar reaches the month.
+        stored = await distrakt.load_month(self.user_id, preview)
+        self.assertEqual(await self._keys(stored), {(101, 1)})
+
+
 class NotWatchingBeforeAMonthExistsTests(RolloverTestCase):
     """WHEN the mark was made decides what it means.
 

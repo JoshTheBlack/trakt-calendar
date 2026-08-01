@@ -44,10 +44,12 @@ def month_committed(month_key: str, today: date | None = None) -> bool:
     month has officially begun. BEFORE this a month is a "preview": it auto-
     populates from premieres and its main-calendar not-watching toggles only HIDE
     shows (reversibly). ON/AFTER it, not-watching promotes to Abandoned and the
-    immediately-prior month freezes."""
-    today = today or date.today()
-    year, month = int(month_key[:4]), int(month_key[5:7])
-    return (today.year, today.month) >= (year, month)
+    immediately-prior month freezes.
+
+    Reads the standing rather than comparing the key again here: "has this month
+    begun" and "is this month over" are the same comparison asked twice, and two
+    copies of it drift silently because neither one looks wrong on its own."""
+    return store.month_standing(month_key, today) is not store.MonthStanding.FUTURE
 
 
 def month_reachable(month_key: str, today: date | None = None) -> bool:

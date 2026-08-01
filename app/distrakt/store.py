@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date
 from enum import StrEnum
 
 from .. import db
@@ -60,6 +61,42 @@ class Bucket(StrEnum):
     CLEANUP = "cleanup"
     COMPLETED = "completed"
     ABANDONED = "abandoned"
+
+
+class MonthStanding(StrEnum):
+    """Where a month stands relative to the calendar: over, in progress, or not
+    yet begun.
+
+    Named here with month_key because it is the same fact — a month is addressed
+    by a "YYYY-MM" string, and everything that has to know whether that string is
+    behind, around or ahead of today asks the same question of it. It was being
+    asked with an inline comparison at each place that needed it, in slightly
+    different words, which is how a month that was over came to be rendered as
+    one still in progress.
+
+    Not a stored value: nothing in either table holds it, because it changes
+    without anything being written. It is derived from the key and the clock every
+    time it is wanted.
+    """
+    PAST = "past"
+    CURRENT = "current"
+    FUTURE = "future"
+
+
+def month_standing(month: str, today: date | None = None) -> MonthStanding:
+    """Where `month` ("YYYY-MM") stands relative to `today`.
+
+    Whole months, not days: a month is in progress from its 1st to its last, and
+    the tracker's rules — what freezes, what previews, what a post may say — all
+    turn on the month rather than on where inside it we are.
+    """
+    today = today or date.today()
+    here = (today.year, today.month)
+    there = (int(month[:4]), int(month[5:7]))
+    if there < here:
+        return MonthStanding.PAST
+    return MonthStanding.CURRENT if there == here else MonthStanding.FUTURE
+
 
 # The identity columns, in key order. Named once because three tables and every
 # lookup in this package are built from them.

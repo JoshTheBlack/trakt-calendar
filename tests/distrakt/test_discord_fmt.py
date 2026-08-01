@@ -372,6 +372,80 @@ class RenderPost2Tests(unittest.TestCase):
         self.assertIn("**Abandoned**\n> :_nf: ~~`Cancelled Show S01 (2/8)`~~", rendered)
 
 
+class WhichMonthMaySayWhatTests(unittest.TestCase):
+    """ONE rule, two faces. Cleanup and Keepup are statements about work in hand,
+    so only the month actually in progress carries them: a month that is over
+    settled both when it froze, and a month that has not begun has neither yet.
+
+    The rule is a single table (MONTH_BUCKETS) read by the roster filter and by
+    the post alike, so what the page lists and what the post says can never
+    disagree about which month is which.
+    """
+
+    def setUp(self):
+        self.emoji = {}
+        self.roster = [
+            show("Airing Weekly", 1, watched=2, total=8, cadence="Sun", started=True),
+            show("Finale Aired", 1, watched=5, total=8, cadence="Sun", started=True, finished=True),
+            show("Not Started", 1, total=8, premiere="9/4"),
+            show("All Watched", 1, watched=8, total=8, started=True, finished=True),
+            show("Given Up", 1, watched=2, total=8, started=True,
+                 abandoned=True, abandoned_form="`Given Up S01 (2/8)`"),
+        ]
+
+    def _titles(self, standing):
+        return [s["title"] for s in fmt.month_view(self.roster, standing)]
+
+    def test_the_month_in_progress_still_carries_everything(self):
+        """The one standing that was never wrong."""
+        rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
+                                    standing=fmt.MonthStanding.CURRENT)
+        for header in ("## **Cleanup**", "## **Keepup**", "**New Shows**",
+                       "**Returning**", "**Completed**", "**Abandoned**"):
+            self.assertIn(header, rendered)
+        self.assertEqual(len(self._titles(fmt.MonthStanding.CURRENT)), len(self.roster))
+
+    def test_a_month_that_is_over_carries_only_its_verdicts_and_its_films(self):
+        rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
+                                    movies=[{"title": "A Film", "year": 2011}],
+                                    standing=fmt.MonthStanding.PAST)
+        self.assertNotIn("Cleanup", rendered)
+        self.assertNotIn("Keepup", rendered)
+        self.assertNotIn("New Shows", rendered)
+        self.assertNotIn("Returning", rendered)
+        self.assertIn("**Completed**", rendered)
+        self.assertIn("**Abandoned**", rendered)
+        self.assertIn("A Film", rendered)
+        self.assertEqual(self._titles(fmt.MonthStanding.PAST), ["All Watched", "Given Up"])
+
+    def test_a_month_that_has_not_begun_carries_neither_cleanup_nor_keepup(self):
+        """The reported case: a title given up on in the month in progress showed
+        up in a later month's Cleanup, because it had been carried forward and
+        the later month bucketed it live like any other."""
+        rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
+                                    standing=fmt.MonthStanding.FUTURE)
+        self.assertNotIn("Cleanup", rendered)
+        self.assertNotIn("Keepup", rendered)
+        self.assertIn("**New Shows**", rendered)
+        self.assertNotIn("Airing Weekly", rendered)
+        self.assertNotIn("Finale Aired", rendered)
+        self.assertNotIn("Airing Weekly", self._titles(fmt.MonthStanding.FUTURE))
+
+    def test_the_default_is_the_month_in_progress(self):
+        """A caller that only wants the markup — a test, a preview — gets the
+        full shape without stating a month, as render_post1 does."""
+        self.assertEqual(fmt.render_post2(self.roster, self.emoji, ":tv:"),
+                         fmt.render_post2(self.roster, self.emoji, ":tv:",
+                                          standing=fmt.MonthStanding.CURRENT))
+
+    def test_a_row_a_month_may_not_show_is_only_hidden_never_dropped(self):
+        """month_view filters a view; the roster it was given is untouched, and
+        the stored rows behind it are what roll into the month they belong to."""
+        before = list(self.roster)
+        fmt.month_view(self.roster, fmt.MonthStanding.PAST)
+        self.assertEqual(self.roster, before)
+
+
 class BucketVocabularyTests(unittest.TestCase):
     """This module DECIDES a bucket; the closed set of them is named beside the
     column that stores it, and its own tests live with it in test_store.py."""

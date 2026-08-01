@@ -41,8 +41,10 @@ class ClosedMonthPayloadTests(unittest.TestCase):
     recomputing it against today's history would rewrite history on every open."""
 
     def _payload(self, doc, link_url=None):
+        # A frozen month is by definition one that is over, and how a month
+        # stands decides which sections it may carry (discord_fmt.MONTH_BUCKETS).
         return distrakt_routes._closed_month_payload(
-            doc, "2026-03", EMOJIS, DEFAULT_EMOJI, link_url)
+            doc, "2026-03", EMOJIS, DEFAULT_EMOJI, link_url, distrakt.MonthStanding.PAST)
 
     def test_it_renders_the_stored_roster_and_says_it_is_closed(self):
         doc = {"month": "2026-03", "closed": True,
@@ -55,6 +57,20 @@ class ClosedMonthPayloadTests(unittest.TestCase):
         self.assertFalse(payload["readonly"])
         self.assertEqual([s["title"] for s in payload["shows"]], ["Frozen Show"])
         self.assertIn("Frozen Show", payload["post1"] + payload["post2"])
+
+    def test_it_carries_only_its_verdicts_and_not_the_work_that_was_in_hand(self):
+        """A month that is over settled its Cleanup and its Keepup when it froze.
+        Re-listing what was still mid-flight on the last day reads as work
+        outstanding on a month nobody can do anything about."""
+        doc = {"month": "2026-03", "closed": True, "shows": [
+            {**_record(1, "Was Mid Season", watched=2, total=8), "finished_airing": False},
+            _record(2, "Got Through It", watched=6, total=6),
+        ]}
+        payload = self._payload(doc)
+        self.assertEqual([s["title"] for s in payload["shows"]], ["Got Through It"])
+        self.assertNotIn("Cleanup", payload["post2"])
+        self.assertNotIn("Keepup", payload["post2"])
+        self.assertIn("**Completed**", payload["post2"])
 
     def test_the_months_films_travel_with_it_rather_than_only_inside_post_2(self):
         doc = {"month": "2026-03", "closed": True, "shows": [],
@@ -91,14 +107,15 @@ class EmptyMonthPayloadTests(unittest.TestCase):
         fact, so an old month nobody was tracking stays empty AND uneditable —
         `readonly` is what hides the add affordances."""
         payload = distrakt_routes._empty_month_payload(
-            "2024-01", EMOJIS, DEFAULT_EMOJI, readonly=True)
+            "2024-01", EMOJIS, DEFAULT_EMOJI, distrakt.MonthStanding.PAST, readonly=True)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["readonly"])
         self.assertEqual(payload["shows"], [])
         self.assertEqual(payload["movies"], [])
 
     def test_an_unconfigured_current_month_is_empty_but_still_editable(self):
-        payload = distrakt_routes._empty_month_payload("2026-07", EMOJIS, DEFAULT_EMOJI)
+        payload = distrakt_routes._empty_month_payload(
+            "2026-07", EMOJIS, DEFAULT_EMOJI, distrakt.MonthStanding.CURRENT)
         self.assertFalse(payload["readonly"])
         self.assertFalse(payload["closed"])
 
