@@ -53,9 +53,9 @@ CACHE_DIR = DATA_DIR / "share_cards"
 RETENTION_DAYS = 90
 RETENTION_SECONDS = RETENTION_DAYS * 24 * 60 * 60
 
-# Half a sha256, which is the same trade ranker_export.render_key makes: far more
-# than enough to make a collision between two cards on one instance a
-# non-event, short enough to read in a directory listing.
+# Half a sha256, which is the same trade app/ranker/exports.py's render_key
+# makes: far more than enough to make a collision between two cards on one
+# instance a non-event, short enough to read in a directory listing.
 KEY_LENGTH = 32
 
 

@@ -26,11 +26,12 @@ import asyncio
 import logging
 from typing import Any
 
-from . import auth, db, distrakt, ranker_sources
-from .providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
-from .config import load_settings
-from .media import artwork
-from .ranker_sources import Media, TitleRef, int_or_none
+from . import sources as ranker_sources
+from .sources import Media, TitleRef, int_or_none
+from .. import auth, db, distrakt
+from ..providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
+from ..config import load_settings
+from ..media import artwork
 
 logger = logging.getLogger(__name__)
 

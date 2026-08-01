@@ -16,8 +16,9 @@ Completed bucket — every episode of the season watched, and the last of them
 watched inside M — so a season finished in May lands in May and in no other
 month, and the "remove it from the months before" problem never arises. Shows
 that were in progress but never finished are not recorded: nothing reads them
-(app/ranker_import only ever asks for `bucket == 'completed'`), and inventing a
-Cleanup/Keepup verdict for a month nobody was watching would be a guess.
+(app/ranker/imports.py only ever asks for `bucket == 'completed'`), and
+inventing a Cleanup/Keepup verdict for a month nobody was watching would be a
+guess.
 
 Each month is written CLOSED, exactly as a month that had been tracked and then
 frozen: the ranker import and the month view both read a frozen month straight

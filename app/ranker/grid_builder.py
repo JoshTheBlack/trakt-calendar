@@ -34,7 +34,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
-from .media import imaging
+from ..media import imaging
 
 # ---------------------------------------------------------------------------
 # constants — each one with the reason it has the value it has
@@ -99,8 +99,12 @@ FORMATS = frozenset(MAX_DIMENSION)
 # that produced it was replaced.
 RENDERER_VERSION = 3
 
+# Two parents, not one: this module sits in app/ranker/ and the bundled image
+# lives under app/static/, so the walk is up out of the package and then down.
+# A path computed from __file__ moves with the file, and nothing in an import
+# sweep looks at it.
 _PLACEHOLDER_PATH = (
-    Path(__file__).resolve().parent / "static" / "images" / "nopostertv.png"
+    Path(__file__).resolve().parent.parent / "static" / "images" / "nopostertv.png"
 )
 
 # Loaded once. Converted here rather than per missing poster, because a grid can

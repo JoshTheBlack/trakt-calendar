@@ -38,7 +38,6 @@ from . import http_pool
 from . import perftrace
 from . import plex_auth
 from . import plex_routes
-from . import ranker_routes
 from . import secrets_backfill
 from . import secrets_box
 from . import settings_routes
@@ -50,6 +49,7 @@ from .calendar import share_routes
 from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, posters
+from .ranker import routes as ranker_routes
 from .auth import AuthLevel
 from .config import load_settings
 from .templating import templates

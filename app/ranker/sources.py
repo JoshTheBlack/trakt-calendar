@@ -9,8 +9,8 @@ templates and stored rows.
 THE RULE THIS MODULE EXISTS TO ENFORCE: nothing outside a provider
 implementation calls a provider function. Routes ask this module for a source
 and get back `TitleRef`s, which say nothing about who produced them. Adding a
-service means adding a class here (and, for the tracker seam, in
-app/ranker_import.py) — not editing anything downstream.
+service means adding a class here (and, for the tracker seam, in imports.py) —
+not editing anything downstream.
 
 CREDENTIALS ARE NOT THE SAME FOR ALL THREE, and getting it backwards is the easy
 mistake:
@@ -32,18 +32,18 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from . import trakt_routes
-from .providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
-from .config import Settings, load_settings
-# Re-exported deliberately: `ranker_sources.Media` and `ranker_sources.parse_media`
-# are what the ranker's routes and data layer already import, and the vocabulary
+from .. import trakt_routes
+from ..providers.trakt import TraktError, detail as trakt_detail, sync as trakt_sync
+from ..config import Settings, load_settings
+# Re-exported deliberately: `sources.Media` and `sources.parse_media` are what
+# the ranker's routes and data layer already import, and the vocabulary
 # they name is the app's, not this feature's — the calendar and the tracker deal
 # in the same two kinds of title. One definition, read from where it lives.
 #
 # `resolve_identity` comes from there too, and is CALLED here rather than
 # re-exported: the tracker keys its own rows on the same waterfall's answer, so a
 # second copy would be two definitions of what makes two titles the same one.
-from .providers.base import Media, parse_media, resolve_identity  # noqa: F401
+from ..providers.base import Media, parse_media, resolve_identity  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

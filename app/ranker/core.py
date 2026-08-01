@@ -35,13 +35,13 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from . import db
+from .. import db
 # Re-exported deliberately (the same reasoning MEDIA_VALUES below carries): the
 # identity a board row is keyed on is the app's notion of "the same title", not
 # this feature's — the tracker files its own rows under the same triple. One
 # definition, read from where it lives.
-from .providers.base import MATCH_SOURCES, ItemKey, Media, item_key  # noqa: F401
-from .providers.base import parse_item_key as base_parse_item_key
+from ..providers.base import MATCH_SOURCES, ItemKey, Media, item_key  # noqa: F401
+from ..providers.base import parse_item_key as base_parse_item_key
 
 # Caps. Every one of these is enforced by rejecting the whole request, never by
 # quietly truncating: a user who pasted a 90-character board name should be told

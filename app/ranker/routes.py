@@ -1,6 +1,6 @@
 """The rankings page and its board API.
 
-HTTP only: parse a request, validate its shape, delegate to app/ranker.py, and
+HTTP only: parse a request, validate its shape, delegate to core.py, and
 turn the answer — or the refusal — into a response. No SQL and no business rules
 live here; a rule that appears in this module is a rule the data layer cannot
 enforce for the callers that bypass a route.
@@ -27,14 +27,15 @@ import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
-from . import (auth, authz, chrome, grid_builder, ranker, ranker_export,
-               ranker_import, ranker_sources)
-from .auth import AuthLevel
-from .config import load_settings
-from .media import posters, user_images
-from .perftrace import span
-from .ranker_sources import Media
-from .templating import templates
+from . import (core as ranker, exports as ranker_export, grid_builder,
+               imports as ranker_import, sources as ranker_sources)
+from .sources import Media
+from .. import auth, authz, chrome
+from ..auth import AuthLevel
+from ..config import load_settings
+from ..media import posters, user_images
+from ..perftrace import span
+from ..templating import templates
 
 router = APIRouter()
 guard = authz.Guard(router)
@@ -148,7 +149,7 @@ def _tiers_by_priority(categories: list[dict]) -> list[dict]:
     """A board's tiers in the order they are read in: highest priority first.
 
     Priority is what a tier MEANS relative to the others, and it is already what
-    the ranking itself is built from — ranker_export orders by exactly this key.
+    the ranking itself is built from — exports.py orders by exactly this key.
     Drawing the tiers in the order they happened to be CREATED in left the board
     disagreeing with its own export, and left no way to move a tier at all,
     since nothing reorders them by hand.
@@ -600,8 +601,8 @@ async def warm_board_posters(board_uid: str, request: Request):
 # ---------------------------------------------------------------------------
 # where titles come from
 # ---------------------------------------------------------------------------
-# Every route below goes through app/ranker_sources.py (and, for the optional
-# import, app/ranker_import.py). None of them names a provider, which is what
+# Every route below goes through sources.py (and, for the optional import,
+# imports.py). None of them names a provider, which is what
 # makes adding a second one a change to those modules alone.
 
 def _media(value, default: Media | None = None) -> Media:
@@ -752,7 +753,7 @@ async def seed_from_ratings(board_uid: str, request: Request):
 # ---------------------------------------------------------------------------
 # taking a ranking away: the image, the preview and the Markdown
 # ---------------------------------------------------------------------------
-# All three consolidate through app/ranker_export.py and only then diverge, so
+# All three consolidate through exports.py and only then diverge, so
 # the picture and the text block a user posts beside it are always the same
 # ranking. Nothing below decides an ordering of its own.
 
