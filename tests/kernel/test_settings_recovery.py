@@ -11,6 +11,13 @@ secret-less Settings and treated each blank field as an instruction to delete.
 
 So: an absent secret must never remove a stored one, an explicit clear must still
 clear, and there must be a way in that does not involve editing the file at all.
+
+That way in is the PUBLIC_BASE_URL environment variable, and it OVERRIDES the
+stored value rather than filling in for a missing one — the lockout operators
+actually hit is a base URL that is set and wrong, which makes the origin check
+refuse every mutating request including the sign-in itself. Because it wins
+silently it has to announce itself, in the startup log and on the Settings
+screen, or the trap simply moves to "I saved it and nothing happened".
 """
 from __future__ import annotations
 
@@ -177,11 +184,6 @@ class PublicBaseUrlBootstrapTests(SettingsFileTestCase):
         with self.with_env("https://shows.example.com"):
             self.assertIn("/auth/trakt/start", self.client.get("/login").text)
 
-    def test_a_stored_value_wins(self):
-        save_settings(Settings(public_base_url="https://stored.example.com"))
-        with self.with_env("https://shows.example.com"):
-            self.assertEqual(load_settings().public_base_url, "https://stored.example.com")
-
     def test_it_is_not_written_to_storage(self):
         """A fallback, not a migration: removing the variable removes the
         override, rather than leaving a value nobody can account for."""
@@ -210,6 +212,126 @@ class PublicBaseUrlBootstrapTests(SettingsFileTestCase):
         db.connection().commit()
         with self.with_env("https://shows.example.com"):
             self.assertEqual(load_settings().public_base_url, "https://shows.example.com")
+
+
+WRONG_STORED_URL = "https://moved-away.example.com"
+
+
+class PublicBaseUrlOverrideTests(SettingsFileTestCase):
+    """The lockout that actually happens: a base URL that is stored and WRONG.
+
+    An absent one still admits a password sign-in, because the origin check falls
+    back to the request's own Host. A wrong one is authoritative, so every
+    mutating request — the sign-in included — is refused as coming from another
+    origin, and the only screen that could correct the setting is behind that
+    sign-in. A rescue lever that deferred to the stored value could not reach this
+    case at all, which is why the environment wins.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=WRONG_STORED_URL)
+
+    def with_env(self, value: str):
+        return patch.dict("os.environ", {PUBLIC_BASE_URL_ENV: value})
+
+    def test_signing_in_works_again_with_the_right_origin_in_the_environment(self):
+        """The whole promise, end to end: username and password, against an
+        instance whose stored base URL points somewhere the operator is not."""
+        self.make_user("someone", calendar_approved=True)
+        credentials = {"username": "someone", "password": PASSWORD}
+
+        refused = self.client.post("/login", json=credentials)
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertIn("another origin", refused.text)
+
+        with self.with_env(ORIGIN):
+            allowed = self.client.post("/login", json=credentials)
+        self.assertEqual(allowed.status_code, 200, allowed.text)
+
+    def test_the_environment_wins_over_a_stored_value(self):
+        with self.with_env("https://shows.example.com"):
+            self.assertEqual(load_settings().public_base_url, "https://shows.example.com")
+
+    def test_nothing_is_overridden_while_the_variable_is_unset(self):
+        """The stored value is still the answer for every instance that never
+        touches this — the override has to be inert unless somebody asks for it."""
+        self.assertEqual(load_settings().public_base_url, WRONG_STORED_URL)
+
+    def test_an_unusable_value_leaves_the_stored_one_in_force(self):
+        """Ignoring a bad value must not also discard the good one underneath it."""
+        with self.with_env("shows.example.com"):
+            self.assertEqual(load_settings().public_base_url, WRONG_STORED_URL)
+
+    def test_the_override_leaves_no_trace_once_the_variable_goes(self):
+        """Removing the variable is the whole undo: it is applied to the assembled
+        settings, never written back, so nothing outlives the restart."""
+        with self.with_env("https://shows.example.com"):
+            load_settings()
+        self.assertEqual(load_settings().public_base_url, WRONG_STORED_URL)
+
+    def test_a_value_saved_in_settings_takes_effect_once_the_variable_is_gone(self):
+        """The end of the rescue: the operator saves the real value, drops the
+        variable, and the instance runs on what they saved."""
+        self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
+        with self.with_env(ORIGIN):
+            resp = self.client.post("/api/settings", json={"public_base_url": ORIGIN})
+            self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(load_settings().public_base_url, ORIGIN)
+
+
+class PublicBaseUrlOverrideIsAnnouncedTests(SettingsFileTestCase):
+    """An override nobody can see is the trap the seed shape was avoiding: set the
+    variable, forget it, type the real value into Settings, watch it save, and
+    nothing changes. So it says so in the startup log and on the screen."""
+
+    def make_settings(self):
+        return Settings(public_base_url=WRONG_STORED_URL)
+
+    def with_env(self, value: str):
+        return patch.dict("os.environ", {PUBLIC_BASE_URL_ENV: value})
+
+    def test_startup_names_both_values_when_they_differ(self):
+        with self.with_env("https://shows.example.com"), \
+                self.assertLogs("app.config", level="WARNING") as logs:
+            config.warn_if_public_base_url_overridden()
+        line = "\n".join(logs.output)
+        self.assertIn("https://shows.example.com", line)
+        self.assertIn(WRONG_STORED_URL, line)
+
+    def test_startup_says_nothing_when_the_variable_matches_what_is_stored(self):
+        """Pinning the value in the environment is an ordinary way to run this;
+        warning about it would train everybody to skip the line that matters."""
+        with self.with_env(WRONG_STORED_URL):
+            with patch.object(config.logger, "warning") as warned:
+                config.warn_if_public_base_url_overridden()
+        warned.assert_not_called()
+
+    def test_startup_says_nothing_when_the_variable_is_unset(self):
+        with patch.object(config.logger, "warning") as warned:
+            config.warn_if_public_base_url_overridden()
+        warned.assert_not_called()
+
+    def test_the_settings_screen_is_told_the_environment_is_overriding_the_field(self):
+        self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
+        with self.with_env(ORIGIN):
+            payload = self.client.get("/api/settings").json()
+        self.assertIs(payload["public_base_url_overridden"], True)
+        self.assertEqual(payload["public_base_url"], ORIGIN)
+
+    def test_the_flag_is_false_with_no_variable_set(self):
+        self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
+        payload = self.client.get("/api/settings").json()
+        self.assertIs(payload["public_base_url_overridden"], False)
+
+    def test_the_flag_adds_no_credential_to_the_response(self):
+        """The one route that must never leak a value: widening it by a boolean is
+        fine, widening it by anything else is not."""
+        save_settings(Settings(public_base_url=WRONG_STORED_URL, **STORED_SECRETS))
+        self.sign_in_as(self.make_user("admin_user", is_admin=True, calendar_approved=True))
+        with self.with_env(ORIGIN):
+            body = self.client.get("/api/settings").text
+        for value in STORED_SECRETS.values():
+            self.assertNotIn(value, body)
 
 
 if __name__ == "__main__":

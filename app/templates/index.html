@@ -268,6 +268,12 @@
                         <label for="s_base_url">Public base URL</label>
                         <input type="text" id="s_base_url" name="public_base_url" placeholder="https://shows.example.com" autocomplete="off" spellcheck="false">
                         <span class="hint" id="s_redirect_hint">The origin people reach this app on — no path, no trailing slash. Required for "Log in with Trakt", and used for every link the app generates.</span>
+                        {# Shown only while PUBLIC_BASE_URL is set in the
+                           environment, which OVERRIDES whatever is saved here.
+                           Without it, an operator who set the variable to get
+                           back in and then forgot it would save a corrected
+                           value, see it accepted, and watch nothing change. #}
+                        <span class="hint warn" id="s_base_url_env" hidden></span>
                     </div>
                     <div class="field">
                         <label for="s_trusted_proxies">Trusted proxy addresses</label>

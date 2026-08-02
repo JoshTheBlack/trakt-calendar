@@ -27,7 +27,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import auth, authz, db
+from . import auth, authz, config, db
 from .auth import encryption_flow, encryption_routes
 from .auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
 from .integrations import routes as integrations_routes
@@ -125,6 +125,13 @@ async def get_settings(request: Request):
         ) and not (admin and admin.has_trakt_identity),
         # Whether the per-user "Log in with Trakt" button can be offered at all.
         "trakt_login_configured": settings.trakt_login_configured,
+        # Whether the PUBLIC_BASE_URL environment variable is in force. It BEATS
+        # the saved base URL (see config.PUBLIC_BASE_URL_ENV), so without this the
+        # administrator would have no way to tell why a value they just saved is
+        # not the one the app is using. Not a credential — it says only that a
+        # variable is set, and the value it carries is the origin every visitor
+        # already types into their address bar.
+        "public_base_url_overridden": bool(config.public_base_url_override()),
         "trakt_redirect_uri": (
             trakt_auth.redirect_uri(settings.public_base_url)
             if settings.public_base_url else ""
