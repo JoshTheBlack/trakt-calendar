@@ -393,8 +393,13 @@ class WhichMonthMaySayWhatTests(unittest.TestCase):
                  abandoned=True, abandoned_form="`Given Up S01 (2/8)`"),
         ]
 
+    # Every premiere in the roster above falls in this month, so the standing rule
+    # is what the assertions below are reading rather than the premiere rule. The
+    # premiere rule has its own class.
+    MONTH = "2026-09"
+
     def _titles(self, standing):
-        return [s["title"] for s in fmt.month_view(self.roster, standing)]
+        return [s["title"] for s in fmt.month_view(self.roster, standing, self.MONTH)]
 
     def test_the_month_in_progress_still_carries_everything(self):
         """The one standing that was never wrong."""
@@ -442,8 +447,45 @@ class WhichMonthMaySayWhatTests(unittest.TestCase):
         """month_view filters a view; the roster it was given is untouched, and
         the stored rows behind it are what roll into the month they belong to."""
         before = list(self.roster)
-        fmt.month_view(self.roster, fmt.MonthStanding.PAST)
+        fmt.month_view(self.roster, fmt.MonthStanding.PAST, self.MONTH)
         self.assertEqual(self.roster, before)
+
+
+class NewAndReturningMeanPremieredHereTests(unittest.TestCase):
+    """A month announces the seasons that START in it. Anything else on its
+    roster that has not begun airing buckets as new/returning all the same, and
+    without the premiere test the page and the second notice re-announce a season
+    that belongs to some other month — which the first notice never did."""
+
+    def setUp(self):
+        self.month = "2026-09"
+        self.here = show("Starts Here", 1, total=8, premiere="9/4")
+        self.elsewhere = show("Started In June", 2, total=8, premiere="6/2")
+        self.undated = show("No Premiere Known", 1, total=8)
+
+    def _titles(self, month):
+        return [s["title"] for s in fmt.month_view(
+            [self.here, self.elsewhere, self.undated], fmt.MonthStanding.CURRENT, month)]
+
+    def test_a_season_that_premiered_elsewhere_is_not_this_month_s_news(self):
+        self.assertEqual(self._titles(self.month), ["Starts Here"])
+
+    def test_the_page_and_the_second_notice_agree_with_the_first(self):
+        """The asymmetry that made this visible: POST 1 applied the test and the
+        other two readers did not, so one announced two shows and the rest three."""
+        rows = fmt.month_view([self.here, self.elsewhere], fmt.MonthStanding.CURRENT,
+                              self.month)
+        post1 = fmt.render_post1([self.here, self.elsewhere], {}, ":tv:", month=self.month)
+        post2 = fmt.render_post2(rows, {}, ":tv:", standing=fmt.MonthStanding.CURRENT)
+        self.assertIn("Starts Here", post1)
+        self.assertNotIn("Started In June", post1)
+        self.assertIn("Starts Here", post2)
+        self.assertNotIn("Started In June", post2)
+
+    def test_a_month_that_cannot_be_read_applies_no_premiere_test(self):
+        """A rendering-only caller with nothing to compare against gets the rows
+        rather than an empty list — the same tolerance _month_number has."""
+        self.assertEqual(len(self._titles(None)), 3)
 
 
 class BucketVocabularyTests(unittest.TestCase):

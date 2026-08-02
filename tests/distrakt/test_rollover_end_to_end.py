@@ -227,12 +227,15 @@ class MonthFreezesWhenItsDatePassesTests(RolloverOverHttpTestCase):
         self.assertTrue(july["closed"])
 
 
-class AMonthThatHasNotBegunHoldsOnlyItsOwnPremieresTests(RolloverOverHttpTestCase):
-    """Before the 1st, next month is a preview of what STARTS in it.
+class AMonthHoldsOnlyItsOwnPremieresTests(RolloverOverHttpTestCase):
+    """A month holds what STARTS in it, whether or not it has begun.
 
-    The carry-forward and the recent-viewing sweep are both statements about now,
-    and a month nobody has reached has nothing for them to be statements about —
-    filed in anyway, a season that began in July was announced as new in August.
+    What the user is in the middle of is a fact about the user, read across every
+    month at once, so there is nothing for a new month to take from the one before
+    it. Taking it anyway made a season that began in July get announced as new in
+    August, gave a month built ahead a roster frozen at build time, and read a
+    calendar turn-away made during that wait as giving up on a show that had never
+    started.
     """
 
     def test_opening_a_month_that_has_not_begun_does_not_build_it(self):
@@ -243,24 +246,38 @@ class AMonthThatHasNotBegunHoldsOnlyItsOwnPremieresTests(RolloverOverHttpTestCas
         self.assertEqual(self.stored_ids(OPENING), set(),
                          "merely looking at next month wrote a roster")
 
-    def test_importing_it_early_takes_premieres_and_nothing_carried_forward(self):
+    def test_importing_it_early_takes_premieres_and_nothing_else(self):
         self.seed_july()
         with fake_today(BEFORE_THE_FIRST):
             self.get_month(CLOSING)
             self.import_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
         self.assertEqual(
             self.stored_ids(OPENING), {801},
-            "a month that has not begun took titles carried over from July")
+            "a month that has not begun took titles from July")
 
-    def test_the_same_month_takes_the_carry_forward_once_it_has_begun(self):
-        # The other half of the rule, and the one that proves the first is a date
-        # decision rather than the carry-forward being broken outright: same data,
-        # same request, one day later.
+    def test_the_same_month_takes_nothing_extra_once_it_has_begun(self):
+        # The month opening changes nothing about what it HOLDS. It used to be the
+        # moment July's roster was copied across, which is how a preview built the
+        # month before could never gain what opening was supposed to bring it.
         self.seed_july()
         with fake_today(ON_THE_FIRST):
             self.get_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
-        self.assertIn(701, self.stored_ids(OPENING),
-                      "the month under way did not take July's live title")
+        self.assertEqual(self.stored_ids(OPENING), {801},
+                         "the month under way copied July's roster in")
+
+    def test_july_s_live_title_is_still_on_the_page_in_august(self):
+        # And this is why nothing needs copying: the show the user is part-way
+        # through is on August's page as THEIR list, read off the month it is
+        # stored on. Its finished and given-up neighbours are not.
+        self.seed_july()
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(
+                OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+        shown = {int((s.get("ids") or {}).get("tmdb")) for s in payload["shows"]}
+        self.assertIn(701, shown, "the user's own list lost the title July held")
+        self.assertNotIn(702, shown)  # finished: July's verdict, not August's work
+        self.assertNotIn(703, shown)  # given up on: off the list for good
+        self.assertEqual(self.stored_ids(OPENING), {801}, "showing it wrote it in")
 
 
 class CompletedAndAbandonedStayInTheMonthTheyHappenedTests(RolloverOverHttpTestCase):
@@ -301,13 +318,154 @@ class CompletedAndAbandonedStayInTheMonthTheyHappenedTests(RolloverOverHttpTestC
         self.assertEqual(buckets[702], "completed")
         self.assertEqual(buckets[703], "abandoned")
 
-    def test_the_live_title_carried_forward_arrives_unabandoned(self):
+    def test_the_live_title_is_still_the_user_s_and_not_given_up_on(self):
+        # July's verdict on 703 travels nowhere, and neither does its absence of
+        # one on 701: the title the user is part-way through reads as work in
+        # hand on August's page, not as something they walked away from.
         self._roll_into_august()
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING)
+        row = next(s for s in payload["shows"] if int((s.get("ids") or {}).get("tmdb")) == 701)
+        self.assertFalse(row["abandoned"])
+        self.assertIn(row["bucket"], ("cleanup", "keepup"))
+
+
+class ASeasonThatGrewComesBackAndSaysSoTests(RolloverOverHttpTestCase):
+    """A show known to have six episodes that the user watched all six of is
+    finished — until the provider learns of an eighth. July's record of having
+    finished it is still true and is not edited; the show being back on the pile
+    is a fact about the user now, and it arrives by itself because their own list
+    is derived from live counts rather than from month membership.
+    """
+
+    def _roll_into_august(self) -> None:
+        self.seed_july()
+        with fake_today(BEFORE_THE_FIRST):
+            self.get_month(CLOSING)
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+
+    @contextlib.contextmanager
+    def _season_grew(self, trakt_id: int, total: int):
+        """The provider revising a season's episode count upward, which is the
+        one number this whole case turns on."""
+        was = _SEASONS[trakt_id]["total"]
+        _SEASONS[trakt_id]["total"] = total
+        try:
+            yield
+        finally:
+            _SEASONS[trakt_id]["total"] = was
+
+    def test_it_reappears_on_the_user_s_own_list(self):
+        self._roll_into_august()
+        with self._season_grew(702, 8), fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING)
+        row = next(s for s in payload["shows"] if int((s.get("ids") or {}).get("tmdb")) == 702)
+        self.assertIn(row["bucket"], ("cleanup", "keepup"))
+
+    def test_it_is_marked_as_being_back(self):
+        # Unannounced, a title the user remembers finishing reads as the page
+        # having got it wrong.
+        self._roll_into_august()
+        with self._season_grew(702, 8), fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING)
+        marked = {int((s.get("ids") or {}).get("tmdb")) for s in payload["shows"] if s["returned"]}
+        self.assertEqual(marked, {702})
+
+    def test_july_still_says_it_was_finished_there(self):
+        # The half the split already resolves: "finished in July" is a fact about
+        # July and is STILL TRUE — the user did finish what was known then.
+        self._roll_into_august()
+        with self._season_grew(702, 8), fake_today(ON_THE_FIRST):
+            self.get_month(OPENING)
+            july = self.get_month(CLOSING)
+        row = next(s for s in july["shows"] if int((s.get("ids") or {}).get("tmdb")) == 702)
+        self.assertEqual(row["bucket"], "completed")
+
+
+class ActingOnARowStoredSomewhereElseTests(RolloverOverHttpTestCase):
+    """The user's own list shows titles stored on other months, so the two
+    controls on such a row have to reach the month it actually lives on."""
+
+    def _roll_into_august(self) -> None:
+        self.seed_july()
+        with fake_today(BEFORE_THE_FIRST):
+            self.get_month(CLOSING)
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+
+    def _post(self, path: str, body: dict) -> dict:
+        # Patched on the ROUTE module, not on the provider one: routes.py binds
+        # both names at import time, so patching where they are defined does not
+        # reach the copies it calls.
+        with self.offline(), \
+                mock.patch("app.distrakt.routes.fetch_watched_map", return_value={}), \
+                mock.patch("app.distrakt.routes.fetch_season_detail",
+                           side_effect=_fake_season_detail):
+            resp = self.client.post(path, json=body)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.json()
+
+    def test_giving_up_on_it_is_recorded_against_the_month_being_viewed(self):
+        # "I stopped following this" is a fact about the month it happened in,
+        # and July has already settled.
+        self._roll_into_august()
+        with fake_today(ON_THE_FIRST):
+            self._post("/api/distrakt/abandon", {
+                "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1,
+                "abandoned": True})
+        self.assertIn(701, self.stored_ids(OPENING))
+        import asyncio
+        row, = [s for s in asyncio.run(
+            distrakt_store.load_month(self.user_id, OPENING))["shows"]
+            if int(s["match_id"]) == 701]
+        self.assertTrue(row["abandoned"])
+
+    def test_july_s_own_row_is_left_as_it_was(self):
+        self._roll_into_august()
+        with fake_today(ON_THE_FIRST):
+            self._post("/api/distrakt/abandon", {
+                "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1,
+                "abandoned": True})
+        import asyncio
+        row, = [s for s in asyncio.run(
+            distrakt_store.load_month(self.user_id, CLOSING))["shows"]
+            if int(s["match_id"]) == 701]
+        self.assertFalse(row["abandoned"])
+
+    def test_removing_it_takes_every_copy_so_it_does_not_come_back(self):
+        # Taking it off only the month being viewed leaves the copy that put it on
+        # the list, and it returns on the next load with the ✕ looking broken.
+        self._roll_into_august()
+        with fake_today(ON_THE_FIRST):
+            self._post("/api/distrakt/remove", {
+                "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1})
+            payload = self.get_month(OPENING)
+        self.assertNotIn(701, self.stored_ids(CLOSING))
+        self.assertNotIn(701, {int((s.get("ids") or {}).get("tmdb")) for s in payload["shows"]})
+
+
+class AFrozenMonthIsFilteredAsAtFreezeTests(RolloverOverHttpTestCase):
+    """A turn-away made today must never reach backwards and edit what an
+    already-frozen month announced. Season 1 was watched and finished in July;
+    turning season 2 away in August says nothing about July."""
+
+    def test_july_keeps_what_it_announced_after_a_mark_made_later(self):
         import asyncio
 
-        doc = asyncio.run(distrakt_store.load_month(self.user_id, OPENING))
-        carried = next(s for s in doc["shows"] if int(s["match_id"]) == 701)
-        self.assertFalse(carried["abandoned"])
+        from app.calendar import state as calendar_state
+
+        self.seed_july()
+        with fake_today(BEFORE_THE_FIRST):
+            self.get_month(CLOSING)
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+            asyncio.run(calendar_state.set_not_watching(self.user_id, "slug-701", True))
+            july = self.get_month(CLOSING)
+
+        shown = {int((s.get("ids") or {}).get("tmdb")) for s in july["shows"]}
+        self.assertEqual(shown, {702, 703})  # July's own verdicts, unchanged
+        self.assertEqual(self.stored_ids(CLOSING), {701, 702, 703})
 
 
 class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):

@@ -137,6 +137,12 @@ async def import_premieres(user_id: int, month_key: str, settings) -> dict | Non
         return doc
     year, month = store.parse_month_key(month_key)
     present = {_present_key(s) for s in doc.get("shows") or []}
+    # EVERY mark, whenever it was made: this is an ADD path, and putting a title
+    # the user has turned away back on the roster is never the right answer. When
+    # the mark was made matters to a row that is ALREADY on the month — that is
+    # the difference between "I never intended to watch this" and "I was following
+    # this and stopped", and it is read where such a row is judged
+    # (routes._apply_not_watching), not here where there is no row yet.
     nw_ids = await calendar_state.not_watching_ids(user_id)
     if await add_premieres(doc, present, user_id, settings, year, month, nw_ids):
         await save_month(user_id, doc)

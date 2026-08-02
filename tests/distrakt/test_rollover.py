@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace as dataclasses_replace
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -160,11 +160,24 @@ class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
         return {(int(s["match_id"]), s["season"]) for s in doc["shows"]}
 
     async def _mark_not_watching(self, user_id, year, month, item_id,
-                                 endpoint="shows/new"):
+                                 endpoint="shows/new", *, before_the_month=True):
         """A real main-calendar "not watching" mark, the same write the calendar
-        page makes. The year/month/endpoint are accepted and ignored: a mark is a
-        statement about the show, not about the view it was made in."""
+        page makes, dated relative to the 1st of (year, month).
+
+        The endpoint is accepted and ignored: a mark is a statement about the
+        show, not about the view it was made in. WHEN is not ignored — a mark made
+        before a month opened keeps the show out of that month entirely, and one
+        made after it opened is a decision about a show that was under way. The
+        default is the first of those, which is what every caller here means.
+        """
         await calendar_state.set_not_watching(user_id, item_id, True)
+        opened = date(year, month, 1)
+        when = opened - timedelta(days=1) if before_the_month else opened + timedelta(days=1)
+        await db.execute(
+            "UPDATE not_watching_shows SET created_at = ? WHERE user_id = ? AND item_id = ?",
+            (int(datetime(when.year, when.month, when.day, tzinfo=timezone.utc).timestamp()),
+             user_id, item_id),
+        )
 
 
 class RolloverTests(RolloverTestCase):
@@ -206,8 +219,12 @@ class RolloverTests(RolloverTestCase):
 
         self.assertEqual(await self._keys(doc), {(201, 1)})
 
-    async def test_rollover_freezes_prior_and_drops_completed_abandoned(self):
-        """July -> August: freeze July, carry active only, add August premieres."""
+    async def test_rollover_freezes_prior_and_takes_nothing_from_it(self):
+        """July -> August: freeze July, and build August from its own premieres.
+
+        What the user is still in the middle of is a fact about the USER and is
+        read across every month at once, so a new month has nothing to inherit —
+        July keeps its own rows, and August holds what starts in August."""
         # Seed an OPEN July with an active, a completed, and an abandoned show.
         for tid, title in ((101, "Active"), (102, "Done"), (103, "Gone")):
             await distrakt.add_show(self.user_id, "2026-07", {
@@ -241,11 +258,13 @@ class RolloverTests(RolloverTestCase):
         self.assertIn("started_airing", by_id[101])  # frozen snapshot renders offline
         self.assertTrue(by_id[101]["started_airing"])
 
-        # August: dropped 102 (completed) + 103 (abandoned); kept 101; added 201.
-        self.assertEqual(await self._keys(aug), {(101, 1), (201, 1)})
-        carried = next(s for s in aug["shows"] if s["key"] == _key(101))
-        self.assertFalse(carried["abandoned"])
-        self.assertIsNone(carried["abandoned_form"])
+        # August holds August: its own premiere and nothing July was holding.
+        self.assertEqual(await self._keys(aug), {(201, 1)})
+        # And July still holds all three, so the live show is still readable —
+        # from the user's own roster rather than from a copy on August.
+        held = {(int(s["match_id"]), s["season"]) for s in await distrakt.user_roster(self.user_id)}
+        self.assertIn((101, 1), held)
+        self.assertNotIn((103, 1), held)  # given up on: off the user's list for good
 
     async def test_frozen_month_returns_untouched(self):
         """An already-closed month is returned as-is with no Trakt calls."""
@@ -824,16 +843,20 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
 
         self.assertEqual(await self._keys(doc), set())
 
-    async def test_the_month_under_way_still_takes_all_three(self):
-        """The half that must not change: once a month has begun, everything that
-        was in hand arrives on it in whatever bucket it has earned."""
+    async def test_the_month_under_way_takes_its_premieres_and_recent_viewing(self):
+        """The half that must not change: once a month has begun, a season
+        somebody is part-way through is this month's material and arrives on it.
+
+        The month before it still contributes nothing — a title still going is a
+        fact about the user, read across every month at once, and copying it here
+        is what let a month claim a season that premiered somewhere else."""
         await self._seed(-1, 101, "Still Airing")
 
         doc = await self._build(0, premieres=[_cal_item(201, 1, "Starts Now")], progress=[
             {"ids": _ids(401), "season": 1, "watched": 3, "title": "Part Way", "network": "Net"},
         ])
 
-        self.assertEqual(await self._keys(doc), {(101, 1), (201, 1), (401, 1)})
+        self.assertEqual(await self._keys(doc), {(201, 1), (401, 1)})
 
     async def test_opening_the_month_ahead_builds_nothing_and_says_what_it_waits_for(self):
         """Building a month is the expensive act, and out ahead it is also a
@@ -964,18 +987,49 @@ class NotWatchingBeforeAMonthExistsTests(RolloverTestCase):
             return await distrakt.ensure_month(self.user_id, self.today.year, self.today.month,
                                                SETTINGS, today=self.today)
 
-    async def test_a_carried_title_already_marked_never_enters_the_new_month(self):
+    async def test_a_premiere_marked_before_the_month_opened_never_enters_it(self):
         """The reported case: the marks were all made on the calendar first, and
         the month's first build listed every one of them as Abandoned."""
-        await distrakt.add_show(self.user_id, self.prior, {
-            "ids": _ids(101), "season": 1, "title": "Not For Me", "network": "Net"})
         await self._mark_not_watching(self.user_id, self.today.year, self.today.month, "slug-101")
 
-        doc = await self._ensure_current()
+        doc = await self._ensure_current(premieres=[_cal_item(101, 1, "Not For Me")])
 
         self.assertEqual(await self._keys(doc), set())
         stored = await distrakt.load_month(self.user_id, self.current)
-        self.assertEqual(stored["shows"], [])  # pruned, not carried in as abandoned
+        self.assertEqual(stored["shows"], [])  # pruned, not built in as abandoned
+
+    async def _payload(self):
+        """The month under way as the page asks for it, with nothing to import."""
+        from app.distrakt import routes as distrakt_routes
+
+        async def no_premieres(endpoint, settings, **kw):
+            return [], None
+
+        with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
+             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+            payload, status = await distrakt_routes._distrakt_month_payload(
+                self.user_id, self.today.year, self.today.month, self._settings())
+        self.assertEqual(status, 200)
+        return payload
+
+    async def test_a_row_marked_before_the_month_opened_is_hidden_not_abandoned(self):
+        """A row that got onto the month anyway — restored from an export, added by
+        hand — is still governed by when the mark was made. Before the month
+        opened it is hidden, and the month reaches no verdict about it: the row is
+        left alone so un-marking brings it straight back."""
+        await self._ensure_current(premieres=[_cal_item(101, 1, "Never Started It")])
+        await self._mark_not_watching(self.user_id, self.today.year, self.today.month,
+                                      "slug-101")
+
+        payload = await self._payload()
+
+        self.assertEqual(payload["shows"], [])
+        stored = await distrakt.load_month(self.user_id, self.current)
+        self.assertFalse(stored["shows"][0]["abandoned"])  # hidden, not given up on
 
     async def test_a_history_title_already_marked_never_enters_the_new_month(self):
         """The same rule for the third source. Recent watch history is a fact
@@ -989,42 +1043,34 @@ class NotWatchingBeforeAMonthExistsTests(RolloverTestCase):
 
         self.assertEqual(await self._keys(doc), set())
 
-    async def test_an_unmarked_title_is_still_carried_forward(self):
-        """The filter has to be about the mark and not about the source — a
-        prior-month title nobody has said anything about still rolls over."""
+    async def test_an_unmarked_title_stays_on_the_user_s_own_list(self):
+        """The filter has to be about the mark and not about the source. A title
+        nobody has said anything about is still the user's to get through — it
+        stays on the month it is stored on, and their own list reads it there."""
         await distrakt.add_show(self.user_id, self.prior, {
             "ids": _ids(101), "season": 1, "title": "Still Watching", "network": "Net"})
 
         doc = await self._ensure_current()
 
-        self.assertEqual(await self._keys(doc), {(101, 1)})
+        self.assertEqual(await self._keys(doc), set())  # not copied onto this month
+        held = {(int(s["match_id"]), s["season"])
+                for s in await distrakt.user_roster(self.user_id)}
+        self.assertEqual(held, {(101, 1)})
 
     async def test_marking_it_after_the_month_exists_abandons_it_instead(self):
         """The other half, and the half that must NOT change: once the month
         lists a title, saying you are not watching it is a verdict on this month,
         and the month records it as Abandoned rather than forgetting it."""
-        from app.distrakt import routes as distrakt_routes
-
         await self._ensure_current(premieres=[_cal_item(101, 1, "Was Watching")])
         self.assertEqual(await self._keys(await distrakt.load_month(self.user_id, self.current)),
                          {(101, 1)})
 
-        # The mark arrives now, against a month that already lists the title.
-        await self._mark_not_watching(self.user_id, self.today.year, self.today.month, "slug-101")
+        # The mark arrives after the month opened, against a title it lists.
+        await self._mark_not_watching(self.user_id, self.today.year, self.today.month,
+                                      "slug-101", before_the_month=False)
 
-        async def no_premieres(endpoint, settings, **kw):
-            return [], None
+        payload = await self._payload()
 
-        with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
-             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
-             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
-             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
-             patch("app.calendar.cache.read_month", side_effect=no_premieres), \
-             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
-            payload, status = await distrakt_routes._distrakt_month_payload(
-                self.user_id, self.today.year, self.today.month, self._settings())
-
-        self.assertEqual(status, 200)
         self.assertEqual([s["bucket"] for s in payload["shows"]], [distrakt.Bucket.ABANDONED])
         stored = await distrakt.load_month(self.user_id, self.current)
         self.assertTrue(stored["shows"][0]["abandoned"])

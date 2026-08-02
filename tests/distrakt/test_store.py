@@ -379,5 +379,74 @@ class StoredIdentityTests(DistraktTestCase):
         self.assertEqual(rec["watched"], 3)
 
 
+class WhatTheUserHoldsAcrossEveryMonthTests(DistraktTestCase):
+    """The set the user's OWN lists are derived from.
+
+    What somebody is behind on is true of no particular month, so it is read
+    across all of them. Reading it from one month's roster made a title's presence
+    depend on which month had last copied it forward.
+    """
+
+    async def _add(self, month, tmdb, *, season=1, title="Show", **fields):
+        await distrakt.add_show(self.user_id, month, {
+            "ids": {"tmdb": tmdb}, "season": season, "title": title, **fields})
+
+    async def _held(self):
+        return {(int(s["match_id"]), s["season"])
+                for s in await distrakt.user_roster(self.user_id)}
+
+    async def test_a_season_on_two_months_is_held_once(self):
+        await self._add("2026-06", 101)
+        await self._add("2026-07", 101)
+        self.assertEqual(await self._held(), {(101, 1)})
+
+    async def test_the_latest_month_s_copy_is_the_one_that_survives(self):
+        """Every month a season was live in has a copy of it, and the most recent
+        one carries the most recent counts."""
+        await self._add("2026-06", 101, watched=1)
+        await self._add("2026-07", 101, watched=5)
+        row, = await distrakt.user_roster(self.user_id)
+        self.assertEqual(row["watched"], 5)
+
+    async def test_giving_up_on_it_anywhere_takes_it_off_everywhere(self):
+        """Abandoned is the user's own "stop bringing this back", so a copy left
+        on an earlier month must not resurrect it."""
+        await self._add("2026-06", 101)
+        await self._add("2026-07", 101, abandoned=True)
+        self.assertEqual(await self._held(), set())
+
+    async def test_seasons_are_held_apart(self):
+        await self._add("2026-07", 101, season=1)
+        await self._add("2026-07", 101, season=2)
+        self.assertEqual(await self._held(), {(101, 1), (101, 2)})
+
+    async def test_a_season_a_month_recorded_as_finished_is_remembered(self):
+        """What tells "back after having been finished" from "never left". No
+        detection: the months already hold the answer."""
+        await self._add("2026-06", 101, bucket=distrakt.Bucket.COMPLETED)
+        await self._add("2026-07", 202, bucket=distrakt.Bucket.KEEPUP)
+        self.assertEqual(await distrakt.completed_seasons(self.user_id),
+                         {("show:tmdb:101", 1)})
+
+    async def test_a_row_is_findable_without_naming_its_month(self):
+        """A row on the page can be stored on any month, so a caller that has to
+        write against one looks it up rather than assuming where it lives."""
+        await self._add("2026-06", 101, title="Somewhere Else")
+        found = await distrakt.find_user_row(self.user_id, ItemKey("show", "tmdb", "101"), 1)
+        self.assertEqual(found["title"], "Somewhere Else")
+        self.assertIsNone(
+            await distrakt.find_user_row(self.user_id, ItemKey("show", "tmdb", "999"), 1))
+
+    async def test_removing_a_season_outright_takes_every_copy(self):
+        """Anything narrower leaves the copy that put it on the list, and the row
+        comes straight back on the next load."""
+        await self._add("2026-06", 101)
+        await self._add("2026-07", 101)
+        months = await distrakt.remove_show_everywhere(
+            self.user_id, ItemKey("show", "tmdb", "101"), 1)
+        self.assertEqual(sorted(months), ["2026-06", "2026-07"])
+        self.assertEqual(await self._held(), set())
+
+
 if __name__ == "__main__":
     unittest.main()

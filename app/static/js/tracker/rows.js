@@ -96,6 +96,14 @@ function filmRow(m) {
         </div>`;
 }
 
+// A season that was finished and is on the pile again — the episode count moved,
+// so there is more of it than there was. Said out loud rather than left to be
+// noticed: a title you remember finishing, sitting back on the list with no
+// explanation, reads as the page having got it wrong.
+function returnMark(s) {
+    return s.returned ? ` <span class="distrakt-return" title="More of this season exists than when you finished it">back</span>` : '';
+}
+
 function showRow(s) {
     const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
     let counts = isNewRet ? `${s.watched}/${s.total}${s.cadence ? ', ' + s.cadence : ''}`
@@ -126,7 +134,7 @@ function showRow(s) {
              data-key="${esc(s.key)}" data-season="${s.season}" data-title="${esc(s.title)}"
              onclick="openDistraktDetails(this, event)">
             <span class="distrakt-badge">${badge}</span>
-            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span></span>
+            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}</span>
             <span class="distrakt-season">S${String(s.season).padStart(2, '0')}</span>
             <!-- Spelled out in every bucket, not just as a tooltip: this is the
                  string the emoji map is keyed on, so seeing it is what makes the

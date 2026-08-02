@@ -276,44 +276,81 @@ async def api_distrakt_list(request: Request):
     return JSONResponse({"ok": True, "month": distrakt_store.month_key(year, month), "shows": (doc or {}).get("shows", [])})
 
 
-async def _apply_not_watching(user_id: int, month_key: str,
-                              shows: list[dict], committed: bool) -> list[dict]:
-    """This user's own main-calendar not-watching marks, date-gated on the month's
-    1st (committed):
+async def _abandon_in_month(user_id: int, month_key: str, show: dict) -> None:
+    """Record `show` as given up on IN `month_key`, putting it on that month's
+    roster first if it is not there yet, and mark the in-memory copy to match.
 
-      - PREVIEW (before the 1st): not-watching HIDES the show from the tracker —
-        excluded from the list + both posts, but KEPT in the roster so un-toggling
-        brings it straight back.
-      - COMMITTED (on/after the 1st): not-watching promotes the roster show to
-        Abandoned (persisted, form frozen). One-directional — never un-abandons;
-        the dedicated /distrakt toggle + Delete stay the source of truth. The
-        `abandoned` guard means a steady-state read does no extra writes.
-
-    The marks read here are the user's whole set, not one month's: "not watching"
-    is a fact about the show, so a show they turned off on the calendar is one
-    the tracker should not be counting whichever month they said it in."""
-    nw_ids = await calendar_state.not_watching_ids(user_id)
-    if not nw_ids:
-        return shows
-
-    def matched(s: dict) -> bool:
-        return distrakt_store.matches_not_watching(s, nw_ids)
-
-    if not committed:
-        return [s for s in shows if not matched(s)]
-
-    for show in shows:
-        if show.get("abandoned") or not matched(show):
-            continue
-        form = discord_fmt.freeze_form(show)
+    The roster write is what makes this work for a title the user holds on some
+    OTHER month. Their live lists are drawn from every month at once, so a row on
+    the page can perfectly well be stored elsewhere — but giving up on it is a
+    fact about THIS month ("I was following this and stopped, in August"), so
+    that is where it has to land. Writing it into the month the row happens to be
+    stored under would edit a month that has already settled.
+    """
+    form = discord_fmt.freeze_form(show)
+    key, season = distrakt_store.record_key(show), int(show["season"])
+    if await distrakt_store.set_abandoned(
+            user_id, month_key, key, season, True, abandoned_form=form) is None:
+        await distrakt_store.add_show(user_id, month_key, show)
         await distrakt_store.set_abandoned(
-            user_id, month_key, distrakt_store.record_key(show), show["season"],
-            True, abandoned_form=form,
-        )
-        show["abandoned"] = True
-        show["abandoned_form"] = form
-        show["bucket"] = distrakt_store.Bucket.ABANDONED
-    return shows
+            user_id, month_key, key, season, True, abandoned_form=form)
+    show["abandoned"] = True
+    show["abandoned_form"] = form
+    show["bucket"] = distrakt_store.Bucket.ABANDONED
+
+
+async def _apply_not_watching(user_id: int, month_key: str, own: list[dict],
+                              live: list[dict]) -> tuple[list[dict], list[dict]]:
+    """This user's own main-calendar not-watching marks, split by WHEN each mark
+    was made relative to the 1st of `month_key`.
+
+      - marked BEFORE the month opened: the show never appears in this month, and
+        can never be abandoned in it. That mark says "I never intended to watch
+        this", so the month has no verdict to announce about it. The row is not
+        deleted — un-marking brings it straight back.
+      - marked ON OR AFTER the 1st: the show is promoted to Abandoned in this
+        month, persisted with its form frozen. That mark says "I was following
+        this and stopped", which is exactly what a month records. One-directional
+        — never un-abandons; the tracker's own toggle and ✕ stay the source of
+        truth, and the `abandoned` guard means a steady-state read does no extra
+        writes.
+
+    Reading the timestamp is what removed the need to notice the moment a month
+    opens: a month built ahead of time exists for weeks before it begins, so
+    measuring "later" against the month's EXISTENCE read every mark made during
+    that wait as giving up on a show that had never started.
+
+    `own` is the month's own roster and `live` is the user's own list (drawn from
+    every month), and they are handled together because the second statement
+    moves a row from one to the other: a title the user turns away part-way
+    through the month stops being a live concern and becomes this month's record
+    of having dropped it. Returns the two lists as they stand afterwards.
+    """
+    before = await calendar_state.not_watching_marked_before(
+        user_id, distrakt_store.month_first_day(month_key))
+    after = await calendar_state.not_watching_ids(user_id) - before
+
+    def matched(s: dict, marks: set[str]) -> bool:
+        return bool(marks) and distrakt_store.matches_not_watching(s, marks)
+
+    kept_own = []
+    for show in own:
+        if matched(show, before):
+            continue
+        if not show.get("abandoned") and matched(show, after):
+            await _abandon_in_month(user_id, month_key, show)
+        kept_own.append(show)
+
+    kept_live = []
+    for show in live:
+        if matched(show, before):
+            continue
+        if matched(show, after):
+            await _abandon_in_month(user_id, month_key, show)
+            kept_own.append(show)  # now one of the month's own verdicts
+            continue
+        kept_live.append(show)
+    return kept_own, kept_live
 
 
 def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
@@ -353,7 +390,7 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     identically and return HTTP 200."""
     doc = await distrakt_store.load_month(user_id, month_key)
     roster = distrakt_store.frozen_shows(doc) if doc else []
-    shows = discord_fmt.month_view(roster, standing)
+    shows = discord_fmt.month_view(roster, standing, month_key)
     notice = (
         "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
         if rate_limited else
@@ -392,7 +429,7 @@ def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji
     calls. The snapshot is the record of what that month WAS — recomputing it
     against today's watch history would rewrite history every time it was opened."""
     roster = distrakt_store.frozen_shows(doc)
-    shows = discord_fmt.month_view(roster, standing)
+    shows = discord_fmt.month_view(roster, standing, month_key)
     return {
         "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
         "movies": doc.get("movies") or [],
@@ -433,6 +470,36 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
     return watched_lookup, completed_lookup, movies
 
 
+# The two buckets that describe WORK IN HAND rather than something a month
+# settled: what has finished airing and is waiting to be caught up on, and what
+# is still airing and being kept up with. They are the user's own lists, which is
+# why they are the only ones a title stored on some other month contributes to —
+# a season that premiered in June, or that June recorded as finished, is June's
+# business, and only the fact that it is still on the pile is today's.
+_WORK_IN_HAND = (distrakt_store.Bucket.CLEANUP, distrakt_store.Bucket.KEEPUP)
+
+
+def _work_in_hand(shows: list[dict]) -> list[dict]:
+    """The rows of `shows` that belong to the user's own lists."""
+    return [s for s in shows if s.get("bucket") in _WORK_IN_HAND]
+
+
+async def _mark_returns(user_id: int, shows: list[dict]) -> None:
+    """Flag each row that is back on the pile after having been finished.
+
+    A season completed at 16 of 16 stops being complete the day the provider
+    learns of an 18th, and the live counts put it back on the user's lists by
+    themselves — no detection, no manual step. That is the behaviour that was
+    wanted, but arriving unannounced it reads as a bug: the user remembers
+    finishing it. The months already hold the record that answers it, so this
+    asks them rather than inferring anything.
+    """
+    finished_before = await distrakt_store.completed_seasons(user_id)
+    for show in shows:
+        show["returned"] = (show.get("bucket") in _WORK_IN_HAND
+                            and distrakt_store.live_key(show) in finished_before)
+
+
 async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
                               emojis: dict, default_emoji: str, link_url: str | None,
                               force_fresh: bool, today: date) -> tuple[dict, int]:
@@ -440,11 +507,18 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     read the watch history, work out each show's live x/y and bucket, and render
     the two Discord posts.
 
+    Two different kinds of fact come out of this. The MONTH's — what premiered in
+    it, what was finished or given up on in it, what films were watched in it —
+    come from its own roster. The USER's — what they are behind on and what they
+    are keeping up with — are true of no particular month and are read across all
+    of them, and only the month in progress shows them.
+
     Everything here may reach Trakt, and the caller is what turns a failure into
     the stale-but-real fallback — this function does not degrade, so that decision
     lives in exactly one place.
     """
     committed = distrakt_store.month_committed(month_key, today)
+    standing = distrakt_store.month_standing(month_key, today)
     # A PREVIEW month (before the 1st) keeps auto-populating from premieres so the
     # roster tracks the calendar (and un-not-watching re-adds a previously excluded
     # premiere). A COMMITTED month is stable — premieres only re-import on demand.
@@ -455,6 +529,23 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     records = doc.get("shows", [])
     if records and not settings.trakt_configured:
         return {"ok": False, "error": "Not configured"}, 400
+
+    # WHAT THE USER IS BEHIND ON AND WHAT THEY ARE KEEPING UP WITH ARE FACTS ABOUT
+    # THE USER, not about a month, so they are read across every month at once
+    # rather than from this one's roster. Only the month actually in progress
+    # shows them: a month that is over settled its own verdicts and a month that
+    # has not begun has no work in hand to report. The rows this adds are the ones
+    # the viewed month does not already hold — a season on both is the month's own
+    # copy, which carries this month's counts and its provenance.
+    elsewhere: list[dict] = []
+    if standing is distrakt_store.MonthStanding.CURRENT and settings.trakt_configured:
+        held = {distrakt_store.live_key(r) for r in records}
+        elsewhere = [r for r in await distrakt_store.user_roster(user_id)
+                     if distrakt_store.live_key(r) not in held]
+    # One pass over both, because they share every provider read: the watch-history
+    # sync baselines against the whole set, and splitting them would fetch each
+    # season twice and baseline the history twice for no gain.
+    everything = records + elsewhere
 
     # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
     # stale load re-baseline the whole watch history):
@@ -469,15 +560,18 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     movies: list[dict] = []
     if settings.trakt_configured:
         watched_lookup, completed_lookup, movies = await _sync_watch_history(
-            settings, user_id, records, month_key, force_fresh, today)
+            settings, user_id, everything, month_key, force_fresh, today)
 
-    with span("payload.compute_live_shows", n=len(records), fresh=season_fresh):
+    with span("payload.compute_live_shows", n=len(everything), fresh=season_fresh):
         # allow_degrade: a per-show season 429 marks THAT show unavailable and
         # renders the rest, instead of failing the whole roster.
-        shows = await distrakt_store.compute_live_shows(
-            user_id, records, settings, fresh=season_fresh, watched_lookup=watched_lookup,
-            allow_degrade=True, completed_lookup=completed_lookup) if records else []
-    shows = await _apply_not_watching(user_id, month_key, shows, committed)
+        computed = await distrakt_store.compute_live_shows(
+            user_id, everything, settings, fresh=season_fresh, watched_lookup=watched_lookup,
+            allow_degrade=True, completed_lookup=completed_lookup) if everything else []
+    # compute_live_shows answers in the order it was asked, so the split is where
+    # the two inputs were joined.
+    shows, live_rows = computed[:len(records)], computed[len(records):]
+    shows, live_rows = await _apply_not_watching(user_id, month_key, shows, live_rows)
     # A season finished before this month began belongs to the month it was
     # finished in, not to this one — see drop_seasons_finished_earlier.
     roster = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
@@ -487,8 +581,8 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # still refreshed, and still there when the calendar reaches its month.
     # POST 1 keeps the unfiltered `roster`: it announces the month's premieres,
     # which no standing changes.
-    standing = distrakt_store.month_standing(month_key, today)
-    shows = discord_fmt.month_view(roster, standing)
+    shows = discord_fmt.month_view(roster, standing, month_key) + _work_in_hand(live_rows)
+    await _mark_returns(user_id, shows)
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
@@ -496,10 +590,14 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # added before logos existed doesn't depend on some OTHER show requesting its
     # network's logo first (see logos.ensure_logos). Best-effort and
     # self-limiting: a no-op once each network's tile is on disk.
-    if roster and settings.trakt_configured:
+    # The user's own list is warmed with the month's: those rows draw a logo too,
+    # and a title stored on some other month has no reason to be the one that
+    # renders a placeholder.
+    if settings.trakt_configured and (roster or live_rows):
         with span("payload.ensure_logos"):
             await logos.ensure_logos(settings, [
-                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in roster
+                (s.get("network"), (s.get("ids") or {}).get("tmdb"))
+                for s in (*roster, *live_rows)
             ])
 
     with span("payload.render"):
@@ -829,6 +927,10 @@ async def api_distrakt_remove(request: Request):
     season you finished years ago and re-watched one episode of does not belong
     on March's list, but it also is not something to start hiding from your
     calendar today. The row goes; the month stays closed.
+
+    A row the viewed month does not hold is one of the user's own lists, drawn
+    from every month at once, and removing it takes the season off all of them.
+    See the branch below for why anything narrower does not stick.
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
@@ -841,18 +943,26 @@ async def api_distrakt_remove(request: Request):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     month_key = distrakt_store.month_key(year, month)
     doc = await distrakt_store.load_month(user_id, month_key)
-    if doc is None:
-        return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
     # Read before removing: both the provenance and the id the mark is written
     # under (slug, falling back to the source's own id, exactly as the calendar
     # keys its own items) live on the record that is about to go.
-    record = next((s for s in (doc.get("shows") or [])
+    record = next((s for s in ((doc or {}).get("shows") or [])
                    if s["key"] == str(key) and int(s["season"]) == season), None)
-    if not await distrakt_store.remove_show(user_id, month_key, key, season):
+    if record is not None:
+        removed = await distrakt_store.remove_show(user_id, month_key, key, season)
+    else:
+        # The row is on the page because the user's own lists are drawn from every
+        # month at once, so it can be stored somewhere else entirely. ✕ there means
+        # the season should not be on their list AT ALL, and taking it off only the
+        # month being viewed would leave the copy that produced it — the row would
+        # come straight back on the next load with the ✕ looking broken.
+        record = await distrakt_store.find_user_row(user_id, key, season)
+        removed = bool(await distrakt_store.remove_show_everywhere(user_id, key, season))
+    if not removed:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
 
     settings = await _distrakt_settings(user_id)
-    closed = bool(doc.get("closed"))
+    closed = bool((doc or {}).get("closed"))
     added_by = str((record or {}).get("added_by") or "")
     hide_on_calendar = not closed and added_by == distrakt_store.ADDED_BY_CALENDAR
     if record is not None and not added_by and not closed:
@@ -1248,7 +1358,15 @@ async def api_distrakt_abandon(request: Request):
     via discord_fmt.freeze_form — so the Discord line stays stable even after the
     show would otherwise have moved buckets. Un-abandoning clears it
     (distrakt_store.set_abandoned's job). If Trakt isn't configured (or the show
-    isn't found), abandoned_form falls back to None."""
+    isn't found), abandoned_form falls back to None.
+
+    ABANDONING PUTS THE TITLE ON THIS MONTH'S ROSTER IF IT IS NOT THERE ALREADY.
+    The user's own lists are drawn from every month at once, so the row being
+    abandoned may well be stored elsewhere — but "I stopped following this" is a
+    fact about the month it happened in, and the month it happens to be stored
+    under has usually already settled. Un-abandoning has no such fallback: there
+    is nothing to un-say about a month with no such row.
+    """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
     today = clock.today()
@@ -1267,6 +1385,12 @@ async def api_distrakt_abandon(request: Request):
 
     rec = await distrakt_store.set_abandoned(user_id, month_key, key, season, abandoned,
                                              abandoned_form=abandoned_form)
+    if rec is None and abandoned:
+        held = await distrakt_store.find_user_row(user_id, key, season)
+        if held is not None:
+            await distrakt_store.add_show(user_id, month_key, held)
+            rec = await distrakt_store.set_abandoned(user_id, month_key, key, season, True,
+                                                     abandoned_form=abandoned_form)
     if rec is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
     payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id))  # recomputed month (1d)
@@ -1290,6 +1414,10 @@ async def _freeze_abandon_form(user_id: int, month_key: str,
          if r["key"] == str(key) and r.get("season") == season),
         None,
     )
+    if rec is None:
+        # Not on this month, but the user's own lists show titles stored on other
+        # months, so the row being abandoned may be one of those.
+        rec = await distrakt_store.find_user_row(user_id, key, season)
     if rec is None:
         return None
     settings = await _distrakt_settings(user_id)

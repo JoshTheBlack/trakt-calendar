@@ -21,7 +21,6 @@ from . import calendar_import, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
-    frozen_shows,
     list_months,
     load_month,
     new_month_doc,
@@ -129,26 +128,6 @@ async def maybe_freeze_prior(user_id: int, month_key: str, settings, today: date
         await freeze_month(user_id, prior, settings)
 
 
-def identity_record(src: dict) -> dict:
-    """Identity-only projection (no live counts/dates/bucket; abandoned reset) —
-    used to carry a title forward into a new month (identity only; recompute live
-    once the new month opens)."""
-    return {
-        "media": src.get("media") or Media.SHOW,
-        "match_source": src.get("match_source"),
-        "match_id": src.get("match_id"),
-        "ids": collect_ids(src.get("ids") or {}),
-        "title": str(src.get("title") or ""),
-        "season": int(src["season"]),
-        "network": str(src.get("network") or ""),
-        "abandoned": False,
-        "abandoned_form": None,
-        # Carried forward with the show: a premiere that rolls into next month is
-        # still the calendar's row, and a hand-added one is still the user's.
-        "added_by": str(src.get("added_by") or ""),
-    }
-
-
 async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     """Compute one final live snapshot for `doc`, persist counts/dates/bucket onto
     each stored record, mark it closed, stamp totals_refreshed_at, save. After
@@ -187,16 +166,18 @@ async def drop_seasons_finished_earlier(user_id: int, month_key: str,
     """Take out the shows whose season was finished BEFORE this month began, and
     delete their roster rows.
 
-    Completed means "completed this month". Rollover already refuses to carry a
-    completed show into a new month, but it decides that once, when the month is
-    created — so a show carried into August during the July preview and then
-    finished in July stayed on August's roster and, being fully watched, sat in
-    August's Completed for good. This closes that window on every load.
+    Completed means "completed this month". A month gets its roster once, when it
+    is created, and a title on it can be finished at any point afterwards — a
+    premiere imported into August that turns out to have been finished off in
+    July would otherwise sit in August's Completed for good, being fully watched.
+    This closes that window on every load.
 
     Removed rather than re-bucketed: with the Completed rule applied, a fully
     watched season would otherwise fall through to Cleanup or Keepup and read as
     work outstanding, which is worse than not being on the month at all. It is
-    still on the month it WAS finished in.
+    still on the month it WAS finished in, which is also where the user's own
+    lists read it from (store.user_roster), so nothing is lost by taking it off
+    this one.
 
     Only acts on a date it actually has: a season the history cache cannot date
     (nothing dated for it, or a title that predates dated history and has not been
@@ -310,65 +291,50 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
 async def _initialize_month(user_id: int, month_key: str, settings,
                             today: date | None = None) -> dict:
-    """A brand-new month's contents, in the order the three sources are allowed to
-    contribute: carried-forward titles first (they are the ones with history), then
-    the calendar's premieres, then whatever recent watch history suggests. Each
-    later source only adds what the earlier ones did not, so being carried forward
-    beats being re-imported, and `added_by` records the truth about who put a row
-    there rather than the last writer to touch it.
+    """A brand-new month's contents: the calendar's premieres, plus — once the
+    month has begun — whatever a season part-way through in recent viewing adds
+    that the premieres did not. The second source only adds what the first did
+    not, so `added_by` records the truth about who put a row there rather than the
+    last writer to touch it.
 
-    A MONTH THAT HAS NOT BEGUN TAKES ITS PREMIERES AND NOTHING ELSE. The other two
-    sources are both statements about NOW — a title still going at the end of last
-    month, and a season part-way through in recent viewing — and neither has
-    anything to say about a month nobody has reached. Filed into one anyway they
-    were bucketed by whether they had aired YET, which they had not, so a season
-    that began in August was announced as new in October. Until a month opens it
-    holds only what BEGINS in it; when it opens, those titles arrive in whatever
-    bucket they have earned by then.
+    A NEW MONTH TAKES NOTHING FROM THE MONTH BEFORE IT. What the user is behind on
+    and what they are keeping up with are facts about the USER — true of no
+    particular month — and they are read live from every month at once
+    (store.user_roster), so there is nothing here for a new month to inherit.
+    Copying them forward is what made a month claim a title that premiered
+    somewhere else, gave a month built ahead of time a roster frozen at build
+    time, and read a calendar turn-away made during that wait as giving up on a
+    show that had never started. None of the three can be stated in a model where
+    a month holds only its own premieres.
+
+    A MONTH THAT HAS NOT BEGUN TAKES ITS PREMIERES AND NOTHING ELSE. The recent-
+    viewing sweep is a statement about NOW, and it has nothing to say about a
+    month nobody has reached; filed into one anyway its titles were bucketed by
+    whether they had aired YET, which they had not, so a season that began in
+    August was announced as new in October.
     """
     doc = new_month_doc(month_key)
     present: set[tuple[str, int]] = set()
     year, month = store.parse_month_key(month_key)
     begun = month_committed(month_key, today)
 
-    # Read ONCE and applied to all three sources below, because the rule is about
-    # the month rather than about where a title came from: a title the user had
-    # already marked not-watching on their calendar when this month was first
-    # built does not enter it AT ALL. The mark predates the month, so there is
-    # nothing in here for it to be a decision about, and a month that opens with
-    # it listed as Abandoned is announcing a verdict on a show the user had
-    # already said they were not following. A mark made LATER, against a month
-    # that already exists, is the other statement — that one promotes the row to
-    # Abandoned (see routes._apply_not_watching), which is why this filter belongs
-    # at initialization and not at read time.
+    # Read ONCE and applied to both sources below: a title the user has turned
+    # away on their calendar does not get built into a month at all. A month that
+    # opens with it listed as Abandoned is announcing a verdict on a show they had
+    # already said they were not following, and there is no row here yet for such
+    # a verdict to be about. WHEN the mark was made is what separates that from "I
+    # was following this and stopped", and it is read against a row that already
+    # exists — see routes._apply_not_watching.
     nw_ids = await calendar_state.not_watching_ids(user_id)
-
-    # Carry forward everything except Completed / Abandoned, once the month has
-    # begun. An open (not-yet-frozen) prior is bucketed live so the rollover still
-    # drops the right titles; a frozen prior reuses its stored buckets.
-    prior = await load_month(user_id, prev_month_key(month_key)) if begun else None
-    if prior is not None:
-        prior_shows = frozen_shows(prior) if prior.get("closed") \
-            else await compute_live_shows(user_id, prior.get("shows") or [], settings)
-        for s in prior_shows:
-            if s.get("abandoned") or s.get("bucket") in (
-                    store.Bucket.COMPLETED, store.Bucket.ABANDONED):
-                continue
-            if calendar_import.matches_not_watching(s, nw_ids):
-                continue
-            key = live_key(s)
-            if key in present:
-                continue
-            doc["shows"].append(normalize_show(identity_record(s)))
-            present.add(key)
 
     # This month's premieres, minus not-watching.
     await calendar_import.add_premieres(doc, present, user_id, settings, year, month, nw_ids)
 
-    # In-progress-but-unfinished titles from recent history, again only once the
-    # month has begun: what somebody is part-way through today is THIS month's
-    # material whichever month is being built, and it was the sweep that filed it
-    # under a month that has not happened.
+    # In-progress-but-unfinished titles from recent history, only once the month
+    # has begun: what somebody is part-way through today is THIS month's material
+    # whichever month is being built, and it was the sweep that filed it under a
+    # month that has not happened. This is also the one way a title nobody's
+    # calendar announced gets onto the roster at all.
     if begun:
         for rec in await history_records(settings, present):
             if calendar_import.matches_not_watching(rec, nw_ids):

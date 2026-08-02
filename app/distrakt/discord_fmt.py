@@ -357,20 +357,46 @@ def _movie_line(movie: dict) -> str:
     return f"> ~~`{label}`~~"
 
 
-def month_view(shows: list[dict], standing: MonthStanding) -> list[dict]:
+# The two buckets that ANNOUNCE a title rather than report on it, and so mean
+# "this premiered here". Named beside month_view because that is where the rule
+# is enforced; bucket_of has no month to test against and cannot state it.
+_PREMIERE_BUCKETS = (Bucket.NEW, Bucket.RETURNING)
+
+
+def month_view(shows: list[dict], standing: MonthStanding, month) -> list[dict]:
     """The roster rows a month in this `standing` presents at all.
 
     The page's list and POST 2 both draw from this, so a title the post does not
     mention is a title the page does not show either — the two disagreeing about
     what is in a month is the thing this rule exists to stop. Nothing is deleted:
-    a row a month may not present is still stored, still exported, and still
-    carried forward when the calendar reaches the month it belongs to.
+    a row a month may not present is still stored and still exported.
 
-    POST 1 is deliberately outside this: it announces what premiered in the
-    month, which no standing changes. See render_post1.
+    NEW AND RETURNING MEAN "PREMIERED IN THIS MONTH", not merely "has not started
+    airing yet". Those two are the same thing only for a title the month itself
+    announced; for anything that reached the month by another route they come
+    apart, and the page and POST 2 then re-announce as this month's a season that
+    premiered somewhere else. `month` is the tracker month ('YYYY-MM' or an int)
+    and the test is premiered_in_month, which is what POST 1 has always used —
+    stating it here as well is what keeps the three readers saying one thing.
+
+    POST 1 is deliberately outside the STANDING half of this: it announces what
+    premiered in the month, which no standing changes. See render_post1.
     """
     allowed = set(MONTH_BUCKETS[standing])
-    return [s for s in shows if bucket_of(s, s) in allowed]
+    month_number = _month_number(month)
+    out = []
+    for show in shows:
+        bucket = bucket_of(show, show)
+        if bucket not in allowed:
+            continue
+        # Tolerant of an unreadable month for the same reason _month_number is:
+        # with no month to compare against there is no premiere test to apply,
+        # and a row is better shown than silently dropped.
+        if bucket in _PREMIERE_BUCKETS and month_number is not None \
+                and not premiered_in_month(show, month_number):
+            continue
+        out.append(show)
+    return out
 
 
 def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:",

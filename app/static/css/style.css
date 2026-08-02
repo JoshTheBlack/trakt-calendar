@@ -942,6 +942,13 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
    "unavailable — refresh to retry" note so its last-known counts aren't trusted. */
 .distrakt-show-row.unavailable { opacity: 0.6; }
 .distrakt-show-row.unavailable .distrakt-dates { color: var(--danger, #e0736b); font-style: italic; }
+/* A season that was finished and now has more of it. Quiet enough not to compete
+   with the title, loud enough that the row does not read as a mistake. */
+.distrakt-return {
+    margin-left: 6px; padding: 0 5px; border-radius: 6px; font-size: 0.62rem;
+    text-transform: uppercase; letter-spacing: 0.06em; vertical-align: middle;
+    color: var(--accent, #7fb2ff); border: 1px solid currentColor; opacity: 0.85;
+}
 .distrakt-badge {
     flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center;
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;

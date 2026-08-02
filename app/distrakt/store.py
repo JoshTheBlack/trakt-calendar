@@ -438,6 +438,103 @@ async def months_with_shows(user_id: int) -> set[str]:
     return {r["month"] for r in rows}
 
 
+async def user_roster(user_id: int) -> list[dict]:
+    """Every season this user holds on ANY of their months, once each, minus
+    everything they have given up on.
+
+    THIS IS THE SET THE USER'S OWN LISTS ARE DERIVED FROM — what they are behind
+    on and what they are keeping up with are facts about the person, true of no
+    particular month, so the set they are computed over cannot be one month's
+    roster. Reading it per month is what made a title's presence on today's list
+    depend on which month happened to have copied it forward, and a season that
+    grew past the count it was finished at could never come back at all: the
+    month that recorded it finished was not the month being looked at.
+
+    Deduplicated by (identity, season) with the LATEST month's row winning,
+    because the same season appears on every month it was live in and the most
+    recent copy carries the most recent counts. Read in month then insertion
+    order, so the result is stable between calls rather than depending on how
+    SQLite felt about the query.
+
+    Abandoned is the user's own "stop bringing this back", and it is checked
+    across every month rather than on the surviving row: giving up on a season in
+    March is a statement about the season, and a copy of it left on February's
+    roster must not resurrect it.
+    """
+    rows = await db.fetch_all(
+        "SELECT * FROM distrakt_shows WHERE user_id = ? ORDER BY month, rowid", (user_id,))
+    latest: dict[tuple[str, int], dict] = {}
+    given_up: set[tuple[str, int]] = set()
+    for row in rows:
+        show = row_to_show(row)
+        key = (show["key"], int(show["season"]))
+        if show["abandoned"]:
+            given_up.add(key)
+        latest[key] = show
+    return [show for key, show in latest.items() if key not in given_up]
+
+
+async def completed_seasons(user_id: int) -> set[tuple[str, int]]:
+    """The (item key, season) pairs some month of this user's has already
+    recorded as finished.
+
+    A season can stop being finished without anybody doing anything: a show known
+    to have 16 episodes that the user watched all 16 of is complete until the
+    provider learns of an 18th, at which point the live counts put it back on the
+    user's list by themselves. That reappearance is correct but it reads as a bug,
+    so the caller marks it — and this is what tells "back after having been
+    finished" from "never left". The frozen months are what hold the answer;
+    nothing has to detect anything.
+    """
+    rows = await db.fetch_all(
+        "SELECT DISTINCT media, match_source, match_id, season FROM distrakt_shows "
+        "WHERE user_id = ? AND bucket = ?",
+        (user_id, str(Bucket.COMPLETED)),
+    )
+    return {(item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"]))
+            for r in rows}
+
+
+async def find_user_row(user_id: int, key: ItemKey, season: int) -> dict | None:
+    """This user's most recent stored row for one season, whichever month it is
+    on, or None if they have never held it.
+
+    The month a season is stored under is not the month it is being ACTED on
+    from: the user's live lists are drawn from every month at once, so a row the
+    page is showing can perfectly well live somewhere else. A caller that has to
+    write against such a row looks it up here rather than assuming the month it
+    was rendered under.
+    """
+    row = await db.fetch_one(
+        "SELECT * FROM distrakt_shows WHERE user_id = ? AND "
+        + " AND ".join(f"{c} = ?" for c in IDENTITY_COLUMNS)
+        + " AND season = ? ORDER BY month DESC LIMIT 1",
+        (user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+    return None if row is None else row_to_show(row)
+
+
+async def remove_show_everywhere(user_id: int, key: ItemKey, season: int) -> list[str]:
+    """Delete one season from EVERY month this user has it on. Returns the months
+    that actually held it.
+
+    The blunt form of remove_show, and it exists because the user's live lists are
+    drawn from every month at once: taking the row off the month it is being
+    viewed under would leave the copy that produced it, and the row would come
+    straight back on the next load with the ✕ looking broken. Deleting a season
+    is the user saying it should not be on their list at all, so it goes from all
+    of them.
+    """
+    params = (user_id, key.media, key.match_source, key.match_id, int(season))
+    where = ("WHERE user_id = ? AND "
+             + " AND ".join(f"{c} = ?" for c in IDENTITY_COLUMNS) + " AND season = ?")
+    rows = await db.fetch_all(f"SELECT month FROM distrakt_shows {where}", params)
+    months = [r["month"] for r in rows]
+    if months:
+        await db.execute(f"DELETE FROM distrakt_shows {where}", params)
+    return months
+
+
 async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
     """Replace just the films a CLOSED month snapshotted, leaving its roster rows
     and its closed flag alone.
