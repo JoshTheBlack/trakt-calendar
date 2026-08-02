@@ -24,6 +24,7 @@ import asyncio
 import json
 import re
 import unittest
+from datetime import date
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
@@ -193,7 +194,10 @@ class AdmittedActorTests(DistraktTestCase):
 
     def test_the_page_renders_for_them(self):
         self.sign_in_as(self.tracker_user())
-        resp = self.client.get("/distrakt")
+        # A month has to be named: the bare address is the chooser, and the
+        # month's own view is what this is about.
+        today = date.today()
+        resp = self.client.get(f"/distrakt?year={today.year}&month={today.month}")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Copy blocks", resp.text)
 

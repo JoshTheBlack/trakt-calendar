@@ -19,6 +19,7 @@ import dataclasses
 import json
 import re
 import unittest
+from datetime import date
 
 from fastapi import Request
 
@@ -261,6 +262,11 @@ class CalendarTemplateTests(GatingTestCase):
 class DistraktTemplateTests(GatingTestCase):
     _identity = 0
 
+    # The tracker's bare address is a month chooser and renders none of this; the
+    # emoji map belongs to a month's own view, so these ask for one. Derived from
+    # the clock rather than written out, so nothing here rots at a month boundary.
+    PAGE = f"/distrakt?year={date.today().year}&month={date.today().month}"
+
     def _tracker(self, *, is_admin: bool) -> int:
         DistraktTemplateTests._identity += 1
         provider_user_id = DistraktTemplateTests._identity
@@ -276,7 +282,7 @@ class DistraktTemplateTests(GatingTestCase):
         user_id = self._tracker(is_admin=False)
         asyncio.run(distrakt.set_emoji_prefs(user_id, {"HBO": ":hbo:"}, ":tv:"))
         self.sign_in_as(user_id)
-        body = self.client.get("/distrakt").text
+        body = self.client.get(self.PAGE).text
         self.assertIn('window.NETWORK_EMOJIS = {"HBO": ":hbo:"}', body)
 
     def test_the_emoji_map_is_this_users_own(self):
@@ -288,10 +294,10 @@ class DistraktTemplateTests(GatingTestCase):
         asyncio.run(distrakt.set_emoji_prefs(mine, {"HBO": ":mine:"}, ":tv:"))
         asyncio.run(distrakt.set_emoji_prefs(theirs, {"HBO": ":theirs:"}, ":tv:"))
         self.sign_in_as(mine)
-        self.assertIn(":mine:", self.client.get("/distrakt").text)
+        self.assertIn(":mine:", self.client.get(self.PAGE).text)
         self.sign_out()
         self.sign_in_as(theirs)
-        body = self.client.get("/distrakt").text
+        body = self.client.get(self.PAGE).text
         self.assertIn(":theirs:", body)
         self.assertNotIn(":mine:", body)
 
@@ -299,12 +305,12 @@ class DistraktTemplateTests(GatingTestCase):
         """Nothing seeds it — not settings.json, not another account. It fills in
         from this user's own roster and travels with their Backup export."""
         self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn("window.NETWORK_EMOJIS = {}", self.client.get("/distrakt").text)
+        self.assertIn("window.NETWORK_EMOJIS = {}", self.client.get(self.PAGE).text)
 
     def test_every_tracker_user_can_edit_their_own_map(self):
         """No longer admin-only: the map decides how THIS account's posts render."""
         self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn("saveEmojiMap()", self.client.get("/distrakt").text)
+        self.assertIn("saveEmojiMap()", self.client.get(self.PAGE).text)
 
 
 class SettingsRedactionTests(GatingTestCase):

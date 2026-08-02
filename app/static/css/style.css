@@ -1061,6 +1061,9 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
 .distrakt-nav-label {
     font-variant-numeric: tabular-nums; color: var(--text-dim); font-size: 0.95rem; min-width: 82px; text-align: center;
 }
+/* It is a link back to the chooser, so it says so on hover rather than looking
+   like the inert label it used to be. */
+.distrakt-nav-label:hover { color: var(--gold-soft); }
 .distrakt-frozen-note {
     max-width: 900px; margin: 0 auto 18px auto; padding: 10px 14px;
     border: 1px solid var(--card-border); border-radius: 10px;
@@ -1400,5 +1403,10 @@ a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08)
     color: var(--text); font-weight: 700; font-size: 1rem; transition: all .18s ease; }
 .month-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.1); transform: translateY(-3px); box-shadow: 0 10px 24px rgba(0,0,0,0.4); }
 .month-btn.current { border-color: var(--gold); box-shadow: 0 0 0 1px var(--gold); }
+/* A month that cannot be opened. Drawn in place rather than left out, so the year
+   still reads as a year — and with the hover lift suppressed, since it is a span
+   with nowhere to go. */
+.month-btn.unavailable { color: var(--text-faint); border-style: dashed; cursor: default; }
+.month-btn.unavailable:hover { border-color: var(--card-border); background: var(--card); transform: none; box-shadow: none; }
 .month-btn .num { display: block; color: var(--text-faint); font-size: 0.72rem; font-weight: 400; margin-top: 5px; }
 .pick-foot { margin-top: 30px; }

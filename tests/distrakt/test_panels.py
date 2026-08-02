@@ -82,6 +82,10 @@ class BackupPanelTests(TrackerPanelTestCase):
         super().setUp()
         self.user_id = self.tracker_user()
         self.sign_in_as(self.user_id)
+        # The panels live on a month's own view; the bare address is the chooser.
+        # Taken from the clock so nothing here rots at a month boundary.
+        today = date.today()
+        self.page = f"/distrakt?year={today.year}&month={today.month}"
 
     def _add_show(self, user_id: int, title: str) -> None:
         asyncio.run(distrakt_store.add_show(user_id, "2026-07", {
@@ -90,7 +94,7 @@ class BackupPanelTests(TrackerPanelTestCase):
         }))
 
     def test_the_page_offers_a_download_and_a_restore(self):
-        body = self.client.get("/distrakt").text
+        body = self.client.get(self.page).text
         self.assertIn('href="/api/distrakt/export"', body)
         self.assertIn('id="restoreFile"', body)
 
@@ -98,7 +102,7 @@ class BackupPanelTests(TrackerPanelTestCase):
         """Restore replaces rather than merges, so the page asks for a phrase
         that has to be read and copied — a confirm dialog can be dismissed by
         reflex, and this cannot."""
-        body = self.client.get("/distrakt").text
+        body = self.client.get(self.page).text
         self.assertIn("REPLACE MY DATA", body)
         self.assertIn('id="restoreAck"', body)
         # The button starts unusable, so the phrase is the only way to arm it.

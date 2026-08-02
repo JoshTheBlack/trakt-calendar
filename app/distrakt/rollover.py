@@ -11,6 +11,7 @@ per-user main-calendar not-watching store (app/calendar/state.py).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from datetime import date
 
 from .. import db
@@ -70,6 +71,20 @@ def month_reachable(month_key: str, today: date | None = None) -> bool:
     the calendar. Anything past that is a month nobody can say anything about yet.
     """
     return month_committed(month_key, today) or month_committed(prev_month_key(month_key), today)
+
+
+def month_openable(month_key: str, tracked: Collection[str], today: date | None = None) -> bool:
+    """Whether the tracker may be OPENED on `month_key` — the question a month
+    chooser asks, which is not the same as month_reachable's.
+
+    Two ways in. A month the tracker may still BUILD (month_reachable) can be
+    opened because opening it is how it gets built. A month already in `tracked`
+    can be opened whatever the clock says, because there is nothing left to
+    build: the rows exist, and reading them costs nothing and writes nothing.
+    Without that second case a restored export holding a month out ahead would
+    show a month the user owns and cannot look at.
+    """
+    return month_key in tracked or month_reachable(month_key, today)
 
 
 async def can_initialize(user_id: int, month_key: str) -> bool:

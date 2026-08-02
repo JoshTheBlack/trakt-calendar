@@ -17,6 +17,7 @@ tracker stays usable through a rate-limit window instead of showing 0/0.
 from __future__ import annotations
 
 import asyncio
+import calendar as _calendar
 import dataclasses
 import json
 import logging
@@ -181,17 +182,59 @@ async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> 
     )
 
 
+def _chooser_months(year: int, tracked: set[str], today: date) -> list[dict]:
+    """The twelve tiles the chooser draws for `year`: which month each one is,
+    whether it may be opened, and whether it is one the user already has.
+
+    A tile that may not be opened is drawn as one — visibly unavailable — rather
+    than left out or offered and refused after the click. The rule it is drawn
+    from is rollover.month_openable, the same one the month view would apply,
+    so the grid cannot advertise a month the tracker would then decline to build.
+    """
+    tiles = []
+    for month in range(1, 13):
+        key = distrakt_store.month_key(year, month)
+        tiles.append({
+            "num": month,
+            "name": _calendar.month_name[month],
+            "openable": distrakt_store.month_openable(key, tracked, today),
+            "tracked": key in tracked,
+        })
+    return tiles
+
+
 @guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt(request: Request):
     """Hidden Discord-tracker page, reached through an easter egg rather than any
     link in the UI.
 
-    Renders the shell for the requested {year, month}; the page's JS fetches the
-    computed month via /api/distrakt/month (which lazily rolls the month over).
-    Month-nav prev/next mirror the main calendar's nav (see index.html)."""
+    WITH NO MONTH IN THE QUERY THIS IS A CHOOSER, and that is the whole point of
+    it. Opening a month is expensive — it can pull a month of premieres, sweep
+    recent viewing and write a roster's worth of rows — and the page used to
+    inherit its month from whichever view the easter egg was triggered on, so
+    which month paid that cost was an accident of where somebody happened to be.
+    Naming a month is now a deliberate act, exactly as it is on the calendar's own
+    landing page (see calendar.routes.home, whose picker shape this follows).
+    Nothing here loads or builds a month: the chooser reads which months this user
+    already has and renders a grid.
+
+    WITH a month it renders the shell for the requested {year, month}; the page's
+    JS then fetches the computed month via /api/distrakt/month (which lazily rolls
+    the month over). Month-nav prev/next mirror the main calendar's nav."""
     today = date.today()
     user = await auth.current_user(request)
     year = route_params.valid_year(request.query_params.get("year"), today.year)
+    if not route_params.month_given(request.query_params.get("month")):
+        tracked = set(await distrakt_store.list_months(user.user_id))
+        return templates.TemplateResponse(request, "distrakt_pick.html", {
+            "request": request,
+            "year": year,
+            "months": _chooser_months(year, tracked, today),
+            "current_month": today.month if year == today.year else None,
+            "today_month": today.month,
+            "today_year": today.year,
+            **chrome.page_context(user),
+        })
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     context = {

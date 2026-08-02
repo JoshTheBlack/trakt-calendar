@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+{% import '_head.html' as page with context %}
+{# This page's own styling lives in the bundled stylesheet, NOT in a <style>
+   here. A boosted navigation swaps <body> and leaves <head> alone, so CSS a
+   page carries in its own head is applied only when that page is the one the
+   browser loaded cold — arrive here by clicking and the rules never exist. #}
+{{ page.head('Pick a Month', scripts=assets.scripts('pick'), site_suffix=false) }}
+{%- set body_class %}{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself. A swap replaces the body's
+   CHILDREN, so the <body> element keeps the previous page's classes and the <head>
+   keeps its scripts — see static/js/boost.js, which reads this and applies both.
+   Inside the body deliberately: it has to travel with the swap, and it has to
+   survive a Back, which htmx serves from its own cache with no request at all.
+
+   `pick`, the same page name the calendar's own chooser uses: the two want the
+   identical one script and neither registers an init, so a second name would be
+   a second copy of the same list in app/assets.py. #}
+<div id="pageMeta" hidden data-page="pick" data-body-class="{{ body_class }}"></div>
+
+{% import '_nav.html' as site_nav %}
+{% call site_nav.navbar(brand='distrakt',
+                        calendar_available=calendar_available,
+                        ranker_available=ranker_available, is_admin=is_admin) %}
+{% endcall %}
+
+    <div class="pick-wrap">
+        <div class="pick-panel">
+            <h1>Pick a Month</h1>
+            <div class="sub">Nothing is gathered until you choose one.</div>
+
+            {# The year arrows stay on this page — neither carries a `month`, and a
+               `month` in the query is what sends this route into a month instead. #}
+            <div class="year-nav">
+                <a class="month-nav-btn prev" href="/distrakt?year={{ year - 1 }}" title="Previous year" aria-label="Previous year">
+                    <img src="/static/images/arrow-left.png" alt="Previous year">
+                </a>
+                <span class="year">{{ year }}</span>
+                <a class="month-nav-btn next" href="/distrakt?year={{ year + 1 }}" title="Next year" aria-label="Next year">
+                    <img src="/static/images/arrow-right.png" alt="Next year">
+                </a>
+            </div>
+
+            <div class="month-grid">
+                {% for m in months %}
+                {# A month that cannot be opened is drawn, not hidden: it is a span
+                   with no href, so it is visible and plainly unavailable rather
+                   than a link that would be refused after the click. #}
+                {% if m.openable %}
+                <a class="month-btn{% if current_month == m.num %} current{% endif %}" href="/distrakt?month={{ m.num }}&amp;year={{ year }}">
+                    {{ m.name }}
+                    <span class="num">{{ year }}{% if m.tracked %} · kept{% endif %}</span>
+                </a>
+                {% else %}
+                <span class="month-btn unavailable" title="The calendar hasn't reached this month yet">
+                    {{ m.name }}
+                    <span class="num">not yet</span>
+                </span>
+                {% endif %}
+                {% endfor %}
+            </div>
+
+            <div class="pick-foot">
+                <a class="pill-btn" href="/distrakt?month={{ today_month }}&amp;year={{ today_year }}">Go to current month →</a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

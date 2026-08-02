@@ -19,7 +19,10 @@
 {% macro hero_lead() %}
         <nav class="month-nav distrakt-nav">
             <a class="month-nav-btn prev" href="?year={{ nav.prev_year }}&amp;month={{ nav.prev_month }}" title="Previous month" aria-label="Previous month">‹</a>
-            <span class="distrakt-nav-label">{{ year }}-{{ '%02d' % month }}</span>
+            {# The label is the way back to the chooser. Without it the only route
+               out of a month is stepping through the ones either side of it, and
+               each step opens the month it lands on. #}
+            <a class="distrakt-nav-label" href="/distrakt?year={{ year }}" title="Pick another month">{{ year }}-{{ '%02d' % month }}</a>
             <a class="month-nav-btn next" href="?year={{ nav.next_year }}&amp;month={{ nav.next_month }}" title="Next month" aria-label="Next month">›</a>
         </nav>
 {% endmacro %}
