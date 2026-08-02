@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
     from ..config import Settings
@@ -260,6 +260,14 @@ class Capabilities:
         return True
 
 
+# runtime_checkable so the suite can isinstance-check a registered source against
+# these declarations. It buys a MEMBER-PRESENCE check and nothing more — see
+# tests/providers/test_protocol_conformance.py, which states that limit — but
+# member presence is the direction that fails in production: adding a verb here
+# and forgetting one source is an AttributeError on whichever source the user
+# happens to have configured. Nothing in the app calls isinstance on these; the
+# structural typing is still what production relies on.
+@runtime_checkable
 class SyncPort(Protocol):
     """The private, per-person reads a source must answer before it can back the
     tracker: what somebody has watched, when they watched it, and a cheap way to
@@ -322,6 +330,7 @@ class SyncPort(Protocol):
         ...
 
 
+@runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
     """What the registry needs in order to offer a source at all: who it is,
     what it can answer, and whether it is usable right now.
