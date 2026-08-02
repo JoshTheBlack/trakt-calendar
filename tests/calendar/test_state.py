@@ -10,7 +10,7 @@ No network.
 from __future__ import annotations
 
 import unittest
-
+from datetime import date, datetime, timezone
 
 from app import db
 from app.calendar import state as calendar_state
@@ -122,6 +122,47 @@ class RosterUnionTests(StateTestCase):
             await calendar_state.not_watching_ids(self.user_id),
             {"new-1", "prem-1", "all-1"},
         )
+
+
+class WhenAMarkWasMadeTests(StateTestCase):
+    """The marks are timestamped, and the tracker reads them by date: one made
+    before a month opened means "I never intended to watch this", and one made
+    once the month was under way means "I was following this and stopped". Two
+    different statements that look identical once made."""
+
+    async def _mark_at(self, item_id: str, when: date) -> None:
+        await calendar_state.set_not_watching(self.user_id, item_id, True)
+        await db.execute(
+            "UPDATE not_watching_shows SET created_at = ? WHERE user_id = ? AND item_id = ?",
+            (int(datetime(when.year, when.month, when.day, tzinfo=timezone.utc).timestamp()),
+             self.user_id, item_id),
+        )
+
+    async def test_only_the_marks_made_before_the_day_come_back(self):
+        await self._mark_at("early", date(2026, 7, 20))
+        await self._mark_at("late", date(2026, 8, 9))
+        self.assertEqual(
+            await calendar_state.not_watching_marked_before(self.user_id, date(2026, 8, 1)),
+            {"early"},
+        )
+
+    async def test_a_mark_made_on_the_day_itself_is_not_before_it(self):
+        """The boundary is the month's own 1st: a mark made that day is a decision
+        about a month that has started, not about one that had not."""
+        await self._mark_at("on-the-first", date(2026, 8, 1))
+        self.assertEqual(
+            await calendar_state.not_watching_marked_before(self.user_id, date(2026, 8, 1)),
+            set(),
+        )
+
+    async def test_a_freshly_written_mark_is_dated(self):
+        """Nothing above works if the column is not populated, and the write is
+        the only thing that populates it."""
+        await calendar_state.set_not_watching(self.user_id, "now", True)
+        row = await db.fetch_one(
+            "SELECT created_at FROM not_watching_shows WHERE user_id = ? AND item_id = ?",
+            (self.user_id, "now"))
+        self.assertGreater(row["created_at"], 0)
 
 
 if __name__ == "__main__":  # pragma: no cover
