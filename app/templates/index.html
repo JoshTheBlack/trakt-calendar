@@ -104,9 +104,15 @@
         </div>
 {% endmacro %}
 
+{# In `distrakt_href` the YEAR travels and the MONTH deliberately does not. The
+   tracker's bare address is a chooser (see distrakt.routes); handing it a month
+   skips that choice and opens whichever month this calendar happened to be
+   showing, which is the accident the chooser exists to stop. The year is a
+   better landing than snapping to the current one — it is the year the user is
+   already looking at. #}
 {% call site_nav.navbar(lead=hero_lead, controls=hero_controls,
                    settings_button=true,
-                   distrakt_href='/distrakt?year=' ~ year ~ '&month=' ~ month,
+                   distrakt_href='/distrakt?year=' ~ year,
                    calendar_available=calendar_available,
                    ranker_available=ranker_available, is_admin=is_admin) %}
         <span class="hero-meta" title="{{ endpoint.description }}">📊 {{ total }} · 🕒 {{ generated }}</span>

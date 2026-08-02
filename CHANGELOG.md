@@ -14,7 +14,7 @@ All notable changes to this project are documented here. Format loosely follows 
 ### 🥚
 - It now lets a month hold only what belongs to it — one that hasn't begun shows just what starts in it, one that's over keeps what it settled and lets go of whatever was still open on its last day, and anything you'd already turned away is simply absent rather than listed as given up on. Turn something away later, once the month is under way, and it still says so. The month you're in is unchanged.
 - It no longer builds a month the calendar hasn't reached out of the current one's contents, nor quietly closes off the months in between. Only the month under way and the one immediately after it get filled in.
-- It now asks which month you want rather than taking whichever one you arrived from, and gathers nothing until you've said. A month it can't speak for yet is shown but can't be chosen; one it already holds always can.
+- It now asks which month you want rather than taking whichever one you arrived from, and gathers nothing until you've said — every way in asks, the page you came from included. A month it can't speak for yet is shown but can't be chosen; one it already holds always can.
 
 ## 🏷️ [1.1.6] - 2026-07-31
 
