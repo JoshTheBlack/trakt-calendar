@@ -44,20 +44,14 @@
 
             <div class="month-grid">
                 {% for m in months %}
-                {# A month that cannot be opened is drawn, not hidden: it is a span
-                   with no href, so it is visible and plainly unavailable rather
-                   than a link that would be refused after the click. #}
-                {% if m.openable %}
+                {# Every month is a destination. Opening one gathers nothing by
+                   itself, so there is nothing here to hold back: a month behind
+                   the calendar shows what it holds, and one ahead shows the
+                   control that builds it. #}
                 <a class="month-btn{% if current_month == m.num %} current{% endif %}" href="/distrakt?month={{ m.num }}&amp;year={{ year }}">
                     {{ m.name }}
                     <span class="num">{{ year }}{% if m.tracked %} · kept{% endif %}</span>
                 </a>
-                {% else %}
-                <span class="month-btn unavailable" title="The calendar hasn't reached this month yet">
-                    {{ m.name }}
-                    <span class="num">not yet</span>
-                </span>
-                {% endif %}
                 {% endfor %}
             </div>
 

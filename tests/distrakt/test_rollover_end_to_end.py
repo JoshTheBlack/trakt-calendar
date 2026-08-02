@@ -304,6 +304,42 @@ class AMonthHoldsOnlyItsOwnPremieresTests(RolloverOverHttpTestCase):
         self.assertEqual(self.stored_ids(OPENING), {801}, "showing it wrote it in")
 
 
+class AnyMonthAheadCanBeAskedForTests(RolloverOverHttpTestCase):
+    """No bound on how far ahead the ask may point, and no order the months have
+    to be built in. What the ask gathers is only what is already known about that
+    month's calendar, so distance costs nothing."""
+
+    FAR_AHEAD = "2026-11"
+
+    def test_a_month_months_ahead_is_built_by_asking_for_it(self):
+        with fake_today(BEFORE_THE_FIRST):
+            self.import_month(self.FAR_AHEAD,
+                              {self.FAR_AHEAD: [_item(801, 1, "November New", "2026-11-05")]})
+        self.assertEqual(self.stored_ids(self.FAR_AHEAD), {801})
+
+    def test_the_months_it_skipped_are_not_stranded_behind_it(self):
+        # The reason the bound could not simply be widened: the store grew forward
+        # only, so a month built out ahead put every month between here and it
+        # permanently out of reach — the month under way included.
+        with fake_today(BEFORE_THE_FIRST):
+            self.import_month(self.FAR_AHEAD,
+                              {self.FAR_AHEAD: [_item(801, 1, "November New", "2026-11-05")]})
+            self.import_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+        self.assertEqual(self.stored_ids(OPENING), {801})
+
+    def test_a_month_the_calendar_has_passed_is_still_refused(self):
+        # The one refusal left: working out a month nobody was tracking from its
+        # premieres would be inventing it, and there is a sweep of what was
+        # actually watched for that.
+        with fake_today(ON_THE_FIRST):
+            self.import_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
+            with self.offline():
+                resp = self.client.post("/api/distrakt/import", json={"year": 2026, "month": 7})
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("never tracked", resp.json()["error"])
+        self.assertEqual(self.stored_ids(CLOSING), set())
+
+
 class CompletedAndAbandonedStayInTheMonthTheyHappenedTests(RolloverOverHttpTestCase):
     """A verdict belongs to the month it was reached in and does not travel."""
 

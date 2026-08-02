@@ -519,18 +519,41 @@ class PerUserIsolationTests(RolloverTestCase):
 
 
 class CanInitializeTests(RolloverTestCase):
-    async def test_empty_store_seeds_anything(self):
-        self.assertTrue(await distrakt.can_initialize(self.user_id, "2026-07"))
-        self.assertFalse(await distrakt.is_backfill_blocked(self.user_id, "2026-07"))
+    """What may be built, with the date handed in so the real calendar cannot
+    decide the answer. `TODAY` is the month the store is standing in."""
 
-    async def test_forward_allowed_backward_blocked(self):
+    TODAY = date(2026, 8, 15)
+
+    async def test_empty_store_seeds_anything(self):
+        self.assertTrue(await distrakt.can_initialize(self.user_id, "2026-07", self.TODAY))
+        self.assertFalse(await distrakt.is_backfill_blocked(self.user_id, "2026-07", self.TODAY))
+
+    async def test_the_month_under_way_and_every_month_ahead_are_allowed(self):
         await distrakt.save_month(self.user_id, distrakt.new_month_doc("2026-08"))
-        self.assertTrue(await distrakt.can_initialize(self.user_id, "2026-09"))   # forward
-        self.assertTrue(await distrakt.can_initialize(self.user_id, "2027-01"))   # forward (year wrap)
-        self.assertFalse(await distrakt.can_initialize(self.user_id, "2026-07"))  # backward
-        self.assertFalse(await distrakt.can_initialize(self.user_id, "2026-08"))  # already latest
-        self.assertTrue(await distrakt.is_backfill_blocked(self.user_id, "2026-07"))
-        self.assertFalse(await distrakt.is_backfill_blocked(self.user_id, "2026-09"))
+        for key in ("2026-08", "2026-09", "2027-01", "2029-06"):
+            with self.subTest(month=key):
+                self.assertTrue(await distrakt.can_initialize(self.user_id, key, self.TODAY))
+
+    async def test_a_gap_left_by_a_month_built_out_ahead_can_be_filled_in(self):
+        """The rule this replaces was forward-only, so a December built during
+        August put September through November permanently out of reach."""
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc("2026-12"))
+        for key in ("2026-09", "2026-10", "2026-11"):
+            with self.subTest(month=key):
+                self.assertTrue(await distrakt.can_initialize(self.user_id, key, self.TODAY))
+                self.assertFalse(await distrakt.is_backfill_blocked(self.user_id, key, self.TODAY))
+
+    async def test_a_past_month_never_tracked_is_still_refused(self):
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc("2026-08"))
+        self.assertFalse(await distrakt.can_initialize(self.user_id, "2026-07", self.TODAY))
+        self.assertTrue(await distrakt.is_backfill_blocked(self.user_id, "2026-07", self.TODAY))
+
+    async def test_a_past_month_later_than_everything_tracked_still_seeds(self):
+        """Forward growth from wherever the store starts, which is older than the
+        rule that was relaxed and is still what a store that began mid-year does."""
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc("2026-02"))
+        self.assertTrue(await distrakt.can_initialize(self.user_id, "2026-05", self.TODAY))
+        self.assertFalse(await distrakt.can_initialize(self.user_id, "2026-01", self.TODAY))
 
 
 class FreezeEligibilityTests(unittest.TestCase):
@@ -743,10 +766,13 @@ def _months_ahead(today: date, n: int) -> tuple[int, int]:
     return today.year + index // 12, index % 12 + 1
 
 
-class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
-    """The tracker inherits whichever month the page it was opened from was
-    showing, and that page can be pointed anywhere. It may build the month that
-    has begun and the one immediately ahead of it (the preview), and no other.
+class MonthsAheadAreBuiltWhenAskedForTests(RolloverTestCase):
+    """Building a month is asked for by name, so there is no distance at which the
+    tracker stops obliging, and no order the months have to be built in.
+
+    What stops a month being built by ACCIDENT is that opening one gathers nothing
+    (see WhatAMonthThatHasNotBegunTakesTests) — the ask is the safeguard, so a
+    bound on how far ahead it could reach only cost the months it stranded.
     """
 
     def setUp(self):
@@ -754,8 +780,7 @@ class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
 
     async def _ensure(self, offset: int):
         """ensure_month for the month `offset` after this one, with every Trakt
-        read recorded so a month that should not be built can be shown not to
-        have asked for anything."""
+        read recorded so what a build actually asked for can be read back."""
         calls: list[str] = []
 
         async def fake_read_month(endpoint, settings, **kw):
@@ -774,15 +799,18 @@ class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
             doc = await distrakt.ensure_month(self.user_id, year, month, SETTINGS, today=self.today)
         return doc, calls, distrakt.month_key(year, month)
 
-    async def test_a_month_past_the_preview_is_not_built_and_asks_for_nothing(self):
-        doc, calls, key = await self._ensure(2)
-        self.assertEqual(doc["shows"], [])
-        self.assertIsNone(await distrakt.load_month(self.user_id, key))  # nothing written
-        self.assertEqual(calls, [])                                     # and nothing fetched
+    async def test_a_month_well_out_ahead_is_built_and_takes_that_month(self):
+        """The calendar read it makes names the month asked for, so a month five
+        ahead gathers its own premieres rather than whatever is nearest."""
+        doc, calls, key = await self._ensure(5)
+        year, month = _months_ahead(self.today, 5)
+        self.assertEqual(await self._keys(doc), {(201, 1)})
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
+        self.assertIn(f"calendar:{year}-{month:02d}", calls)
 
     async def test_the_preview_month_is_still_built(self):
-        """The month immediately ahead is a real feature — before the 1st it
-        auto-populates so the roster tracks the calendar."""
+        """The month immediately ahead is the ordinary case — asked for before the
+        1st, it auto-populates so the roster tracks the calendar."""
         doc, _calls, key = await self._ensure(1)
         self.assertEqual(await self._keys(doc), {(201, 1)})
         self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
@@ -792,8 +820,8 @@ class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
         self.assertEqual(await self._keys(doc), {(201, 1)})
         self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
 
-    async def test_looking_ahead_does_not_consume_the_months_in_between(self):
-        """The expensive half of the old behaviour. A store only grows forward,
+    async def test_building_out_ahead_does_not_consume_the_months_in_between(self):
+        """The half that has to keep working. The store used to grow forward only,
         so a month built out ahead put every month before it permanently out of
         reach — including the one actually in progress."""
         await self._ensure(3)
@@ -801,11 +829,13 @@ class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
         self.assertEqual(await self._keys(doc), {(201, 1)})
         self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
 
-    def test_reachability_allows_exactly_one_month_of_slack(self):
-        self.assertTrue(distrakt.month_reachable("2026-12", date(2026, 12, 20)))   # in progress
-        self.assertTrue(distrakt.month_reachable("2026-11", date(2026, 12, 20)))   # already past
-        self.assertTrue(distrakt.month_reachable("2027-01", date(2026, 12, 20)))   # the preview
-        self.assertFalse(distrakt.month_reachable("2027-02", date(2026, 12, 20)))  # past it
+    async def test_a_month_skipped_over_can_be_filled_in_later(self):
+        """And the months in between are not merely still readable — they can be
+        built afterwards, in any order."""
+        await self._ensure(3)
+        doc, _calls, key = await self._ensure(1)
+        self.assertEqual(await self._keys(doc), {(201, 1)})
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
 
 
 class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
@@ -927,17 +957,15 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
         self.assertIsNone(await distrakt.load_month(self.user_id, key))  # nothing written
         self.assertEqual(calls, [])                                      # nothing fetched
 
-    async def test_a_month_past_the_preview_says_the_calendar_has_not_reached_it(self):
-        """The other empty month, and it must not be confused with the one above:
-        this one cannot be asked about at all, and Import refuses it in the same
-        words the page uses."""
+    async def test_a_month_well_out_ahead_says_the_same_thing(self):
+        """One sentence for every month ahead, at any distance: it is waiting to
+        be asked. There is no longer a second state to confuse it with."""
         from app.distrakt import routes as distrakt_routes
 
-        payload, calls, key = await self._open(2)
+        payload, calls, key = await self._open(5)
 
-        self.assertEqual(payload["empty_note"], distrakt_routes.MONTH_BEYOND_CALENDAR)
-        self.assertNotEqual(distrakt_routes.MONTH_BEYOND_CALENDAR,
-                            distrakt_routes.MONTH_AWAITS_IMPORT)
+        self.assertEqual(payload["empty_note"], distrakt_routes.MONTH_AWAITS_IMPORT)
+        self.assertFalse(payload["readonly"])                             # Import stays offered
         self.assertIsNone(await distrakt.load_month(self.user_id, key))
         self.assertEqual(calls, [])
 

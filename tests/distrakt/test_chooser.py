@@ -4,12 +4,12 @@ Opening a month is the expensive act — it can pull a month of premieres, sweep
 recent viewing and write a roster's worth of rows — so the tracker's bare address
 asks which month rather than inheriting one from wherever the user happened to
 be. What is pinned here is that ARRIVING costs nothing, that naming a month is
-what opens it, and that the grid offers exactly the months
-rollover.month_openable allows: one the tracker may still build, or one the user
-already has.
+what opens it, and that the grid offers every month there is — opening one
+gathers nothing on its own, so there is none it can offer that the month view
+would then refuse.
 
-Every month below is derived from the clock, because all three rules compare a
-month key against today and a written-out one would rot at a month boundary.
+Every month below is derived from the clock, because these rules compare a month
+key against today and a written-out one would rot at a month boundary.
 
 No network: nothing here reaches a provider, which is the point of most of it.
 """
@@ -107,32 +107,36 @@ class WhichMonthsAreOfferedTests(ChooserTestCase):
             with self.subTest(offset=offset):
                 self.assertTrue(self.offered(self.chooser(year), year, month))
 
-    def test_a_month_the_calendar_has_not_reached_is_shown_but_not_offered(self):
-        """Drawn as plainly unavailable rather than left out or offered and then
-        refused after the click — see rollover.month_reachable."""
-        year, month = _month(2)
-        body = self.chooser(year)
-        self.assertFalse(self.offered(body, year, month))
-        self.assertIn("month-btn unavailable", body)
+    def test_a_month_well_out_ahead_is_offered_too(self):
+        """Arriving on one costs nothing — it renders empty with the control that
+        builds it — so there is no distance at which the grid should stop."""
+        for offset in (2, 5):
+            year, month = _month(offset)
+            with self.subTest(offset=offset):
+                self.assertTrue(self.offered(self.chooser(year), year, month))
 
     def test_a_past_month_is_still_offered(self):
-        """The bound is on BUILDING a month, not on looking at one: a past month
-        renders from what is stored, or empty and read-only if nothing is."""
+        """Looking at one costs nothing either: a past month renders from what is
+        stored, or empty and read-only if nothing is."""
         year, month = _month(-1)
         self.assertTrue(self.offered(self.chooser(year), year, month))
 
-    def test_a_month_already_tracked_is_offered_however_far_ahead_it_is(self):
-        """A restored export can hold a month out past the preview. There is
-        nothing left to build in it, so refusing to open it would hide a month
-        the user already owns."""
+    def test_every_tile_in_the_year_is_somewhere_to_go(self):
+        """No tile is drawn as unavailable any more, in any year — there is no
+        month the grid can offer that the month view would then decline."""
+        year, _ = _month(4)
+        body = self.chooser(year)
+        self.assertNotIn("unavailable", body)
+        for month in range(1, 13):
+            with self.subTest(month=month):
+                self.assertTrue(self.offered(body, year, month))
+
+    def test_a_month_already_tracked_says_so(self):
+        """A restored export can hold a month out ahead; the grid marks the ones
+        the user already owns rather than merely letting them in."""
         self.track(4)
         year, month = _month(4)
-        body = self.chooser(year)
-        self.assertTrue(self.offered(body, year, month))
-        # Its untracked neighbour, equally far ahead, is not.
-        neighbour_year, neighbour_month = _month(5)
-        if neighbour_year == year:
-            self.assertFalse(self.offered(body, neighbour_year, neighbour_month))
+        self.assertIn("· kept", self.chooser(year))
 
     def test_opening_a_tracked_month_reads_it_without_building_anything(self):
         month_key = self.track(4)
@@ -204,22 +208,3 @@ class EveryWayInLandsOnTheChooserTests(ChooserTestCase):
         self._lands_on_the_chooser(href)
 
 
-class MonthOpenableTests(AppTestCase):
-    """rollover.month_openable on its own: the two ways a month may be opened."""
-
-    def test_a_month_that_may_be_built_may_be_opened(self):
-        today = date.today()
-        for offset in (-1, 0, 1):
-            key = distrakt_store.month_key(*_month(offset))
-            with self.subTest(offset=offset):
-                self.assertTrue(distrakt_store.month_openable(key, set(), today))
-
-    def test_a_month_past_the_preview_may_not(self):
-        today = date.today()
-        key = distrakt_store.month_key(*_month(2))
-        self.assertFalse(distrakt_store.month_openable(key, set(), today))
-
-    def test_unless_it_is_one_the_user_already_has(self):
-        today = date.today()
-        key = distrakt_store.month_key(*_month(2))
-        self.assertTrue(distrakt_store.month_openable(key, {key}, today))

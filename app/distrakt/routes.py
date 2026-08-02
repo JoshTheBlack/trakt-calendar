@@ -63,15 +63,11 @@ guard = authz.Guard(router)
 # happened to send, or the same title would key differently on two adds.
 _NUMERIC_ID_KEYS = frozenset(ID_KEYS) - {"imdb", "slug"}
 
-# A month that has not begun is in one of two states, and the whole risk is that
-# they blur: one is WAITING TO BE ASKED, the other cannot be asked about at all.
-# Shown the wrong sentence, a user reads a working feature as a broken one, so
-# both are written here, next to each other, and each surface reads the one for
-# the state it is in — the empty month says it for itself, and the import route
-# refuses in the same words rather than in its own.
+# What an empty month that has not begun says for itself. There is only ever one
+# sentence for it now, at any distance ahead: every future month is waiting to be
+# asked, and the ask is a button on the page saying this.
 MONTH_AWAITS_IMPORT = ("This month hasn't begun yet, so nothing has been gathered for it. "
                        "Press ⤓ Import to build it from what premieres in it.")
-MONTH_BEYOND_CALENDAR = "The calendar hasn't reached this month yet."
 
 
 class RequestError(ValueError):
@@ -192,25 +188,26 @@ async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> 
     )
 
 
-def _chooser_months(year: int, tracked: set[str], today: date) -> list[dict]:
-    """The twelve tiles the chooser draws for `year`: which month each one is,
-    whether it may be opened, and whether it is one the user already has.
+def _chooser_months(year: int, tracked: set[str]) -> list[dict]:
+    """The twelve tiles the chooser draws for `year`: which month each one is, and
+    whether it is one the user already has.
 
-    A tile that may not be opened is drawn as one — visibly unavailable — rather
-    than left out or offered and refused after the click. The rule it is drawn
-    from is rollover.month_openable, the same one the month view would apply,
-    so the grid cannot advertise a month the tracker would then decline to build.
+    EVERY month is offered, in every year. Opening one costs nothing on its own —
+    a month behind the calendar that was never tracked renders empty and
+    read-only, and one ahead renders empty with the ⤓ Import control that is the
+    only thing that builds it — so there is no month the grid can advertise and
+    the month view then refuse to show. The tiles used to be bounded by how far
+    ahead the tracker would build, which meant a month the user could legitimately
+    ask for was drawn as unavailable.
     """
-    tiles = []
-    for month in range(1, 13):
-        key = distrakt_store.month_key(year, month)
-        tiles.append({
+    return [
+        {
             "num": month,
             "name": _calendar.month_name[month],
-            "openable": distrakt_store.month_openable(key, tracked, today),
-            "tracked": key in tracked,
-        })
-    return tiles
+            "tracked": distrakt_store.month_key(year, month) in tracked,
+        }
+        for month in range(1, 13)
+    ]
 
 
 @guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)
@@ -239,7 +236,7 @@ async def distrakt(request: Request):
         return templates.TemplateResponse(request, "distrakt_pick.html", {
             "request": request,
             "year": year,
-            "months": _chooser_months(year, tracked, today),
+            "months": _chooser_months(year, tracked),
             "current_month": today.month if year == today.year else None,
             "today_month": today.month,
             "today_year": today.year,
@@ -649,7 +646,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
     existing = await distrakt_store.load_month(user_id, month_key)
     if existing is None:
-        blocked = await distrakt_store.is_backfill_blocked(user_id, month_key)
+        blocked = await distrakt_store.is_backfill_blocked(user_id, month_key, today)
         if blocked or not settings.trakt_configured:
             # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
             # persisted, no Trakt call. `readonly` hides the add/edit affordances.
@@ -669,9 +666,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             # merely early. Not persisted and no Trakt call either way.
             return _empty_month_payload(
                 month_key, emojis, default_emoji, standing, link_url=link_url,
-                empty_note=(MONTH_AWAITS_IMPORT
-                            if distrakt_store.month_reachable(month_key, today)
-                            else MONTH_BEYOND_CALENDAR),
+                empty_note=MONTH_AWAITS_IMPORT,
             ), 200
 
     try:
@@ -750,10 +745,13 @@ async def api_distrakt_import(request: Request):
     button is the ask: it creates the month, which takes that month's premieres
     and nothing carried in from before it (see rollover._initialize_month).
 
-    Bounded to a month the tracker may actually build — the one under way or the
-    preview immediately after it (see rollover.month_reachable). The page inherits
-    its month from whatever view the user came from, so without that bound one
-    click out ahead created a month nobody had asked about."""
+    ANY month ahead, however far, and it does not matter whether the months
+    between have been built: this is somebody pressing a button on the month they
+    are looking at, which is the deliberate act a bound on how far ahead it may
+    point was standing in for. What it gathers is only what this instance already
+    holds for that month's calendar, so a month nothing is known about yet builds
+    empty rather than expensively. A PAST month never tracked is the one refusal
+    left — see rollover.can_initialize for why that one stays."""
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
@@ -763,15 +761,8 @@ async def api_distrakt_import(request: Request):
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     month_key = distrakt_store.month_key(year, month)
-    if await distrakt_store.is_backfill_blocked(user_id, month_key):
+    if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
         return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
-    if not distrakt_store.month_reachable(month_key, today):
-        # Said out loud rather than left to no-op. ensure_month will not build a
-        # month this far ahead (see month_reachable), so importing into it would
-        # write nothing while the toast claimed it had. The same sentence the
-        # empty month shows for this state, so pressing the button cannot appear
-        # to report something different from the page it was pressed on.
-        return JSONResponse({"ok": False, "error": MONTH_BEYOND_CALENDAR}, status_code=400)
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
@@ -1177,10 +1168,10 @@ async def api_distrakt_add(request: Request):
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid ids/season"}, status_code=400)
     month_key = distrakt_store.month_key(year, month)
-    if await distrakt_store.is_backfill_blocked(user_id, month_key):
-        # No backfill: refuse to create a never-tracked past/gap month even via a
-        # manual add (keeps a user's store growing forward-only, consistent with
-        # the read path's read-only rendering of such months).
+    if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
+        # No backfill: refuse to create a never-tracked PAST month even via a
+        # manual add, consistent with the read path's read-only rendering of such
+        # months. api_distrakt_add_completed is the way to state one outright.
         return JSONResponse(
             {"ok": False, "error": "Can't add shows to a past month that was never tracked."},
             status_code=400,

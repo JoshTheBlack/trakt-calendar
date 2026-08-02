@@ -1,4 +1,5 @@
-"""Lazy month rollover, prior-month freeze, and totals staleness.
+"""Lazy month rollover, the freeze of a month the calendar has passed, and totals
+staleness.
 
 ONE JOB — decide what a month should CONTAIN when it is first reached, and when a
 month stops being editable. There is no scheduler: every rule here fires on
@@ -11,7 +12,6 @@ per-user main-calendar not-watching store (app/calendar/state.py).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
 from datetime import date
 
 from .. import clock, db
@@ -43,8 +43,7 @@ def month_committed(month_key: str, today: date | None = None) -> bool:
     """True once the calendar has reached (or passed) the 1st of `month_key` — the
     month has officially begun. BEFORE this a month is a "preview": it auto-
     populates from premieres and its main-calendar not-watching toggles only HIDE
-    shows (reversibly). ON/AFTER it, not-watching promotes to Abandoned and the
-    immediately-prior month freezes.
+    shows (reversibly). ON/AFTER it, not-watching promotes to Abandoned.
 
     Reads the standing rather than comparing the key again here: "has this month
     begun" and "is this month over" are the same comparison asked twice, and two
@@ -52,54 +51,42 @@ def month_committed(month_key: str, today: date | None = None) -> bool:
     return store.month_standing(month_key, today) is not store.MonthStanding.FUTURE
 
 
-def month_reachable(month_key: str, today: date | None = None) -> bool:
-    """Whether the tracker may BUILD `month_key` yet: it has begun, or it is the
-    single month immediately ahead of the one that has (the preview).
+async def can_initialize(user_id: int, month_key: str, today: date | None = None) -> bool:
+    """Whether the tracker may BUILD `month_key` for this user.
 
-    The tracker inherits whichever month the page it was opened from was showing,
-    and that page can be pointed at any month at all. Without this bound, opening
-    it on a month three ahead built that month there and then — pulling in its
-    premieres, and seeding it with titles carried forward and with whatever the
-    user had been watching recently, which is this month's material and not that
-    one's. It also consumed the months in between: a store only ever grows forward
-    (see can_initialize), so a month created out ahead makes every month before it
-    unreachable for good.
+    ANY MONTH THE CALENDAR HAS NOT PASSED, AT ANY DISTANCE. The month under way
+    and every month ahead of it are all fair game, and a gap between them is
+    fine: nothing has to be built in order, and one skipped over can be filled in
+    afterwards. Building a month ahead is a deliberate act — opening one gathers
+    nothing (routes._distrakt_month_payload), and the Import control is what asks
+    for it by name — so the ask is the safeguard, and a bound on how far ahead it
+    may point was doing a job the ask already does. Bounded, it did harm instead:
+    the store grew forward only, so a December built during August stranded
+    September, October and November for good.
 
-    ONE month of slack rather than none, because the preview is a real feature:
-    before the 1st, next month auto-populates from premieres so the roster tracks
-    the calendar. Anything past that is a month nobody can say anything about yet.
+    A MONTH THE CALENDAR HAS ALREADY PASSED IS STILL REFUSED, so backward or gap
+    month-nav cannot silently invent (and Trakt-seed) history for a month nobody
+    was tracking at the time. Filling those in is what the watch-history backfill
+    is for (app/distrakt/backfill.py) — it works them out from what was actually
+    watched and writes them outright rather than coming through here — and titles
+    can be put onto an old month by hand.
+
+    Two long-standing exceptions to that refusal survive: a store with no months
+    at all is a first seed and may start wherever the user starts it, and a month
+    later than everything already tracked is the forward growth the store was
+    built around. YYYY-MM strings compare chronologically.
     """
-    return month_committed(month_key, today) or month_committed(prev_month_key(month_key), today)
-
-
-def month_openable(month_key: str, tracked: Collection[str], today: date | None = None) -> bool:
-    """Whether the tracker may be OPENED on `month_key` — the question a month
-    chooser asks, which is not the same as month_reachable's.
-
-    Two ways in. A month the tracker may still BUILD (month_reachable) can be
-    opened because opening it is how it gets built. A month already in `tracked`
-    can be opened whatever the clock says, because there is nothing left to
-    build: the rows exist, and reading them costs nothing and writes nothing.
-    Without that second case a restored export holding a month out ahead would
-    show a month the user owns and cannot look at.
-    """
-    return month_key in tracked or month_reachable(month_key, today)
-
-
-async def can_initialize(user_id: int, month_key: str) -> bool:
-    """No backfill of months earlier than a user's initial seed. Only a brand-new
-    store (no months yet -> seed) or a month strictly AFTER their latest tracked
-    month (forward rollover) may be initialized. This stops backward / gap
-    month-nav from silently creating (and Trakt-seeding) historical months — a
-    user's store only ever grows forward. YYYY-MM strings compare chronologically."""
+    if store.month_standing(month_key, today) is not store.MonthStanding.PAST:
+        return True
     months = await list_months(user_id)  # sorted ascending
     return not months or month_key > months[-1]
 
 
-async def is_backfill_blocked(user_id: int, month_key: str) -> bool:
+async def is_backfill_blocked(user_id: int, month_key: str, today: date | None = None) -> bool:
     """True when `month_key` has no doc for this user AND may not be initialized (a
     past / gap month reached by navigating backward) — rendered read-only."""
-    return (await load_month(user_id, month_key)) is None and not await can_initialize(user_id, month_key)
+    return ((await load_month(user_id, month_key)) is None
+            and not await can_initialize(user_id, month_key, today))
 
 
 def is_stale(doc: dict | None, max_age_hours: int = TOTALS_STALE_HOURS) -> bool:
@@ -279,9 +266,12 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     so PAST months never re-run initialization.
 
     BUILDING A MONTH THAT HAS NOT BEGUN IS SOMETHING SOMEBODY ASKS FOR. This
-    function will do it — the preview is a real feature — but the page load does
-    not call it for such a month any more; the Import control does. The rule and
-    the reason are at the one place that decides it, routes._distrakt_month_payload.
+    function will do it, however far ahead the month is and whatever gap it leaves
+    behind it (see can_initialize), but the page load does not call it for such a
+    month; the Import control does. The rule and the reason are at the one place
+    that decides it, routes._distrakt_month_payload — which is also why there is
+    no bound here on how far ahead a month may be: nothing reaches this by
+    accident.
     """
     today = today or clock.today()
     month_key = store.month_key(year, month)
@@ -304,13 +294,7 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
         # return a transient, UNPERSISTED empty doc so a proper init still happens
         # once Trakt is configured (rather than baking in an empty month).
         return new_month_doc(month_key)
-    if not month_reachable(month_key, today):
-        # A month the calendar has not got to yet (and is not the preview of).
-        # Same treatment as a blocked past month: a transient, UNPERSISTED empty
-        # doc, so navigating out ahead shows nothing rather than importing a month
-        # nobody asked about — see month_reachable.
-        return new_month_doc(month_key)
-    if not await can_initialize(user_id, month_key):
+    if not await can_initialize(user_id, month_key, today):
         # Backward / gap navigation to a never-tracked past month: DO NOT backfill
         # — return a transient, UNPERSISTED empty doc (rendered read-only).
         return new_month_doc(month_key)

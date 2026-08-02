@@ -146,10 +146,11 @@ class BackupPanelTests(TrackerPanelTestCase):
 
 
 class ImportingAMonthTests(TrackerPanelTestCase):
-    """The ⤓ Import control, and the one month it is allowed to act on.
+    """The ⤓ Import control: the months it acts on, and the one it refuses.
 
-    The tracker opens on whichever month the page it was reached from was
-    showing, so the month in the request is only as sensible as that page was.
+    Pressing it is a deliberate ask about the month on screen, which is why it may
+    point at any month the calendar has not passed, however far ahead and whatever
+    it leaves unbuilt behind it.
     """
 
     def make_settings(self):
@@ -175,13 +176,40 @@ class ImportingAMonthTests(TrackerPanelTestCase):
              patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/import", json={"year": year, "month": month})
 
-    def test_a_month_the_calendar_has_not_reached_is_refused(self):
-        """Not a silent no-op: the month cannot be built out there, so an import
-        into it would write nothing while the page said it had imported."""
-        resp = self._import(2)
+    def _key(self, offset: int) -> str:
+        index = self.today.month - 1 + offset
+        return distrakt_store.month_key(self.today.year + index // 12, index % 12 + 1)
+
+    def test_a_month_well_out_ahead_is_built_by_asking(self):
+        """No bound on how far ahead the ask may point. What it gathers is only
+        what is already known about that month's calendar, so a distant one costs
+        nothing extra — and the click is what stops a month being built by
+        accident."""
+        resp = self._import(4)
+        self.assertEqual(resp.status_code, 200)
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, self._key(4)))
+        self.assertEqual([s["ids"]["trakt"] for s in doc["shows"]], [303])
+
+    def test_a_month_skipped_over_can_still_be_filled_in_afterwards(self):
+        """The reason the bound had to go rather than merely be widened: a store
+        that only grew forward let a month built out ahead strand every month
+        between here and it."""
+        self.assertEqual(self._import(4).status_code, 200)
+        self.assertEqual(self._import(2).status_code, 200)
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, self._key(2)))
+        self.assertEqual([s["ids"]["trakt"] for s in doc["shows"]], [303])
+
+    def test_a_past_month_that_was_never_tracked_is_still_refused(self):
+        """The one refusal left. Filling in months nobody was tracking is what the
+        watch-history backfill is for; an import would invent them from premieres
+        instead."""
+        asyncio.run(distrakt_store.add_show(self.user_id, self._key(0), {
+            "ids": {"trakt": 1, "tmdb": 1, "slug": "seed"}, "season": 1,
+            "title": "Seed", "network": "Net", "media": "show"}))
+        resp = self._import(-1)
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("hasn't reached", resp.json()["error"])
-        self.assertEqual(asyncio.run(distrakt_store.list_months(self.user_id)), [])
+        self.assertIn("never tracked", resp.json()["error"])
+        self.assertNotIn(self._key(-1), asyncio.run(distrakt_store.list_months(self.user_id)))
 
     def test_the_month_in_progress_imports(self):
         resp = self._import(0)
