@@ -14,7 +14,7 @@ import asyncio
 from collections.abc import Collection
 from datetime import date
 
-from .. import db
+from .. import clock, db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
 from . import calendar_import, store
@@ -274,7 +274,7 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     not call it for such a month any more; the Import control does. The rule and
     the reason are at the one place that decides it, routes._distrakt_month_payload.
     """
-    today = today or date.today()
+    today = today or clock.today()
     month_key = store.month_key(year, month)
     existing = await load_month(user_id, month_key)
     configured = bool(settings and getattr(settings, "trakt_configured", False))

@@ -32,7 +32,7 @@ from . import backfill, discord_fmt, watch_history
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, db, route_params
+from .. import auth, authz, chrome, clock, db, route_params
 from ..auth import trakt_routes
 from ..auth import AuthLevel
 from ..calendar import share_links, state as calendar_state
@@ -231,7 +231,7 @@ async def distrakt(request: Request):
     WITH a month it renders the shell for the requested {year, month}; the page's
     JS then fetches the computed month via /api/distrakt/month (which lazily rolls
     the month over). Month-nav prev/next mirror the main calendar's nav."""
-    today = date.today()
+    today = clock.today()
     user = await auth.current_user(request)
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     if not route_params.month_given(request.query_params.get("month")):
@@ -269,7 +269,7 @@ async def distrakt(request: Request):
 async def api_distrakt_list(request: Request):
     """Raw (unbucketed) shows stored for a month — the plain management list."""
     user_id = await _distrakt_user_id(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
@@ -539,7 +539,7 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     the user refreshes again once the window clears. A plain reachability failure
     degrades the same way; only the notice wording differs.
     """
-    today = date.today()
+    today = clock.today()
     month_key = distrakt_store.month_key(year, month)
     # Where this month stands relative to the calendar decides which sections it
     # may show at all (discord_fmt.MONTH_BUCKETS), so every shape below is handed
@@ -605,7 +605,7 @@ async def api_distrakt_month(request: Request):
     past month: rendered from the frozen snapshot with NO Trakt calls. Opening an
     uninitialized month lazily rolls it over first (see ensure_month)."""
     user_id = await _distrakt_user_id(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     with span("GET /api/distrakt/month", ym=f"{year}-{month:02d}"):
@@ -620,7 +620,7 @@ async def api_distrakt_refresh(request: Request):
     /api/distrakt/month. CLOSED months are frozen (nothing to refresh)."""
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id),
@@ -633,7 +633,7 @@ async def api_distrakt_months(request: Request):
     """This user's tracked YYYY-MM months for the history nav, plus the real
     current month (always navigable even before it has been initialized)."""
     user_id = await _distrakt_user_id(request)
-    today = date.today()
+    today = clock.today()
     current = distrakt_store.month_key(today.year, today.month)
     months = sorted(set(await distrakt_store.list_months(user_id)) | {current})
     return JSONResponse({"ok": True, "months": months, "current": current})
@@ -661,7 +661,7 @@ async def api_distrakt_import(request: Request):
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     month_key = distrakt_store.month_key(year, month)
@@ -689,7 +689,7 @@ async def api_distrakt_backfill_networks(request: Request):
     (with the default emoji) so they all show up in the editor. Returns the map."""
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
@@ -832,7 +832,7 @@ async def api_distrakt_remove(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     try:
@@ -929,7 +929,7 @@ async def api_distrakt_add_movie(request: Request):
         watched_on = date.fromisoformat(day)
     except ValueError:
         return JSONResponse({"ok": False, "error": "Pick the day you watched it."}, status_code=400)
-    if watched_on > date.today():
+    if watched_on > clock.today():
         return JSONResponse({"ok": False, "error": "That day hasn't happened yet."}, status_code=400)
 
     recorded = await watch_history.record_movie_watches(user_id, [{
@@ -946,7 +946,7 @@ async def api_distrakt_add_movie(request: Request):
             status_code=400)
     await _resnapshot_if_closed(user_id, distrakt_store.month_key(watched_on.year, watched_on.month))
 
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year_view"), today.year)
     month = route_params.valid_month(data.get("month_view"), today.month)
     payload, status = await _distrakt_month_payload(
@@ -1000,7 +1000,7 @@ async def api_distrakt_remove_movie(request: Request):
     # not necessarily the month being looked at.
     await _resnapshot_if_closed(user_id, watched_at[:7])
 
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     payload, status = await _distrakt_month_payload(
@@ -1045,7 +1045,7 @@ async def api_distrakt_add(request: Request):
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     try:
@@ -1114,7 +1114,7 @@ async def api_distrakt_add_completed(request: Request):
     if not settings.trakt_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     month_key = distrakt_store.month_key(year, month)
@@ -1232,7 +1232,7 @@ async def api_distrakt_abandon(request: Request):
     isn't found), abandoned_form falls back to None."""
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     try:

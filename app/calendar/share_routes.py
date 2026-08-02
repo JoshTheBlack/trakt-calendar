@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 
 from . import (cache as calendar_cache, share_card, share_card_cache,
                share_code, share_links, state as calendar_state)
-from .. import auth, authz, perftrace, route_params
+from .. import auth, authz, clock, perftrace, route_params
 from ..providers.trakt import detail as trakt_detail
 from ..auth import AuthLevel
 from ..authz import Guard
@@ -191,7 +191,7 @@ def resolve_view(params: _Params, share_row, settings) -> ShareView:
     Every value is whitelisted on the way through and an unusable one falls back
     rather than raising, because these arrive from strangers editing URLs.
     """
-    today = date.today()
+    today = clock.today()
     return ShareView(
         year=route_params.valid_year(params.get("year"), today.year),
         month=route_params.valid_month(params.get("month"), today.month),

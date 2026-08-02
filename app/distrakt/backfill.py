@@ -49,7 +49,7 @@ from . import watch_history
 # in — a backfill job has no business knowing which half of the tracker
 # `load_month` or `save_month` lives in.
 from .. import distrakt
-from .. import cache, db, providers
+from .. import cache, clock, db, providers
 from ..providers.base import Media, resolve_key
 
 logger = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ def default_range(today: date | None = None) -> tuple[str, str]:
     filled up left the useful part of a re-run unreachable from the default.
     The current month is excluded: it is the tracker's own to bucket.
     """
-    today = today or date.today()
+    today = today or clock.today()
     start = f"{today.year:04d}-01"
     end = _prev_month(f"{today.year:04d}-{today.month:02d}")
     return (start, max(start, end))
@@ -138,7 +138,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     date or later are left out, so a second run offers only what is genuinely
     missing.
     """
-    today = today or date.today()
+    today = today or clock.today()
     months = month_range(start_month, end_month)
     if not months:
         return _empty_plan(start_month, end_month)

@@ -33,7 +33,7 @@ import re
 from datetime import date
 from enum import StrEnum
 
-from .. import db
+from .. import clock, db
 from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
 
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -90,7 +90,7 @@ def month_standing(month: str, today: date | None = None) -> MonthStanding:
     the tracker's rules — what freezes, what previews, what a post may say — all
     turn on the month rather than on where inside it we are.
     """
-    today = today or date.today()
+    today = today or clock.today()
     here = (today.year, today.month)
     there = (int(month[:4]), int(month[5:7]))
     if there < here:

@@ -55,7 +55,7 @@ import logging
 from datetime import date, datetime, timezone
 
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
-from .. import db, providers
+from .. import clock, db, providers
 from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
 
 logger = logging.getLogger(__name__)
@@ -448,7 +448,7 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
     port = _port()
     if port is None:
         return await _load(user_id)
-    today = today or datetime.now(timezone.utc).date()
+    today = today or clock.today()
     state = await _load(user_id)
     with span("wh.last_activities"):
         la = await port.fetch_last_activities(settings)

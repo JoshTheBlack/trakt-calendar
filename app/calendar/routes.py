@@ -32,7 +32,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from . import cache as calendar_cache, share_links, state as calendar_state
-from .. import auth, authz, chrome, route_params
+from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
@@ -60,7 +60,7 @@ NOT_CONFIGURED = (
 
 
 def _picker_context(request: Request, settings, year: int, endpoint, user=None):
-    today = date.today()
+    today = clock.today()
     return {
         "request": request,
         "year": year,
@@ -318,10 +318,10 @@ async def home(request: Request):
     # Already resolved and cached by the dependency that let this request in.
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    year = route_params.valid_year(request.query_params.get("year"), date.today().year)
+    year = route_params.valid_year(request.query_params.get("year"), clock.today().year)
     endpoint = _requested_endpoint(request, prefs, settings)
     if route_params.month_given(request.query_params.get("month")):
-        month = route_params.valid_month(request.query_params.get("month"), date.today().month)
+        month = route_params.valid_month(request.query_params.get("month"), clock.today().month)
         return RedirectResponse(
             f"/calendar?month={month}&year={year}&endpoint={endpoint.key}", status_code=302)
     return templates.TemplateResponse(
@@ -339,7 +339,7 @@ async def calendar_page(request: Request):
     user = await auth.current_user(request)
     is_admin = bool(user and user.is_admin)
     prefs = await auth.get_user_prefs(user.user_id)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     endpoint = _requested_endpoint(request, prefs, settings)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
@@ -489,7 +489,7 @@ async def calendar_day(request: Request):
     settings = load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     endpoint = _requested_endpoint(request, prefs, settings)
@@ -586,7 +586,7 @@ async def api_details(request: Request):
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)
 async def get_state(request: Request):
     user = await auth.current_user(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     endpoint = get_endpoint(request.query_params.get("endpoint"))
@@ -610,7 +610,7 @@ async def post_state(request: Request):
     mark has no month in it: it is a statement about the show.
     """
     user = await auth.current_user(request)
-    today = date.today()
+    today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     endpoint = get_endpoint(request.query_params.get("endpoint"))
