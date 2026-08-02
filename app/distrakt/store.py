@@ -438,6 +438,21 @@ async def months_with_shows(user_id: int) -> set[str]:
     return {r["month"] for r in rows}
 
 
+async def users_with_shows() -> list[int]:
+    """Every account that holds at least one roster row, ascending.
+
+    The one read in this module that is not scoped to a user, and it exists
+    because a maintenance pass over the stored rows has nobody to ask which
+    accounts there are: every other entry point already knows whose tracker it is
+    looking at, because a request carried the session that said so. Reads
+    distrakt_shows rather than users, so an account that has never opened the
+    tracker is not offered as something to work on.
+    """
+    rows = await db.fetch_all(
+        "SELECT DISTINCT user_id FROM distrakt_shows ORDER BY user_id")
+    return [int(r["user_id"]) for r in rows]
+
+
 async def user_roster(user_id: int) -> list[dict]:
     """Every season this user holds on ANY of their months, once each, minus
     everything they have given up on.

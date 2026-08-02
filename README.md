@@ -406,6 +406,8 @@ app/
     backfill.py       Filling in never-tracked months from watch history
     watch_history.py  The incremental per-user watch cache the tracker reads
     discord_fmt.py    Which bucket a show is in, and the two Discord posts
+    prune.py          A hand-run pass over stored months (python -m), never
+                       reached by the app itself
   ranker/
     core.py           The board data layer: tiers, entries, ordering
     routes.py         The rankings page and its board API

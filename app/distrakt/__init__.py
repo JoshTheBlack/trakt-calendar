@@ -18,6 +18,7 @@ the reason it changes:
   backup.py           the JSON export and its inverse
   discord_fmt.py      which bucket a show is in, and the two Discord posts
   routes.py           the tracker page and the whole /api/distrakt/* API
+  prune.py            a hand-run pass over months already stored
 
 The names re-exported below are the DATA LAYER — what a caller means when it says
 `distrakt.load_month`, versus `distrakt.store.load_month`, which would make every
@@ -26,6 +27,11 @@ router and the backfill job are deliberately NOT among them: they are jobs to ru
 rather than facts to read, and their callers import the module (`from .distrakt
 import routes`) precisely because that is what they want. Inside the package the
 modules call each other directly.
+
+prune.py is not among them either, and it has no caller anywhere in the app: it
+is a `python -m app.distrakt.prune` entry point and nothing else. It deletes rows
+from months the calendar has closed, which is not something a request may do —
+see its own docstring for why that separation is the whole design.
 
 The provider reads (premieres, season detail, watch history) authenticate with
 whatever token is on the `settings` they are handed; `user_id` scopes the STORAGE.

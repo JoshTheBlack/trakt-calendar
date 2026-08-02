@@ -138,14 +138,26 @@ def _month_number(month) -> int | None:
         return None
 
 
+def premiere_month(show: dict) -> int | None:
+    """The month number this show's season premiere falls in, or None when it
+    carries no date anything can read.
+
+    Separate from premiered_in_month because "it premiered somewhere else" and
+    "we do not know when it premiered" are different answers to different
+    questions, and premiered_in_month — which only ever has to decide whether to
+    announce a title — collapses them into one False. A caller weighing whether a
+    row still belongs where it is stored must not read the second as the first."""
+    md = _premiere_month_day(show)
+    return None if md is None else md[0]
+
+
 def premiered_in_month(show: dict, month_number: int) -> bool:
     """Whether this show's season premiere falls in `month_number` — the test for
     POST 1 membership. A premiere date is what makes a show one of this month's
     announcements, independent of whether it has begun airing yet; a show carried
     over from an earlier month premiered then, so its month differs and it is not
     re-announced."""
-    md = _premiere_month_day(show)
-    return md is not None and md[0] == month_number
+    return premiere_month(show) == month_number
 
 
 # ---------------------------------------------------------------------------
