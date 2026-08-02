@@ -28,6 +28,7 @@ from . import auth
 from . import authz
 from . import cache
 from . import changelog
+from . import clock
 from . import config
 from . import chrome
 from . import db
@@ -191,6 +192,9 @@ async def lifespan(_app: FastAPI):
     # base URL, so an operator who left it set would otherwise see a value save in
     # Settings and never take effect. Silent unless the two actually differ.
     config.warn_if_public_base_url_overridden()
+    # And loudest of the three: an instance running on a faked date must say so
+    # every single time it boots, because nothing else about it looks unusual.
+    clock.warn_if_overridden()
     # Turn encryption on non-interactively when the escape-hatch env var is set with
     # a valid key, then derive the key-health once so the request gate can steer an
     # administrator to recovery on a wrong key BEFORE any ordinary load hits a sealed

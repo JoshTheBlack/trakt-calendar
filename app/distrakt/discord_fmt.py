@@ -27,6 +27,7 @@ from __future__ import annotations
 # Both vocabularies are named beside the record shape in store.py; this module is
 # what DECIDES which bucket a show gets, and what a month in a given standing is
 # allowed to say.
+from . import store
 from .store import Bucket, MonthStanding
 
 # WHICH BUCKETS A MONTH MAY PRESENT, by where that month stands relative to the
@@ -129,8 +130,11 @@ def _month_number(month) -> int | None:
     if isinstance(month, int):
         return month
     try:
-        return int(str(month)[5:7])
-    except (ValueError, IndexError):
+        return store.parse_month_key(str(month))[1]
+    except ValueError:
+        # Tolerant on purpose, unlike the parse it delegates to: this is a
+        # rendering helper and an unreadable month means "no month to sort by",
+        # not a failed post.
         return None
 
 

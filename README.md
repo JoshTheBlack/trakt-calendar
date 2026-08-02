@@ -195,6 +195,19 @@ Then set `public_base_url` to `https://shows.example.com` in Settings and leave
 `cookie_secure` at `always`.
 </details>
 
+### `TRAKT_FAKE_TODAY` — a development-only clock
+
+Set it to an ISO date (`2026-09-01`) and the app believes that is today. It exists so a
+month rollover can actually be watched happening: the tracker's behaviour at a month
+boundary depends entirely on the date, and short of waiting for the calendar there was no
+way to reach it.
+
+**Do not set this on a real instance.** A moved clock will freeze the month under way,
+reopen rollover decisions, or make a month that has not started behave as though it had —
+against your real data. It is read from the process environment only; nothing in the app
+can set it, there is no screen for it, and an instance running with it logs a warning
+naming the date every time it boots. Unset it and restart to go back to the real clock.
+
 ## Configuration
 
 Configuration is done in the **⚙️ Settings** panel. Almost everything lives in the SQLite

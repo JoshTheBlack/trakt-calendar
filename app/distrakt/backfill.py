@@ -49,7 +49,7 @@ from . import watch_history
 # in — a backfill job has no business knowing which half of the tracker
 # `load_month` or `save_month` lives in.
 from .. import distrakt
-from .. import cache, db, providers
+from .. import cache, clock, db, providers
 from ..providers.base import Media, resolve_key
 
 logger = logging.getLogger(__name__)
@@ -77,8 +77,8 @@ def valid_month(value) -> str | None:
 
 
 def _prev_month(month_key: str) -> str:
-    year, month = int(month_key[:4]), int(month_key[5:7])
-    return f"{year - 1:04d}-12" if month == 1 else f"{year:04d}-{month - 1:02d}"
+    year, month = distrakt.parse_month_key(month_key)
+    return distrakt.month_key(year - 1, 12) if month == 1 else distrakt.month_key(year, month - 1)
 
 
 def month_range(start_month: str, end_month: str) -> list[str]:
@@ -88,9 +88,9 @@ def month_range(start_month: str, end_month: str) -> list[str]:
     if not start or not end:
         return []
     out: list[str] = []
-    year, month = int(start[:4]), int(start[5:7])
-    while f"{year:04d}-{month:02d}" <= end and len(out) < MAX_MONTHS:
-        out.append(f"{year:04d}-{month:02d}")
+    year, month = distrakt.parse_month_key(start)
+    while distrakt.month_key(year, month) <= end and len(out) < MAX_MONTHS:
+        out.append(distrakt.month_key(year, month))
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     return out
 
@@ -105,7 +105,7 @@ def default_range(today: date | None = None) -> tuple[str, str]:
     filled up left the useful part of a re-run unreachable from the default.
     The current month is excluded: it is the tracker's own to bucket.
     """
-    today = today or date.today()
+    today = today or clock.today()
     start = f"{today.year:04d}-01"
     end = _prev_month(f"{today.year:04d}-{today.month:02d}")
     return (start, max(start, end))
@@ -138,7 +138,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     date or later are left out, so a second run offers only what is genuinely
     missing.
     """
-    today = today or date.today()
+    today = today or clock.today()
     months = month_range(start_month, end_month)
     if not months:
         return _empty_plan(start_month, end_month)
@@ -152,7 +152,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     port = providers.for_tracker()
     if port is None:
         return _empty_plan(start_month, end_month)
-    start_day = date(int(months[0][:4]), int(months[0][5:7]), 1)
+    start_day = distrakt.month_first_day(months[0])
     events = await port.fetch_history(settings, start_at=start_day.isoformat())
     films, films_known = await _split_films(user_id, port.movie_plays_from(events), set(months))
 

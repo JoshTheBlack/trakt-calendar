@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from app import db, distrakt
@@ -66,6 +66,46 @@ class BucketVocabularyTests(unittest.TestCase):
         """`bucket` is a distrakt_shows column, and this enum is what its values
         are allowed to be; a reader who finds one should find the other."""
         self.assertIn("bucket", distrakt.SHOW_COLUMNS)
+
+
+class MonthKeyTests(unittest.TestCase):
+    """The "YYYY-MM" format, written and read by the one pair that owns it.
+
+    The parse used to be hand-rolled at every call site — nine copies of
+    `int(key[:4]), int(key[5:7])` and one written a different way again — so what
+    is worth pinning is the round trip and the refusals, since a blind slice
+    accepts all of the latter and answers nonsense.
+    """
+
+    def test_the_round_trip_is_the_identity(self):
+        for year, month in ((2026, 1), (2026, 12), (1999, 7), (2030, 10)):
+            with self.subTest(year=year, month=month):
+                self.assertEqual(
+                    distrakt.parse_month_key(distrakt.month_key(year, month)),
+                    (year, month))
+
+    def test_it_reads_the_padded_form_the_writer_produces(self):
+        self.assertEqual(distrakt.parse_month_key("2026-07"), (2026, 7))
+
+    def test_the_first_day_is_the_first_of_that_month(self):
+        self.assertEqual(distrakt.month_first_day("2026-07"), date(2026, 7, 1))
+
+    def test_an_unpadded_month_is_refused_rather_than_guessed(self):
+        # The padding is load-bearing — month keys are compared with < and >= —
+        # so "2026-7" is not a month key with a typo, it is not a month key.
+        with self.assertRaises(ValueError):
+            distrakt.parse_month_key("2026-7")
+
+    def test_a_longer_string_is_refused(self):
+        # A slice would happily read (2026, 7) out of a full date and carry on.
+        with self.assertRaises(ValueError):
+            distrakt.parse_month_key("2026-07-15")
+
+    def test_an_impossible_month_is_refused(self):
+        for bad in ("2026-00", "2026-13", "", "not-a-month", "202607"):
+            with self.subTest(value=bad):
+                with self.assertRaises(ValueError):
+                    distrakt.parse_month_key(bad)
 
 
 class DeriveSeasonTests(unittest.TestCase):

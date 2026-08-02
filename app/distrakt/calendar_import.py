@@ -10,6 +10,7 @@ import asyncio
 
 from ..calendar import state as calendar_state
 from ..providers.base import Item, Media, collect_ids
+from . import store
 from .store import ADDED_BY_CALENDAR, load_month, normalize_show, record_key, save_month
 
 
@@ -134,7 +135,7 @@ async def import_premieres(user_id: int, month_key: str, settings) -> dict | Non
     doc = await load_month(user_id, month_key)
     if doc is None or doc.get("closed"):
         return doc
-    year, month = int(month_key[:4]), int(month_key[5:7])
+    year, month = store.parse_month_key(month_key)
     present = {_present_key(s) for s in doc.get("shows") or []}
     nw_ids = await calendar_state.not_watching_ids(user_id)
     if await add_premieres(doc, present, user_id, settings, year, month, nw_ids):
@@ -158,7 +159,7 @@ async def is_calendar_premiere(user_id: int, month_key: str, settings,
     """
     if not (settings and getattr(settings, "trakt_configured", False)):
         return False
-    year, month = int(month_key[:4]), int(month_key[5:7])
+    year, month = store.parse_month_key(month_key)
     try:
         records = await premiere_records(user_id, settings, year, month)
     except Exception:  # noqa: BLE001 — a hiccup here must not fail the removal

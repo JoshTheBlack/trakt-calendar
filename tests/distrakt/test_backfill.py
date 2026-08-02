@@ -780,6 +780,43 @@ class BackfillRouteTests(unittest.TestCase):
                                 json={"start": "2026-06", "end": "2026-01"})
         self.assertEqual(resp.status_code, 400)
 
+    def test_a_malformed_month_is_refused_rather_than_replaced(self):
+        """A month somebody typed wrong must not be swapped for a default.
+
+        It used to be: an unpadded "2026-7" failed validation, fell through
+        `or default_start`, and the survey ran on January-to-last-month instead.
+        The user asked for two months, got a plausible-looking result covering
+        eight, and nothing anywhere said their input had been discarded.
+        """
+        for start, end in (("2026-7", "2026-8"),      # both unpadded
+                           ("2026-7", "2026-08"),     # only one
+                           ("2026-01", "2026-99"),    # not a month at all
+                           ("nonsense", "2026-06")):
+            with self.subTest(start=start, end=end):
+                resp = self.client.post("/api/distrakt/backfill/survey",
+                                        json={"start": start, "end": end})
+                self.assertEqual(resp.status_code, 400, resp.text)
+                self.assertIn("YYYY-MM", resp.json()["error"])
+                self.assertEqual(asyncio.run(distrakt.list_months(self.user_id)), [])
+
+    def test_an_omitted_month_still_falls_back_to_the_default(self):
+        """The other half of the rule: absent is not malformed. Sending nothing
+        is how the dialog asks for the offered range, so it must still work."""
+        with patch("app.distrakt.backfill.survey") as surveyed:
+            surveyed.return_value = backfill._empty_plan("2026-01", "2026-06")
+            resp = self.client.post("/api/distrakt/backfill/survey", json={})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(surveyed.call_args.args[2:], backfill.default_range())
+
+    def test_an_empty_string_counts_as_omitted(self):
+        # An untouched form field arrives as "" rather than being left out.
+        with patch("app.distrakt.backfill.survey") as surveyed:
+            surveyed.return_value = backfill._empty_plan("2026-01", "2026-06")
+            resp = self.client.post("/api/distrakt/backfill/survey",
+                                    json={"start": "", "end": "  "})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(surveyed.call_args.args[2:], backfill.default_range())
+
     def test_the_dialog_opens_on_january_to_last_month_whatever_is_tracked(self):
         """The offered range is January of the current year up to last month, and
         it is NOT clamped to stop before whatever is already tracked — see
