@@ -1181,6 +1181,21 @@ async def api_distrakt_backfill_range(request: Request):
     return JSONResponse({"ok": True, "start": start, "end": end, "tracked": tracked})
 
 
+def _requested_month(value, fallback: str) -> str | None:
+    """A "YYYY-MM" out of the backfill form: `fallback` when nothing was sent,
+    the value when it is a real month key, and None when it is neither.
+
+    ABSENT AND MALFORMED ARE DIFFERENT ANSWERS, and collapsing them is the bug
+    this exists to stop. Substituting the default for a value somebody actually
+    typed means a request for two months quietly runs as eight — the user sees a
+    plausible result and no sign that what they asked for was discarded. Nothing
+    typed at all is the only case a default belongs in.
+    """
+    if value is None or not str(value).strip():
+        return fallback
+    return backfill.valid_month(value)
+
+
 @guard.post("/api/distrakt/backfill/survey", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_backfill_survey(request: Request):
     """Work out what a backfill of {start, end} would write, and write nothing.
@@ -1196,8 +1211,12 @@ async def api_distrakt_backfill_survey(request: Request):
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
     default_start, default_end = backfill.default_range()
-    start = backfill.valid_month(data.get("start")) or default_start
-    end = backfill.valid_month(data.get("end")) or default_end
+    start = _requested_month(data.get("start"), default_start)
+    end = _requested_month(data.get("end"), default_end)
+    if start is None or end is None:
+        return JSONResponse(
+            {"ok": False, "error": "Months go in as YYYY-MM, with the month padded — 2026-07, not 2026-7."},
+            status_code=400)
     if not backfill.month_range(start, end):
         return JSONResponse(
             {"ok": False, "error": "That range covers no months — check the order."},

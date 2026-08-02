@@ -16,8 +16,12 @@ __pycache__/
 # App runtime data (settings.json with API keys, per-month watch state, detail cache)
 data/
 
-# Local scratch/test data dir (mirror of data/, never part of the repo)
+# Local scratch/test data dirs (mirrors of data/, never part of the repo).
+# data-*/ covers the throwaway copies made to exercise a month rollover against
+# real data without writing to it — see TRAKT_FAKE_TODAY in README. Those carry a
+# real settings.json, so an unignored one is API keys a commit away from leaving.
 scratch_data/
+data-*/
 
 # Claude Code local (personal) settings
 .claude/settings.local.json

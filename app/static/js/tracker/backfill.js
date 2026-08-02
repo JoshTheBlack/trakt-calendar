@@ -94,10 +94,17 @@ async function applyBackfill() {
         if (!d.ok) throw new Error(d.error || 'failed');
         backfillReady = false;
         document.getElementById('backfillResult').hidden = true;
+        // Only mentions films when it actually wrote some, and names the PAGE
+        // rather than quoting a control on it. The label of another screen's
+        // field is not a fact this file can keep true — it said to switch "What
+        // to import" to Movies, unconditionally, including on runs that found no
+        // films at all.
         setBackfillStatus(
             `Wrote ${(d.months || []).length} month(s), ${d.shows} finished season(s)`
             + (d.movies ? `, ${d.movies} film(s)` : '')
-            + '. Films import into Rankings on their own — switch "What to import" to Movies.', true);
+            + '.'
+            + (d.movies ? ' Films are on your watch record now; bringing them into a board is a separate import from Rankings.' : ''),
+            true);
         toast('Months backfilled', true);
         loadBackfillRange();
     } catch (e) {
