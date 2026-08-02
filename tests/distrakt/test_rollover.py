@@ -533,6 +533,62 @@ class CanInitializeTests(RolloverTestCase):
         self.assertFalse(await distrakt.is_backfill_blocked(self.user_id, "2026-09"))
 
 
+class FreezeEligibilityTests(unittest.TestCase):
+    """What settles a month is the calendar passing it, and nothing else — no
+    later month has to exist, and none has to have been opened."""
+
+    def test_a_month_settles_the_day_after_its_last(self):
+        self.assertFalse(distrakt.freeze_eligible("2026-07", date(2026, 7, 31)))
+        self.assertTrue(distrakt.freeze_eligible("2026-07", date(2026, 8, 1)))
+        self.assertTrue(distrakt.freeze_eligible("2026-07", date(2026, 11, 4)))
+
+    def test_a_month_still_ahead_never_is(self):
+        self.assertFalse(distrakt.freeze_eligible("2026-09", date(2026, 8, 1)))
+
+
+class MonthFreezesOnTheClockTests(RolloverTestCase):
+    """The lazy half: eligibility is the clock's, the snapshot is taken on the
+    next look."""
+
+    async def _open_july(self) -> None:
+        await distrakt.add_show(self.user_id, "2026-07", {
+            "ids": _ids(101), "season": 1, "title": "Active", "network": "Net"})
+
+    async def _ensure(self, year: int, month: int, today: date) -> dict:
+        async def fake_read_month(endpoint, settings, **kw):
+            return [], None
+
+        async def fake_progress(settings, since_days=60):
+            return []
+
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
+            return await distrakt.ensure_month(self.user_id, year, month, SETTINGS, today=today)
+
+    async def test_looking_at_a_month_the_calendar_has_passed_freezes_it(self):
+        """Nothing later has to exist. The month itself is over, so reading it is
+        what writes down what it settled."""
+        await self._open_july()
+        doc = await self._ensure(2026, 7, date(2026, 8, 20))
+        self.assertTrue(doc["closed"])
+        self.assertTrue((await distrakt.load_month(self.user_id, "2026-07"))["closed"])
+
+    async def test_the_month_under_way_is_left_open(self):
+        await self._open_july()
+        doc = await self._ensure(2026, 7, date(2026, 7, 20))
+        self.assertFalse(doc["closed"])
+
+    async def test_a_gap_does_not_stop_it(self):
+        """A month built far out ahead is not the month after July, so the
+        prior-month freeze cannot be what closes July."""
+        await self._open_july()
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc("2026-12"))
+        await self._ensure(2026, 7, date(2026, 8, 20))
+        self.assertTrue((await distrakt.load_month(self.user_id, "2026-07"))["closed"])
+
+
 class MonthCommittedTests(unittest.TestCase):
     def test_committed_boundary(self):
         self.assertFalse(distrakt.month_committed("2026-08", date(2026, 7, 31)))

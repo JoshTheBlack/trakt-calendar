@@ -192,11 +192,12 @@ class RolloverOverHttpTestCase(AppTestCase):
 
 
 class MonthFreezesWhenItsDatePassesTests(RolloverOverHttpTestCase):
-    """The month under way stays editable; the day the next one begins, it closes.
+    """The month under way stays editable; once the calendar has passed it, it
+    closes — whether or not any later month has been built or looked at.
 
-    This is the transition the author could not watch happen: the freeze is a side
-    effect of ACCESSING the new month, so it needs two requests separated by a
-    date change, which is precisely what could not be arranged before.
+    This is the transition the author could not watch happen: it needs two
+    requests separated by a date change, which is precisely what could not be
+    arranged before.
     """
 
     def test_july_is_open_while_july_is_the_month_under_way(self):
@@ -215,6 +216,29 @@ class MonthFreezesWhenItsDatePassesTests(RolloverOverHttpTestCase):
         with fake_today(ON_THE_FIRST):
             july = self.get_month(CLOSING)
         self.assertTrue(july["closed"], "July did not freeze once August opened")
+
+    def test_july_freezes_on_its_own_without_august_ever_being_opened(self):
+        # The reason the rule is the clock's and not the next month's: a tracker
+        # nobody touches for three weeks used to keep July open and editable the
+        # whole time, because the thing that closed it was a side effect of
+        # opening a month the user had no reason to open.
+        self.seed_july()
+        with fake_today(BEFORE_THE_FIRST):
+            self.assertFalse(self.get_month(CLOSING)["closed"])
+        with fake_today(date(2026, 8, 21)):
+            july = self.get_month(CLOSING)
+        self.assertTrue(july["closed"], "July stayed open because nobody opened August")
+        self.assertEqual(self.stored_ids(OPENING), set(),
+                         "freezing July built the month after it")
+
+    def test_a_month_two_months_back_freezes_the_first_time_it_is_looked_at(self):
+        # The snapshot is lazy, not scheduled: this app runs no background job, so
+        # a month that settled while nobody was looking materialises whenever
+        # somebody first is — however long that takes.
+        self.seed_july()
+        with fake_today(date(2026, 9, 30)):
+            july = self.get_month(CLOSING)
+        self.assertTrue(july["closed"])
 
     def test_a_frozen_month_stays_frozen_on_a_later_day(self):
         # A freeze is a one-way door; re-reading it later must not reopen it, or

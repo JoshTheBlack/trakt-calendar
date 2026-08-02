@@ -115,17 +115,46 @@ def is_stale(doc: dict | None, max_age_hours: int = TOTALS_STALE_HOURS) -> bool:
     return (db.now() - ts) > max_age_hours * 3600
 
 
-async def maybe_freeze_prior(user_id: int, month_key: str, settings, today: date | None = None) -> None:
-    """Freeze `user_id`'s immediately-prior month, but ONLY once `month_key` has
-    begun (first access on/after the 1st) and the prior is still open. This is
-    what keeps a NEW month's pre-1st preview from freezing the still-current prior
-    month. Idempotent — a closed/absent prior is left alone. Per user: one user
-    reaching the 1st does not freeze anyone else's prior month."""
-    if not month_committed(month_key, today):
+def freeze_eligible(month_key: str, today: date | None = None) -> bool:
+    """Whether `month_key` has settled and may be frozen: the calendar has left it
+    behind.
+
+    THE CLOCK DECIDES THIS AND NOTHING ELSE. A month stops being editable because
+    its own dates are over, not because some later month happens to exist or to
+    have been looked at. Asked the other way round — "has the month after it
+    begun?" — a store nobody touched for three weeks kept July open and editable
+    right through August, because the thing that was supposed to close it was a
+    side effect of opening a month the user never opened.
+
+    Being eligible is not the same as being frozen: taking the final snapshot
+    costs a live read (see freeze_month), so it is taken the next time somebody
+    looks. There is no scheduler in this app and this rule does not need one — a
+    month is settled from the moment its date passes, and the snapshot merely
+    writes down what was already true."""
+    return store.month_standing(month_key, today) is store.MonthStanding.PAST
+
+
+async def maybe_freeze(user_id: int, month_key: str, settings, today: date | None = None) -> None:
+    """Freeze `user_id`'s `month_key` if the calendar has passed it and it is still
+    open — the lazy half of freeze_eligible. Idempotent: a closed, absent or
+    still-running month is left alone. Per user, because one user reaching the 1st
+    says nothing about anyone else's roster."""
+    if not freeze_eligible(month_key, today):
         return
-    prior = await load_month(user_id, prev_month_key(month_key))
-    if prior is not None and not prior.get("closed"):
-        await freeze_month(user_id, prior, settings)
+    doc = await load_month(user_id, month_key)
+    if doc is not None and not doc.get("closed"):
+        await freeze_month(user_id, doc, settings)
+
+
+async def maybe_freeze_prior(user_id: int, month_key: str, settings, today: date | None = None) -> None:
+    """Freeze the month immediately BEFORE `month_key` if it has settled.
+
+    The month being looked at freezes itself (maybe_freeze); this is here so the
+    one before it does not have to wait to be visited. On the 1st of August the
+    user opens August, not July, and taking July's snapshot then records its
+    counts while they are still the counts July ended on rather than whatever they
+    have drifted to by the time somebody next opens it."""
+    await maybe_freeze(user_id, prev_month_key(month_key), settings, today)
 
 
 async def freeze_month(user_id: int, doc: dict, settings) -> dict:
@@ -239,16 +268,15 @@ async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]
 async def ensure_month(user_id: int, year: int, month: int, settings, today: date | None = None) -> dict:
     """Lazy, scheduler-free month rollover for one user. Returns the month doc.
 
-    On EVERY access it first freezes the prior month IF the accessed month has
-    begun (maybe_freeze_prior) — so a pre-1st preview of a new month leaves the
-    still-current prior month open/editable, and the freeze only lands on first
-    access on/after the 1st. Then, if the month doc doesn't exist yet and may be
-    created (configured + not backfill-blocked), it initializes it — see
-    _initialize_month for what goes in and in what order.
+    On EVERY access it first freezes whichever of the accessed month and the one
+    before it the calendar has already passed (maybe_freeze / maybe_freeze_prior),
+    so a pre-1st preview of a new month leaves the still-current prior month
+    open/editable. Then, if the month doc doesn't exist yet and may be created
+    (configured + not backfill-blocked), it initializes it — see _initialize_month
+    for what goes in and in what order.
 
-    An already-initialized month is returned untouched (aside from the prior-month
-    freeze), so PAST months never re-run initialization. A month further ahead
-    than the preview is not initialized at all (month_reachable).
+    An already-initialized month is returned untouched (aside from those freezes),
+    so PAST months never re-run initialization.
 
     BUILDING A MONTH THAT HAS NOT BEGUN IS SOMETHING SOMEBODY ASKS FOR. This
     function will do it — the preview is a real feature — but the page load does
@@ -260,9 +288,13 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     existing = await load_month(user_id, month_key)
     configured = bool(settings and getattr(settings, "trakt_configured", False))
 
-    # Freeze the prior month only once THIS month has actually begun (not during a
-    # pre-1st preview). Skip when accessing an already-closed month (settled).
-    if configured and (existing is None or not existing.get("closed")):
+    # A month settles by the calendar alone, so the one being read here freezes on
+    # this very access if its own dates are over — leaving the tracker alone for
+    # weeks no longer leaves a finished month editable. The month before it is
+    # frozen too, so its snapshot is taken while its counts are still the ones it
+    # ended on rather than whenever somebody next thinks to open it.
+    if configured:
+        await maybe_freeze(user_id, month_key, settings, today)
         await maybe_freeze_prior(user_id, month_key, settings, today)
 
     if existing is not None:
