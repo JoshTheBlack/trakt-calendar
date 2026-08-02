@@ -28,6 +28,7 @@ from . import auth
 from . import authz
 from . import cache
 from . import changelog
+from . import config
 from . import chrome
 from . import db
 from . import http_pool
@@ -186,6 +187,10 @@ async def lifespan(_app: FastAPI):
     # Loud, once, at boot: a route nobody declared is being refused to every
     # caller, and the operator should hear about it here rather than from a user.
     authz.log_undeclared_routes(_app)
+    # Also loud and once, and for the same reason: PUBLIC_BASE_URL beats the saved
+    # base URL, so an operator who left it set would otherwise see a value save in
+    # Settings and never take effect. Silent unless the two actually differ.
+    config.warn_if_public_base_url_overridden()
     # Turn encryption on non-interactively when the escape-hatch env var is set with
     # a valid key, then derive the key-health once so the request gate can steer an
     # administrator to recovery on a wrong key BEFORE any ordinary load hits a sealed

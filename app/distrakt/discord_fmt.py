@@ -24,9 +24,42 @@ harder-to-misread source of truth.
 """
 from __future__ import annotations
 
-# The vocabulary is the `bucket` column's, so it is named beside the record shape
-# in store.py; this module is what DECIDES which member a show gets.
-from .store import Bucket
+# Both vocabularies are named beside the record shape in store.py; this module is
+# what DECIDES which bucket a show gets, and what a month in a given standing is
+# allowed to say.
+from .store import Bucket, MonthStanding
+
+# WHICH BUCKETS A MONTH MAY PRESENT, by where that month stands relative to the
+# calendar, in the order they render. ONE table, read by the page's row list (the
+# payload is filtered through month_view) and by POST 2 below, because the
+# question is always the same one — "which month is this?" — and it has to be
+# answered once. Answering it per section is exactly how a month that was over
+# came to carry a Keepup, and a month that had not started came to carry a
+# Cleanup with last month's abandoned title sitting in it.
+#
+# Cleanup and Keepup are statements about work in hand: what is airing right now,
+# and what is waiting to be caught up on. A month that has not begun has neither
+# yet — all it can honestly announce is what premieres in it. A month that is
+# over settled both when it froze; what survives it is the verdict on each title
+# (Completed, Abandoned) plus the films watched during it, and re-listing what
+# was mid-flight on the last day reads as work still outstanding on a month
+# nobody can do anything about. Only the month actually in progress carries the
+# whole set.
+#
+# Films need no entry: they are not a bucket, and a month that has not happened
+# has nothing watched in it to list.
+#
+# POST 1 IS NOT SUBJECT TO THIS TABLE, in any standing. It answers a different
+# question — what PREMIERED in the month — and a premiere belongs to its month
+# whatever became of it afterwards. Filtering it through a past month's row
+# leaves an announcement of two finished titles and an empty Returning section,
+# which is the opposite of what an announcement is for. See render_post1.
+MONTH_BUCKETS: dict[MonthStanding, tuple[Bucket, ...]] = {
+    MonthStanding.FUTURE: (Bucket.NEW, Bucket.RETURNING, Bucket.COMPLETED, Bucket.ABANDONED),
+    MonthStanding.CURRENT: (Bucket.CLEANUP, Bucket.KEEPUP, Bucket.NEW, Bucket.RETURNING,
+                            Bucket.COMPLETED, Bucket.ABANDONED),
+    MonthStanding.PAST: (Bucket.COMPLETED, Bucket.ABANDONED),
+}
 
 # Keepup groups shows by air weekday, Sun..Sat; only weekdays with at least one
 # show get a header, so a quiet Tuesday doesn't leave an empty section in the post.
@@ -277,6 +310,12 @@ def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji
     that only wants the rendering — this falls back to the not-yet-airing
     lifecycle buckets, which is POST 1's pre-snapshot behaviour.
 
+    GIVE THIS THE WHOLE ROSTER, never a roster already put through month_view.
+    That filter is the standing rule MONTH_BUCKETS states, and it belongs to the
+    page's row list and to POST 2 only: a month's premieres are its premieres in
+    every standing, so a title being Completed or Cleanup by now has no bearing
+    on whether this month announced it.
+
     `link_url` is omitted entirely when there is nothing to link to, rather than
     rendered as an empty or broken line. It is wrapped in angle brackets, which
     is Discord's own way of suppressing the link preview card — an announcement
@@ -314,10 +353,33 @@ def _movie_line(movie: dict) -> str:
     return f"> ~~`{label}`~~"
 
 
+def month_view(shows: list[dict], standing: MonthStanding) -> list[dict]:
+    """The roster rows a month in this `standing` presents at all.
+
+    The page's list and POST 2 both draw from this, so a title the post does not
+    mention is a title the page does not show either — the two disagreeing about
+    what is in a month is the thing this rule exists to stop. Nothing is deleted:
+    a row a month may not present is still stored, still exported, and still
+    carried forward when the calendar reaches the month it belongs to.
+
+    POST 1 is deliberately outside this: it announces what premiered in the
+    month, which no standing changes. See render_post1.
+    """
+    allowed = set(MONTH_BUCKETS[standing])
+    return [s for s in shows if bucket_of(s, s) in allowed]
+
+
 def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:",
-                 movies: list[dict] | None = None) -> str:
-    """POST 2 (living tracker): ## Cleanup, ## Keepup, New, Returning,
-    [Completed], [Abandoned], [Movies] — the optional sections omitted when empty.
+                 movies: list[dict] | None = None,
+                 standing: MonthStanding = MonthStanding.CURRENT) -> str:
+    """POST 2 (living tracker) for a month in `standing`: the sections MONTH_BUCKETS
+    allows it, in that order, with Completed/Abandoned/Movies omitted when empty
+    and the rest carrying their header even so.
+
+    The default is the month in progress — the one that says everything — so a
+    caller that only wants the rendering (a test, a preview of the markup) gets the
+    full shape without having to state a month, the same way render_post1 falls
+    back when it is given no month.
 
     `movies` is [{title, year, ...}] watched during the month (from the watch-
     history cache); rendered struck-through, alphabetized ignoring a leading
@@ -330,16 +392,27 @@ def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji
     news = sorted(groups[Bucket.NEW], key=_premiere_sort_key)
     returning = sorted(groups[Bucket.RETURNING], key=_premiere_sort_key)
 
-    sections = [
-        _section("## **Cleanup**", [_cleanup_line(s, emoji_map, default_emoji) for s in cleanup]),
-        _render_keepup(groups[Bucket.KEEPUP], emoji_map, default_emoji),
-        _section("**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
-        _section("**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
-    ]
-    if completed:
-        sections.append(_section("**Completed**", [_completed_line(s, emoji_map, default_emoji) for s in completed]))
-    if abandoned:
-        sections.append(_section("**Abandoned**", [_abandoned_line(s, emoji_map, default_emoji) for s in abandoned]))
+    # Built once each, then picked from by the same table the roster was filtered
+    # through — so "does this month have a Keepup" is asked in one place.
+    blocks = {
+        Bucket.CLEANUP: lambda: _section(
+            "## **Cleanup**", [_cleanup_line(s, emoji_map, default_emoji) for s in cleanup]),
+        Bucket.KEEPUP: lambda: _render_keepup(groups[Bucket.KEEPUP], emoji_map, default_emoji),
+        Bucket.NEW: lambda: _section(
+            "**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
+        Bucket.RETURNING: lambda: _section(
+            "**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
+        # Unlike the four above, an empty one of these is not informative to a
+        # reader of the post, so it is left out entirely rather than headed.
+        Bucket.COMPLETED: lambda: _section(
+            "**Completed**", [_completed_line(s, emoji_map, default_emoji) for s in completed],
+        ) if completed else None,
+        Bucket.ABANDONED: lambda: _section(
+            "**Abandoned**", [_abandoned_line(s, emoji_map, default_emoji) for s in abandoned],
+        ) if abandoned else None,
+    }
+    sections = [block for block in (blocks[bucket]() for bucket in MONTH_BUCKETS[standing])
+                if block is not None]
     if movies:
         movs = sorted(movies, key=lambda m: _sort_title(m.get("title")))
         sections.append(_section("**Movies**", [_movie_line(m) for m in movs]))

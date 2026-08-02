@@ -20,7 +20,7 @@ function applyMonthResponse(d) {
     (d.shows || []).forEach(s => { const tmdb = (s.ids || {}).tmdb; if (s.network && tmdb) networkTmdb[s.network] = tmdb; });
     applyReadonlyState(monthClosed, d.closed ? 'frozen' : (d.readonly ? 'untracked' : ''));
     renderNotice(d);
-    renderShowList(d.shows || [], d.movies || []);
+    renderShowList(d.shows || [], d.movies || [], d.empty_note || '');
     renderCopyBlocks(d.post1 || '', d.post2 || '');
     if (emojiEntries.length) renderEmojiRows();  // refresh emoji-row logos now we have tmdb
 }
@@ -63,7 +63,8 @@ async function refreshMonth() {
 
 // Pull this month's calendar premieres into the open month (New/Returning),
 // skipping shows already present or toggled not-watching. Use it to seed the
-// current month when its doc already exists (lazy-init only seeds premieres once).
+// current month when its doc already exists (lazy-init only seeds premieres
+// once), and to build the month ahead, which is not built by being opened.
 async function importFromCalendar() {
     const host = document.getElementById('distraktShowList');
     host.innerHTML = '<div class="distrakt-empty">Importing premieres…</div>';
@@ -78,7 +79,14 @@ async function importFromCalendar() {
         applyMonthResponse(d);
         toast('Imported premieres from calendar', true);
     } catch (e) {
-        toast('Could not import from calendar', false);
+        // The server's refusals say WHY — the calendar has not reached this
+        // month, this past month was never tracked, it is frozen — and a fixed
+        // "could not import" threw all of that away, leaving a button that
+        // simply did not work. `e.message` carries the server's own sentence
+        // when there was one; anything else (a dropped connection, a response
+        // that is not JSON) has nothing to say and keeps the generic line.
+        const why = e && e.message && e.message !== 'failed' ? e.message : '';
+        toast(why || 'Could not import from calendar', false);
         loadMonthData();
     }
 }

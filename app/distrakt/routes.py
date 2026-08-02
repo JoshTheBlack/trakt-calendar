@@ -17,6 +17,7 @@ tracker stays usable through a rate-limit window instead of showing 0/0.
 from __future__ import annotations
 
 import asyncio
+import calendar as _calendar
 import dataclasses
 import json
 import logging
@@ -61,6 +62,16 @@ guard = authz.Guard(router)
 # in its own namespace and is coerced rather than stored as whatever the client
 # happened to send, or the same title would key differently on two adds.
 _NUMERIC_ID_KEYS = frozenset(ID_KEYS) - {"imdb", "slug"}
+
+# A month that has not begun is in one of two states, and the whole risk is that
+# they blur: one is WAITING TO BE ASKED, the other cannot be asked about at all.
+# Shown the wrong sentence, a user reads a working feature as a broken one, so
+# both are written here, next to each other, and each surface reads the one for
+# the state it is in — the empty month says it for itself, and the import route
+# refuses in the same words rather than in its own.
+MONTH_AWAITS_IMPORT = ("This month hasn't begun yet, so nothing has been gathered for it. "
+                       "Press ⤓ Import to build it from what premieres in it.")
+MONTH_BEYOND_CALENDAR = "The calendar hasn't reached this month yet."
 
 
 class RequestError(ValueError):
@@ -181,17 +192,59 @@ async def _distrakt_post_link(user_id: int, settings, year: int, month: int) -> 
     )
 
 
+def _chooser_months(year: int, tracked: set[str], today: date) -> list[dict]:
+    """The twelve tiles the chooser draws for `year`: which month each one is,
+    whether it may be opened, and whether it is one the user already has.
+
+    A tile that may not be opened is drawn as one — visibly unavailable — rather
+    than left out or offered and refused after the click. The rule it is drawn
+    from is rollover.month_openable, the same one the month view would apply,
+    so the grid cannot advertise a month the tracker would then decline to build.
+    """
+    tiles = []
+    for month in range(1, 13):
+        key = distrakt_store.month_key(year, month)
+        tiles.append({
+            "num": month,
+            "name": _calendar.month_name[month],
+            "openable": distrakt_store.month_openable(key, tracked, today),
+            "tracked": key in tracked,
+        })
+    return tiles
+
+
 @guard.get("/distrakt", AuthLevel.DISTRAKT_APPROVED)
 async def distrakt(request: Request):
     """Hidden Discord-tracker page, reached through an easter egg rather than any
     link in the UI.
 
-    Renders the shell for the requested {year, month}; the page's JS fetches the
-    computed month via /api/distrakt/month (which lazily rolls the month over).
-    Month-nav prev/next mirror the main calendar's nav (see index.html)."""
+    WITH NO MONTH IN THE QUERY THIS IS A CHOOSER, and that is the whole point of
+    it. Opening a month is expensive — it can pull a month of premieres, sweep
+    recent viewing and write a roster's worth of rows — and the page used to
+    inherit its month from whichever view the easter egg was triggered on, so
+    which month paid that cost was an accident of where somebody happened to be.
+    Naming a month is now a deliberate act, exactly as it is on the calendar's own
+    landing page (see calendar.routes.home, whose picker shape this follows).
+    Nothing here loads or builds a month: the chooser reads which months this user
+    already has and renders a grid.
+
+    WITH a month it renders the shell for the requested {year, month}; the page's
+    JS then fetches the computed month via /api/distrakt/month (which lazily rolls
+    the month over). Month-nav prev/next mirror the main calendar's nav."""
     today = date.today()
     user = await auth.current_user(request)
     year = route_params.valid_year(request.query_params.get("year"), today.year)
+    if not route_params.month_given(request.query_params.get("month")):
+        tracked = set(await distrakt_store.list_months(user.user_id))
+        return templates.TemplateResponse(request, "distrakt_pick.html", {
+            "request": request,
+            "year": year,
+            "months": _chooser_months(year, tracked, today),
+            "current_month": today.month if year == today.year else None,
+            "today_month": today.month,
+            "today_year": today.year,
+            **chrome.page_context(user),
+        })
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
     context = {
@@ -264,24 +317,33 @@ async def _apply_not_watching(user_id: int, month_key: str,
 
 
 def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
-                         readonly: bool = False, link_url: str | None = None) -> dict:
+                         standing: distrakt_store.MonthStanding,
+                         readonly: bool = False, link_url: str | None = None,
+                         empty_note: str = "") -> dict:
     """Headers-only render for a month with no roster + no Trakt call: an
     unconfigured/uninitialized month (readonly=False) or a never-tracked past
     month reached by navigating backward (readonly=True). The tracker only
     ever rolls a month's snapshot forward, never backfills one after the fact,
     so an old month nobody was tracking at the time stays permanently empty
-    and read-only rather than retroactively populating from Trakt."""
+    and read-only rather than retroactively populating from Trakt.
+
+    `empty_note` replaces the page's generic "nothing here yet" line. An empty
+    month is not self-explanatory — the same blank list means "waiting for you to
+    ask", "the calendar isn't there yet" and "nobody was tracking that far back" —
+    so when the reason is known it is said, in the sentence the state owns."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
         "movies": [],
+        "empty_note": empty_note,
         "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url, month=month_key),
-        "post2": discord_fmt.render_post2([], emojis, default_emoji),
+        "post2": discord_fmt.render_post2([], emojis, default_emoji, standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
 
 async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, default_emoji: str,
-                               link_url: str | None, rate_limited: bool) -> dict:
+                               link_url: str | None, rate_limited: bool,
+                               standing: distrakt_store.MonthStanding) -> dict:
     """Render a month WITHOUT any Trakt call, from whatever is last persisted — the
     top-level fallback when a shared refresh prerequisite hit Trakt's rate limit or
     was unreachable. Stored records already carry each show's last-known
@@ -290,7 +352,8 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     500. `rate_limited` only chooses the notice wording; both cases degrade
     identically and return HTTP 200."""
     doc = await distrakt_store.load_month(user_id, month_key)
-    shows = distrakt_store.frozen_shows(doc) if doc else []
+    roster = distrakt_store.frozen_shows(doc) if doc else []
+    shows = discord_fmt.month_view(roster, standing)
     notice = (
         "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
         if rate_limited else
@@ -306,8 +369,12 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         # POST 2 text: they were being recorded, counted and imported while never
         # appearing anywhere on the page, which reads as them not being there.
         "movies": (doc or {}).get("movies") or [],
-        "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
-        "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=(doc or {}).get("movies")),
+        # POST 1 gets the WHOLE roster, not the standing-filtered view: it
+        # announces what premiered in the month, and that is true of a month in
+        # any standing. See discord_fmt.render_post1.
+        "post1": discord_fmt.render_post1(roster, emojis, default_emoji, link_url=link_url, month=month_key),
+        "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
+                                          movies=(doc or {}).get("movies"), standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # Reports the ACTUAL cause: True only when Trakt rate-limited us, False when
         # it was simply unreachable. The client shows the banner off `notice`
@@ -318,17 +385,23 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     }
 
 
-def _closed_month_payload(doc: dict, month_key: str, emojis: dict,
-                          default_emoji: str, link_url: str | None) -> dict:
+def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji: str,
+                          link_url: str | None,
+                          standing: distrakt_store.MonthStanding) -> dict:
     """A frozen past month, rendered straight from its own snapshot with NO Trakt
     calls. The snapshot is the record of what that month WAS — recomputing it
     against today's watch history would rewrite history every time it was opened."""
-    shows = distrakt_store.frozen_shows(doc)
+    roster = distrakt_store.frozen_shows(doc)
+    shows = discord_fmt.month_view(roster, standing)
     return {
         "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
         "movies": doc.get("movies") or [],
-        "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
-        "post2": discord_fmt.render_post2(shows, emojis, default_emoji, movies=doc.get("movies")),
+        # The whole roster, not the standing-filtered view: a closed month's
+        # announcement is still every premiere it had, whatever each one has
+        # since become. See discord_fmt.render_post1.
+        "post1": discord_fmt.render_post1(roster, emojis, default_emoji, link_url=link_url, month=month_key),
+        "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
+                                          movies=doc.get("movies"), standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -407,7 +480,15 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     shows = await _apply_not_watching(user_id, month_key, shows, committed)
     # A season finished before this month began belongs to the month it was
     # finished in, not to this one — see drop_seasons_finished_earlier.
-    shows = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
+    roster = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
+    # What this month is allowed to present, decided once for the page's row list
+    # and POST 2 — see discord_fmt.MONTH_BUCKETS. Applied after the roster
+    # bookkeeping above, so a row that is merely not shown here is still stored,
+    # still refreshed, and still there when the calendar reaches its month.
+    # POST 1 keeps the unfiltered `roster`: it announces the month's premieres,
+    # which no standing changes.
+    standing = distrakt_store.month_standing(month_key, today)
+    shows = discord_fmt.month_view(roster, standing)
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
@@ -415,15 +496,16 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # added before logos existed doesn't depend on some OTHER show requesting its
     # network's logo first (see logos.ensure_logos). Best-effort and
     # self-limiting: a no-op once each network's tile is on disk.
-    if shows and settings.trakt_configured:
+    if roster and settings.trakt_configured:
         with span("payload.ensure_logos"):
             await logos.ensure_logos(settings, [
-                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
+                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in roster
             ])
 
     with span("payload.render"):
-        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
-        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies)
+        post1 = discord_fmt.render_post1(roster, emojis, default_emoji, link_url=link_url, month=month_key)
+        post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies,
+                                         standing=standing)
     return {
         "ok": True,
         "month": month_key,
@@ -445,8 +527,10 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     Lazily rolls the month over (ensure_month), then either renders a CLOSED
     month from its frozen snapshot (no Trakt) or computes the OPEN month live
     (or always when force_fresh). A never-tracked PAST/gap month (backward nav)
-    is rendered empty + read-only and never created. Returns (json_payload,
-    http_status).
+    is rendered empty + read-only and never created; a month that has not BEGUN is
+    rendered empty and not created either, because building that one is something
+    the user asks for with ⤓ Import — see the branch below. Returns
+    (json_payload, http_status).
 
     This is also where Trakt failing is turned into an answer. A 429 on a SHARED
     prerequisite (anything but the per-show season fan-out, which degrades itself)
@@ -457,6 +541,10 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     """
     today = date.today()
     month_key = distrakt_store.month_key(year, month)
+    # Where this month stands relative to the calendar decides which sections it
+    # may show at all (discord_fmt.MONTH_BUCKETS), so every shape below is handed
+    # the same answer rather than working one out for itself.
+    standing = distrakt_store.month_standing(month_key, today)
     link_url = await _distrakt_post_link(user_id, settings, year, month)
     # This user's own map, fetched once and handed to every render below. It is
     # not on `settings` any more — see _distrakt_settings.
@@ -468,7 +556,24 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
             # persisted, no Trakt call. `readonly` hides the add/edit affordances.
             return _empty_month_payload(
-                month_key, emojis, default_emoji, readonly=blocked, link_url=link_url,
+                month_key, emojis, default_emoji, standing,
+                readonly=blocked, link_url=link_url,
+            ), 200
+        if standing is distrakt_store.MonthStanding.FUTURE:
+            # A MONTH THAT HAS NOT BEGUN IS NOT BUILT BY BEING LOOKED AT. Building
+            # one is the expensive act — a month of premieres read, a roster's
+            # worth of rows written — and out here it is also a guess: nothing has
+            # aired, so there is no state to catch up with. Opening it therefore
+            # shows an empty month that says what it is waiting for, and ⤓ Import
+            # is what builds it (api_distrakt_import). The month UNDER WAY is the
+            # opposite case and still fills itself in on sight: it is the month
+            # being asked about, and an empty one there would be wrong rather than
+            # merely early. Not persisted and no Trakt call either way.
+            return _empty_month_payload(
+                month_key, emojis, default_emoji, standing, link_url=link_url,
+                empty_note=(MONTH_AWAITS_IMPORT
+                            if distrakt_store.month_reachable(month_key, today)
+                            else MONTH_BEYOND_CALENDAR),
             ), 200
 
     try:
@@ -476,16 +581,19 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
         month_key = doc["month"]
         if doc.get("closed"):
-            return _closed_month_payload(doc, month_key, emojis, default_emoji, link_url), 200
+            return _closed_month_payload(doc, month_key, emojis, default_emoji,
+                                         link_url, standing), 200
         return await _live_month_payload(
             user_id, doc, month_key, settings, emojis, default_emoji, link_url,
             force_fresh, today)
     except TraktRateLimitError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt rate-limited): %s", month_key, exc)
-        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url, rate_limited=True), 200
+        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
+                                          rate_limited=True, standing=standing), 200
     except TraktError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt unreachable): %s", month_key, exc)
-        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url, rate_limited=False), 200
+        return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
+                                          rate_limited=False, standing=standing), 200
 
 
 @guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)
@@ -537,7 +645,17 @@ async def api_distrakt_import(request: Request):
     shows/premieres minus new -> Returning; skips existing + not-watching). The
     manual "Import from calendar" action — e.g. to seed the current month when its
     doc already exists (so lazy-init's one-shot premiere seeding was skipped).
-    Returns the same shape as GET /api/distrakt/month."""
+    Returns the same shape as GET /api/distrakt/month.
+
+    THIS IS ALSO HOW A MONTH THAT HAS NOT BEGUN GETS BUILT AT ALL. Opening one no
+    longer builds it (see _distrakt_month_payload), so for the month ahead this
+    button is the ask: it creates the month, which takes that month's premieres
+    and nothing carried in from before it (see rollover._initialize_month).
+
+    Bounded to a month the tracker may actually build — the one under way or the
+    preview immediately after it (see rollover.month_reachable). The page inherits
+    its month from whatever view the user came from, so without that bound one
+    click out ahead created a month nobody had asked about."""
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
     if not settings.trakt_configured:
@@ -549,6 +667,13 @@ async def api_distrakt_import(request: Request):
     month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key):
         return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
+    if not distrakt_store.month_reachable(month_key, today):
+        # Said out loud rather than left to no-op. ensure_month will not build a
+        # month this far ahead (see month_reachable), so importing into it would
+        # write nothing while the toast claimed it had. The same sentence the
+        # empty month shows for this state, so pressing the button cannot appear
+        # to report something different from the page it was pressed on.
+        return JSONResponse({"ok": False, "error": MONTH_BEYOND_CALENDAR}, status_code=400)
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)

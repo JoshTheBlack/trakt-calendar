@@ -106,6 +106,7 @@ async function openSettings() {
         const res = await fetch('/api/settings', { cache: 'no-store' });
         const s = await res.json();
         document.getElementById('s_base_url').value = s.public_base_url || '';
+        updateBaseUrlHint(s);
         document.getElementById('s_trusted_proxies').value = s.trusted_proxy_ips || '';
         updateProxyHint(s);
         document.getElementById('s_cookie_secure').value = (s.cookie_secure || 'always').toLowerCase();
@@ -193,6 +194,25 @@ async function loadArrOptions(kind) {
 function closeSettings() {
     stopDeviceAuthPolling();
     document.getElementById('settingsModal').classList.remove('open');
+}
+
+// The PUBLIC_BASE_URL environment variable WINS over the saved base URL, because
+// the lockout it exists to rescue is a saved value that no longer matches where
+// the operator is browsing — a wrong one refuses every mutating request, this
+// screen's own save included. Winning silently would just move the trap: the
+// field would accept a correction that never took effect. So while the variable
+// is set, the field says so in place, in the same warn style as the cookie and
+// proxy hints. The field itself shows the value in force, so saving it is how
+// the operator makes the rescue permanent before dropping the variable.
+function updateBaseUrlHint(s) {
+    const hint = document.getElementById('s_base_url_env');
+    if (!hint) return;
+    hint.hidden = !s.public_base_url_overridden;
+    hint.textContent = s.public_base_url_overridden
+        ? 'The PUBLIC_BASE_URL environment variable is set and it overrides this field. '
+        + 'Save the value you want here, then remove the variable and restart — until '
+        + 'you do, anything saved here has no effect.'
+        : '';
 }
 
 // Tells the operator what to type instead of making them work out their own

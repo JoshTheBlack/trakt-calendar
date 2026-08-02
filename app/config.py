@@ -11,6 +11,7 @@ recover from a lockout with no app or database tooling.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
@@ -20,8 +21,34 @@ from urllib.parse import urlsplit
 from . import secrets_box
 from .perftrace import span
 
+logger = logging.getLogger(__name__)
+
 DATA_DIR = Path(os.environ.get("TRAKT_DATA_DIR", Path(__file__).resolve().parent.parent / "data"))
 SETTINGS_FILE = DATA_DIR / "settings.json"
+
+# The way back into an instance nobody can sign in to. The login page refuses a
+# provider sign-in without a base URL, and a base URL that does not match where
+# the operator is actually browsing makes the origin check refuse every mutating
+# request — including the username/password sign-in — so the only screen that
+# could correct it sits behind the setting that is breaking it. Without an
+# out-of-band lever the operator's sole option is to hand-edit
+# data/settings.json, which is a far riskier thing to reach for. An environment
+# variable is the shape used here because it needs no running app and no
+# database tooling, matching TRUSTED_PROXY_IPS below.
+#
+# THIS OVERRIDES A STORED VALUE, it does not merely fill in for a missing one.
+# The lockout an operator actually hits is a WRONG stored value, not an absent
+# one — an absent one still admits a password sign-in, because the origin check
+# falls back to the request's own Host. A lever that only worked when nothing was
+# stored could not rescue the case it exists for.
+#
+# It is still never written to the database on its own: it is applied to the
+# assembled Settings after everything is persisted, so unsetting the variable
+# removes the override again. Because it wins silently it must ANNOUNCE itself —
+# see warn_if_public_base_url_overridden() below and the note the Settings screen
+# renders beside the field — or an operator who forgot the variable types a
+# correct value into Settings, watches it save, and finds nothing changed.
+PUBLIC_BASE_URL_ENV = "PUBLIC_BASE_URL"
 
 # Seed for the admin-editable `trusted_proxy_ips` setting below. Hypercorn reads
 # the same env var for --forwarded-allow-ips at process start and cannot be
@@ -331,6 +358,57 @@ def public_base_url_error(value: str) -> str | None:
     return None
 
 
+def public_base_url_override() -> str:
+    """The PUBLIC_BASE_URL environment variable, or "" when it is unset or unusable.
+
+    Read live rather than captured at import, so the variable can be added and the
+    process restarted without anything else having to know about it.
+
+    Validated with the same rule the Settings screen applies, because a value that
+    only looks right produces a redirect URI Trakt refuses byte-for-byte and the
+    failure surfaces much later as an unreadable OAuth error. A bad one is logged
+    and ignored rather than raised: this exists to rescue an instance nobody can
+    sign in to, so it must never be the reason the process will not start — and an
+    ignored value leaves the stored one in force, which is the safer of the two.
+    """
+    candidate = os.environ.get(PUBLIC_BASE_URL_ENV, "").strip().rstrip("/")
+    if not candidate:
+        return ""
+    if error := public_base_url_error(candidate):
+        logger.warning("Ignoring %s=%r: %s", PUBLIC_BASE_URL_ENV, candidate, error)
+        return ""
+    return candidate
+
+
+def warn_if_public_base_url_overridden() -> None:
+    """Say loudly, once at startup, that the environment is winning over a
+    DIFFERENT stored base URL.
+
+    An override nobody can see is a trap: the operator sets the variable to get
+    back in, forgets it, later types the real value into Settings, watches it
+    save, and finds the app still building links and checking origins against the
+    old one. So the line names BOTH values and says what to do about it, rather
+    than merely noting that a variable is set.
+
+    Silent when the two agree — that is the ordinary state of an instance whose
+    operator pins the value in its environment, and warning about it would train
+    everyone to ignore the line that matters.
+    """
+    override = public_base_url_override()
+    if not override:
+        return
+    stored = load_settings(open_secrets=False, apply_env_override=False).public_base_url
+    if stored == override:
+        return
+    logger.warning(
+        "%s=%s is overriding the saved public base URL (%s). Links and the "
+        "cross-origin check use the environment value, and a different one saved "
+        "in Settings will not take effect until the variable is removed and the "
+        "app restarted.",
+        PUBLIC_BASE_URL_ENV, override, stored or "unset",
+    )
+
+
 def apply_update(current: Settings, update: dict) -> Settings:
     """Merge a partial update onto the current settings.
 
@@ -456,7 +534,7 @@ def _write_settings_file(data: dict) -> None:
     os.replace(tmp, SETTINGS_FILE)
 
 
-def load_settings(open_secrets: bool = True) -> Settings:
+def load_settings(open_secrets: bool = True, *, apply_env_override: bool = True) -> Settings:
     """Assemble one Settings object from its three homes: the two recovery fields
     from settings.json, the non-secret globals from app_settings, and the secrets
     from app_secrets. Everything downstream still sees a fully-populated Settings;
@@ -468,6 +546,11 @@ def load_settings(open_secrets: bool = True) -> Settings:
     this way — which also means authentication keeps working when a stored secret is
     sealed under a key the current one cannot open (that decrypt would otherwise raise
     SealedButWrongKey), so an administrator can still reach the recovery screen.
+
+    `apply_env_override=False` reports `public_base_url` as STORED, ignoring the
+    PUBLIC_BASE_URL environment variable. Only the startup warning asks for that —
+    it is the one caller that needs the value the override is displacing, so that
+    the line it logs can name both. Every other caller wants what is in force.
     """
     # TIMED BECAUSE THIS IS SYNCHRONOUS WORK ON WHATEVER THREAD ASKED, and almost
     # every caller is a route handler, which means the event loop. It reads
@@ -491,6 +574,7 @@ def load_settings(open_secrets: bool = True) -> Settings:
         return Settings(
             trakt_client_id=os.environ.get("TRAKT_CLIENT_ID", ""),
             trakt_access_token=os.environ.get("TRAKT_ACCESS_TOKEN", ""),
+            public_base_url=public_base_url_override() if apply_env_override else "",
         )
 
     # Decrypt the stored secrets here so every downstream reader (trakt.py, arr.py,
@@ -530,17 +614,44 @@ def load_settings(open_secrets: bool = True) -> Settings:
         # load reduces the file safely. Skipped entirely while `degraded`, because
         # re-saving would seal the blanked-out secrets and destroy the values the
         # restored key could still recover.
+        #
+        # THIS SAVE MUST NEVER CLEAR A SECRET, which is why it relies on
+        # save_settings' default. `settings` here can legitimately carry blank
+        # credentials that are not blank in storage: every open_secrets=False
+        # caller (the request-shape guard, sign-in, the session lookup) loads
+        # exactly that way, and one of them runs on essentially every request.
+        # Letting this write treat "blank" as "delete" meant a hand-edited
+        # settings.json — the documented recovery path — wiped every stored
+        # credential the moment anybody used the app.
         if not db.connection().in_transaction:
             save_settings(settings)
+
+    # Last, so the override is never what the file reduction above persists: it
+    # wins over the stored value in memory and leaves no trace of its own in the
+    # database, which is what makes removing the variable enough to undo it.
+    if apply_env_override and (override := public_base_url_override()):
+        settings.public_base_url = override
 
     return settings
 
 
-def save_settings(settings: Settings) -> None:
+def save_settings(settings: Settings, *, clear_unset_secrets: bool = False) -> None:
     """Persist to the three homes: the globals JSON to app_settings, each set
-    secret to app_secrets (an unset one is deleted, not stored empty), and the two
-    recovery fields to settings.json. The Settings dataclass API is unchanged; only
-    the destinations moved.
+    secret to app_secrets, and the two recovery fields to settings.json. The
+    Settings dataclass API is unchanged; only the destinations moved.
+
+    A BLANK SECRET IS LEFT ALONE UNLESS `clear_unset_secrets` SAYS OTHERWISE.
+    A Settings object cannot tell "the operator emptied this field" apart from
+    "this value was never loaded" — both read as "" — and the two want opposite
+    outcomes. Deleting by default made the second one destructive: any caller
+    holding a partially-populated Settings (load_settings(open_secrets=False), or
+    one assembled over a hand-edited settings.json) silently removed every
+    credential the instance had, with nothing left to restore them from.
+    So the deleting behaviour is opt-in, and only a path that has genuinely
+    resolved the operator's intent asks for it — settings_routes' save, where
+    config.apply_update has already turned "omitted" into keep and an explicit
+    null into clear. Deleting a row that is not there is a no-op, so an
+    intentional clear still leaves nothing behind.
     """
     ensure_data_dir()
     from . import db
@@ -578,10 +689,12 @@ def save_settings(settings: Settings) -> None:
                     "ON CONFLICT(name) DO UPDATE SET value = excluded.value",
                     (name, secrets_box.seal(value)),
                 )
-            else:
+            elif clear_unset_secrets:
                 # An unset secret is absence of a row, so `secrets_set` and storage
                 # agree and a cleared credential leaves nothing behind.
                 conn.execute("DELETE FROM app_secrets WHERE name = ?", (name,))
+            # Otherwise the stored row stands: see the docstring — a blank field
+            # on this object is not evidence that anybody asked for it to go.
 
     conn = db.connection()
     owns = not conn.in_transaction

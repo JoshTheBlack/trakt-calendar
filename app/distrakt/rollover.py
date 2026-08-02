@@ -11,6 +11,7 @@ per-user main-calendar not-watching store (app/calendar/state.py).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection
 from datetime import date
 
 from .. import db
@@ -44,10 +45,46 @@ def month_committed(month_key: str, today: date | None = None) -> bool:
     month has officially begun. BEFORE this a month is a "preview": it auto-
     populates from premieres and its main-calendar not-watching toggles only HIDE
     shows (reversibly). ON/AFTER it, not-watching promotes to Abandoned and the
-    immediately-prior month freezes."""
-    today = today or date.today()
-    year, month = int(month_key[:4]), int(month_key[5:7])
-    return (today.year, today.month) >= (year, month)
+    immediately-prior month freezes.
+
+    Reads the standing rather than comparing the key again here: "has this month
+    begun" and "is this month over" are the same comparison asked twice, and two
+    copies of it drift silently because neither one looks wrong on its own."""
+    return store.month_standing(month_key, today) is not store.MonthStanding.FUTURE
+
+
+def month_reachable(month_key: str, today: date | None = None) -> bool:
+    """Whether the tracker may BUILD `month_key` yet: it has begun, or it is the
+    single month immediately ahead of the one that has (the preview).
+
+    The tracker inherits whichever month the page it was opened from was showing,
+    and that page can be pointed at any month at all. Without this bound, opening
+    it on a month three ahead built that month there and then — pulling in its
+    premieres, and seeding it with titles carried forward and with whatever the
+    user had been watching recently, which is this month's material and not that
+    one's. It also consumed the months in between: a store only ever grows forward
+    (see can_initialize), so a month created out ahead makes every month before it
+    unreachable for good.
+
+    ONE month of slack rather than none, because the preview is a real feature:
+    before the 1st, next month auto-populates from premieres so the roster tracks
+    the calendar. Anything past that is a month nobody can say anything about yet.
+    """
+    return month_committed(month_key, today) or month_committed(prev_month_key(month_key), today)
+
+
+def month_openable(month_key: str, tracked: Collection[str], today: date | None = None) -> bool:
+    """Whether the tracker may be OPENED on `month_key` — the question a month
+    chooser asks, which is not the same as month_reachable's.
+
+    Two ways in. A month the tracker may still BUILD (month_reachable) can be
+    opened because opening it is how it gets built. A month already in `tracked`
+    can be opened whatever the clock says, because there is nothing left to
+    build: the rows exist, and reading them costs nothing and writes nothing.
+    Without that second case a restored export holding a month out ahead would
+    show a month the user owns and cannot look at.
+    """
+    return month_key in tracked or month_reachable(month_key, today)
 
 
 async def can_initialize(user_id: int, month_key: str) -> bool:
@@ -229,7 +266,13 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     _initialize_month for what goes in and in what order.
 
     An already-initialized month is returned untouched (aside from the prior-month
-    freeze), so PAST months never re-run initialization.
+    freeze), so PAST months never re-run initialization. A month further ahead
+    than the preview is not initialized at all (month_reachable).
+
+    BUILDING A MONTH THAT HAS NOT BEGUN IS SOMETHING SOMEBODY ASKS FOR. This
+    function will do it — the preview is a real feature — but the page load does
+    not call it for such a month any more; the Import control does. The rule and
+    the reason are at the one place that decides it, routes._distrakt_month_payload.
     """
     today = today or date.today()
     month_key = store.month_key(year, month)
@@ -248,33 +291,62 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
         # return a transient, UNPERSISTED empty doc so a proper init still happens
         # once Trakt is configured (rather than baking in an empty month).
         return new_month_doc(month_key)
+    if not month_reachable(month_key, today):
+        # A month the calendar has not got to yet (and is not the preview of).
+        # Same treatment as a blocked past month: a transient, UNPERSISTED empty
+        # doc, so navigating out ahead shows nothing rather than importing a month
+        # nobody asked about — see month_reachable.
+        return new_month_doc(month_key)
     if not await can_initialize(user_id, month_key):
         # Backward / gap navigation to a never-tracked past month: DO NOT backfill
         # — return a transient, UNPERSISTED empty doc (rendered read-only).
         return new_month_doc(month_key)
 
-    doc = await _initialize_month(user_id, month_key, settings)
+    doc = await _initialize_month(user_id, month_key, settings, today)
     doc["totals_refreshed_at"] = db.now()
     await save_month(user_id, doc)
     return doc
 
 
-async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
+async def _initialize_month(user_id: int, month_key: str, settings,
+                            today: date | None = None) -> dict:
     """A brand-new month's contents, in the order the three sources are allowed to
     contribute: carried-forward titles first (they are the ones with history), then
     the calendar's premieres, then whatever recent watch history suggests. Each
     later source only adds what the earlier ones did not, so being carried forward
     beats being re-imported, and `added_by` records the truth about who put a row
     there rather than the last writer to touch it.
+
+    A MONTH THAT HAS NOT BEGUN TAKES ITS PREMIERES AND NOTHING ELSE. The other two
+    sources are both statements about NOW — a title still going at the end of last
+    month, and a season part-way through in recent viewing — and neither has
+    anything to say about a month nobody has reached. Filed into one anyway they
+    were bucketed by whether they had aired YET, which they had not, so a season
+    that began in August was announced as new in October. Until a month opens it
+    holds only what BEGINS in it; when it opens, those titles arrive in whatever
+    bucket they have earned by then.
     """
     doc = new_month_doc(month_key)
     present: set[tuple[str, int]] = set()
     year, month = int(month_key[:4]), int(month_key[5:7])
+    begun = month_committed(month_key, today)
 
-    # Carry forward everything except Completed / Abandoned. An open (not-yet-
-    # frozen) prior is bucketed live so a preview rollover still drops the right
-    # titles; a frozen prior reuses its stored buckets.
-    prior = await load_month(user_id, prev_month_key(month_key))
+    # Read ONCE and applied to all three sources below, because the rule is about
+    # the month rather than about where a title came from: a title the user had
+    # already marked not-watching on their calendar when this month was first
+    # built does not enter it AT ALL. The mark predates the month, so there is
+    # nothing in here for it to be a decision about, and a month that opens with
+    # it listed as Abandoned is announcing a verdict on a show the user had
+    # already said they were not following. A mark made LATER, against a month
+    # that already exists, is the other statement — that one promotes the row to
+    # Abandoned (see routes._apply_not_watching), which is why this filter belongs
+    # at initialization and not at read time.
+    nw_ids = await calendar_state.not_watching_ids(user_id)
+
+    # Carry forward everything except Completed / Abandoned, once the month has
+    # begun. An open (not-yet-frozen) prior is bucketed live so the rollover still
+    # drops the right titles; a frozen prior reuses its stored buckets.
+    prior = await load_month(user_id, prev_month_key(month_key)) if begun else None
     if prior is not None:
         prior_shows = frozen_shows(prior) if prior.get("closed") \
             else await compute_live_shows(user_id, prior.get("shows") or [], settings)
@@ -282,21 +354,28 @@ async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
             if s.get("abandoned") or s.get("bucket") in (
                     store.Bucket.COMPLETED, store.Bucket.ABANDONED):
                 continue
+            if calendar_import.matches_not_watching(s, nw_ids):
+                continue
             key = live_key(s)
             if key in present:
                 continue
             doc["shows"].append(normalize_show(identity_record(s)))
             present.add(key)
 
-    # This month's premieres, minus not-watching (excluded before commit).
-    nw_ids = await calendar_state.not_watching_ids(user_id)
+    # This month's premieres, minus not-watching.
     await calendar_import.add_premieres(doc, present, user_id, settings, year, month, nw_ids)
 
-    # In-progress-but-unfinished titles from recent history.
-    for rec in await history_records(settings, present):
-        key = (str(record_key(rec)), int(rec["season"]))
-        if key in present:
-            continue
-        doc["shows"].append(normalize_show({**rec, "added_by": ADDED_BY_HISTORY}))
-        present.add(key)
+    # In-progress-but-unfinished titles from recent history, again only once the
+    # month has begun: what somebody is part-way through today is THIS month's
+    # material whichever month is being built, and it was the sweep that filed it
+    # under a month that has not happened.
+    if begun:
+        for rec in await history_records(settings, present):
+            if calendar_import.matches_not_watching(rec, nw_ids):
+                continue
+            key = (str(record_key(rec)), int(rec["season"]))
+            if key in present:
+                continue
+            doc["shows"].append(normalize_show({**rec, "added_by": ADDED_BY_HISTORY}))
+            present.add(key)
     return doc

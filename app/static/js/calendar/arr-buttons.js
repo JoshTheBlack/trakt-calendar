@@ -82,6 +82,14 @@ async function addToArr(el, event) {
             markInLibrary(el, d.message || 'Added');
             const id = libIdFor(el.dataset.arr, el.dataset.media ? el.dataset : (el.closest('.card') || { dataset: {} }).dataset);
             if (id && libraryIds[el.dataset.arr]) libraryIds[el.dataset.arr].add(String(id));
+            // `el` is not always the calendar tile's own button: the details modal
+            // (buildDetailsActions in details-modal.js) builds a SEPARATE arr-btn
+            // for the same title, so marking only `el` leaves the tile behind the
+            // modal showing a plain Add button until the next 60s poll or a full
+            // refresh. applyLibraryStatus() re-renders every arr-btn on the page
+            // from the libraryIds state just updated above — no request, so it is
+            // cheap to run again for one add.
+            applyLibraryStatus();
             toast(d.message || 'Added', true);
         } else {
             el.innerHTML = original; el.classList.remove('busy'); el.dataset.busy = ''; el.disabled = false;

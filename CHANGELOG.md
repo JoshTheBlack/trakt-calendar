@@ -4,8 +4,18 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## 🏷️ [1.1.7] - 2026-08-01
 
+### Fixed
+- 🔑 **Hand-editing `data/settings.json` no longer wipes the instance's saved credentials.** Adding a setting to that file — the only way back into an instance nobody can sign in to — quietly emptied the Trakt client secret, the Trakt access token and every integration API key the next time anybody used the app. Anything left out of that file is now left exactly as it was, and a credential is only cleared by clearing it in Settings. If it's the public base URL that has locked you out — whether it was never set or is set to somewhere you aren't browsing from, which refuses every sign-in as coming from another origin — you no longer need to touch the file at all: set `PUBLIC_BASE_URL` in the environment and restart, and it takes precedence over the saved one so you can sign in and save the real one in Settings. It says so while it's in force, in the startup log and beside the field itself, so a variable you forgot can't quietly outrank what you save; remove it and restart when you're done.
+- 📚 **Adding a title from the details popup now marks the calendar tile behind it straight away.** Requesting a title through Sonarr, Radarr or Seerr from inside an open popup added it successfully but left the tile showing a plain Add button until the page was refreshed. It now shows the mark the moment the request succeeds, whichever of the three you used. (Administrators only — nobody else sees those buttons.)
+
 ### Under the hood
-- 🗂️ **The code behind the app is filed by what it does.** Each part of the app — the calendar, the tracker, the boards, sign-in, pictures — now lives together in one place instead of being spread across a long flat list of files, and which parts are allowed to depend on which is written down and checked automatically. Nothing about using the app changes; it just makes the next change easier to make and harder to get wrong.
+- 🗂️ **The code behind the app is filed by what it does.** Each part of the app — the calendar, the boards, sign-in, pictures — now lives together in one place instead of being spread across a long flat list of files, and which parts are allowed to depend on which is written down and checked automatically. Nothing about using the app changes; it just makes the next change easier to make and harder to get wrong.
+
+### 🥚
+- It now lets a month's second notice hold only what belongs to it — one that hasn't begun says just what starts in it, one that's over keeps what it settled and lets go of whatever was still open on its last day, and anything you'd already turned away is simply absent rather than listed as given up on. Turn something away later, once the month is under way, and it still says so. The first notice is untouched by any of this: in every month, behind you or ahead, it announces everything that began that month, whatever each of those things has since become. The month you're in is unchanged.
+- It no longer builds a month the calendar hasn't reached out of the current one's contents, nor quietly closes off the months in between. Only the month under way and the one immediately after it get filled in.
+- It now asks which month you want rather than taking whichever one you arrived from, and gathers nothing until you've said — every way in asks, the page you came from included. A month it can't speak for yet is shown but can't be chosen; one it already holds always can.
+- A month that hasn't begun waits to be asked. It opens empty, saying so, until you tell it to gather — and what it then takes is only what begins in that month, with nothing carried over from the months before it. The month under way still fills itself in the moment you open it, and a month further ahead than it can see says that instead, in the same words it uses if you ask anyway.
 
 ## 🏷️ [1.1.6] - 2026-07-31
 
