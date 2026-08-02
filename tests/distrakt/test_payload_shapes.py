@@ -13,6 +13,7 @@ grew a verb for it.
 from __future__ import annotations
 
 import unittest
+from datetime import date, timedelta
 
 from app import distrakt
 from app.distrakt import routes as distrakt_routes
@@ -97,6 +98,95 @@ class ClosedMonthPayloadTests(unittest.TestCase):
         payload = self._payload({"month": "2026-03", "closed": True, "shows": []})
         self.assertNotIn("notice", payload)
         self.assertNotIn("rate_limited", payload)
+
+
+def _last_month(today: date | None = None) -> tuple[str, int]:
+    """(month key, month number) for a month that is certainly over.
+
+    Derived from the clock rather than written down: a fixed year-month in a test
+    about past/current/future stops meaning what it was chosen to mean the moment
+    the calendar walks past it, and this suite has been bitten by exactly that."""
+    first_of_this_month = (today or date.today()).replace(day=1)
+    previous = first_of_this_month - timedelta(days=1)
+    return f"{previous.year:04d}-{previous.month:02d}", previous.month
+
+
+class ClosedMonthNoticesAnswerDifferentQuestionsTests(unittest.TestCase):
+    """The two notices of a month that is over are NOT two views of one list.
+
+    FIRST: everything that premiered in that month and was not turned away,
+    whatever became of it since — it belongs because it started then, so a title
+    sitting in Cleanup or Keepup is still one of the month's premieres.
+    SECOND: the verdicts the month settled — Completed, Abandoned and its films.
+
+    They were briefly the same list, and the announcement of a closed month came
+    out as its two finished titles and an empty Returning section."""
+
+    def setUp(self):
+        self.month_key, month = _last_month()
+        self.premiered_that_month = f"{month}/8"
+        # Every row below premiered in the closed month except the carryover.
+        self.doc = {"month": self.month_key, "closed": True, "shows": [
+            {**_record(1, "Saw It Through", watched=6, total=6, bucket="completed"),
+             "premiere": self.premiered_that_month},
+            {**_record(2, "Turned Away", watched=2, total=8, bucket="abandoned"),
+             "premiere": self.premiered_that_month, "abandoned": True,
+             "abandoned_form": "`Turned Away S01 (2/8)`"},
+            # Finale aired, not finished: a Cleanup row when the month froze.
+            {**_record(3, "Left Half Done", watched=2, total=8),
+             "premiere": self.premiered_that_month, "season": 4},
+            # Still airing on the last day: a Keepup row when the month froze.
+            {**_record(4, "Still Going", watched=2, total=8),
+             "premiere": self.premiered_that_month, "finished_airing": False,
+             "cadence": "Sun"},
+            # Premiered the month BEFORE and merely carried on into this one.
+            {**_record(5, "Started Earlier", watched=3, total=8),
+             "premiere": f"{(month - 2) % 12 + 1}/8"},
+        ]}
+        self.payload = distrakt_routes._closed_month_payload(
+            self.doc, self.month_key, EMOJIS, DEFAULT_EMOJI, None,
+            distrakt.MonthStanding.PAST)
+
+    def test_the_first_notice_announces_every_premiere_the_month_had(self):
+        """The regression: the announcement was being put through the buckets a
+        past month's SECOND notice may present, which left it holding only the
+        titles that happened to be Completed or Abandoned by now."""
+        for title in ("Saw It Through", "Left Half Done", "Still Going"):
+            self.assertIn(title, self.payload["post1"])
+
+    def test_the_first_notice_still_drops_what_was_turned_away(self):
+        """The one thing that DOES remove a premiere from the announcement, and
+        it is not a bucket rule: it was explicitly turned away."""
+        self.assertNotIn("Turned Away", self.payload["post1"])
+
+    def test_the_first_notice_still_separates_new_from_returning(self):
+        """The reported symptom included an empty Returning section; a later
+        season premiering that month belongs in it."""
+        new_block, returning_block = self.payload["post1"].split("**Returning**")
+        self.assertIn("Left Half Done", returning_block)
+        self.assertNotIn("Left Half Done", new_block)
+
+    def test_the_first_notice_still_leaves_out_what_did_not_premiere_then(self):
+        """Membership is by premiere date, which the repair does not loosen."""
+        self.assertNotIn("Started Earlier", self.payload["post1"])
+
+    def test_the_second_notice_keeps_only_the_verdicts_the_month_settled(self):
+        """Unchanged by the repair, and asserted beside the first notice so the
+        difference between the two is documented where both can be seen."""
+        post2 = self.payload["post2"]
+        self.assertIn("**Completed**", post2)
+        self.assertIn("Saw It Through", post2)
+        self.assertIn("**Abandoned**", post2)
+        self.assertIn("Turned Away", post2)
+        for absent in ("Cleanup", "Keepup", "New Shows", "Returning",
+                       "Left Half Done", "Still Going"):
+            self.assertNotIn(absent, post2)
+
+    def test_the_pages_row_list_follows_the_second_notice_not_the_first(self):
+        """The page and the second notice read one table; the announcement does
+        not, so a title only the announcement names is still absent here."""
+        self.assertEqual(sorted(s["title"] for s in self.payload["shows"]),
+                         ["Saw It Through", "Turned Away"])
 
 
 class EmptyMonthPayloadTests(unittest.TestCase):

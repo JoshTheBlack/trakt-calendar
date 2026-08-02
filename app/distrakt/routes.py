@@ -352,7 +352,8 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
     500. `rate_limited` only chooses the notice wording; both cases degrade
     identically and return HTTP 200."""
     doc = await distrakt_store.load_month(user_id, month_key)
-    shows = discord_fmt.month_view(distrakt_store.frozen_shows(doc) if doc else [], standing)
+    roster = distrakt_store.frozen_shows(doc) if doc else []
+    shows = discord_fmt.month_view(roster, standing)
     notice = (
         "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
         if rate_limited else
@@ -368,7 +369,10 @@ async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, defau
         # POST 2 text: they were being recorded, counted and imported while never
         # appearing anywhere on the page, which reads as them not being there.
         "movies": (doc or {}).get("movies") or [],
-        "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
+        # POST 1 gets the WHOLE roster, not the standing-filtered view: it
+        # announces what premiered in the month, and that is true of a month in
+        # any standing. See discord_fmt.render_post1.
+        "post1": discord_fmt.render_post1(roster, emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
                                           movies=(doc or {}).get("movies"), standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -387,11 +391,15 @@ def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji
     """A frozen past month, rendered straight from its own snapshot with NO Trakt
     calls. The snapshot is the record of what that month WAS — recomputing it
     against today's watch history would rewrite history every time it was opened."""
-    shows = discord_fmt.month_view(distrakt_store.frozen_shows(doc), standing)
+    roster = distrakt_store.frozen_shows(doc)
+    shows = discord_fmt.month_view(roster, standing)
     return {
         "ok": True, "month": month_key, "closed": True, "readonly": False, "shows": shows,
         "movies": doc.get("movies") or [],
-        "post1": discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key),
+        # The whole roster, not the standing-filtered view: a closed month's
+        # announcement is still every premiere it had, whatever each one has
+        # since become. See discord_fmt.render_post1.
+        "post1": discord_fmt.render_post1(roster, emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2(shows, emojis, default_emoji,
                                           movies=doc.get("movies"), standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -472,13 +480,15 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     shows = await _apply_not_watching(user_id, month_key, shows, committed)
     # A season finished before this month began belongs to the month it was
     # finished in, not to this one — see drop_seasons_finished_earlier.
-    shows = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
-    # What this month is allowed to present, decided once for the page and the
-    # posts alike — see discord_fmt.MONTH_BUCKETS. Applied after the roster
+    roster = await distrakt_store.drop_seasons_finished_earlier(user_id, month_key, shows)
+    # What this month is allowed to present, decided once for the page's row list
+    # and POST 2 — see discord_fmt.MONTH_BUCKETS. Applied after the roster
     # bookkeeping above, so a row that is merely not shown here is still stored,
     # still refreshed, and still there when the calendar reaches its month.
+    # POST 1 keeps the unfiltered `roster`: it announces the month's premieres,
+    # which no standing changes.
     standing = distrakt_store.month_standing(month_key, today)
-    shows = discord_fmt.month_view(shows, standing)
+    shows = discord_fmt.month_view(roster, standing)
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
 
@@ -486,14 +496,14 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # added before logos existed doesn't depend on some OTHER show requesting its
     # network's logo first (see logos.ensure_logos). Best-effort and
     # self-limiting: a no-op once each network's tile is on disk.
-    if shows and settings.trakt_configured:
+    if roster and settings.trakt_configured:
         with span("payload.ensure_logos"):
             await logos.ensure_logos(settings, [
-                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
+                (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in roster
             ])
 
     with span("payload.render"):
-        post1 = discord_fmt.render_post1(shows, emojis, default_emoji, link_url=link_url, month=month_key)
+        post1 = discord_fmt.render_post1(roster, emojis, default_emoji, link_url=link_url, month=month_key)
         post2 = discord_fmt.render_post2(shows, emojis, default_emoji, movies=movies,
                                          standing=standing)
     return {

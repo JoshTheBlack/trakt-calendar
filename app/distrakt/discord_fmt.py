@@ -48,6 +48,12 @@ from .store import Bucket, MonthStanding
 #
 # Films need no entry: they are not a bucket, and a month that has not happened
 # has nothing watched in it to list.
+#
+# POST 1 IS NOT SUBJECT TO THIS TABLE, in any standing. It answers a different
+# question — what PREMIERED in the month — and a premiere belongs to its month
+# whatever became of it afterwards. Filtering it through a past month's row
+# leaves an announcement of two finished titles and an empty Returning section,
+# which is the opposite of what an announcement is for. See render_post1.
 MONTH_BUCKETS: dict[MonthStanding, tuple[Bucket, ...]] = {
     MonthStanding.FUTURE: (Bucket.NEW, Bucket.RETURNING, Bucket.COMPLETED, Bucket.ABANDONED),
     MonthStanding.CURRENT: (Bucket.CLEANUP, Bucket.KEEPUP, Bucket.NEW, Bucket.RETURNING,
@@ -304,6 +310,12 @@ def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji
     that only wants the rendering — this falls back to the not-yet-airing
     lifecycle buckets, which is POST 1's pre-snapshot behaviour.
 
+    GIVE THIS THE WHOLE ROSTER, never a roster already put through month_view.
+    That filter is the standing rule MONTH_BUCKETS states, and it belongs to the
+    page's row list and to POST 2 only: a month's premieres are its premieres in
+    every standing, so a title being Completed or Cleanup by now has no bearing
+    on whether this month announced it.
+
     `link_url` is omitted entirely when there is nothing to link to, rather than
     rendered as an empty or broken line. It is wrapped in angle brackets, which
     is Discord's own way of suppressing the link preview card — an announcement
@@ -349,6 +361,9 @@ def month_view(shows: list[dict], standing: MonthStanding) -> list[dict]:
     what is in a month is the thing this rule exists to stop. Nothing is deleted:
     a row a month may not present is still stored, still exported, and still
     carried forward when the calendar reaches the month it belongs to.
+
+    POST 1 is deliberately outside this: it announces what premiered in the
+    month, which no standing changes. See render_post1.
     """
     allowed = set(MONTH_BUCKETS[standing])
     return [s for s in shows if bucket_of(s, s) in allowed]
