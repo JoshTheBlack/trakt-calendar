@@ -268,6 +268,11 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     An already-initialized month is returned untouched (aside from the prior-month
     freeze), so PAST months never re-run initialization. A month further ahead
     than the preview is not initialized at all (month_reachable).
+
+    BUILDING A MONTH THAT HAS NOT BEGUN IS SOMETHING SOMEBODY ASKS FOR. This
+    function will do it — the preview is a real feature — but the page load does
+    not call it for such a month any more; the Import control does. The rule and
+    the reason are at the one place that decides it, routes._distrakt_month_payload.
     """
     today = today or date.today()
     month_key = store.month_key(year, month)
@@ -297,23 +302,34 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
         # — return a transient, UNPERSISTED empty doc (rendered read-only).
         return new_month_doc(month_key)
 
-    doc = await _initialize_month(user_id, month_key, settings)
+    doc = await _initialize_month(user_id, month_key, settings, today)
     doc["totals_refreshed_at"] = db.now()
     await save_month(user_id, doc)
     return doc
 
 
-async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
+async def _initialize_month(user_id: int, month_key: str, settings,
+                            today: date | None = None) -> dict:
     """A brand-new month's contents, in the order the three sources are allowed to
     contribute: carried-forward titles first (they are the ones with history), then
     the calendar's premieres, then whatever recent watch history suggests. Each
     later source only adds what the earlier ones did not, so being carried forward
     beats being re-imported, and `added_by` records the truth about who put a row
     there rather than the last writer to touch it.
+
+    A MONTH THAT HAS NOT BEGUN TAKES ITS PREMIERES AND NOTHING ELSE. The other two
+    sources are both statements about NOW — a title still going at the end of last
+    month, and a season part-way through in recent viewing — and neither has
+    anything to say about a month nobody has reached. Filed into one anyway they
+    were bucketed by whether they had aired YET, which they had not, so a season
+    that began in August was announced as new in October. Until a month opens it
+    holds only what BEGINS in it; when it opens, those titles arrive in whatever
+    bucket they have earned by then.
     """
     doc = new_month_doc(month_key)
     present: set[tuple[str, int]] = set()
     year, month = int(month_key[:4]), int(month_key[5:7])
+    begun = month_committed(month_key, today)
 
     # Read ONCE and applied to all three sources below, because the rule is about
     # the month rather than about where a title came from: a title the user had
@@ -327,10 +343,10 @@ async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
     # at initialization and not at read time.
     nw_ids = await calendar_state.not_watching_ids(user_id)
 
-    # Carry forward everything except Completed / Abandoned. An open (not-yet-
-    # frozen) prior is bucketed live so a preview rollover still drops the right
-    # titles; a frozen prior reuses its stored buckets.
-    prior = await load_month(user_id, prev_month_key(month_key))
+    # Carry forward everything except Completed / Abandoned, once the month has
+    # begun. An open (not-yet-frozen) prior is bucketed live so the rollover still
+    # drops the right titles; a frozen prior reuses its stored buckets.
+    prior = await load_month(user_id, prev_month_key(month_key)) if begun else None
     if prior is not None:
         prior_shows = frozen_shows(prior) if prior.get("closed") \
             else await compute_live_shows(user_id, prior.get("shows") or [], settings)
@@ -349,13 +365,17 @@ async def _initialize_month(user_id: int, month_key: str, settings) -> dict:
     # This month's premieres, minus not-watching.
     await calendar_import.add_premieres(doc, present, user_id, settings, year, month, nw_ids)
 
-    # In-progress-but-unfinished titles from recent history.
-    for rec in await history_records(settings, present):
-        if calendar_import.matches_not_watching(rec, nw_ids):
-            continue
-        key = (str(record_key(rec)), int(rec["season"]))
-        if key in present:
-            continue
-        doc["shows"].append(normalize_show({**rec, "added_by": ADDED_BY_HISTORY}))
-        present.add(key)
+    # In-progress-but-unfinished titles from recent history, again only once the
+    # month has begun: what somebody is part-way through today is THIS month's
+    # material whichever month is being built, and it was the sweep that filed it
+    # under a month that has not happened.
+    if begun:
+        for rec in await history_records(settings, present):
+            if calendar_import.matches_not_watching(rec, nw_ids):
+                continue
+            key = (str(record_key(rec)), int(rec["season"]))
+            if key in present:
+                continue
+            doc["shows"].append(normalize_show({**rec, "added_by": ADDED_BY_HISTORY}))
+            present.add(key)
     return doc

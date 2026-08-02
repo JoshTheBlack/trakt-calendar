@@ -24,11 +24,15 @@ function premiereKey(s) {
 }
 const byPremiere = (a, b) => (premiereKey(a) - premiereKey(b)) || byTitle(a, b);
 
-function renderShowList(shows, movies) {
+// `emptyNote` is the server's own sentence for why this month is empty, when it
+// knows one — a month waiting to be imported reads very differently from one
+// that simply has nothing on it yet, and the blank list looks identical either
+// way. Falls back to the generic line for every month that is just empty.
+function renderShowList(shows, movies, emptyNote) {
     const host = document.getElementById('distraktShowList');
     const films = movies || [];
     if (!shows.length && !films.length) {
-        host.innerHTML = '<div class="distrakt-empty">Nothing tracked yet this month.</div>';
+        host.innerHTML = `<div class="distrakt-empty">${esc(emptyNote || 'Nothing tracked yet this month.')}</div>`;
         return;
     }
     const groups = {};

@@ -190,6 +190,18 @@ class ImportingAMonthTests(TrackerPanelTestCase):
         doc = asyncio.run(distrakt_store.load_month(self.user_id, month))
         self.assertEqual([s["ids"]["trakt"] for s in doc["shows"]], [303])
 
+    def test_the_month_ahead_is_built_by_asking(self):
+        """Opening a month that has not begun no longer builds it, so this button
+        is how it comes into existence at all — and what it gets is what premieres
+        in it."""
+        index = self.today.month
+        year, month = self.today.year + index // 12, index % 12 + 1
+        resp = self._import(1)
+        self.assertEqual(resp.status_code, 200)
+        doc = asyncio.run(distrakt_store.load_month(
+            self.user_id, distrakt_store.month_key(year, month)))
+        self.assertEqual([s["ids"]["trakt"] for s in doc["shows"]], [303])
+
 
 class RemovingFromTheTrackerTests(TrackerPanelTestCase):
     """The ✕ on a tracker row, and the one thing it is allowed to touch outside

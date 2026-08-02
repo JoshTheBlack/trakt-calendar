@@ -46,6 +46,8 @@ _DETAILS = {
     102: _detail(8, started=True, finished=True, finale="7/28"),            # completed (8/8)
     103: _detail(6, started=True),                                          # abandoned (flag wins)
     401: _detail(10, cadence="Tue", started=True, finished=False),          # history in-progress
+    # A premiere that has not aired yet — what a month ahead is allowed to hold.
+    201: _detail(6, cadence="Fri", premiere="8/15", started=False),
 }
 
 # Watched-episode counts (the live `x`).
@@ -285,7 +287,7 @@ class RolloverTests(RolloverTestCase):
             "network": "Net"})
 
         async def fake_read_month(endpoint, settings, **kw):
-            return [], None  # no August premieres in this scenario
+            return [_cal_item(201, 1, "Aug New")], None
 
         async def fake_progress(settings, since_days=60):
             return []
@@ -299,7 +301,10 @@ class RolloverTests(RolloverTestCase):
 
         july = await distrakt.load_month(self.user_id, "2026-07")
         self.assertFalse(july["closed"])                      # stays open during preview
-        self.assertEqual(await self._keys(aug), {(101, 1)})   # still carried forward live
+        # August has not begun, so it takes what premieres in it and nothing
+        # else: July's still-running title arrives when August does — see
+        # _initialize_month, and WhatAMonthThatHasNotBegunTakesTests.
+        self.assertEqual(await self._keys(aug), {(201, 1)})
 
     async def test_import_premieres_merges_skipping_existing_and_not_watching(self):
         await distrakt.add_show(self.user_id, "2026-08",
@@ -726,6 +731,154 @@ class MonthsTheCalendarHasNotReachedTests(RolloverTestCase):
         self.assertTrue(distrakt.month_reachable("2026-11", date(2026, 12, 20)))   # already past
         self.assertTrue(distrakt.month_reachable("2027-01", date(2026, 12, 20)))   # the preview
         self.assertFalse(distrakt.month_reachable("2027-02", date(2026, 12, 20)))  # past it
+
+
+class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
+    """Until a month opens it holds only the titles that BEGIN in it — and it is
+    not built by being looked at.
+
+    A title carried out of the month before, and a season somebody is part-way
+    through, are both statements about NOW. Filed into a month nobody has reached
+    they were bucketed by whether they had aired YET, which they had not, so a
+    season that began in August was announced as new in October.
+
+    Every month here is derived from the clock. All of these rules compare a
+    month key against today, so a written-out one would be a different distance
+    from today every month and test the wrong rule most of them.
+    """
+
+    def setUp(self):
+        self.today = date.today()
+
+    def _settings(self):
+        """SETTINGS plus the field the payload's share link reads."""
+        return SimpleNamespace(**vars(SETTINGS), public_base_url="")
+
+    async def _build(self, offset: int, premieres=(), progress=()) -> dict:
+        """Build the month `offset` ahead the way ⤓ Import does — asking for it
+        outright rather than by opening the page."""
+        async def fake_read_month(endpoint, settings, **kw):
+            return list(premieres), None
+
+        async def fake_progress(settings, since_days=60):
+            return list(progress)
+
+        year, month = _months_ahead(self.today, offset)
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.distrakt.watch_history.sync_and_baseline", side_effect=_fake_sync_and_baseline):
+            return await distrakt.ensure_month(self.user_id, year, month, SETTINGS,
+                                               today=self.today)
+
+    async def _open(self, offset: int):
+        """Open the month `offset` ahead as the page does, recording every read so
+        a month that should build nothing can be shown to have asked for nothing."""
+        from app.distrakt import routes as distrakt_routes
+
+        calls: list[str] = []
+
+        async def fake_read_month(endpoint, settings, **kw):
+            calls.append("calendar")
+            return [_cal_item(201, 1, "Premiere")], None
+
+        async def fake_progress(settings, since_days=60):
+            calls.append("history")
+            return []
+
+        year, month = _months_ahead(self.today, offset)
+        with patch("app.calendar.cache.read_month", side_effect=fake_read_month), \
+             patch("app.providers.trakt.sync.fetch_watched_progress", side_effect=fake_progress), \
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+            payload, status = await distrakt_routes._distrakt_month_payload(
+                self.user_id, year, month, self._settings())
+        self.assertEqual(status, 200)
+        return payload, calls, distrakt.month_key(year, month)
+
+    async def _seed(self, offset: int, tid: int, title: str) -> None:
+        """A title already on the month `offset` from this one."""
+        year, month = _months_ahead(self.today, offset)
+        await distrakt.add_show(self.user_id, distrakt.month_key(year, month), {
+            "ids": _ids(tid), "season": 1, "title": title, "network": "Net",
+            "media": "show"})
+
+    async def test_the_month_ahead_takes_its_premieres_and_nothing_carried_over(self):
+        """The reported case: a preview month listing seasons that began two
+        months earlier, filed under New Shows because they had not aired yet."""
+        await self._seed(0, 101, "Still Airing")
+
+        doc = await self._build(1, premieres=[_cal_item(201, 1, "Starts Then")])
+
+        self.assertEqual(await self._keys(doc), {(201, 1)})
+
+    async def test_the_month_ahead_takes_nothing_from_recent_viewing_either(self):
+        """The third source is the same kind of statement about now, and it was
+        the one filing this month's material under a month that has not happened."""
+        doc = await self._build(1, progress=[
+            {"ids": _ids(401), "season": 1, "watched": 3, "title": "Part Way", "network": "Net"},
+        ])
+
+        self.assertEqual(await self._keys(doc), set())
+
+    async def test_the_month_under_way_still_takes_all_three(self):
+        """The half that must not change: once a month has begun, everything that
+        was in hand arrives on it in whatever bucket it has earned."""
+        await self._seed(-1, 101, "Still Airing")
+
+        doc = await self._build(0, premieres=[_cal_item(201, 1, "Starts Now")], progress=[
+            {"ids": _ids(401), "season": 1, "watched": 3, "title": "Part Way", "network": "Net"},
+        ])
+
+        self.assertEqual(await self._keys(doc), {(101, 1), (201, 1), (401, 1)})
+
+    async def test_opening_the_month_ahead_builds_nothing_and_says_what_it_waits_for(self):
+        """Building a month is the expensive act, and out ahead it is also a
+        guess. Opening one shows an empty month that says so; ⤓ Import builds it."""
+        from app.distrakt import routes as distrakt_routes
+
+        payload, calls, key = await self._open(1)
+
+        self.assertEqual(payload["shows"], [])
+        self.assertEqual(payload["empty_note"], distrakt_routes.MONTH_AWAITS_IMPORT)
+        self.assertFalse(payload["readonly"])                            # Import stays offered
+        self.assertIsNone(await distrakt.load_month(self.user_id, key))  # nothing written
+        self.assertEqual(calls, [])                                      # nothing fetched
+
+    async def test_a_month_past_the_preview_says_the_calendar_has_not_reached_it(self):
+        """The other empty month, and it must not be confused with the one above:
+        this one cannot be asked about at all, and Import refuses it in the same
+        words the page uses."""
+        from app.distrakt import routes as distrakt_routes
+
+        payload, calls, key = await self._open(2)
+
+        self.assertEqual(payload["empty_note"], distrakt_routes.MONTH_BEYOND_CALENDAR)
+        self.assertNotEqual(distrakt_routes.MONTH_BEYOND_CALENDAR,
+                            distrakt_routes.MONTH_AWAITS_IMPORT)
+        self.assertIsNone(await distrakt.load_month(self.user_id, key))
+        self.assertEqual(calls, [])
+
+    async def test_the_month_under_way_still_fills_itself_in_on_sight(self):
+        """The month being asked about is the one case where an empty page would
+        be wrong rather than merely early, so opening it still builds it."""
+        payload, _calls, key = await self._open(0)
+
+        self.assertEqual([s["ids"]["trakt"] for s in payload["shows"]], [201])
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
+
+    async def test_a_month_ahead_that_was_built_is_read_as_it_stands(self):
+        """Once asked for, it is an ordinary month: opening it shows what it
+        holds rather than the waiting line."""
+        await self._seed(1, 101, "Already Asked For")
+
+        payload, _calls, key = await self._open(1)
+
+        self.assertFalse(payload.get("empty_note"))  # not the waiting line any more
+        self.assertIsNotNone(await distrakt.load_month(self.user_id, key))
 
 
 class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):

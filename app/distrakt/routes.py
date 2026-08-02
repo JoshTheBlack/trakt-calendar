@@ -63,6 +63,16 @@ guard = authz.Guard(router)
 # happened to send, or the same title would key differently on two adds.
 _NUMERIC_ID_KEYS = frozenset(ID_KEYS) - {"imdb", "slug"}
 
+# A month that has not begun is in one of two states, and the whole risk is that
+# they blur: one is WAITING TO BE ASKED, the other cannot be asked about at all.
+# Shown the wrong sentence, a user reads a working feature as a broken one, so
+# both are written here, next to each other, and each surface reads the one for
+# the state it is in — the empty month says it for itself, and the import route
+# refuses in the same words rather than in its own.
+MONTH_AWAITS_IMPORT = ("This month hasn't begun yet, so nothing has been gathered for it. "
+                       "Press ⤓ Import to build it from what premieres in it.")
+MONTH_BEYOND_CALENDAR = "The calendar hasn't reached this month yet."
+
 
 class RequestError(ValueError):
     """A request body the caller has to fix. Its message is what the client is
@@ -308,16 +318,23 @@ async def _apply_not_watching(user_id: int, month_key: str,
 
 def _empty_month_payload(month_key: str, emojis: dict, default_emoji: str,
                          standing: distrakt_store.MonthStanding,
-                         readonly: bool = False, link_url: str | None = None) -> dict:
+                         readonly: bool = False, link_url: str | None = None,
+                         empty_note: str = "") -> dict:
     """Headers-only render for a month with no roster + no Trakt call: an
     unconfigured/uninitialized month (readonly=False) or a never-tracked past
     month reached by navigating backward (readonly=True). The tracker only
     ever rolls a month's snapshot forward, never backfills one after the fact,
     so an old month nobody was tracking at the time stays permanently empty
-    and read-only rather than retroactively populating from Trakt."""
+    and read-only rather than retroactively populating from Trakt.
+
+    `empty_note` replaces the page's generic "nothing here yet" line. An empty
+    month is not self-explanatory — the same blank list means "waiting for you to
+    ask", "the calendar isn't there yet" and "nobody was tracking that far back" —
+    so when the reason is known it is said, in the sentence the state owns."""
     return {
         "ok": True, "month": month_key, "closed": False, "readonly": readonly, "shows": [],
         "movies": [],
+        "empty_note": empty_note,
         "post1": discord_fmt.render_post1([], emojis, default_emoji, link_url=link_url, month=month_key),
         "post2": discord_fmt.render_post2([], emojis, default_emoji, standing=standing),
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -500,8 +517,10 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     Lazily rolls the month over (ensure_month), then either renders a CLOSED
     month from its frozen snapshot (no Trakt) or computes the OPEN month live
     (or always when force_fresh). A never-tracked PAST/gap month (backward nav)
-    is rendered empty + read-only and never created. Returns (json_payload,
-    http_status).
+    is rendered empty + read-only and never created; a month that has not BEGUN is
+    rendered empty and not created either, because building that one is something
+    the user asks for with ⤓ Import — see the branch below. Returns
+    (json_payload, http_status).
 
     This is also where Trakt failing is turned into an answer. A 429 on a SHARED
     prerequisite (anything but the per-show season fan-out, which degrades itself)
@@ -529,6 +548,22 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
             return _empty_month_payload(
                 month_key, emojis, default_emoji, standing,
                 readonly=blocked, link_url=link_url,
+            ), 200
+        if standing is distrakt_store.MonthStanding.FUTURE:
+            # A MONTH THAT HAS NOT BEGUN IS NOT BUILT BY BEING LOOKED AT. Building
+            # one is the expensive act — a month of premieres read, a roster's
+            # worth of rows written — and out here it is also a guess: nothing has
+            # aired, so there is no state to catch up with. Opening it therefore
+            # shows an empty month that says what it is waiting for, and ⤓ Import
+            # is what builds it (api_distrakt_import). The month UNDER WAY is the
+            # opposite case and still fills itself in on sight: it is the month
+            # being asked about, and an empty one there would be wrong rather than
+            # merely early. Not persisted and no Trakt call either way.
+            return _empty_month_payload(
+                month_key, emojis, default_emoji, standing, link_url=link_url,
+                empty_note=(MONTH_AWAITS_IMPORT
+                            if distrakt_store.month_reachable(month_key, today)
+                            else MONTH_BEYOND_CALENDAR),
             ), 200
 
     try:
@@ -602,6 +637,11 @@ async def api_distrakt_import(request: Request):
     doc already exists (so lazy-init's one-shot premiere seeding was skipped).
     Returns the same shape as GET /api/distrakt/month.
 
+    THIS IS ALSO HOW A MONTH THAT HAS NOT BEGUN GETS BUILT AT ALL. Opening one no
+    longer builds it (see _distrakt_month_payload), so for the month ahead this
+    button is the ask: it creates the month, which takes that month's premieres
+    and nothing carried in from before it (see rollover._initialize_month).
+
     Bounded to a month the tracker may actually build — the one under way or the
     preview immediately after it (see rollover.month_reachable). The page inherits
     its month from whatever view the user came from, so without that bound one
@@ -620,10 +660,10 @@ async def api_distrakt_import(request: Request):
     if not distrakt_store.month_reachable(month_key, today):
         # Said out loud rather than left to no-op. ensure_month will not build a
         # month this far ahead (see month_reachable), so importing into it would
-        # write nothing while the toast claimed it had.
-        return JSONResponse(
-            {"ok": False, "error": "Can't import a month the calendar hasn't reached yet."},
-            status_code=400)
+        # write nothing while the toast claimed it had. The same sentence the
+        # empty month shows for this state, so pressing the button cannot appear
+        # to report something different from the page it was pressed on.
+        return JSONResponse({"ok": False, "error": MONTH_BEYOND_CALENDAR}, status_code=400)
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
