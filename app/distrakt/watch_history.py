@@ -54,6 +54,7 @@ import json
 import logging
 from datetime import date, datetime, timezone
 
+from . import store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
 from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
@@ -335,7 +336,7 @@ def movies_in_range(state: dict, start_date: str, end_date: str) -> list[dict]:
 def month_bounds(month_key: str) -> tuple[str, str]:
     """('YYYY-MM-01', 'YYYY-MM-<last>') for a 'YYYY-MM' key."""
     import calendar as _calendar
-    year, month = int(month_key[:4]), int(month_key[5:7])
+    year, month = store.parse_month_key(month_key)
     last = _calendar.monthrange(year, month)[1]
     return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last:02d}"
 

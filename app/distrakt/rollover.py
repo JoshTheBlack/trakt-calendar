@@ -36,7 +36,7 @@ WATCHED_RECENCY_DAYS = 60      # only seed genuinely active shows from history
 
 
 def prev_month_key(month_key: str) -> str:
-    year, month = (int(x) for x in month_key.split("-"))
+    year, month = store.parse_month_key(month_key)
     return store.month_key(year - 1, 12) if month == 1 else store.month_key(year, month - 1)
 
 
@@ -328,7 +328,7 @@ async def _initialize_month(user_id: int, month_key: str, settings,
     """
     doc = new_month_doc(month_key)
     present: set[tuple[str, int]] = set()
-    year, month = int(month_key[:4]), int(month_key[5:7])
+    year, month = store.parse_month_key(month_key)
     begun = month_committed(month_key, today)
 
     # Read ONCE and applied to all three sources below, because the rule is about

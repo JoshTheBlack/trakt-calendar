@@ -92,7 +92,7 @@ def month_standing(month: str, today: date | None = None) -> MonthStanding:
     """
     today = today or clock.today()
     here = (today.year, today.month)
-    there = (int(month[:4]), int(month[5:7]))
+    there = parse_month_key(month)
     if there < here:
         return MonthStanding.PAST
     return MonthStanding.CURRENT if there == here else MonthStanding.FUTURE
@@ -176,6 +176,37 @@ def month_key(year: int, month: int) -> str:
     "2026-7" would sort after "2026-12" and silently mis-file a month.
     """
     return f"{int(year):04d}-{int(month):02d}"
+
+
+def parse_month_key(month: str) -> tuple[int, int]:
+    """month_key's inverse: "YYYY-MM" back to (year, month).
+
+    Beside month_key because it is the same fact read the other way, and the
+    format has exactly one owner in this module — _MONTH_RE states it, month_key
+    writes it, this reads it. Without an inverse every caller sliced the string
+    itself, which came to nine copies of `int(key[:4]), int(key[5:7])` plus one
+    written a second way as `key.split("-")`. Nothing about that was wrong yet,
+    and that is the point: a format asked about in ten places in two spellings is
+    how one of them comes to disagree with the others, which is exactly what
+    happened one layer up with "is this month over".
+
+    Validates rather than slicing blindly. A caller handing this a date, an empty
+    string or a "2026-7" gets a ValueError naming the value, instead of a plausible
+    (2026, 0) that goes wrong somewhere further along.
+    """
+    _validate_month(month)
+    return int(month[:4]), int(month[5:7])
+
+
+def month_first_day(month: str) -> date:
+    """The 1st of "YYYY-MM", for the callers that want a date rather than a pair.
+
+    Several of them built `date(int(key[:4]), int(key[5:7]), 1)` inline. Named
+    here so "the month starts on its first day" is stated once next to the format
+    it is derived from.
+    """
+    year, month_number = parse_month_key(month)
+    return date(year, month_number, 1)
 
 
 def _validate_month(month: str) -> str:

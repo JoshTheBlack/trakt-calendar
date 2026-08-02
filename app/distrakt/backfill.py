@@ -77,8 +77,8 @@ def valid_month(value) -> str | None:
 
 
 def _prev_month(month_key: str) -> str:
-    year, month = int(month_key[:4]), int(month_key[5:7])
-    return f"{year - 1:04d}-12" if month == 1 else f"{year:04d}-{month - 1:02d}"
+    year, month = distrakt.parse_month_key(month_key)
+    return distrakt.month_key(year - 1, 12) if month == 1 else distrakt.month_key(year, month - 1)
 
 
 def month_range(start_month: str, end_month: str) -> list[str]:
@@ -88,9 +88,9 @@ def month_range(start_month: str, end_month: str) -> list[str]:
     if not start or not end:
         return []
     out: list[str] = []
-    year, month = int(start[:4]), int(start[5:7])
-    while f"{year:04d}-{month:02d}" <= end and len(out) < MAX_MONTHS:
-        out.append(f"{year:04d}-{month:02d}")
+    year, month = distrakt.parse_month_key(start)
+    while distrakt.month_key(year, month) <= end and len(out) < MAX_MONTHS:
+        out.append(distrakt.month_key(year, month))
         year, month = (year + 1, 1) if month == 12 else (year, month + 1)
     return out
 
@@ -152,7 +152,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
     port = providers.for_tracker()
     if port is None:
         return _empty_plan(start_month, end_month)
-    start_day = date(int(months[0][:4]), int(months[0][5:7]), 1)
+    start_day = distrakt.month_first_day(months[0])
     events = await port.fetch_history(settings, start_at=start_day.isoformat())
     films, films_known = await _split_films(user_id, port.movie_plays_from(events), set(months))
 
