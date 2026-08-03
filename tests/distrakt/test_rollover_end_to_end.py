@@ -98,6 +98,16 @@ _SEASONS = {
     # the user's own work in hand, which is what reaches a later month's page.
     912: {"total": 8, "started": True, "finished": False, "watched": 3,
           "premiere": f"{_EARLIER_DAY.month}/6"},
+    # Two rows on the month UNDER WAY, alike in every way the bucketing can see
+    # and different only in where they came from — which is the whole of what
+    # decides whether giving up on one reaches the calendar.
+    921: {"total": 8, "started": True, "finished": False, "watched": 3,
+          "premiere": f"{UNDER_WAY_DAY.month}/6"},
+    922: {"total": 8, "started": True, "finished": False, "watched": 3,
+          "premiere": f"{UNDER_WAY_DAY.month}/6"},
+    # A calendar row on the month that CLOSES, for the case where the month is
+    # what refuses rather than the row.
+    923: {"total": 6, "started": True, "finished": False, "watched": 2},
 }
 
 
@@ -193,6 +203,30 @@ class RolloverOverHttpTestCase(AppTestCase):
                                     json={"year": year, "month": month})
         self.assertEqual(resp.status_code, 200, resp.text)
         return resp.json()
+
+    def post(self, path: str, body: dict) -> dict:
+        """POST one of the row controls, with every read it makes patched.
+
+        Patched on the ROUTE module, not on the provider one: routes.py binds
+        both names at import time, so patching where they are defined does not
+        reach the copies it calls.
+        """
+        with self.offline(), \
+                mock.patch("app.distrakt.routes.fetch_watched_map", return_value={}), \
+                mock.patch("app.distrakt.routes.fetch_season_detail",
+                           side_effect=_fake_season_detail):
+            resp = self.client.post(path, json=body)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return resp.json()
+
+    def row_on(self, month_key: str, trakt_id: int) -> dict:
+        """One month's STORED row for an id — what a request wrote, rather than
+        what the response happened to render."""
+        import asyncio
+
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, month_key))
+        row, = [s for s in (doc or {}).get("shows", []) if int(s["match_id"]) == trakt_id]
+        return row
 
     def stored_ids(self, key: str) -> set[int]:
         """The (numeric id) set actually persisted for a month, read from the
@@ -483,24 +517,12 @@ class ActingOnARowStoredSomewhereElseTests(RolloverOverHttpTestCase):
         with fake_today(ON_THE_FIRST):
             self.get_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
 
-    def _post(self, path: str, body: dict) -> dict:
-        # Patched on the ROUTE module, not on the provider one: routes.py binds
-        # both names at import time, so patching where they are defined does not
-        # reach the copies it calls.
-        with self.offline(), \
-                mock.patch("app.distrakt.routes.fetch_watched_map", return_value={}), \
-                mock.patch("app.distrakt.routes.fetch_season_detail",
-                           side_effect=_fake_season_detail):
-            resp = self.client.post(path, json=body)
-        self.assertEqual(resp.status_code, 200, resp.text)
-        return resp.json()
-
     def test_giving_up_on_it_is_recorded_against_the_month_being_viewed(self):
         # "I stopped following this" is a fact about the month it happened in,
         # and July has already settled.
         self._roll_into_august()
         with fake_today(ON_THE_FIRST):
-            self._post("/api/distrakt/abandon", {
+            self.post("/api/distrakt/abandon", {
                 "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1,
                 "abandoned": True})
         self.assertIn(701, self.stored_ids(OPENING))
@@ -513,7 +535,7 @@ class ActingOnARowStoredSomewhereElseTests(RolloverOverHttpTestCase):
     def test_july_s_own_row_is_left_as_it_was(self):
         self._roll_into_august()
         with fake_today(ON_THE_FIRST):
-            self._post("/api/distrakt/abandon", {
+            self.post("/api/distrakt/abandon", {
                 "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1,
                 "abandoned": True})
         import asyncio
@@ -527,7 +549,7 @@ class ActingOnARowStoredSomewhereElseTests(RolloverOverHttpTestCase):
         # the list, and it returns on the next load with the ✕ looking broken.
         self._roll_into_august()
         with fake_today(ON_THE_FIRST):
-            self._post("/api/distrakt/remove", {
+            self.post("/api/distrakt/remove", {
                 "year": 2026, "month": 8, "key": "show:tmdb:701", "season": 1})
             payload = self.get_month(OPENING)
         self.assertNotIn(701, self.stored_ids(CLOSING))
@@ -608,13 +630,6 @@ class ATurnAwayReachesOnlyWhatIsWorkInHandTests(RolloverOverHttpTestCase):
     def shown_ids(self, payload: dict) -> set[int]:
         return {int((s.get("ids") or {}).get("tmdb")) for s in payload["shows"]}
 
-    def row_on(self, month_key: str, trakt_id: int) -> dict:
-        import asyncio
-
-        doc = asyncio.run(distrakt_store.load_month(self.user_id, month_key))
-        row, = [s for s in (doc or {}).get("shows", []) if int(s["match_id"]) == trakt_id]
-        return row
-
     def test_the_part_watched_season_is_on_the_page_before_anything_is_turned_away(self):
         # Guards the fixture rather than the behaviour: every assertion below about
         # the title being abandoned would also pass if it had simply never reached
@@ -674,6 +689,116 @@ class ATurnAwayReachesOnlyWhatIsWorkInHandTests(RolloverOverHttpTestCase):
         self.assertEqual(self.stored_ids(UNDER_WAY), {912})
         self.assertTrue(self.row_on(UNDER_WAY, 912)["abandoned"])
         self.assertFalse(self.row_on(NOT_BEGUN, 911)["abandoned"])
+
+
+class GivingUpOnTheTrackerSaysSoOnTheCalendarTests(RolloverOverHttpTestCase):
+    """Abandon on the tracker turns the title away on the calendar, and taking the
+    abandon back brings it straight back — the two halves of one switch.
+
+    THE SECOND HALF IS WHAT MAKES THE FIRST SAFE, and it has to be exercised by
+    reloading the month rather than by reading the response to the un-abandon. A
+    mark made after a month opened is read on the next load as having given up on
+    the title (see routes._apply_not_watching), so a mark left standing behind an
+    un-abandon re-abandons the row the moment anybody looks at the month again:
+    the button reports success, the row comes back given up on, and nothing in
+    between says why. Every assertion here that matters is made after a fresh
+    read of the month.
+
+    Which rows may speak to the calendar at all is the ✕'s rule, unchanged: only
+    one the calendar put on the month, and never on a month the calendar has
+    passed.
+    """
+
+    CALENDAR_ROW = 921
+    HAND_ADDED_ROW = 922
+    CLOSED_MONTH_ROW = 923
+
+    def seed(self) -> None:
+        """Two rows on the month under way, identical to the bucketing and
+        different only in where each came from."""
+        self.add_row(UNDER_WAY, self.CALENDAR_ROW, distrakt_store.ADDED_BY_CALENDAR)
+        self.add_row(UNDER_WAY, self.HAND_ADDED_ROW, distrakt_store.ADDED_BY_MANUAL)
+
+    def add_row(self, month_key: str, trakt_id: int, added_by: str) -> None:
+        import asyncio
+
+        asyncio.run(distrakt_store.add_show(self.user_id, month_key, {
+            "ids": {"trakt": trakt_id, "tmdb": trakt_id, "slug": f"slug-{trakt_id}"},
+            "season": 1, "title": f"Show {trakt_id}", "network": "Net",
+            "added_by": added_by,
+        }))
+
+    def marks(self) -> set[str]:
+        import asyncio
+
+        from app.calendar import state as calendar_state
+
+        return asyncio.run(calendar_state.not_watching_ids(self.user_id))
+
+    def abandon(self, trakt_id: int, abandoned: bool,
+                month_key: str = UNDER_WAY, on_day: date = UNDER_WAY_DAY) -> dict:
+        year, month = int(month_key[:4]), int(month_key[5:7])
+        with fake_today(on_day):
+            return self.post("/api/distrakt/abandon", {
+                "year": year, "month": month, "key": f"show:tmdb:{trakt_id}",
+                "season": 1, "abandoned": abandoned})
+
+    def reload_the_month(self) -> dict:
+        with fake_today(UNDER_WAY_DAY):
+            return self.get_month(UNDER_WAY)
+
+    def test_giving_up_on_a_calendar_row_turns_it_away_there_too(self):
+        # The row is one the calendar is still offering, so a month before its 1st
+        # would hand it straight back on the next load; and either way the two
+        # views would otherwise disagree about a title just decided about.
+        self.seed()
+        self.abandon(self.CALENDAR_ROW, True)
+        self.assertIn(f"slug-{self.CALENDAR_ROW}", self.marks())
+
+    def test_taking_it_back_clears_the_mark(self):
+        self.seed()
+        self.abandon(self.CALENDAR_ROW, True)
+        self.abandon(self.CALENDAR_ROW, False)
+        self.assertEqual(self.marks(), set())
+
+    def test_the_row_is_still_taken_back_after_the_month_is_read_again(self):
+        # THE ROUND TRIP, AND THE POINT OF ALL OF IT. Un-abandoning and then
+        # opening the month is what a person does, and it is where a mark left
+        # behind would undo the click they just made.
+        self.seed()
+        self.abandon(self.CALENDAR_ROW, True)
+        self.abandon(self.CALENDAR_ROW, False)
+        payload = self.reload_the_month()
+        self.assertFalse(self.row_on(UNDER_WAY, self.CALENDAR_ROW)["abandoned"],
+                         "the row was given up on again by being looked at")
+        row = next(s for s in payload["shows"]
+                   if int((s.get("ids") or {}).get("tmdb")) == self.CALENDAR_ROW)
+        self.assertFalse(row["abandoned"])
+        self.assertIn(row["bucket"], ("cleanup", "keepup"))
+
+    def test_giving_up_on_a_hand_added_row_says_nothing_to_the_calendar(self):
+        # A title somebody added themselves need not be on the calendar at all,
+        # and hiding it there would take away something they never said they were
+        # not watching.
+        self.seed()
+        self.abandon(self.HAND_ADDED_ROW, True)
+        self.assertEqual(self.marks(), set())
+        self.assertTrue(self.row_on(UNDER_WAY, self.HAND_ADDED_ROW)["abandoned"],
+                        "the row itself was not given up on")
+
+    def test_a_month_the_calendar_has_passed_says_nothing_to_it_either(self):
+        # Correcting what a frozen month records is a statement about that month
+        # alone. The row is a calendar row, so provenance is not what refuses
+        # here — the month is.
+        self.add_row(CLOSING, self.CLOSED_MONTH_ROW, distrakt_store.ADDED_BY_CALENDAR)
+        with fake_today(BEFORE_THE_FIRST):
+            self.get_month(CLOSING)
+        with fake_today(ON_THE_FIRST):
+            self.get_month(CLOSING)  # the read that freezes it
+        self.abandon(self.CLOSED_MONTH_ROW, True,
+                     month_key=CLOSING, on_day=ON_THE_FIRST)
+        self.assertEqual(self.marks(), set())
+        self.assertTrue(self.row_on(CLOSING, self.CLOSED_MONTH_ROW)["abandoned"])
 
 
 class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):

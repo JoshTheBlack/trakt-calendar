@@ -911,30 +911,64 @@ async def api_distrakt_set_emojis(request: Request):
     })
 
 
+async def _calendar_item_a_row_speaks_for(user_id: int, month_key: str, doc: dict | None,
+                                          record: dict | None, key: ItemKey, season: int,
+                                          settings) -> str | None:
+    """The calendar item this tracker row is allowed to speak for, or None when
+    acting on the row must say nothing to the calendar at all.
+
+    ONE answer for both of the controls that end a title's run on a month — the
+    ✕ and Abandon. They ask the identical question ("may this touch the
+    calendar, and under which id?"), and a second copy of the rule beside the
+    second control would drift out of step with the first in silence: the copies
+    are only ever read one at a time, so nothing would ever put them side by
+    side and notice.
+
+    ONLY A ROW THE CALENDAR PUT ON THE MONTH. For such a row the mark is what
+    makes the action stick at all: a month before its 1st re-imports its
+    premieres on every load, and the not-watching set is the only thing
+    import_premieres skips, so without it the row is handed straight back in the
+    same response and the control looks broken. A row the user added by hand, or
+    one their watch history produced, is neither re-imported nor necessarily on
+    the calendar in the first place — hiding a show there because somebody undid
+    a manual add would take away something they never said they were not
+    watching. A row written before provenance was recorded has no stored answer,
+    so the calendar is asked directly whether it would hand that show back (see
+    is_calendar_premiere).
+
+    A CLOSED MONTH NEVER SPEAKS OUTWARD, whatever the row says. Correcting what
+    a past month records is a statement about that month and nothing else — a
+    season you finished years ago and re-watched one episode of does not belong
+    on March's list, but it is also not something to start hiding from your
+    calendar today.
+
+    The id is the slug, falling back to the source's own id, exactly as the
+    calendar keys its own cards. That is NOT the id the tracker row is filed
+    under, and a mark written in the tracker's terms would silently match
+    nothing.
+    """
+    if record is None or (doc or {}).get("closed"):
+        return None
+    added_by = str(record.get("added_by") or "")
+    from_calendar = (added_by == distrakt_store.ADDED_BY_CALENDAR if added_by
+                     else await distrakt_store.is_calendar_premiere(
+                         user_id, month_key, settings, key, season))
+    if not from_calendar:
+        return None
+    ids = record.get("ids") or {}
+    return str(ids.get("slug") or ids.get("trakt") or key.match_id)
+
+
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_remove(request: Request):
     """Delete a show+season from a month (cleanup mistakes / abandons), and for a
-    row the CALENDAR put there in an OPEN month, mark the show not-watching on
-    the calendar as well.
+    row the calendar put there, mark the show not-watching on the calendar as
+    well — which rows those are, and under what id, is
+    _calendar_item_a_row_speaks_for's to say.
 
-    That mark is not a bonus, it is what makes such a removal STICK. A preview
-    month (before the 1st) re-imports the month's premieres on every load, and
-    the not-watching set is the only thing import_premieres skips — so deleting
-    the row alone put it straight back in the same response and the ✕ looked
-    broken.
-
-    It is deliberately NOT written for a row the user added by hand or one that
-    came from their watch history: neither is re-imported, so removing them
-    already sticks, and hiding a show on the calendar because someone undid a
-    manual add would take away something they never said they weren't watching.
-    A row from before provenance was recorded is resolved by asking the calendar
-    whether it would hand that show straight back (see is_calendar_premiere).
-
-    A CLOSED month never writes that mark, whatever the row says. Correcting what
-    a past month records is a statement about that month and nothing else — a
-    season you finished years ago and re-watched one episode of does not belong
-    on March's list, but it also is not something to start hiding from your
-    calendar today. The row goes; the month stays closed.
+    That mark is not a bonus, it is what makes such a removal STICK: without it
+    a preview month's next load re-imports the premiere and the ✕ looks broken.
+    The row goes either way.
 
     A row the viewed month does not hold is one of the user's own lists, drawn
     from every month at once, and removing it takes the season off all of them.
@@ -970,22 +1004,14 @@ async def api_distrakt_remove(request: Request):
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
 
     settings = await _distrakt_settings(user_id)
-    closed = bool((doc or {}).get("closed"))
-    added_by = str((record or {}).get("added_by") or "")
-    hide_on_calendar = not closed and added_by == distrakt_store.ADDED_BY_CALENDAR
-    if record is not None and not added_by and not closed:
-        hide_on_calendar = await distrakt_store.is_calendar_premiere(
-            user_id, month_key, settings, key, season,
-        )
-    if hide_on_calendar:
-        ids = (record or {}).get("ids") or {}
-        await calendar_state.set_not_watching(
-            user_id, str(ids.get("slug") or ids.get("trakt") or key.match_id), True,
-        )
+    item_id = await _calendar_item_a_row_speaks_for(
+        user_id, month_key, doc, record, key, season, settings)
+    if item_id is not None:
+        await calendar_state.set_not_watching(user_id, item_id, True)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     # So the toast can say what actually happened rather than guessing.
     if isinstance(payload, dict):
-        payload["hidden_on_calendar"] = hide_on_calendar
+        payload["hidden_on_calendar"] = item_id is not None
     return JSONResponse(payload, status_code=status)
 
 
@@ -1374,6 +1400,19 @@ async def api_distrakt_abandon(request: Request):
     fact about the month it happened in, and the month it happens to be stored
     under has usually already settled. Un-abandoning has no such fallback: there
     is nothing to un-say about a month with no such row.
+
+    IT ALSO TURNS THE TITLE AWAY ON THE CALENDAR, AND TAKING IT BACK UN-TURNS
+    IT, for the rows _calendar_item_a_row_speaks_for allows — the same rule and
+    the same helper the ✕ uses. Giving up on a title the calendar is still
+    offering and leaving it sitting there is the two views disagreeing about a
+    decision just made.
+
+    BOTH DIRECTIONS OR NEITHER, and the second is not symmetry for its own sake.
+    A calendar mark made after a month opened is read on the next load as having
+    given up on the title (see _apply_not_watching), so a mark left standing
+    behind an un-abandon gives the row up again the moment anybody looks at the
+    month: the button reports success and the row comes back abandoned, with
+    nothing in between to say why.
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
@@ -1401,7 +1440,16 @@ async def api_distrakt_abandon(request: Request):
                                                      abandoned_form=abandoned_form)
     if rec is None:
         return JSONResponse({"ok": False, "error": "Show/season not found in that month"}, status_code=404)
-    payload, status = await _distrakt_month_payload(user_id, year, month, await _distrakt_settings(user_id))  # recomputed month (1d)
+
+    settings = await _distrakt_settings(user_id)
+    # Read AFTER the writes above, so a row that reached this month through the
+    # held-elsewhere fallback is judged on the month it has just landed on.
+    doc = await distrakt_store.load_month(user_id, month_key)
+    item_id = await _calendar_item_a_row_speaks_for(
+        user_id, month_key, doc, rec, key, season, settings)
+    if item_id is not None:
+        await calendar_state.set_not_watching(user_id, item_id, abandoned)
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     return JSONResponse(payload, status_code=status)
 
 
