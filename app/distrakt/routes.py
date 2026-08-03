@@ -568,6 +568,21 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # compute_live_shows answers in the order it was asked, so the split is where
     # the two inputs were joined.
     shows, live_rows = computed[:len(records)], computed[len(records):]
+    # THE USER'S OWN LIST IS CLEANUP AND KEEPUP AND NOTHING ELSE, AND IT IS CUT
+    # DOWN TO THOSE HERE — before anything can read from it or write off it.
+    # This is the only position that works. A row taken from another month
+    # carries no bucket until the live pass above has resolved its watched count
+    # and its air dates, so the question cannot be asked any earlier; and the very
+    # next step, _apply_not_watching, WRITES — a calendar turn-away on a row it is
+    # handed materialises that row onto the month being viewed and records it as
+    # given up on there.
+    # What that cost: a title that has not started airing buckets as New or
+    # Returning, so premieres imported into a month still ahead sat on this list,
+    # were turned away, and were abandoned against the month under way. The
+    # standing filter below then hid them from the page — long after they had been
+    # written. New and Returning for the viewed month come from its OWN roster;
+    # they must never arrive by this route.
+    live_rows = _work_in_hand(live_rows)
     shows, live_rows = await _apply_not_watching(user_id, month_key, shows, live_rows)
     # A season finished before this month began belongs to the month it was
     # finished in, not to this one — see drop_seasons_finished_earlier.
@@ -578,7 +593,9 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # still refreshed, and still there when the calendar reaches its month.
     # POST 1 keeps the unfiltered `roster`: it announces the month's premieres,
     # which no standing changes.
-    shows = discord_fmt.month_view(roster, standing, month_key) + _work_in_hand(live_rows)
+    # `live_rows` needs no filtering of its own: it was reduced to the user's own
+    # two buckets before anything acted on it, above.
+    shows = discord_fmt.month_view(roster, standing, month_key) + live_rows
     await _mark_returns(user_id, shows)
     if records and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)

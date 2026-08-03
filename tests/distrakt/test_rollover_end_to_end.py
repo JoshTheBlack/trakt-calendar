@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import contextlib
 import os
-from datetime import date
+from datetime import date, timedelta
 from unittest import mock
 
 from app import clock, distrakt as distrakt_store
@@ -39,6 +39,23 @@ CLOSING = "2026-07"
 OPENING = "2026-08"
 BEFORE_THE_FIRST = date(2026, 7, 20)
 ON_THE_FIRST = date(2026, 8, 1)
+
+# A SECOND SET OF MONTHS, DERIVED FROM THE REAL CLOCK RATHER THAN PINNED, for the
+# cases that turn on a calendar turn-away. Those cases have one input that cannot
+# be faked: a turn-away is stamped with the real wall clock (calendar.state
+# .set_not_watching writes db.now(), and the clock override moves dates only), and
+# the whole question they ask is whether that stamp falls before or after the 1st
+# of the month being viewed. Pinned months would answer that differently depending
+# on when the suite was run, which is the rot this file's header is about — so
+# these are anchored to the real calendar instead, and it is the FAKE clock that
+# is moved to meet them. The month before the real one is always comfortably
+# behind a mark made now, and the real month is then a month that has not begun.
+_REAL_FIRST = date.today().replace(day=1)
+UNDER_WAY_DAY = (_REAL_FIRST - timedelta(days=1)).replace(day=15)
+UNDER_WAY = distrakt_store.month_key(UNDER_WAY_DAY.year, UNDER_WAY_DAY.month)
+NOT_BEGUN = distrakt_store.month_key(_REAL_FIRST.year, _REAL_FIRST.month)
+_EARLIER_DAY = UNDER_WAY_DAY.replace(day=1) - timedelta(days=1)
+EARLIER = distrakt_store.month_key(_EARLIER_DAY.year, _EARLIER_DAY.month)
 
 
 def fake_today(value: date):
@@ -73,6 +90,14 @@ _SEASONS = {
     703: {"total": 6, "started": True, "finished": False, "watched": 1},
     # August's own premiere.
     801: {"total": 10, "started": True, "finished": False, "watched": 0},
+    # Imported into a month that has NOT BEGUN: its premiere is still weeks off,
+    # so nothing has aired and nobody has watched anything.
+    911: {"total": 10, "started": False, "finished": False, "watched": 0,
+          "premiere": f"{_REAL_FIRST.month}/8"},
+    # Stored on the month BEFORE the one under way, part-watched and still airing:
+    # the user's own work in hand, which is what reaches a later month's page.
+    912: {"total": 8, "started": True, "finished": False, "watched": 3,
+          "premiere": f"{_EARLIER_DAY.month}/6"},
 }
 
 
@@ -80,7 +105,11 @@ async def _fake_season_detail(settings, trakt_id, season, fresh=False, client=No
     spec = _SEASONS[int(trakt_id)]
     return {
         "season": int(season), "total": spec["total"], "cadence": "Mon",
-        "premiere": "7/6", "finale": "7/28" if spec["finished"] else None,
+        # "M/D" with no year, as the real season lookup gives it. Most ids here
+        # premiered in the closing month and take the default; an id whose
+        # premiere MONTH is what a test is about names its own.
+        "premiere": spec.get("premiere", "7/6"),
+        "finale": "7/28" if spec["finished"] else None,
         "started_airing": spec["started"], "finished_airing": spec["finished"],
         "air_dates": [],
     }
@@ -526,6 +555,125 @@ class AFrozenMonthIsFilteredAsAtFreezeTests(RolloverOverHttpTestCase):
         shown = {int((s.get("ids") or {}).get("tmdb")) for s in july["shows"]}
         self.assertEqual(shown, {702, 703})  # July's own verdicts, unchanged
         self.assertEqual(self.stored_ids(CLOSING), {701, 702, 703})
+
+
+class ATurnAwayReachesOnlyWhatIsWorkInHandTests(RolloverOverHttpTestCase):
+    """A turn-away made during the month under way gives up on the title IN that
+    month — and the set of titles it can say that about is exactly the user's own
+    work in hand: what has finished airing and is waiting to be caught up on, and
+    what is still airing and being kept up with.
+
+    THE PAIR OF RULES HERE PULL AGAINST EACH OTHER AND THAT IS THE POINT.
+    A season stored on an EARLIER month that the user is part-way through is on
+    this month's page as their own list, and turning it away is them dropping it:
+    "I meant to watch that and ran out of time." A season imported into a month
+    still AHEAD has not aired, nobody is behind on it, and turning it away is them
+    declining a premiere they were offered — it belongs to the month it starts in
+    and this month has no verdict to record about it.
+
+    Both were reached through the same list, so both were abandoned against the
+    month under way: 26 titles premiering next month were written onto this one,
+    turned away, and given up on, all in the time it takes to open the page. The
+    row was hidden afterwards by the filter that decides what a month may show,
+    which is why nothing looked wrong — the write had already happened.
+    """
+
+    def seed(self) -> None:
+        """One title on each side of the line, and neither on the month under way:
+        a part-watched season on the month BEFORE it, and an unaired premiere
+        imported into the month AFTER it."""
+        import asyncio
+
+        asyncio.run(distrakt_store.add_show(self.user_id, EARLIER, {
+            "ids": {"trakt": 912, "tmdb": 912, "slug": "slug-912"},
+            "season": 1, "title": "Behind On This", "network": "Net",
+        }))
+        with fake_today(UNDER_WAY_DAY):
+            self.import_month(NOT_BEGUN, {NOT_BEGUN: [
+                _item(911, 1, "Not Aired Yet", f"{NOT_BEGUN}-08")]})
+
+    def turn_away(self, slug: str) -> None:
+        """The calendar's own control, marked NOW — which is after the 1st of the
+        month under way, and so reads as giving up rather than never starting."""
+        import asyncio
+
+        from app.calendar import state as calendar_state
+
+        asyncio.run(calendar_state.set_not_watching(self.user_id, slug, True))
+
+    def view_the_month_under_way(self) -> dict:
+        with fake_today(UNDER_WAY_DAY):
+            return self.get_month(UNDER_WAY)
+
+    def shown_ids(self, payload: dict) -> set[int]:
+        return {int((s.get("ids") or {}).get("tmdb")) for s in payload["shows"]}
+
+    def row_on(self, month_key: str, trakt_id: int) -> dict:
+        import asyncio
+
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, month_key))
+        row, = [s for s in (doc or {}).get("shows", []) if int(s["match_id"]) == trakt_id]
+        return row
+
+    def test_the_part_watched_season_is_on_the_page_before_anything_is_turned_away(self):
+        # Guards the fixture rather than the behaviour: every assertion below about
+        # the title being abandoned would also pass if it had simply never reached
+        # the page at all.
+        self.seed()
+        payload = self.view_the_month_under_way()
+        self.assertIn(912, self.shown_ids(payload))
+        row = next(s for s in payload["shows"] if int((s.get("ids") or {}).get("tmdb")) == 912)
+        self.assertIn(row["bucket"], ("cleanup", "keepup"))
+
+    def test_the_unaired_premiere_never_reaches_the_month_under_way(self):
+        self.seed()
+        payload = self.view_the_month_under_way()
+        self.assertNotIn(911, self.shown_ids(payload))
+        self.assertEqual(self.stored_ids(UNDER_WAY), set(),
+                         "a title that has not started airing was written onto "
+                         "the month under way")
+
+    def test_turning_away_an_unaired_premiere_does_not_give_up_on_it(self):
+        self.seed()
+        self.turn_away("slug-911")
+        payload = self.view_the_month_under_way()
+        self.assertNotIn(911, self.shown_ids(payload))
+        self.assertEqual(self.stored_ids(UNDER_WAY), set(),
+                         "turning away next month's premiere wrote it onto this one")
+        self.assertFalse(self.row_on(NOT_BEGUN, 911)["abandoned"],
+                         "next month's premiere was given up on without ever airing")
+
+    def test_turning_away_a_part_watched_season_does_give_up_on_it_here(self):
+        # The case the write exists for, and it must not be lost to the fix above:
+        # a season the user is in the middle of, turned away today, is one they
+        # meant to keep watching and stopped — and that is a fact about the month
+        # they stopped in, not about the month the row happens to be stored on.
+        self.seed()
+        self.turn_away("slug-912")
+        self.view_the_month_under_way()
+        self.assertIn(912, self.stored_ids(UNDER_WAY),
+                      "giving up on a title held elsewhere left no record here")
+        self.assertTrue(self.row_on(UNDER_WAY, 912)["abandoned"])
+
+    def test_the_earlier_month_s_own_row_is_left_alone(self):
+        # The month it is stored on has settled; the verdict belongs to the month
+        # the user reached it in.
+        self.seed()
+        self.turn_away("slug-912")
+        self.view_the_month_under_way()
+        self.assertFalse(self.row_on(EARLIER, 912)["abandoned"])
+
+    def test_both_marks_at_once_are_told_apart(self):
+        # The two rules pinned against each other in one pass, which is the shape
+        # the real data had: one turn-away recorded, the other declined, from the
+        # same list on the same request.
+        self.seed()
+        self.turn_away("slug-911")
+        self.turn_away("slug-912")
+        self.view_the_month_under_way()
+        self.assertEqual(self.stored_ids(UNDER_WAY), {912})
+        self.assertTrue(self.row_on(UNDER_WAY, 912)["abandoned"])
+        self.assertFalse(self.row_on(NOT_BEGUN, 911)["abandoned"])
 
 
 class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):
