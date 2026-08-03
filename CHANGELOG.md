@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.1.7] - 2026-08-01
+## 🏷️ [1.1.7] - 2026-08-03
 
 ### Fixed
 - 🔑 **Hand-editing `data/settings.json` no longer wipes the instance's saved credentials.** Adding a setting to that file — the only way back into an instance nobody can sign in to — quietly emptied the Trakt client secret, the Trakt access token and every integration API key the next time anybody used the app. Anything left out of that file is now left exactly as it was, and a credential is only cleared by clearing it in Settings. If it's the public base URL that has locked you out — whether it was never set or is set to somewhere you aren't browsing from, which refuses every sign-in as coming from another origin — you no longer need to touch the file at all: set `PUBLIC_BASE_URL` in the environment and restart, and it takes precedence over the saved one so you can sign in and save the real one in Settings. It says so while it's in force, in the startup log and beside the field itself, so a variable you forgot can't quietly outrank what you save; remove it and restart when you're done.
