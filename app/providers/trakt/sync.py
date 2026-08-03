@@ -87,11 +87,11 @@ async def fetch_show_progress_detail(settings: Settings, trakt_id,
     Pass a shared `client` when batching.
 
     `last_watched_at` is carried per episode rather than discarded because WHEN a
-    season was finished is what decides which month gets to call it Completed —
-    a season finished in July is not August's business (see
-    distrakt.drop_seasons_finished_earlier). It is "" when Trakt reports an
-    episode as completed without a timestamp, which reads as "date unknown"
-    everywhere downstream and never as a date.
+    season was finished is what decides which month records it as finished: the
+    date of its last episode names that month, and a season finished in July is
+    July's whatever month the reader happens to be looking at. It is "" when Trakt
+    reports an episode as completed without a timestamp, which reads as "date
+    unknown" everywhere downstream and never as a date.
     """
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     c = client or transport.shared_client()

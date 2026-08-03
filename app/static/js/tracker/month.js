@@ -20,7 +20,8 @@ function applyMonthResponse(d) {
     (d.shows || []).forEach(s => { const tmdb = (s.ids || {}).tmdb; if (s.network && tmdb) networkTmdb[s.network] = tmdb; });
     applyReadonlyState(monthClosed, d.closed ? 'frozen' : (d.readonly ? 'untracked' : ''));
     renderNotice(d);
-    renderShowList(d.shows || [], d.movies || [], d.empty_note || '');
+    renderShowList(d.shows || [], d.movies || [], d.empty_note || '',
+                   d.unknown_episodes || [], d.given_up_episodes || []);
     renderCopyBlocks(d.post1 || '', d.post2 || '');
     if (emojiEntries.length) renderEmojiRows();  // refresh emoji-row logos now we have tmdb
 }

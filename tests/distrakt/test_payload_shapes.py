@@ -16,6 +16,7 @@ import unittest
 from datetime import date, timedelta
 
 from app import distrakt
+from app.distrakt import lifecycle
 from app.distrakt import routes as distrakt_routes
 from app.integrations import routes as integrations_routes
 
@@ -23,17 +24,31 @@ EMOJIS = {"HBO": "🟪"}
 DEFAULT_EMOJI = "📺"
 
 
-def _record(trakt_id: int, title: str, *, watched: int, total: int,
-            bucket: str = "watching") -> dict:
-    """A stored record as a frozen month holds it: the counts and dates were
-    persisted when the month closed, which is what lets it render with no Trakt."""
+def _record(trakt_id: int, title: str, *, kind: str, watched: int = 0, total: int = 0,
+            season: int = 1, premiere: str = "3/1", finale: str = "3/29",
+            abandoned_form: str | None = None) -> dict:
+    """A stored month record exactly as `frozen_shows` hands it to the renderers
+    — a plain pass-through of `doc["shows"]`, with no computation of its own.
+
+    `kind` IS REQUIRED, on purpose: every record a real month ever holds carries
+    one (app/distrakt/store.py's `normalize_show` refuses to write one without
+    it), so a fixture built here without a kind would not be standing in for
+    anything the store can actually produce. `bucket` is likewise not left for
+    discord_fmt to derive — a real closed-month record already carries it,
+    written once from `kind` at storage time (store.BUCKET_OF_KIND), and this
+    fixture states the same fact the same way rather than leaving it to be
+    recomputed."""
+    kind = str(kind)
     return {
         "ids": {"trakt": trakt_id, "tmdb": trakt_id, "slug": f"slug-{trakt_id}"},
-        "key": f"show:tmdb:{trakt_id}", "season": 1, "title": title,
-        "network": "HBO", "media": "show", "watched": watched, "total": total,
-        "cadence": "weekly", "premiere": "2026-03-01", "finale": "2026-03-29",
-        "started_airing": True, "finished_airing": True, "bucket": bucket,
-        "abandoned": False, "abandoned_form": None,
+        "key": f"show:tmdb:{trakt_id}", "season": season, "title": title,
+        "network": "HBO", "media": "show", "kind": kind,
+        "bucket": str(distrakt.bucket_of_kind(kind)),
+        "watched": watched, "total": total,
+        "cadence": "weekly", "premiere": premiere, "finale": finale,
+        "started_airing": True, "finished_airing": True,
+        "abandoned": kind == str(distrakt.RecordKind.ABANDONED),
+        "abandoned_form": abandoned_form,
     }
 
 
@@ -43,13 +58,13 @@ class ClosedMonthPayloadTests(unittest.TestCase):
 
     def _payload(self, doc, link_url=None):
         # A frozen month is by definition one that is over, and how a month
-        # stands decides which sections it may carry (discord_fmt.MONTH_BUCKETS).
+        # stands decides which sections it may carry (discord_fmt.READER_BUCKETS).
         return distrakt_routes._closed_month_payload(
             doc, "2026-03", EMOJIS, DEFAULT_EMOJI, link_url, distrakt.MonthStanding.PAST)
 
     def test_it_renders_the_stored_roster_and_says_it_is_closed(self):
         doc = {"month": "2026-03", "closed": True,
-               "shows": [_record(1, "Frozen Show", watched=6, total=6, bucket="completed")]}
+               "shows": [_record(1, "Frozen Show", kind="completed", watched=6, total=6)]}
         payload = self._payload(doc)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["closed"])
@@ -60,12 +75,16 @@ class ClosedMonthPayloadTests(unittest.TestCase):
         self.assertIn("Frozen Show", payload["post1"] + payload["post2"])
 
     def test_it_carries_only_its_verdicts_and_not_the_work_that_was_in_hand(self):
-        """A month that is over settled its Cleanup and its Keepup when it froze.
-        Re-listing what was still mid-flight on the last day reads as work
-        outstanding on a month nobody can do anything about."""
+        """A season still in the viewer's hand when a month froze belongs to
+        `distrakt_user_seasons`, not to any month record — a closed month's own
+        rows are only ever premiere, completed or abandoned kinds, so a keepup
+        record simply has no month here to have been carried on. This fixture
+        stands in for a record that was, despite that, mistakenly written onto
+        the month (a bug, or a pre-migration leftover): it must still not
+        render, because `kind` alone decides what a month record IS."""
         doc = {"month": "2026-03", "closed": True, "shows": [
-            {**_record(1, "Was Mid Season", watched=2, total=8), "finished_airing": False},
-            _record(2, "Got Through It", watched=6, total=6),
+            _record(1, "Was Mid Season", kind="keepup", watched=2, total=8),
+            _record(2, "Got Through It", kind="completed", watched=6, total=6),
         ]}
         payload = self._payload(doc)
         self.assertEqual([s["title"] for s in payload["shows"]], ["Got Through It"])
@@ -114,50 +133,51 @@ def _last_month(today: date | None = None) -> tuple[str, int]:
 class ClosedMonthNoticesAnswerDifferentQuestionsTests(unittest.TestCase):
     """The two notices of a month that is over are NOT two views of one list.
 
-    FIRST: everything that premiered in that month and was not turned away,
-    whatever became of it since — it belongs because it started then, so a title
-    sitting in Cleanup or Keepup is still one of the month's premieres.
+    FIRST: every premiere record the month holds, whatever became of it since.
+    A season that premiered AND was settled in the same month holds TWO records
+    on it — its premiere and its verdict — which is the expected shape and not a
+    duplicate (see app/distrakt/store.py's module docstring); the first notice
+    reads the premiere one and does not care what the verdict record says.
     SECOND: the verdicts the month settled — Completed, Abandoned and its films.
 
-    They were briefly the same list, and the announcement of a closed month came
-    out as its two finished titles and an empty Returning section."""
+    They were briefly one filtered list shared between both notices, and the
+    announcement of a closed month came out as its two finished titles and an
+    empty Returning section."""
 
     def setUp(self):
-        self.month_key, month = _last_month()
-        self.premiered_that_month = f"{month}/8"
-        # Every row below premiered in the closed month except the carryover.
+        self.month_key, _ = _last_month()
         self.doc = {"month": self.month_key, "closed": True, "shows": [
-            {**_record(1, "Saw It Through", watched=6, total=6, bucket="completed"),
-             "premiere": self.premiered_that_month},
-            {**_record(2, "Turned Away", watched=2, total=8, bucket="abandoned"),
-             "premiere": self.premiered_that_month, "abandoned": True,
-             "abandoned_form": "`Turned Away S01 (2/8)`"},
-            # Finale aired, not finished: a Cleanup row when the month froze.
-            {**_record(3, "Left Half Done", watched=2, total=8),
-             "premiere": self.premiered_that_month, "season": 4},
-            # Still airing on the last day: a Keepup row when the month froze.
-            {**_record(4, "Still Going", watched=2, total=8),
-             "premiere": self.premiered_that_month, "finished_airing": False,
-             "cadence": "Sun"},
-            # Premiered the month BEFORE and merely carried on into this one.
-            {**_record(5, "Started Earlier", watched=3, total=8),
-             "premiere": f"{(month - 2) % 12 + 1}/8"},
+            # Premiered and finished in the same month: two records, one title.
+            _record(1, "Saw It Through", kind="series_premiere"),
+            _record(1, "Saw It Through", kind="completed", watched=6, total=6),
+            # Premiered and was given up on in the same month: two records.
+            _record(2, "Turned Away", kind="series_premiere"),
+            _record(2, "Turned Away", kind="abandoned", watched=2, total=8,
+                    abandoned_form="`Turned Away S01 (2/8)`"),
+            # A later season's premiere with no verdict recorded when the month
+            # froze — nothing settled it, so only the announcement exists.
+            _record(3, "Left Half Done", kind="season_premiere", season=4),
+            # A first season's premiere, likewise unsettled.
+            _record(4, "Still Going", kind="series_premiere"),
         ]}
         self.payload = distrakt_routes._closed_month_payload(
             self.doc, self.month_key, EMOJIS, DEFAULT_EMOJI, None,
             distrakt.MonthStanding.PAST)
 
     def test_the_first_notice_announces_every_premiere_the_month_had(self):
-        """The regression: the announcement was being put through the buckets a
-        past month's SECOND notice may present, which left it holding only the
-        titles that happened to be Completed or Abandoned by now."""
-        for title in ("Saw It Through", "Left Half Done", "Still Going"):
+        """The regression this reproduces: the announcement was being put
+        through the buckets a past month's SECOND notice may present, which
+        left it holding only the titles that happened to be Completed or
+        Abandoned by now."""
+        for title in ("Saw It Through", "Turned Away", "Left Half Done", "Still Going"):
             self.assertIn(title, self.payload["post1"])
 
-    def test_the_first_notice_still_drops_what_was_turned_away(self):
-        """The one thing that DOES remove a premiere from the announcement, and
-        it is not a bucket rule: it was explicitly turned away."""
-        self.assertNotIn("Turned Away", self.payload["post1"])
+    def test_the_first_notice_no_longer_drops_what_was_turned_away(self):
+        """Reversed from the old rule on purpose: a premiere record is
+        permanent and carries no verdict of its own, so it stays announced
+        whatever the SEPARATE verdict record says. Only the viewer's ✕ removes
+        a record, and that happens well before either notice is built."""
+        self.assertIn("Turned Away", self.payload["post1"])
 
     def test_the_first_notice_still_separates_new_from_returning(self):
         """The reported symptom included an empty Returning section; a later
@@ -165,10 +185,6 @@ class ClosedMonthNoticesAnswerDifferentQuestionsTests(unittest.TestCase):
         new_block, returning_block = self.payload["post1"].split("**Returning**")
         self.assertIn("Left Half Done", returning_block)
         self.assertNotIn("Left Half Done", new_block)
-
-    def test_the_first_notice_still_leaves_out_what_did_not_premiere_then(self):
-        """Membership is by premiere date, which the repair does not loosen."""
-        self.assertNotIn("Started Earlier", self.payload["post1"])
 
     def test_the_second_notice_keeps_only_the_verdicts_the_month_settled(self):
         """Unchanged by the repair, and asserted beside the first notice so the
@@ -183,10 +199,46 @@ class ClosedMonthNoticesAnswerDifferentQuestionsTests(unittest.TestCase):
             self.assertNotIn(absent, post2)
 
     def test_the_pages_row_list_follows_the_second_notice_not_the_first(self):
-        """The page and the second notice read one table; the announcement does
-        not, so a title only the announcement names is still absent here."""
+        """The page and the second notice read the same declaration
+        (discord_fmt.READER_BUCKETS); the announcement does not, so a title
+        only the announcement names is still absent here."""
         self.assertEqual(sorted(s["title"] for s in self.payload["shows"]),
                          ["Saw It Through", "Turned Away"])
+
+
+class APremiereSettledInItsOwnMonthTests(unittest.TestCase):
+    """A season that premiered and was settled in the SAME month holds two
+    records on it. That is the shape working as intended — the announcement and
+    the verdict are two different statements — but the PAGE must not draw both."""
+
+    def _rows(self, *records) -> list[dict]:
+        shape = lifecycle.shape_of(list(records))
+        return distrakt_routes._rows_for(shape, distrakt.MonthStanding.CURRENT)
+
+    def _unaired_premiere(self) -> dict:
+        """Turned away before a single episode of it aired — the case that showed
+        up on the page as both something still to come and something given up."""
+        return {**_record(1, "Sterling Point",
+                          kind=distrakt.RecordKind.SERIES_PREMIERE),
+                "started_airing": False, "finished_airing": False}
+
+    def test_the_verdict_wins_the_page_over_the_announcement(self):
+        rows = self._rows(self._unaired_premiere(),
+                          _record(1, "Sterling Point",
+                                  kind=distrakt.RecordKind.ABANDONED))
+        self.assertEqual([r["bucket"] for r in rows], ["abandoned"])
+
+    def test_an_unsettled_premiere_still_shows_as_one_to_come(self):
+        rows = self._rows(self._unaired_premiere())
+        self.assertEqual([r["bucket"] for r in rows], ["new"])
+
+    def test_another_seasons_verdict_does_not_hide_this_premiere(self):
+        """The match is on the season, not the title: a later season being given
+        up on says nothing about the one starting."""
+        rows = self._rows(self._unaired_premiere(),
+                          _record(1, "Sterling Point", season=2,
+                                  kind=distrakt.RecordKind.ABANDONED))
+        self.assertEqual(sorted(r["bucket"] for r in rows), ["abandoned", "new"])
 
 
 class EmptyMonthPayloadTests(unittest.TestCase):

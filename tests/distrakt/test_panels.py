@@ -5,7 +5,12 @@ These are seam tests. The machinery each one drives is proven elsewhere — the
 export/restore round trip in tests/distrakt/test_backup.py, the store in
 tests/distrakt/test_store.py — so what is pinned here is that the control on the
 page reaches it, that the destructive one cannot be reached by accident, and
-that removing a row does the right thing to the calendar it came from.
+that ending a title's run here says so on the viewer's main calendar.
+
+EVERY MONTH IN THIS FILE COMES FROM THE CLOCK. Written down instead, one rots the
+moment the real calendar moves past it — this suite has been bitten twice by
+exactly that, once by a month that passed all July and failed on the 1st of
+August. Nothing here may name a month that has to be true on the day it is run.
 
 No network: the shared calendar cache's read is patched wherever a removal
 consults it.
@@ -14,16 +19,24 @@ from __future__ import annotations
 
 import unittest
 import asyncio
-import re
 from datetime import date
 from unittest.mock import patch
 
 from app import distrakt as distrakt_store
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
-from app.providers.trakt import TraktError
-from app.config import Settings, load_settings, save_settings
+from app.config import Settings, load_settings
 from tests.support import AppTestCase, ORIGIN
+
+
+def _month_offset(today: date, offset: int) -> tuple[int, int]:
+    """The (year, month) `offset` months from `today`, negative for behind.
+
+    One helper because every class below needs it and each writing its own is how
+    two of them came to disagree about what "last month" was in January.
+    """
+    index = today.year * 12 + (today.month - 1) + offset
+    return divmod(index, 12)[0], divmod(index, 12)[1] + 1
 
 
 def _fake_premiere_read(trakt_id: int, season: int):
@@ -86,12 +99,22 @@ class BackupPanelTests(TrackerPanelTestCase):
         # Taken from the clock so nothing here rots at a month boundary.
         today = date.today()
         self.page = f"/distrakt?year={today.year}&month={today.month}"
+        self.year, self.month = today.year, today.month
+        self.list_url = f"/api/distrakt/list?year={self.year}&month={self.month}"
 
     def _add_show(self, user_id: int, title: str) -> None:
-        asyncio.run(distrakt_store.add_show(user_id, "2026-07", {
-            "ids": {"trakt": 11, "tmdb": 11, "slug": "a-show"}, "season": 1, "title": title,
-            "network": "HBO", "media": "show",
-        }))
+        """One record on the month the panels are being driven from — a settled
+        one, so it is a month FACT and travels with the month rather than sitting
+        on the viewer's own list, which belongs to no month for the export to put
+        it under."""
+        asyncio.run(distrakt_store.add_month_record(
+            user_id, distrakt_store.month_key(self.year, self.month), {
+                "media": Media.SHOW,
+                "ids": {"trakt": 11, "tmdb": 11, "slug": "a-show"},
+                "season": 1, "title": title, "network": "HBO",
+                "kind": distrakt_store.RecordKind.COMPLETED,
+                "watched": 6, "total": 6,
+            }))
 
     def test_the_page_offers_a_download_and_a_restore(self):
         body = self.client.get(self.page).text
@@ -118,13 +141,13 @@ class BackupPanelTests(TrackerPanelTestCase):
         self._add_show(self.user_id, "Kept Show")
         exported = self.client.get("/api/distrakt/export").json()
 
-        asyncio.run(distrakt_store.remove_show(
-            self.user_id, "2026-07", ItemKey("show", "tmdb", "11"), 1))
-        self.assertEqual(self.client.get("/api/distrakt/list?year=2026&month=7").json()["shows"], [])
+        asyncio.run(distrakt_store.remove_season_everywhere(
+            self.user_id, ItemKey("show", "tmdb", "11"), 1))
+        self.assertEqual(self.client.get(self.list_url).json()["shows"], [])
 
         resp = self.client.post("/api/distrakt/restore", json=exported)
         self.assertEqual(resp.status_code, 200, resp.text)
-        listed = self.client.get("/api/distrakt/list?year=2026&month=7").json()
+        listed = self.client.get(self.list_url).json()
         self.assertEqual([s["title"] for s in listed["shows"]], ["Kept Show"])
 
     def test_a_restore_lands_on_whoever_asked_not_whoever_exported(self):
@@ -137,11 +160,11 @@ class BackupPanelTests(TrackerPanelTestCase):
         self.sign_in_as(other)
         resp = self.client.post("/api/distrakt/restore", json=exported)
         self.assertEqual(resp.status_code, 200, resp.text)
-        landed = self.client.get("/api/distrakt/list?year=2026&month=7").json()
+        landed = self.client.get(self.list_url).json()
         self.assertEqual([s["title"] for s in landed["shows"]], ["Mine"])
 
         self.sign_in_as(self.user_id)
-        still_there = self.client.get("/api/distrakt/list?year=2026&month=7").json()
+        still_there = self.client.get(self.list_url).json()
         self.assertEqual([s["title"] for s in still_there["shows"]], ["Mine"])
 
 
@@ -203,9 +226,11 @@ class ImportingAMonthTests(TrackerPanelTestCase):
         """The one refusal left. Filling in months nobody was tracking is what the
         watch-history backfill is for; an import would invent them from premieres
         instead."""
-        asyncio.run(distrakt_store.add_show(self.user_id, self._key(0), {
+        asyncio.run(distrakt_store.add_month_record(self.user_id, self._key(0), {
+            "media": Media.SHOW,
             "ids": {"trakt": 1, "tmdb": 1, "slug": "seed"}, "season": 1,
-            "title": "Seed", "network": "Net", "media": "show"}))
+            "title": "Seed", "network": "Net",
+            "kind": distrakt_store.RecordKind.SERIES_PREMIERE}))
         resp = self._import(-1)
         self.assertEqual(resp.status_code, 400)
         self.assertIn("never tracked", resp.json()["error"])
@@ -231,38 +256,134 @@ class ImportingAMonthTests(TrackerPanelTestCase):
         self.assertEqual([s["ids"]["trakt"] for s in doc["shows"]], [303])
 
 
-class RemovingFromTheTrackerTests(TrackerPanelTestCase):
-    """The ✕ on a tracker row, and the one thing it is allowed to touch outside
-    the tracker.
+class AcknowledgingASeasonThatCameBackTests(TrackerPanelTestCase):
+    """The control that dismisses the marker on a season that had been finished
+    and grew.
 
-    It used to delete the row and nothing else, which on a PREVIEW month (before
-    the 1st, when the roster re-imports the month's premieres on every load) put
-    the show straight back in the same response — the button looked broken, and
-    the only way to get rid of a premiere was to go and hide it on the calendar
-    instead. It now makes that calendar mark itself, but ONLY for a row the
-    calendar put there: removing something the user added by hand must not hide a
-    show they never said they weren't watching.
+    THE VIEWER CLEARS IT AND NOTHING ELSE DOES — not time, not the next load — so
+    it needs a request of its own, and that request is all this covers. What sets
+    the marker in the first place is tested in tests/distrakt/test_lifecycle.py.
     """
 
     def setUp(self):
         super().setUp()
         self.user_id = self.tracker_user()
         self.sign_in_as(self.user_id)
-        self._add(202, 1, "slug-202", distrakt_store.ADDED_BY_CALENDAR)
 
-    def _add(self, tid, season, slug, added_by):
-        asyncio.run(distrakt_store.add_show(self.user_id, "2026-08", {
+    def _list_season(self, tid: int, season: int = 1, *, came_back: bool = True) -> None:
+        asyncio.run(distrakt_store.add_user_record(self.user_id, {
+            "media": Media.SHOW, "ids": {"trakt": tid, "tmdb": tid},
+            "season": season, "title": f"Show {tid}", "network": "Net",
+            "kind": distrakt_store.RecordKind.KEEPUP, "watched": 8, "total": 10,
+        }))
+        if came_back:
+            asyncio.run(distrakt_store.set_came_back(
+                self.user_id, ItemKey(Media.SHOW, "tmdb", str(tid)), season, True))
+
+    def _flag(self, tid: int, season: int = 1) -> bool:
+        record = asyncio.run(distrakt_store.find_user_record(
+            self.user_id, ItemKey(Media.SHOW, "tmdb", str(tid)), season))
+        return bool(record["came_back"])
+
+    def _acknowledge(self, tid: int, season: int = 1):
+        return self.client.post("/api/distrakt/acknowledge-return",
+                                json={"key": f"show:tmdb:{tid}", "season": season})
+
+    def test_pressing_it_clears_the_marker(self):
+        self._list_season(808)
+        resp = self._acknowledge(808)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertTrue(resp.json()["ok"])
+        self.assertFalse(self._flag(808))
+
+    def test_it_answers_with_the_acknowledgement_and_not_a_whole_month(self):
+        """Recomputing a month to drop one word would cost a season lookup per
+        listed title — and there is no provider configured in this test, so a
+        month rebuild here would also be a different failure."""
+        self._list_season(808)
+        self.assertEqual(self._acknowledge(808).json(), {"ok": True})
+
+    def test_only_the_named_season_is_cleared(self):
+        self._list_season(808, 1)
+        self._list_season(808, 2)
+        self._acknowledge(808, 1)
+        self.assertFalse(self._flag(808, 1))
+        self.assertTrue(self._flag(808, 2))
+
+    def test_a_season_that_is_not_on_the_list_says_so(self):
+        resp = self._acknowledge(909)
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(resp.json()["ok"])
+
+    def test_a_malformed_row_address_is_refused_rather_than_queried(self):
+        resp = self.client.post("/api/distrakt/acknowledge-return",
+                                json={"key": "nonsense", "season": 1})
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.json()["error"])
+
+
+class EndingATitlesRunReachesTheCalendarTests(TrackerPanelTestCase):
+    """The ✕ and Abandon, and the mark each of them leaves on the main calendar.
+
+    A ROW TAKEN OFF HERE USED TO COME STRAIGHT BACK. On a month that has not begun
+    the premieres re-import on every load, so deleting the row and nothing else
+    put the show back in the same response — the button looked broken, and the
+    only way to be rid of it was to go and hide it on the calendar by hand.
+
+    IT NOW WRITES THAT MARK ITSELF, FOR EVERY ROW. The rule this replaces only
+    spoke for rows the calendar had put there, and otherwise fell back to asking
+    whether the title was one of the VIEWED month's premieres — so a show that
+    premiered in one month and was given up on in a later one wrote nothing at
+    all, because it was not that later month's premiere. A mark on a show the
+    calendar never shows is inert: it hides nothing and re-adds nothing, so
+    gating it bought nothing and cost the marks that mattered.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.tracker_user()
+        self.sign_in_as(self.user_id)
+        self.today = date.today()
+        self.month = distrakt_store.month_key(self.today.year, self.today.month)
+        self._announce(202, 1, "slug-202", distrakt_store.ADDED_BY_CALENDAR)
+
+    def _announce(self, tid, season, slug, added_by):
+        """A premiere record on the month under way, as an import or a hand-add
+        leaves one."""
+        asyncio.run(distrakt_store.add_month_record(self.user_id, self.month, {
+            "media": Media.SHOW,
             "ids": {"trakt": tid, "tmdb": tid, "slug": slug}, "season": season,
-            "title": f"Show {tid}",
-            "network": "Net", "media": "show", "added_by": added_by,
+            "title": f"Show {tid}", "network": "Net", "added_by": added_by,
+            "kind": distrakt_store.premiere_kind(season),
         }))
 
-    def _remove(self, tid=202, season=1):
-        # The payload rebuild at the end of the route is a whole live month and
-        # not what is under test; the removal itself is.
-        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/remove", json={
-                "year": 2026, "month": 8, "key": f"show:tmdb:{tid}", "season": season})
+    def _put_on_the_list(self, tid, season, slug, added_by):
+        """A season on the viewer's OWN list, which belongs to no month at all —
+        the case the replaced rule could never write a mark for, because there is
+        no month whose premieres it could have been one of."""
+        asyncio.run(distrakt_store.add_user_record(self.user_id, {
+            "media": Media.SHOW,
+            "ids": {"trakt": tid, "tmdb": tid, "slug": slug}, "season": season,
+            "title": f"Show {tid}", "network": "Net", "added_by": added_by,
+            "kind": distrakt_store.RecordKind.KEEPUP, "watched": 2, "total": 8,
+        }))
+
+    def _post(self, path, **body):
+        # The payload rebuild at the end of each of these routes is a whole live
+        # month and is not what is under test; the mark is.
+        with patch("app.distrakt.routes._distrakt_month_payload",
+                   return_value=({"ok": True}, 200)):
+            return self.client.post(path, json=body)
+
+    def _remove(self, tid=202, season=1, offset=0):
+        year, month = _month_offset(self.today, offset)
+        return self._post("/api/distrakt/remove", year=year, month=month,
+                          key=f"show:tmdb:{tid}", season=season)
+
+    def _abandon(self, tid, season, abandoned, offset=0):
+        year, month = _month_offset(self.today, offset)
+        return self._post("/api/distrakt/abandon", year=year, month=month,
+                          key=f"show:tmdb:{tid}", season=season, abandoned=abandoned)
 
     def _marks(self) -> set:
         return asyncio.run(calendar_state.not_watching_ids(self.user_id))
@@ -273,39 +394,53 @@ class RemovingFromTheTrackerTests(TrackerPanelTestCase):
         self.assertIn("slug-202", self._marks())
         self.assertTrue(resp.json()["hidden_on_calendar"])
 
-    def test_removing_a_hand_added_row_leaves_the_calendar_alone(self):
-        """THE POINT OF THE PROVENANCE COLUMN. Undoing a manual add is not a
-        statement about watching, and must not take the show off the calendar."""
-        self._add(404, 1, "slug-404", distrakt_store.ADDED_BY_MANUAL)
-        resp = self._remove(tid=404, season=1)
+    def test_removing_a_hand_added_row_marks_it_just_the_same(self):
+        """WHAT PUT THE ROW THERE IS NOT ASKED. This asserted the opposite while
+        the provenance column decided it, and the show it declined to mark was one
+        the viewer had just said outright they were done with."""
+        self._announce(404, 1, "slug-404", distrakt_store.ADDED_BY_MANUAL)
+        resp = self._remove(tid=404)
         self.assertEqual(resp.status_code, 200)
-        self.assertNotIn("slug-404", self._marks())
-        self.assertFalse(resp.json()["hidden_on_calendar"])
+        self.assertIn("slug-404", self._marks())
+        self.assertTrue(resp.json()["hidden_on_calendar"])
 
-    def test_removing_a_watch_history_row_leaves_the_calendar_alone(self):
-        """Nor is dropping something the tracker picked up from watch history —
-        it is not re-imported either, so removing it already sticks."""
-        self._add(505, 3, "slug-505", distrakt_store.ADDED_BY_HISTORY)
+    def test_removing_a_row_the_tracker_picked_up_from_viewing_marks_it_too(self):
+        self._put_on_the_list(505, 3, "slug-505", distrakt_store.ADDED_BY_HISTORY)
         self._remove(tid=505, season=3)
-        self.assertNotIn("slug-505", self._marks())
+        self.assertIn("slug-505", self._marks())
 
-    def test_the_removed_calendar_row_does_not_come_straight_back(self):
-        """The bug, end to end: remove it, then let a preview month re-import the
-        month's premieres exactly as a page load does."""
-        self._remove()
+    def test_giving_up_marks_the_show_from_whichever_month_is_on_screen(self):
+        """NOT BOUNDED TO A MONTH. The season is on the viewer's own list, so it
+        belongs to no month, and the month being looked at is not even the one the
+        verdict is filed against — the mark is a statement about the SHOW."""
+        self._put_on_the_list(606, 2, "slug-606", distrakt_store.ADDED_BY_HISTORY)
+        resp = self._abandon(606, 2, True, offset=-1)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("slug-606", self._marks())
 
-        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(202, 1)):
-            asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
+    def test_taking_the_verdict_back_takes_the_mark_back_with_it(self):
+        """The fourth movement of the mirror, and the one that keeps the two views
+        from arguing: a season put back in hand is not one the calendar should go
+        on hiding."""
+        self._put_on_the_list(707, 1, "slug-707", distrakt_store.ADDED_BY_HISTORY)
+        self._abandon(707, 1, True)
+        self.assertIn("slug-707", self._marks())
+        self._abandon(707, 1, False)
+        self.assertNotIn("slug-707", self._marks())
 
-        doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
-        self.assertEqual([s["key"] for s in doc["shows"]], [])
+    def test_pressing_it_again_reports_that_nothing_changed(self):
+        """`hidden_on_calendar` is what the toast speaks from, so it says whether
+        a mark was actually made rather than whether one is there."""
+        self.assertTrue(self._remove().json()["hidden_on_calendar"])
+        self._announce(202, 1, "slug-202", distrakt_store.ADDED_BY_CALENDAR)
+        self.assertFalse(self._remove().json()["hidden_on_calendar"])
 
     def test_a_row_with_no_slug_is_marked_by_its_source_id(self):
         """The calendar keys an item by slug and falls back to the source's own
         id; a mark written under the wrong one would silently match nothing. Note
         that is NOT the id the tracker row is keyed on — the row is filed under
         the shared id, and the mark has to be written in the calendar's terms."""
-        self._add(303, 2, "", distrakt_store.ADDED_BY_CALENDAR)
+        self._announce(303, 2, "", distrakt_store.ADDED_BY_CALENDAR)
         self._remove(tid=303, season=2)
         self.assertIn("303", self._marks())
 
@@ -316,67 +451,27 @@ class RemovingFromTheTrackerTests(TrackerPanelTestCase):
         self.assertEqual(resp.status_code, 404)
         self.assertEqual(self._marks(), set())
 
+    def test_the_removed_calendar_row_does_not_come_straight_back(self):
+        """The bug, end to end: remove it, then let the month re-import its
+        premieres exactly as a load of a month still ahead does."""
+        self._remove()
+
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(202, 1)):
+            asyncio.run(distrakt_store.import_premieres(
+                self.user_id, self.month, load_settings()))
+
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, self.month))
+        self.assertEqual([s["key"] for s in doc["shows"]], [])
+
     def test_an_imported_premiere_records_where_it_came_from(self):
-        """The provenance has to be written by the import itself, or every row on
-        a preview month would look hand-added the moment it mattered."""
-        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(606, 1)):
-            asyncio.run(distrakt_store.import_premieres(self.user_id, "2026-08", load_settings()))
-        doc = asyncio.run(distrakt_store.load_month(self.user_id, "2026-08"))
-        added = next(s for s in doc["shows"] if s["ids"]["trakt"] == 606)
+        """Provenance no longer decides whether a mark is written, but it is still
+        what tells a reader — and the restore path — where a row came from."""
+        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(808, 1)):
+            asyncio.run(distrakt_store.import_premieres(
+                self.user_id, self.month, load_settings()))
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, self.month))
+        added = next(s for s in doc["shows"] if s["ids"]["trakt"] == 808)
         self.assertEqual(added["added_by"], distrakt_store.ADDED_BY_CALENDAR)
-
-
-class LegacyRowRemovalTests(TrackerPanelTestCase):
-    """Rows written before provenance was recorded, which is every row on every
-    instance the day this ships. There is no stored answer, so the calendar is
-    asked directly: would it hand this show straight back?"""
-
-    def setUp(self):
-        super().setUp()
-        # The legacy path asks the calendar, which it only does with Trakt
-        # credentials in place; the read itself is patched in each test.
-        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="id",
-                               trakt_access_token="tok"))
-        self.user_id = self.tracker_user()
-        self.sign_in_as(self.user_id)
-
-    def _add_legacy(self, tid, slug):
-        asyncio.run(distrakt_store.add_show(self.user_id, "2026-08", {
-            "ids": {"trakt": tid, "tmdb": tid, "slug": slug}, "season": 1, "title": "Legacy",
-            "network": "Net", "media": "show",  # no added_by: the pre-column shape
-        }))
-
-    def _remove(self, tid):
-        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/remove", json={
-                "year": 2026, "month": 8, "key": f"show:tmdb:{tid}", "season": 1})
-
-    def test_a_legacy_row_the_calendar_would_re_add_is_marked(self):
-        self._add_legacy(707, "slug-707")
-        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(707, 1)):
-            resp = self._remove(707)
-        self.assertTrue(resp.json()["hidden_on_calendar"])
-        self.assertIn("slug-707", asyncio.run(calendar_state.not_watching_ids(self.user_id)))
-
-    def test_a_legacy_row_the_calendar_knows_nothing_about_is_left_alone(self):
-        self._add_legacy(808, "slug-808")
-        with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(707, 1)):
-            resp = self._remove(808)
-        self.assertFalse(resp.json()["hidden_on_calendar"])
-        self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
-
-    def test_an_unreachable_calendar_marks_nothing_rather_than_guessing(self):
-        """Not knowing means not marking: the row comes back, which is annoying
-        and undoable, where a wrong mark hides a show the user still wants."""
-        async def boom(endpoint, settings, **kw):
-            raise TraktError("unreachable")
-
-        self._add_legacy(909, "slug-909")
-        with patch("app.calendar.cache.read_month", side_effect=boom):
-            resp = self._remove(909)
-        self.assertEqual(resp.status_code, 200)
-        self.assertFalse(resp.json()["hidden_on_calendar"])
-        self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
 
 
 if __name__ == "__main__":

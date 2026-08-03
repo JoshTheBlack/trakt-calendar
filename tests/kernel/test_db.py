@@ -24,13 +24,16 @@ EXPECTED_TABLES = {
     "api_cache", "calendar_view_state",
     # Migration 3 — public share links.
     "share_links",
-    # Migration 4 — the per-user distrakt tracker data model.
-    "distrakt_months", "distrakt_shows", "distrakt_watch_state",
+    # Migration 4 — the per-user distrakt tracker data model. (distrakt_shows was
+    # split into the two record tables below by migration 19 and dropped.)
+    "distrakt_months", "distrakt_watch_state",
     "distrakt_show_progress", "distrakt_movie_watches",
     # Migration 9 / 10 — per-user emoji map, and show-level not-watching.
     "distrakt_prefs", "not_watching_shows",
     # Migration 11 — configuration consolidated out of settings.json.
     "app_secrets", "app_settings",
+    # Migration 19 — month facts and viewer facts, stored apart.
+    "distrakt_month_records", "distrakt_user_seasons", "distrakt_prompt_dismissals",
 }
 
 

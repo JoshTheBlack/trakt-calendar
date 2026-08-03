@@ -797,9 +797,11 @@ class DistraktDetailsTests(RegressionTestCase):
         asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="trakt", provider_user_id=f"uuid-{name}",
             access_token="user-token")))
-        asyncio.run(distrakt.add_show(user_id, "2026-07", {
+        # On the viewer's own list rather than on a month: that is where a season
+        # part-way through lives, and it is the first place the route looks.
+        asyncio.run(distrakt.add_user_record(user_id, {
             "ids": {"trakt": 7, "tmdb": 1, "slug": "silo"}, "season": 3, "title": "Silo",
-            "network": "Apple TV", "media": "show",
+            "network": "Apple TV", "media": "show", "kind": distrakt.RecordKind.KEEPUP,
         }))
         return user_id
 
@@ -821,7 +823,7 @@ class DistraktDetailsTests(RegressionTestCase):
                 "trakt_id) VALUES (?,?,?,?,?,?,?)",
                 (self.user_id, "show", "tmdb", "1", 3, watched, 7)))
         self.login("josh")
-        with patch("app.distrakt.routes.fetch_details", return_value=self.DETAILS):
+        with patch("app.providers.trakt.detail.fetch_details", return_value=self.DETAILS):
             return self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3")
 
     def test_it_returns_the_episodes_and_this_users_watched_set(self):
@@ -842,7 +844,7 @@ class DistraktDetailsTests(RegressionTestCase):
         body = self.details().json()
         self.assertEqual(body["slug"], "silo")
         self.login("josh")
-        with patch("app.distrakt.routes.fetch_details", return_value=self.DETAILS):
+        with patch("app.providers.trakt.detail.fetch_details", return_value=self.DETAILS):
             spoofed = self.client.get(
                 f"/api/distrakt/details?key={self.KEY}&season=3&slug=evil").json()
         self.assertEqual(spoofed["slug"], "silo")
@@ -852,7 +854,7 @@ class DistraktDetailsTests(RegressionTestCase):
         self.client.post("/logout", json={})
         other = self.tracker("other")
         self.login("other")
-        with patch("app.distrakt.routes.fetch_details", return_value=self.DETAILS):
+        with patch("app.providers.trakt.detail.fetch_details", return_value=self.DETAILS):
             body = self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").json()
         self.assertEqual(body["watched_episodes"], [])
 

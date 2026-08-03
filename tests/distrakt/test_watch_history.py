@@ -92,6 +92,38 @@ class PureStateTests(unittest.TestCase):
         self.assertEqual(state["shows"][SHOW(101)]["seasons"]["2"],
                          {"1": "2026-07-04T00:00:00Z"})
 
+    def test_a_play_carries_only_what_the_event_said(self):
+        """The title and the episode, and nothing looked up. That is what makes a
+        play safe to raise for a season nothing knows about."""
+        event = _ep_event(101, 2, 5)
+        event["show"]["title"] = "Show 101"
+        play = wh._episode_play(event)
+        self.assertEqual((str(play.key), play.season, play.number, play.title),
+                         (SHOW(101), 2, 5, "Show 101"))
+
+    def test_a_play_is_reported_for_a_title_the_cache_has_never_seen(self):
+        """_apply_episode drops an untracked title because it has no counts to
+        keep; the play is still reported, because "watched something nothing
+        knows about" is exactly the question a caller has to answer."""
+        state = {"shows": {}}
+        wh._apply_episode(state, SHOW(999), 1, 1)
+        self.assertEqual(state["shows"], {})
+        self.assertIsNotNone(wh._episode_play(_ep_event(999, 1, 1)))
+
+    def test_events_that_name_no_episode_are_not_plays(self):
+        self.assertIsNone(wh._episode_play(_mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")))
+        # No shared id -> nothing to file it under, so nothing could be said
+        # about it either way.
+        self.assertIsNone(wh._episode_play(
+            {"type": "episode", "show": {"ids": {}}, "episode": {"season": 1, "number": 1}}))
+        self.assertIsNone(wh._episode_play(
+            {"type": "episode", "show": {"ids": {"trakt": 1, "tmdb": 1}}, "episode": {}}))
+
+    def test_a_state_that_came_out_of_storage_reports_no_plays(self):
+        """Plays belong to a sync, not to the cache — a load has nothing to act
+        on, which is what keeps a routine page load a read."""
+        self.assertEqual(wh.episode_plays({"shows": {}, "movies": {}}), [])
+
     def test_apply_movie_keeps_latest_watched_at(self):
         state = {"movies": {}}
         ids = {"trakt": 5, "tmdb": 5}
@@ -194,6 +226,29 @@ class StorageRoundTripTests(WatchStateTestCase):
         self.assertEqual(wh.season_completed_map(
             {"shows": {SHOW(101): _show(101, {"1": wh.episode_watches([1, 2, 3])})}}), {})
 
+    async def test_a_title_with_nothing_watched_survives_the_round_trip(self):
+        """The table holds one row per SEASON, so a title the viewer has seen
+        none of wrote no row at all and came back looking as though it had never
+        been baselined — so every load re-fetched it from the provider, for ever.
+        A month of new premieres is exactly that case."""
+        state = {"last_synced": None, "beacons": None,
+                 "shows": {SHOW(77): _show(77, {})}, "movies": {}}
+        await wh._save(self.user_id, state)
+        back = await wh._load(self.user_id)
+        self.assertIn(SHOW(77), back["shows"], "it read as never baselined")
+        self.assertEqual(back["shows"][SHOW(77)]["seasons"], {},
+                         "the marker leaked out as a season of its own")
+        self.assertEqual(back, state)
+
+    async def test_the_marker_is_replaced_once_something_is_watched(self):
+        await wh._save(self.user_id, {"last_synced": None, "beacons": None,
+                                      "shows": {SHOW(77): _show(77, {})}, "movies": {}})
+        await wh._save(self.user_id, {"last_synced": None, "beacons": None,
+                                      "shows": {SHOW(77): _show(77, {"1": {"1": ""}})},
+                                      "movies": {}})
+        back = await wh._load(self.user_id)
+        self.assertEqual(back["shows"][SHOW(77)]["seasons"], {"1": {"1": ""}})
+
     async def test_save_replaces_rather_than_accumulates(self):
         await wh._save(self.user_id, {"last_synced": "a", "beacons": None,
                                       "shows": {SHOW(1): _show(1, {"1": {"1": ""}})},
@@ -244,6 +299,71 @@ class SyncTests(WatchStateTestCase):
             await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
             hist2.assert_not_called()
 
+    async def _seed_for_whole_month(self, la: dict) -> None:
+        """A settled cache: two titles baselined, the beacon matching, the cursor
+        part-way through the month. A plain sync would be gated here."""
+        await wh._save(self.user_id, {
+            "shows": {SHOW(101): _show(101, {"1": {"1": ""}}),
+                      SHOW(102): _show(102, {"1": {"1": ""}})},
+            "movies": {}, "last_synced": "2026-07-20",
+            "beacons": wh._beacons(la)})
+
+    async def test_a_named_month_is_read_without_re_asking_every_title(self):
+        """The half of a forced sync a freeze actually needs: read that month
+        again, don't re-fetch the progress of every title ever tracked. A settled
+        record already holds the counts it settled on."""
+        la = {"episodes": {"watched_at": "T1", "removed_at": None},
+              "movies": {"watched_at": "T1", "removed_at": None}}
+        await self._seed_for_whole_month(la)
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={}) as progress:
+            await wh.sync(SETTINGS, self.user_id, since_month="2026-07",
+                          today=date(2026, 7, 20))
+        progress.assert_not_called()
+        self.assertEqual(hist.call_args.kwargs["start_at"], "2026-07-01")
+
+    async def test_the_month_read_is_the_one_named_not_the_one_today_is_in(self):
+        """A month is closed from the month AFTER it, so the two are never the
+        same — and the only start the sync could work out for itself was today's.
+        Closing October during November read November's history and never touched
+        October's, which is the one month a freeze exists to write down."""
+        la = {"episodes": {"watched_at": "T1", "removed_at": None},
+              "movies": {"watched_at": "T1", "removed_at": None}}
+        await self._seed_for_whole_month(la)
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+            await wh.sync(SETTINGS, self.user_id, since_month="2026-10",
+                          today=date(2026, 11, 1))
+        self.assertEqual(hist.call_args.kwargs["start_at"], "2026-10-01")
+
+    async def test_a_malformed_month_is_refused_before_it_reaches_the_provider(self):
+        la = {"episodes": {"watched_at": "T1", "removed_at": None},
+              "movies": {"watched_at": "T1", "removed_at": None}}
+        await self._seed_for_whole_month(la)
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+            with self.assertRaises(ValueError):
+                await wh.sync(SETTINGS, self.user_id, since_month="2026-7",
+                              today=date(2026, 11, 1))
+        hist.assert_not_called()
+
+    async def test_forcing_still_re_asks_every_title(self):
+        """The other half is unchanged: an explicit refresh is the one caller that
+        does want every title re-read."""
+        la = {"episodes": {"watched_at": "T1", "removed_at": None},
+              "movies": {"watched_at": "T1", "removed_at": None}}
+        await self._seed_for_whole_month(la)
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={}) as progress:
+            await wh.sync(SETTINGS, self.user_id, force=True, today=date(2026, 7, 20))
+        progress.assert_called_once()
+
     async def test_change_applies_history_delta(self):
         await wh._save(self.user_id, {"shows": {SHOW(101): _show(101, {"1": {"1": ""}})},
                                       "movies": {},
@@ -262,6 +382,40 @@ class SyncTests(WatchStateTestCase):
         # and it was persisted under this user, not just returned
         reloaded = await wh._load(self.user_id)
         self.assertEqual(sorted(reloaded["shows"][SHOW(101)]["seasons"]["1"]), ["1", "2"])
+
+    async def test_a_sync_reports_the_plays_it_folded_in_and_stores_none_of_them(self):
+        """What the history has just reported is a signal to act on once. A stored
+        copy would have every later load replay a decision already taken."""
+        await wh._save(self.user_id, {"shows": {SHOW(101): _show(101, {"1": {"1": ""}})},
+                                      "movies": {}, "last_synced": "2026-07-01",
+                                      "beacons": {"ep_watched": "OLD"}})
+        la = {"episodes": {"watched_at": "NEW", "removed_at": None},
+              "movies": {"watched_at": "NEW", "removed_at": None}}
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history",
+                   return_value=[_ep_event(101, 1, 2), _ep_event(777, 3, 1),
+                                 _mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")]), \
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+            state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        self.assertEqual([(str(p.key), p.season, p.number) for p in wh.episode_plays(state)],
+                         [(SHOW(101), 1, 2), (SHOW(777), 3, 1)])
+        self.assertEqual(wh.episode_plays(await wh._load(self.user_id)), [])
+
+    async def test_a_gated_sync_reports_no_plays_at_all(self):
+        """The beacon had not moved, so no history was pulled and there is nothing
+        for a caller to reconcile."""
+        la = {"episodes": {"watched_at": "T1", "removed_at": None},
+              "movies": {"watched_at": "T1", "removed_at": None}}
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[_ep_event(101, 1, 1)]), \
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+            await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+            state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        hist.assert_not_called()
+        self.assertEqual(wh.episode_plays(state), [])
 
     async def test_sync_is_scoped_to_one_user(self):
         """Another user's sync must not fold events into this user's cache."""

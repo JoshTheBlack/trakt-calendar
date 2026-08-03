@@ -932,16 +932,17 @@ class TrackerImportTests(RankerTestCase):
         ))
 
     def show(self, month: str, trakt_id: int, season: int, *, watched: int, total: int,
-             bucket: str | None = None, title: str = "A Show", tmdb: int | None = 100) -> None:
-        """A roster row, written as the tracker writes one: keyed on the shared id
-        (tmdb here), with Trakt's own id kept beside it as an attribute."""
+             kind: str = "completed", title: str = "A Show", tmdb: int | None = 100) -> None:
+        """A month record, written as the tracker writes one: keyed on the shared
+        id (tmdb here) plus the kind, with Trakt's own id kept beside it as an
+        attribute."""
         asyncio.run(db.execute(
-            "INSERT INTO distrakt_shows (user_id, month, media, match_source, match_id, "
-            "trakt_id, tmdb, slug, title, season, "
-            "network, watched, total, bucket, started_airing, finished_airing) "
-            "VALUES (?, ?, 'show', 'tmdb', ?, ?, ?, 'a-show', ?, ?, 'HBO', ?, ?, ?, 1, 1)",
-            (self.user_id, month, str(tmdb), trakt_id, tmdb, title, season,
-             watched, total, bucket),
+            "INSERT INTO distrakt_month_records (user_id, month, kind, media, match_source, "
+            "match_id, trakt_id, tmdb, slug, title, season, "
+            "network, watched, total, started_airing, finished_airing, created_at) "
+            "VALUES (?, ?, ?, 'show', 'tmdb', ?, ?, ?, 'a-show', ?, ?, 'HBO', ?, ?, 1, 1, 0)",
+            (self.user_id, month, kind, str(tmdb), trakt_id, tmdb, title, season,
+             watched, total),
         ))
 
     def movie(self, trakt_id: int, watched_at: str, title: str = "A Film",
@@ -959,82 +960,55 @@ class TrackerImportTests(RankerTestCase):
         source = ranker_import.finished_titles_source()
         return asyncio.run(source.finished_titles(self.user_id, media=media, year=year))
 
-    def linked_account(self):
-        """An open month needs the caller's own credential to be worked out at
-        all, so a test about one has to supply it."""
-        return patched(ranker_sources, "user_trakt_settings",
-                       async_result(Settings(trakt_client_id="c", trakt_access_token="t")))
-
-    def test_a_closed_month_uses_its_stored_verdict(self):
-        """A frozen month's counts stopped being refreshed the moment it froze,
-        so recomputing from them would silently unfinish finished shows."""
+    def test_a_month_is_read_from_the_verdicts_it_recorded(self):
+        """Only the seasons the month actually settled as finished; a season it
+        merely held is not one somebody completed."""
         self.month("2026-01", closed=True)
-        self.show("2026-01", 10, 1, watched=0, total=0, bucket="completed", tmdb=100)
-        self.show("2026-01", 11, 1, watched=0, total=0, bucket="cleanup", tmdb=101)
+        self.show("2026-01", 10, 1, watched=0, total=0, kind="completed", tmdb=100)
+        self.show("2026-01", 11, 1, watched=0, total=0, kind="abandoned", tmdb=101)
         self.assertEqual([ref.ids["trakt"] for ref in self.finished()], [10])
 
-    def test_an_open_month_is_worked_out_the_same_way_the_other_feature_does_it(self):
-        """THE STORED ROWS OF AN OPEN MONTH ARE NOT ITS LIVE COUNTS. They are
-        only written back when the month freezes, so a season finished this
-        month sits at 0/0 in the database while the other feature's own screen
-        shows it completed. Reading those rows made this import report nothing
-        for an account looking at six finished shows, so it asks that feature to
-        work the month out instead — one rule, one answer.
-        """
+    def test_a_month_still_running_answers_the_same_way_a_frozen_one_does(self):
+        """Finishing a season WRITES a record onto the month it was finished in,
+        whatever that month's standing, so there is no live path left to take and
+        no credential to need. The import used to recompute an open month because
+        an open month had no stored verdict."""
         self.month("2026-07")
-        self.show("2026-07", 10, 1, watched=0, total=0, title="Finished", tmdb=100)
-        self.show("2026-07", 11, 1, watched=0, total=0, title="Halfway", tmdb=101)
-        live = [
-            {"media": "show", "match_source": "tmdb", "match_id": "100", "season": 1,
-             "title": "Finished", "network": "HBO",
-             "ids": {"trakt": 10, "tmdb": 100, "slug": "a-show"},
-             "total": 8, "bucket": "completed"},
-            {"media": "show", "match_source": "tmdb", "match_id": "101", "season": 1,
-             "title": "Halfway", "network": "HBO",
-             "ids": {"trakt": 11, "tmdb": 101, "slug": "b-show"},
-             "total": 8, "bucket": "keepup"},
-        ]
-        with self.linked_account(), patched(distrakt, "compute_live_shows", async_result(live)):
+        self.show("2026-07", 10, 1, watched=0, total=8, kind="completed", title="Finished",
+                  tmdb=100)
+        self.show("2026-07", 11, 1, watched=0, total=8, kind="abandoned", title="Gave Up",
+                  tmdb=101)
+        with patched(distrakt, "compute_live_shows",
+                     _explode("an open month was recomputed")):
             refs = self.finished()
         self.assertEqual([ref.title for ref in refs], ["Finished"])
         self.assertEqual(refs[0].episode_count, 8)
 
-    def test_an_open_month_is_skipped_rather_than_guessed_at_without_a_credential(self):
-        """Its live counts cannot be obtained, and the stored ones would answer
-        "nothing is finished" — which is a wrong answer, not a missing one."""
-        self.month("2026-07")
-        self.show("2026-07", 10, 1, watched=0, total=0)
-        with patched(distrakt, "compute_live_shows",
-                     _explode("the open month was computed with no credential")):
-            self.assertEqual(self.finished(), [])
-
-    def test_only_the_open_month_costs_anything(self):
-        """THE COST RULE. A closed month is answered from its stored verdict, so
-        an account with years of history spends nothing on any of it — only the
-        single month still open is worked out live, however much came before.
-        """
+    def test_no_month_costs_anything(self):
+        """THE COST RULE. Every month is answered from what it recorded, so an
+        account with years of history spends nothing on any of it — there is no
+        provider call anywhere on this path."""
         for month in ("2024-01", "2024-02", "2025-06", "2025-07", "2026-01"):
             self.month(month, closed=True)
-            self.show(month, 10, 1, watched=0, total=5, bucket="completed")
+            self.show(month, 10, 1, watched=0, total=5, kind="completed")
         with patched(distrakt, "compute_live_shows",
-                     _explode("a frozen month was recomputed")), \
-             patched(distrakt, "load_month", _explode("a frozen month was reloaded")):
+                     _explode("a month was recomputed")):
             self.assertEqual(len(self.finished()), 1)
 
     def test_counts_describe_how_much_was_finished(self):
         self.month("2026-01", closed=True)
-        self.show("2026-01", 10, 1, watched=0, total=10, bucket="completed")
-        self.show("2026-01", 10, 2, watched=0, total=12, bucket="completed")
-        self.show("2026-01", 10, 3, watched=0, total=6, bucket="keepup")
+        self.show("2026-01", 10, 1, watched=0, total=10, kind="completed")
+        self.show("2026-01", 10, 2, watched=0, total=12, kind="completed")
+        self.show("2026-01", 10, 3, watched=0, total=6, kind="abandoned")
         ref, = self.finished()
         self.assertEqual((ref.season_count, ref.episode_count), (2, 22))
 
     def test_the_year_filter_is_when_it_was_watched(self):
         self.month("2025-06", closed=True)
         self.month("2026-06", closed=True)
-        self.show("2025-06", 10, 1, watched=0, total=5, bucket="completed", title="Older",
+        self.show("2025-06", 10, 1, watched=0, total=5, kind="completed", title="Older",
                   tmdb=100)
-        self.show("2026-06", 11, 1, watched=0, total=5, bucket="completed", title="Newer",
+        self.show("2026-06", 11, 1, watched=0, total=5, kind="completed", title="Newer",
                   tmdb=101)
         self.assertEqual([r.title for r in self.finished(year=2026)], ["Newer"])
         self.assertEqual(
@@ -1075,7 +1049,7 @@ class TrackerImportTests(RankerTestCase):
 
     def test_the_import_route_adds_to_the_pool(self):
         self.month("2026-01", closed=True)
-        self.show("2026-01", 10, 1, watched=0, total=5, bucket="completed")
+        self.show("2026-01", 10, 1, watched=0, total=5, kind="completed")
         resp = self.client.post("/api/rankings/boards/b1/import/tracker", json={"media": "show"})
         self.assertEqual(resp.json(), {"ok": True, "found": 1, "added": 1})
         self.assertEqual(self.value("SELECT added_from FROM tier_items"), "tracker")

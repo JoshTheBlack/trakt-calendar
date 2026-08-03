@@ -1,12 +1,23 @@
-"""Bucketing state machine + POST 1/POST 2 markdown renderer.
+"""Bucket vocabulary + POST 1/POST 2 markdown renderer.
 
-Pure, offline functions — no I/O, no Trakt calls, no persistence. Callers
-(live.py) merge each show's stored record (store.py, identity +
-`abandoned`/`abandoned_form`) with its live Trakt-derived fields
-(app/providers/trakt/ `fetch_season_detail` + the watch-history cache) into one
-flat dict before calling anything here.
+Pure, offline functions — no I/O, no Trakt calls, no persistence.
 
-LIVE SHOW SHAPE (one dict per show+season, used throughout this module):
+TWO KINDS OF CALLER HAND THIS MODULE A SHOW, and they are at different points
+in the season's life:
+
+  - live.py, on every load, merges a stored record with what Trakt says about
+    it RIGHT NOW into the flat "LIVE SHOW SHAPE" below, and calls `bucket_of`
+    to work out where that live-merged season currently stands — nothing has
+    decided its bucket yet, because nothing has decided its stored `kind` yet
+    either; that happens afterwards, in lifecycle.py, off exactly this answer.
+  - routes.py and this module's own renderers, once a season has a stored
+    record, read `show["bucket"]` straight off it. A stored record's `kind`
+    already says what it is (store.RecordKind, store.BUCKET_OF_KIND), so
+    reading it back is a lookup and re-running `bucket_of` on it would be a
+    second, independent opinion that the two are not guaranteed to agree with.
+
+LIVE SHOW SHAPE (one dict per show+season, the input `bucket_of` and the line
+renderers below read):
   title (str), season (int), network (str),
   abandoned (bool), abandoned_form (str | None),
   watched (int, "x"), total (int, "y"),
@@ -24,42 +35,68 @@ harder-to-misread source of truth.
 """
 from __future__ import annotations
 
-# Both vocabularies are named beside the record shape in store.py; this module is
-# what DECIDES which bucket a show gets, and what a month in a given standing is
-# allowed to say.
-from . import store
+from typing import NamedTuple
+
+# The render vocabulary is named beside the record shape in store.py; this
+# module is what a bucket LOOKS like once rendered.
 from .store import Bucket, MonthStanding
 
-# WHICH BUCKETS A MONTH MAY PRESENT, by where that month stands relative to the
-# calendar, in the order they render. ONE table, read by the page's row list (the
-# payload is filtered through month_view) and by POST 2 below, because the
-# question is always the same one — "which month is this?" — and it has to be
-# answered once. Answering it per section is exactly how a month that was over
-# came to carry a Keepup, and a month that had not started came to carry a
-# Cleanup with last month's abandoned title sitting in it.
+# WHICH BUCKETS EACH READER MAY PRESENT, by where a month stands relative to the
+# calendar. ONE declaration, not two, because a bucket's MEANING is one fact —
+# "Cleanup" names the same set of seasons for the page as it does for the second
+# notice — and restating that set a second time for the other reader is exactly
+# how the two came to disagree the first time this shipped: they were once one
+# filtered list built for whichever reader asked first, and the second reader
+# read off a copy of it that nobody kept in step.
 #
-# Cleanup and Keepup are statements about work in hand: what is airing right now,
-# and what is waiting to be caught up on. A month that has not begun has neither
-# yet — all it can honestly announce is what premieres in it. A month that is
-# over settled both when it froze; what survives it is the verdict on each title
-# (Completed, Abandoned) plus the films watched during it, and re-listing what
-# was mid-flight on the last day reads as work still outstanding on a month
-# nobody can do anything about. Only the month actually in progress carries the
-# whole set.
+# WHAT GENUINELY DIFFERS BETWEEN THE TWO READERS is not what a bucket means but
+# which buckets they answer with AT ALL. The page also carries what has not
+# started airing yet — New and Returning — because a season with nothing else to
+# say about it is still worth a viewer seeing sitting on their page. The second
+# notice never carries them, in ANY standing: announcing a premiere is the FIRST
+# notice's job, in every standing, regardless of the month's — see render_post1 —
+# and the second notice exists to answer a different question, what is in hand
+# and what got settled. Losing New/Returning from POST 2 is therefore not a
+# per-standing filter that happens to always come out empty; New and Returning
+# are simply not among the things this notice ever says.
 #
-# Films need no entry: they are not a bucket, and a month that has not happened
-# has nothing watched in it to list.
+# `post2` is a tuple rather than a set because it also states the ORDER its
+# sections render in; `page` needs no order because nothing here decides where a
+# row sits in the page's own list.
 #
-# POST 1 IS NOT SUBJECT TO THIS TABLE, in any standing. It answers a different
-# question — what PREMIERED in the month — and a premiere belongs to its month
-# whatever became of it afterwards. Filtering it through a past month's row
-# leaves an announcement of two finished titles and an empty Returning section,
-# which is the opposite of what an announcement is for. See render_post1.
-MONTH_BUCKETS: dict[MonthStanding, tuple[Bucket, ...]] = {
-    MonthStanding.FUTURE: (Bucket.NEW, Bucket.RETURNING, Bucket.COMPLETED, Bucket.ABANDONED),
-    MonthStanding.CURRENT: (Bucket.CLEANUP, Bucket.KEEPUP, Bucket.NEW, Bucket.RETURNING,
-                            Bucket.COMPLETED, Bucket.ABANDONED),
-    MonthStanding.PAST: (Bucket.COMPLETED, Bucket.ABANDONED),
+# POST 1 IS NOT IN THIS TABLE. It answers a third question — what did this month
+# ANNOUNCE — and the answer does not change with where the month stands: a
+# premiere belongs to the month it began in, whatever became of it since.
+# Filtering it through this table would make an announcement of two finished
+# titles and an empty Returning section, which is the opposite of what an
+# announcement is for. See render_post1.
+class ReaderBuckets(NamedTuple):
+    page: frozenset[Bucket]
+    post2: tuple[Bucket, ...]
+
+
+READER_BUCKETS: dict[MonthStanding, ReaderBuckets] = {
+    MonthStanding.FUTURE: ReaderBuckets(
+        page=frozenset({Bucket.NEW, Bucket.RETURNING}),
+        # Nothing has happened yet in a month nobody has reached: no season is in
+        # hand to report on and nothing has been settled, so the living-tracker
+        # notice has nothing of its own to say. It stays silent rather than
+        # repeating the announcement the first notice already made.
+        post2=(),
+    ),
+    MonthStanding.CURRENT: ReaderBuckets(
+        page=frozenset({Bucket.CLEANUP, Bucket.KEEPUP, Bucket.NEW, Bucket.RETURNING,
+                        Bucket.COMPLETED, Bucket.ABANDONED}),
+        post2=(Bucket.CLEANUP, Bucket.KEEPUP, Bucket.COMPLETED, Bucket.ABANDONED),
+    ),
+    MonthStanding.PAST: ReaderBuckets(
+        # A month that is over settled its Cleanup and its Keepup when it froze;
+        # what survives is the verdict on each title plus the films watched
+        # during it. Re-listing what was still mid-flight on the last day would
+        # read as work outstanding on a month nobody can do anything about.
+        page=frozenset({Bucket.COMPLETED, Bucket.ABANDONED}),
+        post2=(Bucket.COMPLETED, Bucket.ABANDONED),
+    ),
 }
 
 # Keepup groups shows by air weekday, Sun..Sat; only weekdays with at least one
@@ -124,48 +161,19 @@ def _premiere_sort_key(show: dict):
     return (month, day, _sort_title(show.get("title")))
 
 
-def _month_number(month) -> int | None:
-    """The month number from a tracker month given either as an int (7) or a
-    'YYYY-MM' string ('2026-07')."""
-    if isinstance(month, int):
-        return month
-    try:
-        return store.parse_month_key(str(month))[1]
-    except ValueError:
-        # Tolerant on purpose, unlike the parse it delegates to: this is a
-        # rendering helper and an unreadable month means "no month to sort by",
-        # not a failed post.
-        return None
-
-
-def premiere_month(show: dict) -> int | None:
-    """The month number this show's season premiere falls in, or None when it
-    carries no date anything can read.
-
-    Separate from premiered_in_month because "it premiered somewhere else" and
-    "we do not know when it premiered" are different answers to different
-    questions, and premiered_in_month — which only ever has to decide whether to
-    announce a title — collapses them into one False. A caller weighing whether a
-    row still belongs where it is stored must not read the second as the first."""
-    md = _premiere_month_day(show)
-    return None if md is None else md[0]
-
-
-def premiered_in_month(show: dict, month_number: int) -> bool:
-    """Whether this show's season premiere falls in `month_number` — the test for
-    POST 1 membership. A premiere date is what makes a show one of this month's
-    announcements, independent of whether it has begun airing yet; a show carried
-    over from an earlier month premiered then, so its month differs and it is not
-    re-announced."""
-    return premiere_month(show) == month_number
-
-
 # ---------------------------------------------------------------------------
-# Bucketing state machine
+# Bucketing state machine — for a season that has no stored kind yet
 # ---------------------------------------------------------------------------
 
 def bucket_of(rec: dict, live: dict) -> Bucket:
-    """Which Bucket this show is in.
+    """Which Bucket this LIVE-MERGED show is in right now.
+
+    Called by live.py on a season fresh off a Trakt merge, BEFORE anything has
+    decided what its stored record should say — that decision is what this
+    answer feeds into (lifecycle.py). A season that already has a stored `kind`
+    should be read from its own `bucket` field instead (store.BUCKET_OF_KIND);
+    calling this on one would be a second, independently-derived opinion with no
+    guarantee of agreeing with the first.
 
     `rec` carries identity + the manual `abandoned` flag; `live` carries the
     Trakt-derived counts/dates/airing flags. Callers may pass the same merged
@@ -275,20 +283,29 @@ def _abandoned_line(show: dict, emoji_map: dict, default_emoji: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _section(header: str, lines: list[str]) -> str:
-    """Mandatory sections (New/Returning/Cleanup/Keepup) always render their
-    header, even with zero lines; only Completed/Abandoned are conditionally
-    omitted entirely by the caller when they have nothing in them, since
-    unlike the mandatory sections an empty Completed/Abandoned isn't itself
-    informative to a reader of the post."""
+    """Mandatory sections (Cleanup/Keepup, and New/Returning in POST 1) always
+    render their header, even with zero lines; only Completed/Abandoned are
+    conditionally omitted entirely by the caller when they have nothing in
+    them, since unlike the mandatory sections an empty Completed/Abandoned
+    isn't itself informative to a reader of the post."""
     return header + ("\n" + "\n".join(lines) if lines else "")
 
 
 def _group_by_bucket(shows: list[dict]) -> dict[Bucket, list[dict]]:
     """Every bucket gets a list, empty or not, so a caller can read one without
-    checking whether anything landed in it."""
+    checking whether anything landed in it.
+
+    Reads `show["bucket"]` rather than deriving it. Every show reaching this
+    point is a STORED record — the page's rows and the second notice's input are
+    the same list, built from records whose `kind` already decided their bucket
+    once, in store.py's row_to_record. Recomputing it here from the show's live
+    counts would be a second opinion that the stored one is not guaranteed to
+    agree with, which is exactly the class of bug the kind-vs-bucket split
+    exists to close.
+    """
     groups: dict[Bucket, list[dict]] = {bucket: [] for bucket in Bucket}
     for show in shows:
-        groups[bucket_of(show, show)].append(show)
+        groups[Bucket(show["bucket"])].append(show)
     return groups
 
 
@@ -309,28 +326,28 @@ def _render_keepup(shows: list[dict], emoji_map: dict, default_emoji: str) -> st
     return "\n".join(lines)
 
 
-def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:",
-                 link_url: str | None = None, month=None) -> str:
-    """POST 1 (announcement): a SNAPSHOT of this month's premieres — **New Shows**
-    (a season 1 premiere) + **Returning** (a later season's premiere) — optionally
-    followed by a link line pointing at the poster's own public calendar.
+def render_post1(series_premieres: list[dict], season_premieres: list[dict],
+                 emoji_map: dict | None = None, default_emoji: str = ":tv:",
+                 link_url: str | None = None) -> str:
+    """POST 1 (announcement): **New Shows** (a series' first season) +
+    **Returning** (a later season), optionally followed by a link line pointing
+    at the poster's own public calendar.
 
-    Membership is by PREMIERE DATE, not by the airing lifecycle. A show announced
-    here stays here once its episodes start; only POST 2 moves it on into Keepup /
-    Cleanup. It leaves POST 1 only if its premiere date moves out of this month
-    (then it belongs to that other month's announcement) or it is abandoned. That
-    is the difference from POST 2, whose New/Returning sections DO empty as shows
-    begin airing.
+    THE TWO SECTIONS ARE THE TWO RECORD KINDS the month stores its premieres
+    under — `series_premieres` and `season_premieres`, store.RecordKind's two
+    premiere members — not one list re-split by season number at render time.
+    store.premiere_kind() makes that split ONCE, at the moment a premiere record
+    is written; re-deriving it here on every render is how the two sections
+    would come to disagree with what was actually stored.
 
-    `month` is the tracker month, as 'YYYY-MM' or an int. Without it — a caller
-    that only wants the rendering — this falls back to the not-yet-airing
-    lifecycle buckets, which is POST 1's pre-snapshot behaviour.
-
-    GIVE THIS THE WHOLE ROSTER, never a roster already put through month_view.
-    That filter is the standing rule MONTH_BUCKETS states, and it belongs to the
-    page's row list and to POST 2 only: a month's premieres are its premieres in
-    every standing, so a title being Completed or Cleanup by now has no bearing
-    on whether this month announced it.
+    IN EVERY STANDING, and with no filter of its own beyond what its caller
+    already handed it: a season the month announced stays announced whatever it
+    has since become — airing, finished, even abandoned — because this notice
+    answers "what began this month" and that answer does not change with the
+    calendar or with the season's later life. GIVE THIS THE MONTH'S OWN PREMIERE
+    RECORDS, never rows already filtered through READER_BUCKETS — that table is
+    the page's and the second notice's rule for what THEY may say, and applying
+    it here would answer this notice's question with the wrong one.
 
     `link_url` is omitted entirely when there is nothing to link to, rather than
     rendered as an empty or broken line. It is wrapped in angle brackets, which
@@ -339,19 +356,8 @@ def render_post1(shows: list[dict], emoji_map: dict | None = None, default_emoji
     underneath it.
     """
     emoji_map = emoji_map or {}
-    month_number = _month_number(month)
-    if month_number is None:
-        groups = _group_by_bucket(shows)
-        news, returning = groups[Bucket.NEW], groups[Bucket.RETURNING]
-    else:
-        premieres = [
-            s for s in shows
-            if not s.get("abandoned") and premiered_in_month(s, month_number)
-        ]
-        news = [s for s in premieres if int(s.get("season") or 1) == 1]
-        returning = [s for s in premieres if int(s.get("season") or 1) != 1]
-    news = sorted(news, key=_premiere_sort_key)
-    returning = sorted(returning, key=_premiere_sort_key)
+    news = sorted(series_premieres, key=_premiere_sort_key)
+    returning = sorted(season_premieres, key=_premiere_sort_key)
     sections = [
         _section("**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
         _section("**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
@@ -369,59 +375,27 @@ def _movie_line(movie: dict) -> str:
     return f"> ~~`{label}`~~"
 
 
-# The two buckets that ANNOUNCE a title rather than report on it, and so mean
-# "this premiered here". Named beside month_view because that is where the rule
-# is enforced; bucket_of has no month to test against and cannot state it.
-_PREMIERE_BUCKETS = (Bucket.NEW, Bucket.RETURNING)
-
-
-def month_view(shows: list[dict], standing: MonthStanding, month) -> list[dict]:
-    """The roster rows a month in this `standing` presents at all.
-
-    The page's list and POST 2 both draw from this, so a title the post does not
-    mention is a title the page does not show either — the two disagreeing about
-    what is in a month is the thing this rule exists to stop. Nothing is deleted:
-    a row a month may not present is still stored and still exported.
-
-    NEW AND RETURNING MEAN "PREMIERED IN THIS MONTH", not merely "has not started
-    airing yet". Those two are the same thing only for a title the month itself
-    announced; for anything that reached the month by another route they come
-    apart, and the page and POST 2 then re-announce as this month's a season that
-    premiered somewhere else. `month` is the tracker month ('YYYY-MM' or an int)
-    and the test is premiered_in_month, which is what POST 1 has always used —
-    stating it here as well is what keeps the three readers saying one thing.
-
-    POST 1 is deliberately outside the STANDING half of this: it announces what
-    premiered in the month, which no standing changes. See render_post1.
-    """
-    allowed = set(MONTH_BUCKETS[standing])
-    month_number = _month_number(month)
-    out = []
-    for show in shows:
-        bucket = bucket_of(show, show)
-        if bucket not in allowed:
-            continue
-        # Tolerant of an unreadable month for the same reason _month_number is:
-        # with no month to compare against there is no premiere test to apply,
-        # and a row is better shown than silently dropped.
-        if bucket in _PREMIERE_BUCKETS and month_number is not None \
-                and not premiered_in_month(show, month_number):
-            continue
-        out.append(show)
-    return out
-
-
 def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji: str = ":tv:",
                  movies: list[dict] | None = None,
                  standing: MonthStanding = MonthStanding.CURRENT) -> str:
-    """POST 2 (living tracker) for a month in `standing`: the sections MONTH_BUCKETS
-    allows it, in that order, with Completed/Abandoned/Movies omitted when empty
-    and the rest carrying their header even so.
+    """POST 2 (living tracker) for a month in `standing`: Cleanup, Keepup,
+    Completed, Abandoned and Movies — NEVER New/Returning, in any standing. See
+    READER_BUCKETS: announcing a premiere is POST 1's job in every standing, so
+    this notice does not carry a New/Returning section to filter down to empty,
+    it simply never has one.
 
-    The default is the month in progress — the one that says everything — so a
-    caller that only wants the rendering (a test, a preview of the markup) gets the
-    full shape without having to state a month, the same way render_post1 falls
-    back when it is given no month.
+    `shows` IS THE SAME LIST THE PAGE'S ROW LIST WAS BUILT FROM, including
+    whatever premiere rows the page shows and this notice will not — the one
+    declaration in READER_BUCKETS is what tells this function which of them to
+    render, not a copy of the list pre-trimmed for this one caller. Trimming it
+    before it gets here would be growing the second table this design refuses
+    to grow: two lists carrying the same fact, free to drift apart the day only
+    one of them gets edited.
+
+    The default standing is the month in progress — the one that says
+    everything — so a caller that only wants the rendering (a test, a preview of
+    the markup) gets the full shape without having to state a month, the same
+    way render_post1 needs no month to fall back on.
 
     `movies` is [{title, year, ...}] watched during the month (from the watch-
     history cache); rendered struck-through, alphabetized ignoring a leading
@@ -431,20 +405,14 @@ def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji
     cleanup = sorted(groups[Bucket.CLEANUP], key=lambda s: _sort_title(s.get("title")))
     completed = sorted(groups[Bucket.COMPLETED], key=lambda s: _sort_title(s.get("title")))
     abandoned = sorted(groups[Bucket.ABANDONED], key=lambda s: _sort_title(s.get("title")))
-    news = sorted(groups[Bucket.NEW], key=_premiere_sort_key)
-    returning = sorted(groups[Bucket.RETURNING], key=_premiere_sort_key)
 
-    # Built once each, then picked from by the same table the roster was filtered
-    # through — so "does this month have a Keepup" is asked in one place.
+    # Built once each, then picked from by the same table the page's rows were
+    # filtered through — so "does this month have a Keepup" is asked in one place.
     blocks = {
         Bucket.CLEANUP: lambda: _section(
             "## **Cleanup**", [_cleanup_line(s, emoji_map, default_emoji) for s in cleanup]),
         Bucket.KEEPUP: lambda: _render_keepup(groups[Bucket.KEEPUP], emoji_map, default_emoji),
-        Bucket.NEW: lambda: _section(
-            "**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
-        Bucket.RETURNING: lambda: _section(
-            "**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
-        # Unlike the four above, an empty one of these is not informative to a
+        # Unlike the two above, an empty one of these is not informative to a
         # reader of the post, so it is left out entirely rather than headed.
         Bucket.COMPLETED: lambda: _section(
             "**Completed**", [_completed_line(s, emoji_map, default_emoji) for s in completed],
@@ -453,7 +421,7 @@ def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji
             "**Abandoned**", [_abandoned_line(s, emoji_map, default_emoji) for s in abandoned],
         ) if abandoned else None,
     }
-    sections = [block for block in (blocks[bucket]() for bucket in MONTH_BUCKETS[standing])
+    sections = [block for block in (blocks[bucket]() for bucket in READER_BUCKETS[standing].post2)
                 if block is not None]
     if movies:
         movs = sorted(movies, key=lambda m: _sort_title(m.get("title")))

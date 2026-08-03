@@ -198,11 +198,11 @@ class CachedGetContractTests(unittest.IsolatedAsyncioTestCase):
 
 
 def _record(trakt_id, season, **over):
-    """A stored roster record. Its shared id is derived from the Trakt id so each
-    fixture is a distinct row, and `_key` names the same row back."""
+    """A stored record. Its shared id is derived from the Trakt id so each fixture
+    is a distinct row, and `_key` names the same row back."""
     rec = {
         "media": "show", "ids": {"trakt": trakt_id, "tmdb": 500 + trakt_id, "slug": "s"},
-        "season": season,
+        "season": season, "kind": "series_premiere",
         "title": f"Show {trakt_id}", "network": "HBO", "abandoned": False, "abandoned_form": None,
         "watched": 3, "total": 12, "cadence": "Mon", "premiere": "1/5", "finale": "3/1",
         "started_airing": True, "finished_airing": False, "bucket": "keepup",
@@ -270,7 +270,13 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
         today = date.today()
         month_key = f"{today.year:04d}-{today.month:02d}"
         doc = distrakt_store.new_month_doc(month_key)
-        doc["shows"] = [_record(1, 1, total=12, watched=8)]
+        # A MONTH record can only be a premiere, completed or abandoned kind —
+        # keepup/catchup belong to distrakt_user_seasons, which the stale
+        # fallback deliberately never reads (see _stale_month_payload: every row
+        # there would need the season lookup that has just failed). "completed"
+        # is what lets this fixture stand in for a month record surviving a
+        # rate-limited load from its own last-known stored totals.
+        doc["shows"] = [_record(1, 1, kind="completed", bucket="completed", total=12, watched=8)]
         doc["totals_refreshed_at"] = db.now()
         await distrakt_store.save_month(self.user_id, doc)
 

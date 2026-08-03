@@ -123,8 +123,8 @@ class SurveyTests(BackfillTestCase):
 
         self.assertEqual(list(plan["months"]), ["2026-03"])
         row = plan["months"]["2026-03"][0]
-        self.assertEqual((row["title"], row["season"], row["bucket"]),
-                         ("Finished In March", 1, "completed"))
+        self.assertEqual((row["title"], row["season"], row["kind"]),
+                         ("Finished In March", 1, distrakt.RecordKind.COMPLETED))
         # A frozen month's counts are never recomputed, so they have to be right now.
         self.assertEqual((row["watched"], row["total"]), (3, 3))
         self.assertEqual(row["added_by"], distrakt.ADDED_BY_HISTORY)
@@ -158,8 +158,9 @@ class SurveyTests(BackfillTestCase):
 
     async def test_a_month_that_is_already_tracked_is_left_alone(self):
         """A tracked month holds decisions watch history knows nothing about."""
-        await distrakt.add_show(self.user_id, "2026-03", {
-            "ids": {"trakt": 999, "tmdb": 999, "slug": "mine"}, "season": 1, "title": "Mine"})
+        await distrakt.add_month_record(self.user_id, "2026-03", {
+            "ids": {"trakt": 999, "tmdb": 999, "slug": "mine"}, "season": 1, "title": "Mine",
+            "kind": distrakt.RecordKind.SERIES_PREMIERE})
         events = [_ep_event(105, 1, 2, "2026-03-14T00:00:00Z")]
         progress = {105: {1: {1: "2026-03-01T00:00:00Z", 2: "2026-03-14T00:00:00Z"}}}
         plan = await self._survey(events, progress, {(105, 1): {"total": 2}})
@@ -197,8 +198,8 @@ class ApplyTests(BackfillTestCase):
 
         doc = await distrakt.load_month(self.user_id, "2026-02")
         self.assertTrue(doc["closed"])
-        self.assertEqual([(s["title"], s["bucket"]) for s in doc["shows"]],
-                         [("Feb Show", "completed")])
+        self.assertEqual([(s["title"], s["kind"]) for s in doc["shows"]],
+                         [("Feb Show", distrakt.RecordKind.COMPLETED)])
 
     async def test_applying_twice_does_not_double_a_month(self):
         events = [_ep_event(203, 1, 1, "2026-02-10T00:00:00Z")]
@@ -325,8 +326,8 @@ class ApplyTests(BackfillTestCase):
         await self._survey(events, progress, {(212, 1): {"total": 1}})
         await backfill.apply(self.user_id)
 
-        await distrakt.remove_show(
-            self.user_id, "2026-01", ItemKey("show", "tmdb", "1112"), 1)
+        await distrakt.remove_season_everywhere(
+            self.user_id, ItemKey("show", "tmdb", "1112"), 1)
         emptied = await distrakt.load_month(self.user_id, "2026-01")
         self.assertEqual(emptied["shows"], [])  # the month row itself survives
 
@@ -342,9 +343,9 @@ class ApplyTests(BackfillTestCase):
     async def test_a_month_that_still_holds_something_is_still_protected(self):
         """The other half of the same rule: content is what deserves protecting,
         and a month with any of it left is never rebuilt from a sweep."""
-        await distrakt.add_show(self.user_id, "2026-01", {
+        await distrakt.add_month_record(self.user_id, "2026-01", {
             "ids": {"trakt": 998, "tmdb": 998, "slug": "kept"}, "season": 1,
-            "title": "Kept By Hand"})
+            "title": "Kept By Hand", "kind": distrakt.RecordKind.SERIES_PREMIERE})
         events = [_ep_event(213, 1, 1, "2026-01-10T00:00:00Z")]
         progress = {213: {1: {1: "2026-01-10T00:00:00Z"}}}
         plan = await self._survey(events, progress, {(213, 1): {"total": 1}})
@@ -358,9 +359,9 @@ class ApplyTests(BackfillTestCase):
         await self._survey(events, progress, {(205, 1): {"total": 1}})
 
         # Someone (another tab, the tracker itself) creates it in between.
-        await distrakt.add_show(self.user_id, "2026-02", {
+        await distrakt.add_month_record(self.user_id, "2026-02", {
             "ids": {"trakt": 999, "tmdb": 999, "slug": "first"}, "season": 1,
-            "title": "Landed First"})
+            "title": "Landed First", "kind": distrakt.RecordKind.SERIES_PREMIERE})
 
         written = await backfill.apply(self.user_id)
         self.assertEqual(written["months"], [])
@@ -392,7 +393,7 @@ class ManualCompletedRouteTests(unittest.TestCase):
             return {"total": total, "cadence": "Mon", "premiere": "3/1", "finale": "4/5",
                     "started_airing": True, "finished_airing": True}
 
-        with patch("app.distrakt.routes.fetch_season_detail", side_effect=fake_season), \
+        with patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season), \
              patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             return self.client.post("/api/distrakt/add-completed", json={
                 "year": year, "month": month, "season": season,
@@ -405,7 +406,8 @@ class ManualCompletedRouteTests(unittest.TestCase):
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         self.assertTrue(doc["closed"])
         row = doc["shows"][0]
-        self.assertEqual((row["bucket"], row["watched"], row["total"]), ("completed", 6, 6))
+        self.assertEqual((row["kind"], row["watched"], row["total"]),
+                         (distrakt.RecordKind.COMPLETED, 6, 6))
         self.assertEqual(row["added_by"], distrakt.ADDED_BY_MANUAL)
 
     def test_the_episode_total_comes_from_trakt_not_the_caller(self):
@@ -414,7 +416,7 @@ class ManualCompletedRouteTests(unittest.TestCase):
         async def fake_season(settings, trakt_id, season_no, fresh=False, client=None):
             return {"total": 10}
 
-        with patch("app.distrakt.routes.fetch_season_detail", side_effect=fake_season), \
+        with patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season), \
              patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
             self.client.post("/api/distrakt/add-completed", json={
                 "year": 2026, "month": 3, "season": 1,
@@ -468,11 +470,11 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
         db.close_thread_connection()
 
     def _freeze_march_with(self, added_by):
-        asyncio.run(distrakt.add_show(self.user_id, "2026-03", {
+        asyncio.run(distrakt.add_month_record(self.user_id, "2026-03", {
             "ids": {"trakt": 601, "tmdb": 601, "slug": "slug-601"},
             "season": 1, "title": "Rewatched One Episode",
             "network": "Net", "media": "show", "watched": 10, "total": 10,
-            "bucket": "completed", "added_by": added_by,
+            "kind": distrakt.RecordKind.COMPLETED, "added_by": added_by,
         }))
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         doc["closed"] = True
@@ -502,8 +504,9 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
             with self.subTest(added_by=added_by):
                 asyncio.run(db.execute("DELETE FROM distrakt_months WHERE user_id = ?",
                                        (self.user_id,)))
-                asyncio.run(db.execute("DELETE FROM distrakt_shows WHERE user_id = ?",
-                                       (self.user_id,)))
+                asyncio.run(db.execute(
+                    "DELETE FROM distrakt_month_records WHERE user_id = ?",
+                    (self.user_id,)))
                 self._freeze_march_with(added_by=added_by)
                 resp = self._remove()
                 self.assertFalse(resp.json()["hidden_on_calendar"])
@@ -534,9 +537,10 @@ class FilmsAreVisibleTests(unittest.TestCase):
         db.close_thread_connection()
 
     def _freeze_january_with_a_film(self):
-        asyncio.run(distrakt.add_show(self.user_id, "2026-01", {
+        asyncio.run(distrakt.add_month_record(self.user_id, "2026-01", {
             "ids": {"trakt": 801, "tmdb": 801, "slug": "jan"}, "season": 1,
-            "title": "Jan Show", "bucket": "completed", "watched": 4, "total": 4}))
+            "title": "Jan Show", "kind": distrakt.RecordKind.COMPLETED,
+            "watched": 4, "total": 4}))
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-01"))
         doc["closed"] = True
         doc["movies"] = [{"title": "The Sixth Sense", "year": 1999,
@@ -617,9 +621,9 @@ class AddingAFilmByHandTests(unittest.TestCase):
     def test_a_closed_month_is_told_about_it(self):
         """A frozen month renders films from its own snapshot, so a film added
         to one has to be written into it or it will never appear."""
-        asyncio.run(distrakt.add_show(self.user_id, "2026-03", {
+        asyncio.run(distrakt.add_month_record(self.user_id, "2026-03", {
             "ids": {"trakt": 802, "tmdb": 802, "slug": "mar"}, "season": 1,
-            "title": "Mar Show"}))
+            "title": "Mar Show", "kind": distrakt.RecordKind.SERIES_PREMIERE}))
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         doc["closed"] = True
         asyncio.run(distrakt.save_month(self.user_id, doc))
@@ -679,9 +683,9 @@ class RemovingAFilmTests(unittest.TestCase):
     def test_a_closed_month_carrying_it_is_re_snapshotted(self):
         """A frozen month renders films from its own copy, so removing one has
         to rebuild that copy or the film stays on the page for good."""
-        asyncio.run(distrakt.add_show(self.user_id, "2026-03", {
+        asyncio.run(distrakt.add_month_record(self.user_id, "2026-03", {
             "ids": {"trakt": 803, "tmdb": 803, "slug": "mar"}, "season": 1,
-            "title": "Mar Show"}))
+            "title": "Mar Show", "kind": distrakt.RecordKind.SERIES_PREMIERE}))
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         doc["closed"] = True
         doc["movies"] = [{"key": "movie:tmdb:91", "title": "Never Watched This",
@@ -840,8 +844,9 @@ class BackfillRouteTests(unittest.TestCase):
         # Tracking the range's own end month is what makes the "not clamped" half
         # a real assertion: the tracked month is inside the offered range by
         # construction, on any date this ever runs.
-        asyncio.run(distrakt.add_show(self.user_id, end, {
-            "ids": {"trakt": 1, "tmdb": 1, "slug": "t"}, "season": 1, "title": "T"}))
+        asyncio.run(distrakt.add_month_record(self.user_id, end, {
+            "ids": {"trakt": 1, "tmdb": 1, "slug": "t"}, "season": 1, "title": "T",
+            "kind": distrakt.RecordKind.SERIES_PREMIERE}))
         body = self.client.get("/api/distrakt/backfill").json()
         self.assertEqual(body["start"], start)
         self.assertEqual(body["end"], end)

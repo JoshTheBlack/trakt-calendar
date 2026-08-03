@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from .. import db
 from ..config import DATA_DIR
@@ -57,31 +57,6 @@ async def not_watching_ids(user_id: int) -> set[str]:
     """not_watching_list as a set, for the callers that only ever ask "is this
     one of them?"."""
     return set(await not_watching_list(user_id))
-
-
-async def not_watching_marked_before(user_id: int, when: date) -> set[str]:
-    """The shows this user marked not-watching STRICTLY BEFORE `when`.
-
-    WHEN a mark was made is what separates two different statements that look
-    identical once made. Turning a show away before a month starts says "I never
-    intended to watch this", and it should simply not be in that month. Turning
-    the same show away part-way through the month says "I was following this and
-    stopped", which is worth recording. The rows are timestamped, so the two are
-    told apart by comparing `created_at` against the day the month opened —
-    there is nothing to detect and no moment anybody has to be present for.
-
-    The cutoff is midnight UTC of `when`, matching created_at's own units
-    (db.now() is whole UTC seconds). A mark made within a few hours either side of
-    a month boundary can therefore fall on the far side of it from the user's own
-    clock; the alternative is threading a timezone through every caller to move a
-    once-a-month edge by hours, which buys less than it costs.
-    """
-    cutoff = int(datetime(when.year, when.month, when.day, tzinfo=timezone.utc).timestamp())
-    rows = await db.fetch_all(
-        "SELECT item_id FROM not_watching_shows WHERE user_id = ? AND created_at < ?",
-        (user_id, cutoff),
-    )
-    return {r["item_id"] for r in rows}
 
 
 async def load_view_state(user_id: int, endpoint: str, year: int, month: int) -> dict:

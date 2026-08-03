@@ -1,35 +1,59 @@
-"""The tracker's row store: month documents in, month documents out.
+"""The tracker's record store: two tables, and the shape of what they hold.
 
-ONE JOB — read and write `distrakt_months` and `distrakt_shows`. No Trakt calls,
-no bucketing, no rollover decisions. The orchestration that reaches out to a
-provider lives beside this module, not in it, so a store operation can be tested
-against a database and nothing else.
+ONE JOB — read and write `distrakt_months`, `distrakt_month_records`,
+`distrakt_user_seasons` and `distrakt_prompt_dismissals`. No Trakt calls, no
+bucketing decisions, no lifecycle. Deciding what a season's record BECOMES as its
+life proceeds lives beside this module, not in it, so a store operation can be
+tested against a database and nothing else.
 
-Two storage shapes:
-  - distrakt_months holds the month-level state (whether the month is frozen,
-    when its totals were last refreshed, the movies snapshotted at freeze time),
-    keyed (user_id, month).
-  - distrakt_shows holds one row per tracked (user_id, month, title, season).
+MONTH FACTS AND VIEWER FACTS ARE DIFFERENT RECORDS, STORED SEPARATELY. "This
+season premiered in July" is true of July for ever; "you are four episodes into
+it" is true only right now and of no month at all. Keeping both on one row meant
+the second could only be kept current by copying the row onto every month the
+season was live in, and answering "what am I behind on?" meant unioning every
+month and deduping — so a title's presence on today's list depended on which
+month had last copied it forward.
 
-WHAT NAMES A ROW. A season is identified by (media, match_source, match_id) — the
-shared id namespace the identity waterfall landed in, plus the id in it (see
+  distrakt_months         the month-level state: whether the month is frozen,
+                          when its totals were last refreshed, the films
+                          snapshotted at freeze time. Keyed (user_id, month).
+  distrakt_month_records  what a month announced or settled, keyed
+                          (user_id, month, kind, identity, season). `kind` is IN
+                          the key on purpose: a season that premiered AND was
+                          settled in the same month holds two rows on it, which
+                          is two different statements rather than a duplicate.
+  distrakt_user_seasons   what the viewer is in the middle of, keyed
+                          (user_id, identity, season) and belonging to no month.
+                          keepup and catchup are two STATES of one row, so a
+                          season finishing its run is an UPDATE.
+
+A SEASON LIVES IN UP TO TWO OF THREE PLACES AT ONCE: the month it premiered in,
+the viewer's list, and the month that settled it.
+
+A PREMIERE RECORD CARRIES NO VIEWER PROGRESS. `watched` is meaningless on one and
+neither written nor read there — it is a snapshot of the show as it premiered,
+which is what makes it safe to keep for ever and safe to correct when a later
+season lookup reports a different episode total.
+
+WHAT NAMES A RECORD. A season is identified by (media, match_source, match_id) —
+the shared id namespace the identity waterfall landed in, plus the id in it (see
 app/providers/base.py). NOT by the id of whichever service happened to report it:
 keying on that would make the same season arriving from a second service a second
-row for ever, with nothing to say the two were the same. The service's own ids
-travel on the row as ordinary attributes, because they are still what you need to
-CALL that service — `record["ids"]["trakt"]` is how you ask Trakt about a season,
-and `record["match_id"]` is how you find it here.
+record for ever, with nothing to say the two were the same. The service's own ids
+travel on the record as ordinary attributes, because they are still what you need
+to CALL that service — `record["ids"]["trakt"]` is how you ask Trakt about a
+season, and `record["match_id"]` is how you find it here.
 
-In memory a month is the same `doc` dict the renderers and the pure rollover
-logic have always consumed —
+In memory a month is the same `doc` dict the renderers have always consumed —
     {month, closed, totals_refreshed_at, movies?, shows: [record, ...]}
-— so load_month assembles that shape from the two tables and save_month writes it
-back.
+— so load_month assembles that shape from distrakt_months plus that month's
+records, and save_month writes it back.
 """
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import AsyncIterator, Iterable
 from datetime import date
 from enum import StrEnum
 
@@ -39,21 +63,41 @@ from ..providers.base import ItemKey, Media, collect_ids, item_key, resolve_key
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
+class RecordKind(StrEnum):
+    """What a stored record IS — the STORAGE vocabulary.
+
+    A StrEnum, so the member IS the stored string: it goes into the `kind` column
+    and out into the browser's JSON with no conversion at either boundary.
+
+    Four kinds belong to a month and two belong to the viewer, and which table a
+    kind lives in is not a second fact to remember — MONTH_KINDS and USER_KINDS
+    below are derived from this set and are what every caller asks.
+
+    Separate from Bucket, which is the RENDER vocabulary: what a SECTION of the
+    page and of the Discord notices is called. The two are mapped once, in
+    BUCKET_OF_KIND, and nowhere else.
+    """
+    SERIES_PREMIERE = "series_premiere"
+    SEASON_PREMIERE = "season_premiere"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+    KEEPUP = "keepup"
+    CATCHUP = "catchup"
+
+
 class Bucket(StrEnum):
-    """The closed set of values the `bucket` column holds.
+    """The closed set of section names the browser and the Discord notices group
+    by — the RENDER vocabulary.
 
-    A StrEnum, so the member IS the stored string: it goes into the column and
-    out into the browser's JSON with no conversion at either boundary, which is
-    the whole reason to prefer it over a class of constants. What the enum buys
-    beyond that is that the set is written down once, here with the record shape,
-    instead of being spelled out again at every place that compares against it.
+    A StrEnum for the same reason RecordKind is: `row["bucket"]` reaches
+    app/static/js/tracker/rows.js and the notice headers as a plain string with no
+    conversion. These strings are read by shipped browser code, so they cannot
+    change without changing that too.
 
-    NAMING the set is this module's job; DECIDING which one a show is in is
-    discord_fmt.bucket_of's, from the show's live counts and dates. The two are
-    separate because most readers only ever want the vocabulary — the rollover
-    refuses to carry a COMPLETED or ABANDONED show into a new month, the backfill
-    writes COMPLETED rows, and the ranker's import asks for the finished ones —
-    and none of them render anything.
+    CATCHUP RENDERS AS "Cleanup", which is why this enum is not simply RecordKind
+    under another name: what the viewer's own notices call that section is
+    established and renaming it would be a user-visible change to something nobody
+    asked to have renamed.
     """
     NEW = "new"
     RETURNING = "returning"
@@ -61,6 +105,28 @@ class Bucket(StrEnum):
     CLEANUP = "cleanup"
     COMPLETED = "completed"
     ABANDONED = "abandoned"
+
+
+# The ONE mapping between the two vocabularies. Every renderer, every section
+# header and every grouping in the browser resolves through this; a second copy of
+# it anywhere is how a kind would come to render under two different headings.
+BUCKET_OF_KIND: dict[RecordKind, Bucket] = {
+    RecordKind.SERIES_PREMIERE: Bucket.NEW,
+    RecordKind.SEASON_PREMIERE: Bucket.RETURNING,
+    RecordKind.KEEPUP: Bucket.KEEPUP,
+    RecordKind.CATCHUP: Bucket.CLEANUP,
+    RecordKind.COMPLETED: Bucket.COMPLETED,
+    RecordKind.ABANDONED: Bucket.ABANDONED,
+}
+
+# Which kinds each table may hold. Named as sets rather than restated at each
+# query, because "is this a month record?" is asked by the lifecycle, the
+# renderers and the two migrate verbs below, and a disagreement between two of
+# them would file a record in the wrong table.
+PREMIERE_KINDS = frozenset({RecordKind.SERIES_PREMIERE, RecordKind.SEASON_PREMIERE})
+SETTLED_KINDS = frozenset({RecordKind.COMPLETED, RecordKind.ABANDONED})
+MONTH_KINDS = PREMIERE_KINDS | SETTLED_KINDS
+USER_KINDS = frozenset({RecordKind.KEEPUP, RecordKind.CATCHUP})
 
 
 class MonthStanding(StrEnum):
@@ -87,7 +153,7 @@ def month_standing(month: str, today: date | None = None) -> MonthStanding:
     """Where `month` ("YYYY-MM") stands relative to `today`.
 
     Whole months, not days: a month is in progress from its 1st to its last, and
-    the tracker's rules — what freezes, what previews, what a post may say — all
+    the tracker's rules — what freezes, what previews, what a notice may say — all
     turn on the month rather than on where inside it we are.
     """
     today = today or clock.today()
@@ -98,8 +164,26 @@ def month_standing(month: str, today: date | None = None) -> MonthStanding:
     return MonthStanding.CURRENT if there == here else MonthStanding.FUTURE
 
 
-# The identity columns, in key order. Named once because three tables and every
-# lookup in this package are built from them.
+def bucket_of_kind(kind: RecordKind | str) -> Bucket:
+    """The section a record of `kind` renders under. The only reader of
+    BUCKET_OF_KIND that callers outside this module should need."""
+    return BUCKET_OF_KIND[RecordKind(kind)]
+
+
+def premiere_kind(season: int | None) -> RecordKind:
+    """Which premiere a season number is: a SERIES premiere (a first season) or a
+    SEASON premiere (a later one).
+
+    The two are separate record kinds rather than one kind sorted by season number
+    when something renders. They are two distinct sections of the month's first
+    notice, and deriving the split at every render is how the two come to
+    disagree — so the split is decided ONCE, here, at the moment a record is made.
+    """
+    return RecordKind.SERIES_PREMIERE if int(season or 1) <= 1 else RecordKind.SEASON_PREMIERE
+
+
+# The identity columns, in key order. Named once because both record tables, the
+# dismissals table and every lookup in this package are built from them.
 IDENTITY_COLUMNS = ("media", "match_source", "match_id")
 
 # The columns that hold ids, and which ID_KEYS namespace each one holds. Both
@@ -111,48 +195,71 @@ ID_COLUMNS = {
     "tvdb": "tvdb", "imdb": "imdb", "mal": "mal", "slug": "slug",
 }
 
-# The distrakt_shows columns beyond (user_id, month), in insert order. The bool
-# columns are stored as 0/1; everything else passes through.
-SHOW_COLUMNS = (
-    *IDENTITY_COLUMNS, "season", *ID_COLUMNS, "title", "network",
-    "abandoned", "abandoned_form", "watched", "total", "cadence", "premiere",
-    "finale", "bucket", "started_airing", "finished_airing", "added_by",
+# The fields both tables share, in insert order. Split out because the two record
+# tables differ only at their ends — a month record adds `month` and
+# `abandoned_form`, a user record adds `came_back` — and writing the common part
+# twice is how one of them would quietly stop storing a field.
+_SHARED_COLUMNS = (
+    "kind", *IDENTITY_COLUMNS, "season", *ID_COLUMNS, "title", "network",
+    "watched", "total", "cadence", "premiere", "finale",
+    "started_airing", "finished_airing", "added_by", "created_at",
 )
 
-# Keys allowed on a stored show record, with the type-coercion used on write.
-_INT_FIELDS = ("season", "watched", "total")
-_BOOL_FIELDS = ("abandoned",)
+# Every distrakt_month_records column except user_id, in insert order.
+MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form")
 
-# Who put a row on the roster. Only CALENDAR rows are re-imported on every load
-# of a preview month, and only they mean "the calendar says you're watching
-# this" — which is why removing one marks the show not-watching there and
-# removing any other kind does not. "" is a row written before the column
-# existed; see routes.api_distrakt_remove.
+# Every distrakt_user_seasons column except user_id, in insert order.
+USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back")
+
+# Columns whose value is coerced on the way to the database. Everything else
+# passes through as the caller stated it.
+_INT_COLUMNS = frozenset(("season", "watched", "total"))
+_BOOL_COLUMNS = frozenset(("started_airing", "finished_airing", "came_back"))
+_TEXT_COLUMNS = frozenset(("title", "network", "added_by"))
+
+# Who put a record there. Only CALENDAR records mean "the calendar says you're
+# watching this", which is why removing one marks the show turned away there and
+# removing any other kind does not. "" is a record written before the column
+# existed.
 ADDED_BY_CALENDAR = "calendar"
 ADDED_BY_HISTORY = "history"
 ADDED_BY_MANUAL = "manual"
 ADDED_BY_VALUES = (ADDED_BY_CALENDAR, ADDED_BY_HISTORY, ADDED_BY_MANUAL)
 
-# Columns an in-place update is allowed to touch (identity keys excluded).
-# `added_by` is excluded with them: it records who FIRST put the row on the
-# roster and must not be rewritten by the live-counts writer or by re-adding a
-# show that is already there, or a calendar row could quietly become a manual one.
-_UPDATABLE_COLUMNS = frozenset(SHOW_COLUMNS) - {*IDENTITY_COLUMNS, "season", "added_by"}
-_BOOL_COLUMNS = frozenset(("abandoned", "started_airing", "finished_airing"))
+# What an in-place update may touch. The identity, the season, the month and the
+# kind are excluded because changing one of them addresses a DIFFERENT record —
+# moving a season between kinds is a migration, not an update, and has its own
+# verbs below. `added_by` is excluded because it records who FIRST filed the
+# record and a live-counts write must not turn a calendar record into a manual
+# one. `created_at` is excluded for the same reason.
+_UPDATABLE_MONTH_COLUMNS = frozenset(MONTH_RECORD_COLUMNS) - {
+    "month", "kind", *IDENTITY_COLUMNS, "season", "added_by", "created_at"}
+# The user set differs twice over. `kind` IS updatable here, because keepup and
+# catchup are two states of one record rather than two records — a season
+# finishing its run changes the record it already has. `came_back` is not: it is
+# the marker for a season that turned out not to have been finished, and only the
+# viewer acknowledging it clears it, so a routine counts refresh written back
+# without the flag must not dismiss a marker nobody has read.
+_UPDATABLE_USER_COLUMNS = frozenset(USER_RECORD_COLUMNS) - {
+    *IDENTITY_COLUMNS, "season", "added_by", "created_at", "came_back"}
 
-_INSERT_SHOW_SQL = (
-    "INSERT INTO distrakt_shows (user_id, month, " + ", ".join(SHOW_COLUMNS) + ") "
-    "VALUES (" + ", ".join(["?"] * (2 + len(SHOW_COLUMNS))) + ")"
-)
 
-# The WHERE clause that addresses one season of one user's month. Written once
-# because every single-row read, update and delete below shares it, and a
-# mismatch between two of them would be a cross-row write.
-_ROW_WHERE = (
-    "WHERE user_id = ? AND month = ? AND "
-    + " AND ".join(f"{c} = ?" for c in IDENTITY_COLUMNS)
-    + " AND season = ?"
-)
+def _insert_sql(table: str, columns: tuple[str, ...]) -> str:
+    return (f"INSERT INTO {table} (user_id, " + ", ".join(columns) + ") "
+            "VALUES (" + ", ".join(["?"] * (1 + len(columns))) + ")")
+
+
+_INSERT_MONTH_SQL = _insert_sql("distrakt_month_records", MONTH_RECORD_COLUMNS)
+_INSERT_USER_SQL = _insert_sql("distrakt_user_seasons", USER_RECORD_COLUMNS)
+
+# The WHERE clauses that address one record. Written once each because every
+# single-record read, update and delete below shares one of them, and a mismatch
+# between two of them would be a cross-record write.
+_IDENTITY_MATCH = " AND ".join(f"{c} = ?" for c in IDENTITY_COLUMNS)
+_MONTH_ROW_WHERE = f"WHERE user_id = ? AND month = ? AND kind = ? AND {_IDENTITY_MATCH} AND season = ?"
+# Addresses one season of one user in EITHER table: it is the whole key of a user
+# record, and the part of a month record's key that is not the month and the kind.
+_SEASON_WHERE = f"WHERE user_id = ? AND {_IDENTITY_MATCH} AND season = ?"
 
 
 class UnkeyableRecord(ValueError):
@@ -166,14 +273,13 @@ def month_key(year: int, month: int) -> str:
 
     Here rather than in whichever caller needed one first, because the format is
     a STORAGE fact — it is the key half of distrakt_months' identity, and
-    _MONTH_RE above is the same fact stated as a validator. It was spelled out
-    inline in the routes and again in the rollover logic, which is two places to
-    get the padding wrong.
+    _MONTH_RE above is the same fact stated as a validator.
 
     THE ZERO-PADDING IS LOAD-BEARING, not cosmetic: several callers compare month
-    keys with `<` and `>=` to decide which months are past. String comparison
-    only agrees with chronological order while every key is the same width, so
-    "2026-7" would sort after "2026-12" and silently mis-file a month.
+    keys with `<` and `>=` to decide which months are past, and the backward walk
+    below orders by the column. String comparison only agrees with chronological
+    order while every key is the same width, so "2026-7" would sort after
+    "2026-12" and silently mis-file a month.
     """
     return f"{int(year):04d}-{int(month):02d}"
 
@@ -185,10 +291,7 @@ def parse_month_key(month: str) -> tuple[int, int]:
     format has exactly one owner in this module — _MONTH_RE states it, month_key
     writes it, this reads it. Without an inverse every caller sliced the string
     itself, which came to nine copies of `int(key[:4]), int(key[5:7])` plus one
-    written a second way as `key.split("-")`. Nothing about that was wrong yet,
-    and that is the point: a format asked about in ten places in two spellings is
-    how one of them comes to disagree with the others, which is exactly what
-    happened one layer up with "is this month over".
+    written a second way as `key.split("-")`.
 
     Validates rather than slicing blindly. A caller handing this a date, an empty
     string or a "2026-7" gets a ValueError naming the value, instead of a plausible
@@ -215,6 +318,27 @@ def _validate_month(month: str) -> str:
     return month
 
 
+def _validate_kind(kind, allowed: frozenset[RecordKind], where: str) -> RecordKind:
+    """`kind` as a RecordKind, refused if it cannot live in `where`.
+
+    Checked at the boundary rather than left to the primary key, because a kind
+    in the wrong table is not a constraint violation — both tables would accept
+    the string quite happily, and the record would simply never be found again by
+    the reader that expected it in the other one.
+    """
+    try:
+        resolved = RecordKind(kind)
+    except ValueError:
+        raise ValueError(
+            f"{kind!r} is not one of the tracker's record kinds "
+            f"({', '.join(sorted(RecordKind))})") from None
+    if resolved not in allowed:
+        raise ValueError(
+            f"{resolved} is not a {where} kind; those are "
+            f"{', '.join(sorted(allowed))}")
+    return resolved
+
+
 def record_key(rec: dict) -> ItemKey:
     """The identity of a stored (or about-to-be-stored) record.
 
@@ -230,14 +354,14 @@ def record_key(rec: dict) -> ItemKey:
     if key is None:
         raise UnkeyableRecord(
             f"{rec.get('title') or 'This title'} carries none of the shared ids "
-            "the tracker files rows under."
+            "the tracker files records under."
         )
     return key
 
 
 def row_params(rec: dict) -> tuple:
     """(media, match_source, match_id, season) for a record — the tuple every
-    single-row statement in this module ends with."""
+    single-record statement in this module ends with."""
     key = record_key(rec)
     return (key.media, key.match_source, key.match_id, int(rec["season"]))
 
@@ -253,14 +377,21 @@ def new_month_doc(month: str) -> dict:
 
 
 def normalize_show(show: dict) -> dict:
-    """Build a full show record from `show`, filling schema defaults.
+    """Build a full record from `show`, filling schema defaults.
 
     Resolves the identity here rather than at each call site, so a record that
     cannot be keyed is refused at the moment it is built and not two layers
     further on, where the caller no longer knows which title it came from.
+
+    THE KIND IS REQUIRED AND IS NOT GUESSED. It decides which table the record
+    lives in and, for a month record, is half of what addresses it — a default
+    would file somebody's completed season as a premiere, and nothing downstream
+    would ever notice. premiere_kind() is there for the callers that genuinely are
+    making a premiere and want the series/season split made for them.
     """
     incoming = dict(show or {})
     key = record_key(incoming)
+    kind = _validate_kind(incoming.get("kind"), frozenset(RecordKind), "stored")
     return {
         "media": key.media,
         "match_source": key.match_source,
@@ -270,74 +401,100 @@ def normalize_show(show: dict) -> dict:
         "ids": collect_ids(incoming.get("ids") or {}),
         "title": str(incoming.get("title") or ""),
         "network": str(incoming.get("network") or ""),
-        "abandoned": bool(incoming.get("abandoned", False)),
+        "kind": str(kind),
+        "bucket": str(bucket_of_kind(kind)),
+        "abandoned": kind is RecordKind.ABANDONED,
         "abandoned_form": incoming.get("abandoned_form"),
+        "came_back": bool(incoming.get("came_back", False)),
         "watched": int(incoming.get("watched") or 0),
         "total": int(incoming.get("total") or 0),
         "cadence": incoming.get("cadence"),
         "premiere": incoming.get("premiere"),
         "finale": incoming.get("finale"),
-        "bucket": incoming.get("bucket"),
+        "started_airing": bool(incoming.get("started_airing", False)),
+        "finished_airing": bool(incoming.get("finished_airing", False)),
         "added_by": str(incoming.get("added_by") or ""),
+        "created_at": incoming.get("created_at"),
     }
 
 
-def _coerce_update(fields: dict) -> dict:
-    """Coerce the subset of updatable COLUMNS present in `fields` for an in-place
-    update, dropping identity keys and anything not a real column.
+def _column_value(column: str, rec: dict):
+    """One column's stored value from a record dict.
 
-    `ids` is expanded into its columns: a row learning an id it did not have when
-    it was written is the one way an identity can be improved later, and the
+    One mapping for both tables and for both the insert and the update path, so
+    "how is `watched` coerced?" has a single answer rather than one per statement.
+    """
+    if column in ID_COLUMNS:
+        return (rec.get("ids") or {}).get(ID_COLUMNS[column])
+    if column in _BOOL_COLUMNS:
+        return 1 if rec.get(column) else 0
+    if column in _INT_COLUMNS:
+        return int(rec.get(column) or 0)
+    if column in _TEXT_COLUMNS:
+        return str(rec.get(column) or "")
+    if column == "kind":
+        return str(rec["kind"])
+    return rec.get(column)
+
+
+def _insert_params(user_id: int, columns: tuple[str, ...], rec: dict) -> list:
+    return [user_id, *(_column_value(c, rec) for c in columns)]
+
+
+def _coerce_update(fields: dict, updatable: frozenset[str]) -> dict:
+    """The subset of `updatable` present in `fields`, coerced for an in-place
+    update. Anything that is not an updatable column is dropped.
+
+    `ids` is expanded into its columns: a record learning an id it did not have
+    when it was written is the one way an identity can be improved later, and the
     caller states it the same way it states one on an insert.
     """
-    out = {}
+    out: dict = {}
     for column, id_key in ID_COLUMNS.items():
-        if id_key in (fields or {}).get("ids", {}):
+        if column in updatable and id_key in (fields or {}).get("ids", {}):
             out[column] = fields["ids"][id_key]
-    for k, v in (fields or {}).items():
-        if k not in _UPDATABLE_COLUMNS:
-            continue  # identity key or not a stored column
-        if k in _INT_FIELDS:
-            out[k] = int(v) if v is not None else 0
-        elif k in _BOOL_FIELDS:
-            out[k] = bool(v)
-        else:
-            out[k] = v
+    for name in (fields or {}):
+        if name in updatable and name not in ID_COLUMNS:
+            out[name] = _column_value(name, fields)
     return out
 
 
-def _show_params(user_id: int, month: str, rec: dict) -> tuple:
-    """Positional values for _INSERT_SHOW_SQL from a record dict."""
-    ids = rec.get("ids") or {}
-    return (
-        user_id, month,
-        *row_params(rec),
-        *(ids.get(id_key) for id_key in ID_COLUMNS.values()),
-        str(rec.get("title") or ""),
-        str(rec.get("network") or ""),
-        1 if rec.get("abandoned") else 0,
-        rec.get("abandoned_form"),
-        int(rec.get("watched") or 0),
-        int(rec.get("total") or 0),
-        rec.get("cadence"),
-        rec.get("premiere"),
-        rec.get("finale"),
-        rec.get("bucket"),
-        1 if rec.get("started_airing") else 0,
-        1 if rec.get("finished_airing") else 0,
-        str(rec.get("added_by") or ""),
-    )
+def _differences(existing, updates: dict) -> dict:
+    """The subset of `updates` whose value the stored row does not already hold.
 
+    EVERY LOAD RE-WRITES WHAT IT READ, otherwise. The live pass hands the same
+    counts and dates back for every record on the page whether or not anything
+    moved, so an unconditional update turned a plain read of a month into one
+    write per row — a page of fifty seasons cost fifty pointless UPDATEs, every
+    time anybody looked at it.
 
-def row_to_show(row) -> dict:
-    """A distrakt_shows row back into the record shape the renderers consume.
-
-    `key` is derived rather than stored: it is the flat form of the three columns
-    beside it, and it is what a client names a row by, so computing it here means
-    no caller has to know how to spell it.
+    A bool compares equal to the 0/1 SQLite stores it as, so no coercion is
+    needed here; a column genuinely changing type would show up as a difference,
+    which is the safe direction to be wrong in.
     """
+    return {name: value for name, value in updates.items()
+            if existing[name] != value}
+
+
+def row_to_record(row) -> dict:
+    """A stored row from either table back into the record shape the renderers
+    consume.
+
+    One reader for both tables because the shape they hand out is the same one:
+    the columns they do not share are read only when the row actually has them, so
+    a month record carries `month` and `abandoned_form` while a user record
+    carries `came_back`, and neither has to pretend to the other's fields.
+
+    `key` and `bucket` are DERIVED rather than stored. `key` is the flat form of
+    the three identity columns beside it and is what a client names a record by;
+    `bucket` is what section the record renders under, which BUCKET_OF_KIND
+    already answers from `kind`. Storing either would be a second copy of a fact
+    that can go stale.
+    """
+    columns = set(row.keys())
+    kind = RecordKind(row["kind"])
     ids = collect_ids({id_key: row[column] for column, id_key in ID_COLUMNS.items()})
-    return {
+    rec = {
         "media": row["media"],
         "match_source": row["match_source"],
         "match_id": row["match_id"],
@@ -346,25 +503,60 @@ def row_to_show(row) -> dict:
         "ids": ids,
         "title": row["title"] or "",
         "network": row["network"] or "",
-        "abandoned": bool(row["abandoned"]),
-        "abandoned_form": row["abandoned_form"],
+        "kind": str(kind),
+        "bucket": str(BUCKET_OF_KIND[kind]),
+        # The manual "I gave up on this" the renderers ask about. Derived from the
+        # kind, which IS that statement now that giving up moves the record onto
+        # the month rather than setting a flag on it.
+        "abandoned": kind is RecordKind.ABANDONED,
         "watched": row["watched"],
         "total": row["total"],
         "cadence": row["cadence"],
         "premiere": row["premiere"],
         "finale": row["finale"],
-        "bucket": row["bucket"],
         "started_airing": bool(row["started_airing"]),
         "finished_airing": bool(row["finished_airing"]),
         "added_by": row["added_by"] or "",
+        "created_at": row["created_at"],
     }
+    if "month" in columns:
+        rec["month"] = row["month"]
+    if "abandoned_form" in columns:
+        rec["abandoned_form"] = row["abandoned_form"]
+    if "came_back" in columns:
+        rec["came_back"] = bool(row["came_back"])
+    return rec
 
+
+def _kind_filter(kinds: Iterable[RecordKind | str] | None) -> tuple[str, list[str]]:
+    """An optional `AND kind IN (...)` clause and its parameters.
+
+    Returns an empty clause for None rather than listing every kind, so "all of
+    them" costs no query text and cannot fall behind a kind being added.
+    """
+    if kinds is None:
+        return "", []
+    values = [str(RecordKind(k)) for k in kinds]
+    if not values:
+        # An explicit empty selection is a caller asking for nothing, which is a
+        # legitimate thing to ask for and must not silently mean "everything".
+        return " AND 0", []
+    return " AND kind IN (" + ", ".join(["?"] * len(values)) + ")", values
+
+
+# ---------------------------------------------------------------------------
+# the month row: whether it is frozen, when it refreshed, what films it kept
+# ---------------------------------------------------------------------------
 
 async def load_month(user_id: int, month: str) -> dict | None:
     """Return this user's stored month doc, or None if it has not been created.
 
-    None — rather than an empty default — lets the rollover logic distinguish an
+    None — rather than an empty default — lets the callers distinguish an
     uninitialized month from an initialized-but-empty one.
+
+    `shows` is every record the month holds, of every kind, in the order they
+    were written. A reader that wants one kind asks month_records for it rather
+    than filtering this, so the filter is stated once.
     """
     month = _validate_month(month)
     mrow = await db.fetch_one(
@@ -374,15 +566,11 @@ async def load_month(user_id: int, month: str) -> dict | None:
     )
     if mrow is None:
         return None
-    rows = await db.fetch_all(
-        "SELECT * FROM distrakt_shows WHERE user_id = ? AND month = ? ORDER BY rowid",
-        (user_id, month),
-    )
     doc = {
         "month": month,
         "closed": bool(mrow["closed"]),
         "totals_refreshed_at": mrow["totals_refreshed_at"],
-        "shows": [row_to_show(r) for r in rows],
+        "shows": await month_records(user_id, month),
     }
     # `movies` only exists on a frozen month (snapshotted at freeze time). Mirror
     # the file model, where the key was simply absent until then.
@@ -393,18 +581,26 @@ async def load_month(user_id: int, month: str) -> dict | None:
 
 async def save_month(user_id: int, doc: dict) -> None:
     """Persist a whole month doc for `user_id` in one transaction: upsert the
-    month-level row, then replace the month's show rows with the doc's.
+    month-level row, then replace the month's records with the doc's.
 
     Whole-doc replace matches how the freeze pass and the lazy init build a doc
-    (from scratch or by recomputing every record); the per-item mutators below
-    write single rows instead.
+    (from scratch, or by recomputing every record); the per-record verbs below
+    write one record instead. Every record in `shows` must name a MONTH kind —
+    the viewer's own list is not part of any month and is written through
+    add_user_record.
     """
     month = _validate_month((doc or {}).get("month"))
     closed = 1 if doc.get("closed") else 0
     totals = doc.get("totals_refreshed_at")
     movies = doc.get("movies")
     movies_json = None if movies is None else json.dumps(movies)
-    shows = doc.get("shows") or []
+    # Normalized before the transaction opens, so a record that cannot be keyed or
+    # names no kind refuses the save without having deleted the month's records
+    # first.
+    records = [normalize_show(rec) for rec in (doc.get("shows") or [])]
+    for rec in records:
+        _validate_kind(rec["kind"], MONTH_KINDS, "month record")
+    now = db.now()
 
     def _work(conn: db.Connection) -> None:
         conn.execute(
@@ -414,156 +610,16 @@ async def save_month(user_id: int, doc: dict) -> None:
             "ON CONFLICT(user_id, month) DO UPDATE SET "
             "closed = excluded.closed, totals_refreshed_at = excluded.totals_refreshed_at, "
             "movies_json = excluded.movies_json",
-            (user_id, month, closed, totals, movies_json, db.now()),
+            (user_id, month, closed, totals, movies_json, now),
         )
-        conn.execute("DELETE FROM distrakt_shows WHERE user_id = ? AND month = ?", (user_id, month))
-        for rec in shows:
-            conn.execute(_INSERT_SHOW_SQL, _show_params(user_id, month, rec))
+        conn.execute("DELETE FROM distrakt_month_records WHERE user_id = ? AND month = ?",
+                     (user_id, month))
+        for rec in records:
+            conn.execute(_INSERT_MONTH_SQL, _insert_params(
+                user_id, MONTH_RECORD_COLUMNS,
+                {**rec, "month": month, "created_at": rec.get("created_at") or now}))
 
     await db.transaction(_work)
-
-
-async def months_with_shows(user_id: int) -> set[str]:
-    """The months that actually HOLD something for this user.
-
-    Distinct from list_months, which answers "has a month row", because the two
-    diverge the moment a month is emptied: removing its last show leaves the
-    month row behind, so the history backfill — which refuses to touch a month
-    somebody is already keeping — saw a curated month where there was nothing at
-    all, and could never refill it. What deserves protecting is the content, not
-    the row.
-    """
-    rows = await db.fetch_all(
-        "SELECT DISTINCT month FROM distrakt_shows WHERE user_id = ?", (user_id,))
-    return {r["month"] for r in rows}
-
-
-async def users_with_shows() -> list[int]:
-    """Every account that holds at least one roster row, ascending.
-
-    The one read in this module that is not scoped to a user, and it exists
-    because a maintenance pass over the stored rows has nobody to ask which
-    accounts there are: every other entry point already knows whose tracker it is
-    looking at, because a request carried the session that said so. Reads
-    distrakt_shows rather than users, so an account that has never opened the
-    tracker is not offered as something to work on.
-    """
-    rows = await db.fetch_all(
-        "SELECT DISTINCT user_id FROM distrakt_shows ORDER BY user_id")
-    return [int(r["user_id"]) for r in rows]
-
-
-async def user_roster(user_id: int) -> list[dict]:
-    """Every season this user holds on ANY of their months, once each, minus
-    everything they have given up on.
-
-    THIS IS THE SET THE USER'S OWN LISTS ARE DERIVED FROM — what they are behind
-    on and what they are keeping up with are facts about the person, true of no
-    particular month, so the set they are computed over cannot be one month's
-    roster. Reading it per month is what made a title's presence on today's list
-    depend on which month happened to have copied it forward, and a season that
-    grew past the count it was finished at could never come back at all: the
-    month that recorded it finished was not the month being looked at.
-
-    Deduplicated by (identity, season) with the LATEST month's row winning,
-    because the same season appears on every month it was live in and the most
-    recent copy carries the most recent counts. Read in month then insertion
-    order, so the result is stable between calls rather than depending on how
-    SQLite felt about the query.
-
-    Abandoned is the user's own "stop bringing this back", and it is checked
-    across every month rather than on the surviving row: giving up on a season in
-    March is a statement about the season, and a copy of it left on February's
-    roster must not resurrect it.
-    """
-    rows = await db.fetch_all(
-        "SELECT * FROM distrakt_shows WHERE user_id = ? ORDER BY month, rowid", (user_id,))
-    latest: dict[tuple[str, int], dict] = {}
-    given_up: set[tuple[str, int]] = set()
-    for row in rows:
-        show = row_to_show(row)
-        key = (show["key"], int(show["season"]))
-        if show["abandoned"]:
-            given_up.add(key)
-        latest[key] = show
-    return [show for key, show in latest.items() if key not in given_up]
-
-
-async def completed_seasons(user_id: int) -> set[tuple[str, int]]:
-    """The (item key, season) pairs some month of this user's has already
-    recorded as finished.
-
-    A season can stop being finished without anybody doing anything: a show known
-    to have 16 episodes that the user watched all 16 of is complete until the
-    provider learns of an 18th, at which point the live counts put it back on the
-    user's list by themselves. That reappearance is correct but it reads as a bug,
-    so the caller marks it — and this is what tells "back after having been
-    finished" from "never left". The frozen months are what hold the answer;
-    nothing has to detect anything.
-    """
-    rows = await db.fetch_all(
-        "SELECT DISTINCT media, match_source, match_id, season FROM distrakt_shows "
-        "WHERE user_id = ? AND bucket = ?",
-        (user_id, str(Bucket.COMPLETED)),
-    )
-    return {(item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"]))
-            for r in rows}
-
-
-async def find_user_row(user_id: int, key: ItemKey, season: int) -> dict | None:
-    """This user's most recent stored row for one season, whichever month it is
-    on, or None if they have never held it.
-
-    The month a season is stored under is not the month it is being ACTED on
-    from: the user's live lists are drawn from every month at once, so a row the
-    page is showing can perfectly well live somewhere else. A caller that has to
-    write against such a row looks it up here rather than assuming the month it
-    was rendered under.
-    """
-    row = await db.fetch_one(
-        "SELECT * FROM distrakt_shows WHERE user_id = ? AND "
-        + " AND ".join(f"{c} = ?" for c in IDENTITY_COLUMNS)
-        + " AND season = ? ORDER BY month DESC LIMIT 1",
-        (user_id, key.media, key.match_source, key.match_id, int(season)),
-    )
-    return None if row is None else row_to_show(row)
-
-
-async def remove_show_everywhere(user_id: int, key: ItemKey, season: int) -> list[str]:
-    """Delete one season from EVERY month this user has it on. Returns the months
-    that actually held it.
-
-    The blunt form of remove_show, and it exists because the user's live lists are
-    drawn from every month at once: taking the row off the month it is being
-    viewed under would leave the copy that produced it, and the row would come
-    straight back on the next load with the ✕ looking broken. Deleting a season
-    is the user saying it should not be on their list at all, so it goes from all
-    of them.
-    """
-    params = (user_id, key.media, key.match_source, key.match_id, int(season))
-    where = ("WHERE user_id = ? AND "
-             + " AND ".join(f"{c} = ?" for c in IDENTITY_COLUMNS) + " AND season = ?")
-    rows = await db.fetch_all(f"SELECT month FROM distrakt_shows {where}", params)
-    months = [r["month"] for r in rows]
-    if months:
-        await db.execute(f"DELETE FROM distrakt_shows {where}", params)
-    return months
-
-
-async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
-    """Replace just the films a CLOSED month snapshotted, leaving its roster rows
-    and its closed flag alone.
-
-    Targeted rather than a save_month round trip because the caller (the history
-    backfill) has learned about films for a month that was already frozen: the
-    verdicts in it were settled and must not be rewritten, but the **Movies**
-    section is a record of what was watched, and leaving it stale would make the
-    month contradict the plan that just told the user what it found.
-    """
-    await db.execute(
-        "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
-        (json.dumps(list(movies or [])), user_id, _validate_month(month)),
-    )
 
 
 async def list_months(user_id: int) -> list[str]:
@@ -575,86 +631,49 @@ async def list_months(user_id: int) -> list[str]:
     return [r["month"] for r in rows]
 
 
-async def add_show(user_id: int, month: str, show: dict) -> None:
-    """Upsert a title+season into `user_id`'s `month`, creating the month row if
-    needed. Keyed by (media, match_source, match_id, season): a new one is
-    inserted as a full record; an existing one is updated in place with whatever
-    updatable keys `show` carries (so this doubles as a live-counts writer)."""
-    month = _validate_month(month)
-    key_params = row_params(show)
+async def months_with_shows(user_id: int) -> set[str]:
+    """The months that actually HOLD something for this user.
 
-    def _work(conn: db.Connection) -> None:
-        conn.execute(
-            "INSERT INTO distrakt_months "
-            "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
-            "VALUES (?, ?, 0, NULL, NULL, ?) ON CONFLICT(user_id, month) DO NOTHING",
-            (user_id, month, db.now()),
-        )
-        existing = conn.execute(
-            f"SELECT match_id FROM distrakt_shows {_ROW_WHERE}",
-            (user_id, month, *key_params),
-        ).fetchone()
-        if existing is None:
-            conn.execute(_INSERT_SHOW_SQL, _show_params(user_id, month, normalize_show(show)))
-            return
-        updates = _coerce_update(show)
-        if not updates:
-            return
-        cols = list(updates)
-        set_clause = ", ".join(f"{c} = ?" for c in cols)
-        params = [(1 if updates[c] else 0) if c in _BOOL_COLUMNS else updates[c] for c in cols]
-        params += [user_id, month, *key_params]
-        conn.execute(f"UPDATE distrakt_shows SET {set_clause} {_ROW_WHERE}", params)
-
-    await db.transaction(_work)
-
-
-async def set_abandoned(user_id: int, month: str, key: ItemKey, season: int,
-                        abandoned: bool, abandoned_form: str | None = None) -> dict | None:
-    """Toggle a title's abandoned flag. Returns the updated record, or None if the
-    month or the title+season isn't present for this user.
-
-    When abandoning, `abandoned_form` freezes the rendered inline form so the
-    Discord line stays stable; un-abandoning clears it.
+    Distinct from list_months, which answers "has a month row", because the two
+    diverge the moment a month is emptied: removing its last record leaves the
+    month row behind, so the history backfill — which refuses to touch a month
+    somebody is already keeping — saw a curated month where there was nothing at
+    all, and could never refill it. What deserves protecting is the content, not
+    the row.
     """
-    month = _validate_month(month)
-    key_params = (key.media, key.match_source, key.match_id, int(season))
-
-    def _work(conn: db.Connection) -> dict | None:
-        row = conn.execute(
-            f"SELECT match_id FROM distrakt_shows {_ROW_WHERE}",
-            (user_id, month, *key_params),
-        ).fetchone()
-        if row is None:
-            return None
-        conn.execute(
-            f"UPDATE distrakt_shows SET abandoned = ?, abandoned_form = ? {_ROW_WHERE}",
-            (1 if abandoned else 0, abandoned_form if abandoned else None,
-             user_id, month, *key_params),
-        )
-        updated = conn.execute(
-            f"SELECT * FROM distrakt_shows {_ROW_WHERE}", (user_id, month, *key_params),
-        ).fetchone()
-        return row_to_show(updated)
-
-    return await db.transaction(_work)
+    rows = await db.fetch_all(
+        "SELECT DISTINCT month FROM distrakt_month_records WHERE user_id = ?", (user_id,))
+    return {r["month"] for r in rows}
 
 
-async def remove_show(user_id: int, month: str, key: ItemKey, season) -> bool:
-    """Delete a title+season from a user's month. Returns True if a record was
-    removed. Callers guard closed (frozen) months."""
-    month = _validate_month(month)
-    result = await db.execute(
-        f"DELETE FROM distrakt_shows {_ROW_WHERE}",
-        (user_id, month, key.media, key.match_source, key.match_id, int(season)),
+async def set_month_movies(user_id: int, month: str, movies: list[dict]) -> None:
+    """Replace just the films a CLOSED month snapshotted, leaving its records and
+    its closed flag alone.
+
+    Targeted rather than a save_month round trip because the caller (the history
+    backfill) has learned about films for a month that was already frozen: the
+    verdicts in it were settled and must not be rewritten, but the **Movies**
+    section is a record of what was seen, and leaving it stale would make the
+    month contradict the plan that just told the user what it found.
+    """
+    await db.execute(
+        "UPDATE distrakt_months SET movies_json = ? WHERE user_id = ? AND month = ?",
+        (json.dumps(list(movies or [])), user_id, _validate_month(month)),
     )
-    return result.rowcount > 0
+
+
+async def stamp_refreshed(user_id: int, month_key: str) -> None:
+    """Record that a user's open month totals were just refreshed."""
+    await db.execute(
+        "UPDATE distrakt_months SET totals_refreshed_at = ? WHERE user_id = ? AND month = ?",
+        (db.now(), user_id, _validate_month(month_key)),
+    )
 
 
 def frozen_shows(doc: dict) -> list[dict]:
     """LIVE SHOW SHAPE list for a CLOSED month, straight from the stored snapshot
     — NO Trakt calls. The freeze pass already persisted watched/total/cadence/
-    premiere/finale/started_airing/finished_airing/bucket onto each record, so the
+    premiere/finale/started_airing/finished_airing onto each record, so the
     discord_fmt renderers read them as-is."""
     out = []
     for rec in doc.get("shows") or []:
@@ -665,9 +684,399 @@ def frozen_shows(doc: dict) -> list[dict]:
     return out
 
 
-async def stamp_refreshed(user_id: int, month_key: str) -> None:
-    """Record that a user's open month totals were just refreshed."""
-    await db.execute(
-        "UPDATE distrakt_months SET totals_refreshed_at = ? WHERE user_id = ? AND month = ?",
-        (db.now(), user_id, _validate_month(month_key)),
+# ---------------------------------------------------------------------------
+# month records — what a month announced, and what it settled
+# ---------------------------------------------------------------------------
+
+async def month_records(user_id: int, month: str,
+                        kinds: Iterable[RecordKind | str] | None = None) -> list[dict]:
+    """One month's records, optionally narrowed to some kinds, in write order.
+
+    The kinds filter is here rather than in each caller because "which records
+    does this month's page show?" is asked three times with three different
+    answers (a month not begun, one in progress, one that is over), and each of
+    those is a list of kinds — not a different query.
+    """
+    clause, params = _kind_filter(kinds)
+    rows = await db.fetch_all(
+        "SELECT * FROM distrakt_month_records WHERE user_id = ? AND month = ?"
+        + clause + " ORDER BY rowid",
+        (user_id, _validate_month(month), *params),
     )
+    return [row_to_record(r) for r in rows]
+
+
+async def find_month_record(user_id: int, month: str, kind: RecordKind | str,
+                            key: ItemKey, season: int) -> dict | None:
+    """One month record, or None if that month holds no record of that kind for
+    that season."""
+    row = await db.fetch_one(
+        f"SELECT * FROM distrakt_month_records {_MONTH_ROW_WHERE}",
+        (user_id, _validate_month(month),
+         str(_validate_kind(kind, MONTH_KINDS, "month record")),
+         key.media, key.match_source, key.match_id, int(season)),
+    )
+    return None if row is None else row_to_record(row)
+
+
+async def add_month_record(user_id: int, month: str, record: dict) -> dict:
+    """Upsert one record onto `user_id`'s `month`, creating the month row if
+    needed. Returns the stored record.
+
+    Addressed by (month, kind, identity, season): a record that is not there is
+    inserted whole, and one that is gets the updatable fields `record` carries
+    written over it, so this doubles as the live-counts writer. Writing a
+    DIFFERENT kind for the same season adds a second record rather than replacing
+    the first — that is the premiered-and-settled-in-one-month case, and it is
+    what having `kind` in the key is for.
+    """
+    month = _validate_month(month)
+    kind = _validate_kind(record.get("kind"), MONTH_KINDS, "month record")
+    key_params = row_params(record)
+    address = (user_id, month, str(kind), *key_params)
+    now = db.now()
+
+    def _work(conn: db.Connection) -> dict:
+        conn.execute(
+            "INSERT INTO distrakt_months "
+            "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
+            "VALUES (?, ?, 0, NULL, NULL, ?) ON CONFLICT(user_id, month) DO NOTHING",
+            (user_id, month, now),
+        )
+        existing = conn.execute(
+            f"SELECT * FROM distrakt_month_records {_MONTH_ROW_WHERE}", address,
+        ).fetchone()
+        if existing is None:
+            conn.execute(_INSERT_MONTH_SQL, _insert_params(
+                user_id, MONTH_RECORD_COLUMNS,
+                {**normalize_show(record), "month": month,
+                 "created_at": record.get("created_at") or now}))
+        else:
+            updates = _differences(
+                existing, _coerce_update(record, _UPDATABLE_MONTH_COLUMNS))
+            if updates:
+                set_clause = ", ".join(f"{c} = ?" for c in updates)
+                conn.execute(
+                    f"UPDATE distrakt_month_records SET {set_clause} {_MONTH_ROW_WHERE}",
+                    [*updates.values(), *address])
+        return row_to_record(conn.execute(
+            f"SELECT * FROM distrakt_month_records {_MONTH_ROW_WHERE}", address).fetchone())
+
+    return await db.transaction(_work)
+
+
+async def remove_month_record(user_id: int, month: str, kind: RecordKind | str,
+                              key: ItemKey, season: int) -> bool:
+    """Delete one record from one month. True if there was one to delete."""
+    result = await db.execute(
+        f"DELETE FROM distrakt_month_records {_MONTH_ROW_WHERE}",
+        (user_id, _validate_month(month),
+         str(_validate_kind(kind, MONTH_KINDS, "month record")),
+         key.media, key.match_source, key.match_id, int(season)),
+    )
+    return result.rowcount > 0
+
+
+async def walk_settled(user_id: int, *,
+                       before: str | None = None) -> AsyncIterator[tuple[str, list[dict]]]:
+    """This user's months that settled something, NEWEST FIRST, each with its
+    completed and abandoned records. Yields (month, records).
+
+    A GENERATOR because the caller stops as soon as it finds what it is looking
+    for. When an episode is seen for a season nothing currently holds, the search
+    walks back one month at a time until it matches or the data runs out — and the
+    match is usually one or two months back, so reading every month first would
+    load a viewing life to answer a question about last month.
+
+    `before` excludes that month and everything after it, which is how the search
+    skips the months it has already asked about by other means.
+
+    Ordered by the month KEY, which is why month_key's zero-padding is
+    load-bearing: string order is chronological order only while every key is the
+    same width.
+    """
+    clause = " AND month < ?" if before else ""
+    params: tuple = (user_id, _validate_month(before)) if before else (user_id,)
+    kinds = [str(k) for k in sorted(SETTLED_KINDS)]
+    months = await db.fetch_all(
+        "SELECT DISTINCT month FROM distrakt_month_records WHERE user_id = ?"
+        + clause
+        + " AND kind IN (" + ", ".join(["?"] * len(kinds)) + ")"
+        + " ORDER BY month DESC",
+        (*params, *kinds),
+    )
+    for row in months:
+        yield row["month"], await month_records(user_id, row["month"], SETTLED_KINDS)
+
+
+# ---------------------------------------------------------------------------
+# user records — what the viewer is in the middle of, on no month at all
+# ---------------------------------------------------------------------------
+
+async def user_records(user_id: int,
+                       kinds: Iterable[RecordKind | str] | None = None) -> list[dict]:
+    """Everything this viewer is in the middle of, optionally narrowed to keepup
+    or catchup, in write order.
+
+    THIS IS THE VIEWER'S OWN LIST, read from one table. What somebody is behind on
+    is a fact about the person and true of no particular month, so it is stored as
+    one and not derived by unioning every month they have ever had.
+    """
+    clause, params = _kind_filter(kinds)
+    rows = await db.fetch_all(
+        "SELECT * FROM distrakt_user_seasons WHERE user_id = ?" + clause + " ORDER BY rowid",
+        (user_id, *params),
+    )
+    return [row_to_record(r) for r in rows]
+
+
+async def find_user_record(user_id: int, key: ItemKey, season: int) -> dict | None:
+    """This viewer's record for one season, or None if it is not on their list.
+
+    No month is named because there is none to name: a season is on the list at
+    most once, whichever month it premiered in and whichever month is on screen.
+    """
+    row = await db.fetch_one(
+        f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}",
+        (user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+    return None if row is None else row_to_record(row)
+
+
+async def add_user_record(user_id: int, record: dict) -> dict:
+    """Upsert one season onto the viewer's list. Returns the stored record.
+
+    Addressed by (identity, season) alone, so keepup and catchup can never both
+    hold the same season: a record already on the list is UPDATED, which includes
+    its kind changing when the season finishes airing.
+
+    `came_back` is written on an INSERT and left alone on an update — see
+    set_came_back for why only the viewer clears it.
+    """
+    _validate_kind(record.get("kind"), USER_KINDS, "user record")
+    key_params = row_params(record)
+    address = (user_id, *key_params)
+    now = db.now()
+
+    def _work(conn: db.Connection) -> dict:
+        existing = conn.execute(
+            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address,
+        ).fetchone()
+        if existing is None:
+            conn.execute(_INSERT_USER_SQL, _insert_params(
+                user_id, USER_RECORD_COLUMNS,
+                {**normalize_show(record), "created_at": record.get("created_at") or now}))
+        else:
+            updates = _differences(
+                existing, _coerce_update(record, _UPDATABLE_USER_COLUMNS))
+            if updates:
+                set_clause = ", ".join(f"{c} = ?" for c in updates)
+                conn.execute(
+                    f"UPDATE distrakt_user_seasons SET {set_clause} {_SEASON_WHERE}",
+                    [*updates.values(), *address])
+        return row_to_record(conn.execute(
+            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone())
+
+    return await db.transaction(_work)
+
+
+async def set_user_kind(user_id: int, key: ItemKey, season: int,
+                        kind: RecordKind | str) -> bool:
+    """Move a season between keepup and catchup. True if it was on the list.
+
+    Its own verb rather than an add_user_record call carrying only a kind, because
+    this is the one transition that happens with no new information: the season
+    lookup made for every listed season on every load already reports the last
+    episode's air date, and a date in the past means the season has finished
+    airing. Nothing extra is fetched to decide it.
+    """
+    result = await db.execute(
+        f"UPDATE distrakt_user_seasons SET kind = ? {_SEASON_WHERE}",
+        (str(_validate_kind(kind, USER_KINDS, "user record")),
+         user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+    return result.rowcount > 0
+
+
+async def set_came_back(user_id: int, key: ItemKey, season: int, came_back: bool) -> bool:
+    """Set or clear the marker that says this season had been finished and grew.
+    True if the season was on the viewer's list.
+
+    SET AS THE RECORD IS RE-ADDED AND BEFORE THE OLD MONTH RECORD GOES, because
+    that completed record is what proved the season was ever finished and it is
+    about to stop existing — "completed in July" has turned out not to be true, so
+    the month no longer settled it. The flag is the only thing that survives the
+    move, and it is what the page draws the marker from.
+
+    CLEARED BY THE VIEWER PRESSING THE ACKNOWLEDGE CONTROL and by nothing else —
+    not by time, not by the next load. That is why it is a stored flag with its
+    own verb rather than something computed from the record's dates.
+    """
+    result = await db.execute(
+        f"UPDATE distrakt_user_seasons SET came_back = ? {_SEASON_WHERE}",
+        (1 if came_back else 0,
+         user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+    return result.rowcount > 0
+
+
+async def remove_user_record(user_id: int, key: ItemKey, season: int) -> bool:
+    """Take one season off the viewer's list. True if it was there."""
+    result = await db.execute(
+        f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}",
+        (user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+    return result.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# moving a season between the two tables
+# ---------------------------------------------------------------------------
+
+async def migrate_to_month(user_id: int, key: ItemKey, season: int, *, month: str,
+                           kind: RecordKind | str,
+                           abandoned_form: str | None = None) -> dict | None:
+    """Move a season OFF the viewer's list and onto `month` as a completed or
+    abandoned record. Returns the record written, or None if it was not on the
+    list.
+
+    ONE TRANSACTION, because the two halves are one statement: a season that had
+    been removed from the list without its verdict being recorded would vanish
+    from the tracker entirely, and one recorded twice would be settled on a month
+    while still being listed as in progress.
+
+    The record's fields come from the row that was on the list — its counts, its
+    dates, who first filed it — because the verdict is about that season as the
+    viewer last had it, and re-deriving any of it here would be a second opinion.
+    """
+    settled = _validate_kind(kind, SETTLED_KINDS, "settled")
+    month = _validate_month(month)
+    address = (user_id, key.media, key.match_source, key.match_id, int(season))
+    now = db.now()
+
+    def _work(conn: db.Connection) -> dict | None:
+        row = conn.execute(
+            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone()
+        if row is None:
+            return None
+        record = {**row_to_record(row), "kind": str(settled), "month": month,
+                  "abandoned_form": abandoned_form if settled is RecordKind.ABANDONED else None,
+                  "created_at": now}
+        conn.execute(
+            "INSERT INTO distrakt_months "
+            "(user_id, month, closed, totals_refreshed_at, movies_json, created_at) "
+            "VALUES (?, ?, 0, NULL, NULL, ?) ON CONFLICT(user_id, month) DO NOTHING",
+            (user_id, month, now),
+        )
+        conn.execute(f"DELETE FROM distrakt_month_records {_MONTH_ROW_WHERE}",
+                     (user_id, month, str(settled), *address[1:]))
+        conn.execute(_INSERT_MONTH_SQL,
+                     _insert_params(user_id, MONTH_RECORD_COLUMNS, record))
+        conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
+        return row_to_record(conn.execute(
+            f"SELECT * FROM distrakt_month_records {_MONTH_ROW_WHERE}",
+            (user_id, month, str(settled), *address[1:])).fetchone())
+
+    return await db.transaction(_work)
+
+
+async def migrate_to_user(user_id: int, key: ItemKey, season: int, *, month: str,
+                          from_kind: RecordKind | str, kind: RecordKind | str,
+                          came_back: bool = False) -> dict | None:
+    """Move a season OFF `month`'s settled record and back onto the viewer's list.
+    Returns the record written, or None if that month held no such record.
+
+    THE MONTH RECORD DOES NOT SURVIVE. A month records what it settled, and this
+    one no longer settled it: un-abandoning says the viewer did not give up after
+    all, and a season that turned out to have more episodes was never finished in
+    that month. A record that has turned out to be false is worse than an absent
+    one.
+
+    `came_back` is written as part of this same transaction, which is the whole
+    reason it is a parameter here rather than a separate call afterwards — the
+    completed record it replaces is the only other thing that remembered the
+    season had once been finished, and between the two writes there would be a
+    moment when nothing did.
+    """
+    settled = _validate_kind(from_kind, SETTLED_KINDS, "settled")
+    listed = _validate_kind(kind, USER_KINDS, "user record")
+    month = _validate_month(month)
+    address = (user_id, key.media, key.match_source, key.match_id, int(season))
+    month_address = (user_id, month, str(settled), *address[1:])
+    now = db.now()
+
+    def _work(conn: db.Connection) -> dict | None:
+        row = conn.execute(
+            f"SELECT * FROM distrakt_month_records {_MONTH_ROW_WHERE}",
+            month_address).fetchone()
+        if row is None:
+            return None
+        record = {**row_to_record(row), "kind": str(listed),
+                  "came_back": came_back, "created_at": now}
+        conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
+        conn.execute(_INSERT_USER_SQL,
+                     _insert_params(user_id, USER_RECORD_COLUMNS, record))
+        conn.execute(f"DELETE FROM distrakt_month_records {_MONTH_ROW_WHERE}", month_address)
+        return row_to_record(conn.execute(
+            f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone())
+
+    return await db.transaction(_work)
+
+
+async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> list[str]:
+    """Delete one season from the viewer's list AND from every month that holds a
+    record of it. Returns the months that actually held one, sorted.
+
+    The ✕ on a row, and the only thing that ever removes a record. It is deliberately
+    blunt: a season can hold a premiere record on one month, a verdict on another
+    and a row on the viewer's list all at once, so anything narrower would leave a
+    copy behind and the row would come straight back on the next load with the ✕
+    looking broken.
+    """
+    address = (user_id, key.media, key.match_source, key.match_id, int(season))
+
+    def _work(conn: db.Connection) -> list[str]:
+        months = sorted({
+            r["month"] for r in conn.execute(
+                f"SELECT DISTINCT month FROM distrakt_month_records {_SEASON_WHERE}",
+                address).fetchall()
+        })
+        conn.execute(f"DELETE FROM distrakt_month_records {_SEASON_WHERE}", address)
+        conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
+        return months
+
+    return await db.transaction(_work)
+
+
+# ---------------------------------------------------------------------------
+# the prompt for an episode nothing knows about
+# ---------------------------------------------------------------------------
+
+async def dismiss_prompt(user_id: int, key: ItemKey, season: int) -> None:
+    """Record that the viewer declined to add a season the tracker has never
+    heard of.
+
+    Stored, because the prompt is DERIVED from the watch history on every load:
+    without somewhere to record the refusal the same episode would raise it again
+    on the very next one and the ✗ would do nothing. Per SEASON rather than per
+    episode, or every further episode of the same season would ask again.
+    """
+    await db.execute(
+        "INSERT INTO distrakt_prompt_dismissals "
+        "(user_id, media, match_source, match_id, season, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
+        (user_id, key.media, key.match_source, key.match_id, int(season), db.now()),
+    )
+
+
+async def dismissed_prompts(user_id: int) -> set[tuple[str, int]]:
+    """The (item key, season) pairs this viewer has already said no to, in the
+    same shape the watch-history lookups are keyed by."""
+    rows = await db.fetch_all(
+        "SELECT media, match_source, match_id, season FROM distrakt_prompt_dismissals "
+        "WHERE user_id = ?",
+        (user_id,),
+    )
+    return {(item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"]))
+            for r in rows}

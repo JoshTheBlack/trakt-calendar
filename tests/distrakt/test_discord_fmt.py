@@ -13,7 +13,6 @@ hand-verify against a real sample month's posts, with two corrections applied:
 """
 from __future__ import annotations
 
-import re
 import unittest
 
 from app.distrakt import discord_fmt as fmt
@@ -24,14 +23,27 @@ _NEXT_ID = [1000]
 def show(title, season, network="Net", watched=0, total=0, cadence=None,
          premiere=None, finale=None, started=False, finished=False,
          abandoned=False, abandoned_form=None):
+    """A LIVE SHOW SHAPE dict, the same flat shape live.py merges before anything
+    has written a stored record for it.
+
+    `bucket` is computed the same way live.py computes it — via `bucket_of` on
+    the merged fields — because every render_post2/`_group_by_bucket` caller in
+    production reads a STORED record's `bucket`, which was decided once from its
+    `kind` (store.BUCKET_OF_KIND) rather than re-derived at render time. Doing
+    the same here is what makes a fixture built by this helper look like what
+    the renderers actually receive, instead of the raw live merge they never
+    see directly.
+    """
     _NEXT_ID[0] += 1
-    return {
+    rec = {
         "trakt_id": _NEXT_ID[0], "title": title, "season": season, "network": network,
         "watched": watched, "total": total, "cadence": cadence,
         "premiere": premiere, "finale": finale,
         "started_airing": started, "finished_airing": finished,
         "abandoned": abandoned, "abandoned_form": abandoned_form,
     }
+    rec["bucket"] = str(fmt.bucket_of(rec, rec))
+    return rec
 
 
 class BucketOfTests(unittest.TestCase):
@@ -155,7 +167,12 @@ class FreezeFormTests(unittest.TestCase):
 
 
 class RenderPost1Tests(unittest.TestCase):
-    """Reproduces POST 1 of the hand-provided July sample."""
+    """Reproduces POST 1 of the hand-provided July sample.
+
+    `series_premieres`/`season_premieres` are handed to render_post1 already
+    split — the sample's season numbers happen to line up with the split
+    exactly (every title below is either a first season or a later one), which
+    is what lets this test build the two lists straight off them."""
 
     def setUp(self):
         self.emoji = {
@@ -163,7 +180,7 @@ class RenderPost1Tests(unittest.TestCase):
             "Peacock": ":_pe:", "Tubi": ":tubi:", "AS": ":_as:", "Hulu": ":_hu:",
             "Paramount+": ":_pa:", "SYFY": ":SYFY:",
         }
-        self.shows = [
+        self.series_premieres = [
             show("Little House on the Prairie", 1, "Netflix", 0, 8, "b", "7/9", None),
             show("The Westies", 1, "MGM+", 0, 8, "Sun", "7/12", "8/23"),
             show("Lucky", 1, "AppleTV+", 0, 7, "Tue", "7/14", "8/18"),
@@ -174,6 +191,8 @@ class RenderPost1Tests(unittest.TestCase):
             show("Breaking Bear", 1, "Tubi", 0, 8, "b", "7/24", None),
             show("President Curtis", 1, "AS", 0, 13, "Sun", "7/26", None),
             show("Furious", 1, "Hulu", 0, 8, "Mon", "7/27", "8/31"),
+        ]
+        self.season_premieres = [
             show("Silo", 3, "AppleTV+", 0, 10, "Fri", "7/3", "9/4"),
             show("King of the Hill", 15, "Hulu", 0, 10, "b", "7/20", None),
             show("Star Trek: Strange New Worlds", 4, "Paramount+", 0, 10, "Thu", "7/23", "9/24"),
@@ -200,59 +219,53 @@ class RenderPost1Tests(unittest.TestCase):
             "> :_pa:`Star Trek: Strange New Worlds S04 (0/10, Thu)` 7/23 - 9/24\n"
             "> :SYFY:`The Ark S03 (0/12, Wed)` 7/29 - 10/14"
         )
-        self.assertEqual(fmt.render_post1(self.shows, self.emoji, ":tv:", month="2026-07"), expected)
+        self.assertEqual(
+            fmt.render_post1(self.series_premieres, self.season_premieres, self.emoji, ":tv:"),
+            expected,
+        )
 
 
-class Post1IsAPremiereSnapshotTests(unittest.TestCase):
-    """POST 1 is the month's announcement snapshot: every show that PREMIERES this
-    month, kept once it starts airing. Only a premiere date that moves to another
-    month (or an abandon) removes it — that is what separates it from POST 2,
-    whose New/Returning sections empty as shows begin airing."""
+class RenderPost1TrustsTheStoredSplitTests(unittest.TestCase):
+    """render_post1 renders each argument under its own header and applies no
+    filter of its own — the split into series vs season premiere already
+    happened once, when the record was written (store.premiere_kind), and this
+    module re-checking it (or the airing state, or an abandon) at render time is
+    exactly how the announcement and reality could come to disagree."""
 
-    MONTH = "2026-07"
+    def test_a_later_season_handed_in_as_a_series_premiere_still_renders_as_new(self):
+        # Deliberately mis-filed to prove render_post1 takes the caller's word
+        # for which list a record is in rather than re-deriving it from the
+        # season number.
+        s = show("Renumbered", 3, total=8, premiere="7/1")
+        out = fmt.render_post1([s], [], {}, ":tv:")
+        self.assertIn("Renumbered", out.split("**Returning**")[0])
 
-    def _post1_titles(self, shows):
-        out = fmt.render_post1(shows, {}, ":tv:", month=self.MONTH)
-        # Each line is "> <emoji>`Title Snn (...)` ...": pull the title before Snn.
-        return [m.group(1) for ln in out.splitlines()
-                if ln.startswith("> ") for m in [re.search(r"`(.+?) S\d", ln)] if m]
-
-    def test_a_premiere_that_has_started_airing_stays_in_post1(self):
-        """The bug: once episodes began, the show dropped out of the
-        announcement. It must not."""
-        aired = show("Already Airing", 1, "HBO", 3, 8, "Sun", "7/6", "8/24",
-                     started=True, finished=False)
-        self.assertIn("Already Airing", self._post1_titles([aired]))
-
-    def test_a_finished_or_completed_premiere_still_stays(self):
-        binged = show("Bingewatched", 1, "Netflix", 8, 8, "b", "7/2", None,
-                      started=True, finished=True)
-        self.assertIn("Bingewatched", self._post1_titles([binged]))
-
-    def test_a_carryover_from_a_prior_month_is_not_announced(self):
-        """Premiered in June, still airing in July — it belongs to June's
-        announcement, not this one, even though it's in July's roster."""
-        june = show("June Carryover", 2, "AMC", 4, 10, "Mon", "6/15", "8/1",
-                    started=True)
-        self.assertNotIn("June Carryover", self._post1_titles([june]))
-
-    def test_a_premiere_whose_date_moved_out_of_the_month_is_pruned(self):
-        moved = show("Slipped to August", 1, "Hulu", 0, 8, "Fri", "8/3", None)
-        self.assertNotIn("Slipped to August", self._post1_titles([moved]))
-
-    def test_an_abandoned_premiere_is_dropped(self):
-        gone = show("Dropped It", 1, "Peacock", 1, 8, "Tue", "7/9", None,
+    def test_nothing_is_filtered_by_airing_state_or_by_being_given_up_on(self):
+        """A season the month announced stays announced whatever it has since
+        become — still airing, fully watched, or turned away. Only the ✕ removes
+        a record, and that happens before render_post1 ever sees it."""
+        aired = show("Already Airing", 1, watched=3, total=8, cadence="Sun",
+                     premiere="7/6", finale="8/24", started=True, finished=False)
+        binged = show("Bingewatched", 1, watched=8, total=8, cadence="b",
+                      premiere="7/2", started=True, finished=True)
+        gone = show("Dropped It", 1, watched=1, total=8, premiere="7/9",
                     started=True, abandoned=True)
-        self.assertNotIn("Dropped It", self._post1_titles([gone]))
+        out = fmt.render_post1([aired, binged, gone], [], {}, ":tv:")
+        for title in ("Already Airing", "Bingewatched", "Dropped It"):
+            self.assertIn(title, out)
 
-    def test_season_one_is_new_and_later_seasons_are_returning(self):
-        s1 = show("Fresh", 1, "FX", 0, 8, "Sun", "7/10", None)
-        s3 = show("Back Again", 3, "FX", 0, 8, "Sun", "7/11", None, started=True)
-        out = fmt.render_post1([s1, s3], {}, ":tv:", month=self.MONTH)
-        new_block, returning_block = out.split("**Returning**")
-        self.assertIn("Fresh", new_block)
-        self.assertNotIn("Back Again", new_block)
-        self.assertIn("Back Again", returning_block)
+    def test_new_and_returning_each_sort_by_their_own_premiere_date(self):
+        earlier_title_later_date = show("Second", 1, premiere="7/20")
+        later_title_earlier_date = show("First", 1, premiere="7/2")
+        out = fmt.render_post1(
+            [earlier_title_later_date, later_title_earlier_date], [], {}, ":tv:")
+        self.assertLess(out.index("First"), out.index("Second"))
+
+    def test_link_is_appended_only_when_given(self):
+        without_link = fmt.render_post1([], [], {}, ":tv:")
+        with_link = fmt.render_post1([], [], {}, ":tv:", link_url="https://example.test/c/abc")
+        self.assertNotIn("example.test", without_link)
+        self.assertIn("https://example.test/c/abc", with_link)
 
 
 class RenderPost2Tests(unittest.TestCase):
@@ -372,15 +385,12 @@ class RenderPost2Tests(unittest.TestCase):
         self.assertIn("**Abandoned**\n> :_nf: ~~`Cancelled Show S01 (2/8)`~~", rendered)
 
 
-class WhichMonthMaySayWhatTests(unittest.TestCase):
-    """ONE rule, two faces. Cleanup and Keepup are statements about work in hand,
-    so only the month actually in progress carries them: a month that is over
-    settled both when it froze, and a month that has not begun has neither yet.
-
-    The rule is a single table (MONTH_BUCKETS) read by the roster filter and by
-    the post alike, so what the page lists and what the post says can never
-    disagree about which month is which.
-    """
+class RenderPost2NeverAnnouncesPremieresTests(unittest.TestCase):
+    """POST 2 answers a different question from POST 1: what is in hand and what
+    got settled, never what began the month. discord_fmt.READER_BUCKETS states
+    this once for every standing, and this class exercises render_post2 directly
+    against it rather than through a row list built for the page — the page's
+    filtering is routes.py's job now (_rows_for), not this module's."""
 
     def setUp(self):
         self.emoji = {}
@@ -393,22 +403,19 @@ class WhichMonthMaySayWhatTests(unittest.TestCase):
                  abandoned=True, abandoned_form="`Given Up S01 (2/8)`"),
         ]
 
-    # Every premiere in the roster above falls in this month, so the standing rule
-    # is what the assertions below are reading rather than the premiere rule. The
-    # premiere rule has its own class.
-    MONTH = "2026-09"
-
-    def _titles(self, standing):
-        return [s["title"] for s in fmt.month_view(self.roster, standing, self.MONTH)]
-
-    def test_the_month_in_progress_still_carries_everything(self):
-        """The one standing that was never wrong."""
+    def test_the_month_in_progress_carries_keepup_cleanup_completed_and_abandoned(self):
         rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
                                     standing=fmt.MonthStanding.CURRENT)
-        for header in ("## **Cleanup**", "## **Keepup**", "**New Shows**",
-                       "**Returning**", "**Completed**", "**Abandoned**"):
+        for header in ("## **Cleanup**", "## **Keepup**", "**Completed**", "**Abandoned**"):
             self.assertIn(header, rendered)
-        self.assertEqual(len(self._titles(fmt.MonthStanding.CURRENT)), len(self.roster))
+
+    def test_the_month_in_progress_never_carries_new_or_returning(self):
+        """The reversal: POST 2 used to announce premieres in the one standing
+        that carried everything else. It carries neither section now, ever."""
+        rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
+                                    standing=fmt.MonthStanding.CURRENT)
+        self.assertNotIn("New Shows", rendered)
+        self.assertNotIn("**Returning**", rendered)
 
     def test_a_month_that_is_over_carries_only_its_verdicts_and_its_films(self):
         rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
@@ -416,85 +423,34 @@ class WhichMonthMaySayWhatTests(unittest.TestCase):
                                     standing=fmt.MonthStanding.PAST)
         self.assertNotIn("Cleanup", rendered)
         self.assertNotIn("Keepup", rendered)
-        self.assertNotIn("New Shows", rendered)
-        self.assertNotIn("Returning", rendered)
         self.assertIn("**Completed**", rendered)
         self.assertIn("**Abandoned**", rendered)
         self.assertIn("A Film", rendered)
-        self.assertEqual(self._titles(fmt.MonthStanding.PAST), ["All Watched", "Given Up"])
 
-    def test_a_month_that_has_not_begun_carries_neither_cleanup_nor_keepup(self):
-        """The reported case: a title given up on in the month in progress showed
-        up in a later month's Cleanup, because it had been carried forward and
-        the later month bucketed it live like any other."""
+    def test_a_month_that_has_not_begun_says_nothing_at_all(self):
+        """Not merely no Cleanup/Keepup (already true before) — no New/Returning
+        either, so a future month's second notice renders empty."""
         rendered = fmt.render_post2(self.roster, self.emoji, ":tv:",
                                     standing=fmt.MonthStanding.FUTURE)
-        self.assertNotIn("Cleanup", rendered)
-        self.assertNotIn("Keepup", rendered)
-        self.assertIn("**New Shows**", rendered)
-        self.assertNotIn("Airing Weekly", rendered)
-        self.assertNotIn("Finale Aired", rendered)
-        self.assertNotIn("Airing Weekly", self._titles(fmt.MonthStanding.FUTURE))
+        self.assertEqual(rendered, "")
 
     def test_the_default_is_the_month_in_progress(self):
         """A caller that only wants the markup — a test, a preview — gets the
-        full shape without stating a month, as render_post1 does."""
+        full shape without stating a standing, as render_post1 needs no
+        argument to fall back on either."""
         self.assertEqual(fmt.render_post2(self.roster, self.emoji, ":tv:"),
                          fmt.render_post2(self.roster, self.emoji, ":tv:",
                                           standing=fmt.MonthStanding.CURRENT))
 
-    def test_a_row_a_month_may_not_show_is_only_hidden_never_dropped(self):
-        """month_view filters a view; the roster it was given is untouched, and
-        the stored rows behind it are what roll into the month they belong to."""
-        before = list(self.roster)
-        fmt.month_view(self.roster, fmt.MonthStanding.PAST, self.MONTH)
-        self.assertEqual(self.roster, before)
-
-
-class NewAndReturningMeanPremieredHereTests(unittest.TestCase):
-    """A month announces the seasons that START in it. Anything else on its
-    roster that has not begun airing buckets as new/returning all the same, and
-    without the premiere test the page and the second notice re-announce a season
-    that belongs to some other month — which the first notice never did."""
-
-    def setUp(self):
-        self.month = "2026-09"
-        self.here = show("Starts Here", 1, total=8, premiere="9/4")
-        self.elsewhere = show("Started In June", 2, total=8, premiere="6/2")
-        self.undated = show("No Premiere Known", 1, total=8)
-
-    def _titles(self, month):
-        return [s["title"] for s in fmt.month_view(
-            [self.here, self.elsewhere, self.undated], fmt.MonthStanding.CURRENT, month)]
-
-    def test_a_season_that_premiered_elsewhere_is_not_this_month_s_news(self):
-        self.assertEqual(self._titles(self.month), ["Starts Here"])
-
-    def test_the_page_and_the_second_notice_agree_with_the_first(self):
-        """The asymmetry that made this visible: POST 1 applied the test and the
-        other two readers did not, so one announced two shows and the rest three."""
-        rows = fmt.month_view([self.here, self.elsewhere], fmt.MonthStanding.CURRENT,
-                              self.month)
-        post1 = fmt.render_post1([self.here, self.elsewhere], {}, ":tv:", month=self.month)
-        post2 = fmt.render_post2(rows, {}, ":tv:", standing=fmt.MonthStanding.CURRENT)
-        self.assertIn("Starts Here", post1)
-        self.assertNotIn("Started In June", post1)
-        self.assertIn("Starts Here", post2)
-        self.assertNotIn("Started In June", post2)
-
-    def test_a_month_that_cannot_be_read_applies_no_premiere_test(self):
-        """A rendering-only caller with nothing to compare against gets the rows
-        rather than an empty list — the same tolerance _month_number has."""
-        self.assertEqual(len(self._titles(None)), 3)
-
 
 class BucketVocabularyTests(unittest.TestCase):
-    """This module DECIDES a bucket; the closed set of them is named beside the
-    column that stores it, and its own tests live with it in test_store.py."""
+    """This module DECIDES a bucket for a not-yet-stored season; the closed set
+    of buckets is named beside the column that stores one, and its own tests
+    live with it in test_store.py."""
 
     def test_bucket_of_answers_with_a_member(self):
-        show = {"watched": 8, "total": 8, "started_airing": True}
-        self.assertIs(fmt.bucket_of(show, show), fmt.Bucket.COMPLETED)
+        s = {"watched": 8, "total": 8, "started_airing": True}
+        self.assertIs(fmt.bucket_of(s, s), fmt.Bucket.COMPLETED)
 
     def test_every_bucket_gets_a_group_whether_or_not_anything_lands_in_it(self):
         """Callers read one bucket without first checking that it exists."""

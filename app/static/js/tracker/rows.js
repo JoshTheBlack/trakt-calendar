@@ -28,18 +28,76 @@ const byPremiere = (a, b) => (premiereKey(a) - premiereKey(b)) || byTitle(a, b);
 // knows one — a month waiting to be imported reads very differently from one
 // that simply has nothing on it yet, and the blank list looks identical either
 // way. Falls back to the generic line for every month that is just empty.
-function renderShowList(shows, movies, emptyNote) {
+// A question the history pull raised that only the viewer can settle. Thin on
+// purpose: it says only what the history event itself said, because the season
+// lookup that would fill in counts and dates is exactly the cost this row exists
+// to defer until somebody actually wants it.
+//
+// Drawn ABOVE every section rather than inside one — it is not a bucket and it
+// is not part of the month; it is a question, and a question buried under six
+// headings is a question nobody answers.
+//
+// TWO QUESTIONS SHARE ONE ROW because they read the same way and are answered the
+// same way; only the sentence and what ✓ does differ. Saying no is one statement
+// either way — do not put this on my list — so both send the same dismissal.
+//
+// The title and the ids travel on the row's dataset rather than through the
+// onclick attribute, for the reason deleteFilm already documents: a show called
+// "Good Luck, Have Fun, Don't Die" carries both quote characters, and either one
+// ends the attribute early and kills the handler.
+const ASK_KINDS = {
+    unknown: {
+        sentence: 'Should we add this to Distrakt?',
+        yesTitle: 'Add this season',
+        yes: 'addUnknownSeason',
+    },
+    givenUp: {
+        sentence: "You'd given this up. Add it back to Distrakt?",
+        yesTitle: 'Put this season back on your list',
+        yes: 'resumeGivenUpSeason',
+    },
+};
+
+function askRow(u, kind) {
+    const ask = ASK_KINDS[kind];
+    const ep = `S${String(u.season).padStart(2, '0')}E${String(u.number).padStart(2, '0')}`;
+    const label = `${u.title || 'Something'} ${ep}`;
+    const args = `'${esc(u.key)}', ${u.season}, this`;
+    return `
+        <div class="distrakt-unknown-row" data-key="${esc(u.key)}" data-season="${u.season}"
+             data-title="${esc(u.title || '')}" data-ids="${esc(JSON.stringify(u.ids || {}))}">
+            <span class="distrakt-unknown-text">You watched <strong>${esc(label)}</strong>. ${esc(ask.sentence)}</span>
+            <span class="distrakt-row-actions">
+                <button type="button" class="btn-ghost small" title="${esc(ask.yesTitle)}"
+                        onclick="${ask.yes}(${args})">✓</button>
+                <button type="button" class="btn-ghost small" title="Don't ask about this season again"
+                        onclick="dismissUnknownSeason(${args})">✗</button>
+            </span>
+        </div>`;
+}
+
+// The ones nothing knows about first: a title the tracker has never heard of is a
+// bigger gap than one it holds a verdict on.
+function renderAsks(unknown, givenUp) {
+    return (unknown || []).map(u => askRow(u, 'unknown')).join('')
+        + (givenUp || []).map(u => askRow(u, 'givenUp')).join('');
+}
+
+function renderShowList(shows, movies, emptyNote, unknown, givenUp) {
     const host = document.getElementById('distraktShowList');
     const films = movies || [];
+    const asks = renderAsks(unknown, givenUp);
     if (!shows.length && !films.length) {
-        host.innerHTML = `<div class="distrakt-empty">${esc(emptyNote || 'Nothing tracked yet this month.')}</div>`;
+        // The questions still stand on an otherwise empty month: they come from
+        // viewing, not from anything the month holds.
+        host.innerHTML = asks + `<div class="distrakt-empty">${esc(emptyNote || 'Nothing tracked yet this month.')}</div>`;
         return;
     }
     const groups = {};
     BUCKET_ORDER.forEach(b => groups[b] = []);
     shows.forEach(s => (groups[s.bucket] || (groups[s.bucket] = [])).push(s));
 
-    let html = '';
+    let html = asks;
     BUCKET_ORDER.forEach(bucket => {
         const rows = groups[bucket] || [];
         if (!rows.length) return;
@@ -100,8 +158,15 @@ function filmRow(m) {
 // so there is more of it than there was. Said out loud rather than left to be
 // noticed: a title you remember finishing, sitting back on the list with no
 // explanation, reads as the page having got it wrong.
+// It is a button because dismissing it is the only thing that clears it — not
+// time and not the next load — so the mark has to be pressable where it is read.
+// The row itself opens the details modal on click; details.js ignores clicks that
+// land on a button, so this one does not have to fight it.
 function returnMark(s) {
-    return s.returned ? ` <span class="distrakt-return" title="More of this season exists than when you finished it">back</span>` : '';
+    if (!s.returned) return '';
+    return ` <button type="button" class="distrakt-return"
+            title="More of this season exists than when you finished it — click when you've seen this"
+            onclick="acknowledgeReturn('${esc(s.key)}', ${s.season}, this)">back</button>`;
 }
 
 function showRow(s) {

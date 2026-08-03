@@ -122,7 +122,8 @@ class StandaloneTestCase(unittest.TestCase):
         self.assertFalse(user["distrakt_approved"])
         self.assertFalse(user["calendar_approved"])
         self.assertEqual(self.value(
-            "SELECT COUNT(*) FROM distrakt_shows WHERE user_id = ?", (self.user_id,)), 0)
+            "SELECT COUNT(*) FROM distrakt_month_records WHERE user_id = ?",
+            (self.user_id,)), 0)
         self.assertEqual(self.value(
             "SELECT COUNT(*) FROM linked_identities WHERE user_id = ?", (self.user_id,)), 0)
 

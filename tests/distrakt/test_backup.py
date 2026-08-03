@@ -25,28 +25,35 @@ from app.providers.base import ItemKey
 from app.distrakt import watch_history as wh
 from app.config import Settings, save_settings
 from app.main import app
+from tests.distrakt.test_store import month_back
 from tests.support import ORIGIN, migrated_db, new_db_path
 
 async def _seed_dataset(user_id: int, *, tag: str) -> None:
-    """A dataset touching all five tables, so a round trip has something to
+    """A dataset touching every exported table, so a round trip has something to
     prove in each of them."""
-    await distrakt.add_show(user_id, "2026-07", {
+    await distrakt.add_month_record(user_id, "2026-07", {
         "ids": {"trakt": 101, "tmdb": 555, "slug": f"slug-{tag}"}, "season": 1,
         "title": f"Show {tag}", "network": "Net", "media": "show",
+        "kind": distrakt.RecordKind.SERIES_PREMIERE,
     })
-    await distrakt.add_show(user_id, "2026-08", {
+    await distrakt.add_month_record(user_id, "2026-08", {
         "ids": {"trakt": 202, "tmdb": 606, "slug": f"other-{tag}"}, "season": 2,
-        "title": "Second",
+        "title": "Second", "kind": distrakt.RecordKind.SEASON_PREMIERE,
     })
-    # A frozen month, which is where the snapshot columns and movies_json matter.
+    # The viewer's own list, which belongs to no month at all.
+    await distrakt.add_user_record(user_id, {
+        "ids": {"trakt": 303, "tmdb": 707}, "season": 1, "title": f"Listed {tag}",
+        "kind": distrakt.RecordKind.KEEPUP, "watched": 2, "total": 6,
+    })
+    await distrakt.dismiss_prompt(user_id, ItemKey("show", "tmdb", "808"), 3)
+    # A frozen month, which is where the snapshot fields and movies_json matter.
     doc = await distrakt.load_month(user_id, "2026-07")
     doc["closed"] = True
     doc["totals_refreshed_at"] = db.now()
     doc["movies"] = [{"title": f"Film {tag}", "year": 2026, "watched_at": "2026-07-04T00:00:00Z"}]
     doc["shows"][0].update({
         "watched": 4, "total": 8, "cadence": "Tue", "premiere": "7/1",
-        "finale": "7/29", "bucket": "keepup",
-        "started_airing": True, "finished_airing": False,
+        "finale": "7/29", "started_airing": True, "finished_airing": False,
     })
     await distrakt.save_month(user_id, doc)
     await wh._save(user_id, {
@@ -105,7 +112,13 @@ class RoundTripTests(ExportTestCase):
         rec = distrakt.frozen_shows(july)[0]
         self.assertTrue(rec["started_airing"])
         self.assertFalse(rec["finished_airing"])
-        self.assertEqual((rec["watched"], rec["total"], rec["bucket"]), (4, 8, "keepup"))
+        self.assertEqual((rec["watched"], rec["total"], rec["bucket"]), (4, 8, "new"))
+        # the viewer's own list and their dismissals are not a month's, and come
+        # back on their own
+        listed, = await distrakt.user_records(self.user_id)
+        self.assertEqual((listed["kind"], listed["watched"]), ("keepup", 2))
+        self.assertEqual(await distrakt.dismissed_prompts(self.user_id),
+                         {("show:tmdb:808", 3)})
         # and the watch-history side came back too
         state = await wh._load(self.user_id)
         self.assertEqual(wh.watched_map(state), {("show:tmdb:555", 1): 4})
@@ -140,7 +153,8 @@ class RestoreScopingTests(ExportTestCase):
         # ...and the id in the file bought nothing: the original owner is untouched.
         self.assertEqual(await distrakt.list_months(self.user_id), ["2026-07", "2026-08"])
         rows = await db.fetch_all(
-            "SELECT user_id, COUNT(*) c FROM distrakt_shows GROUP BY user_id ORDER BY user_id")
+            "SELECT user_id, COUNT(*) c FROM distrakt_month_records "
+            "GROUP BY user_id ORDER BY user_id")
         self.assertEqual([(r["user_id"], r["c"]) for r in rows],
                          [(self.user_id, 2), (self.other_id, 2)])
 
@@ -148,7 +162,9 @@ class RestoreScopingTests(ExportTestCase):
         await _seed_dataset(self.user_id, tag="mine")
         doc = await distrakt.export_user_data(self.user_id)
         # A month that is NOT in the document must be gone after the restore.
-        await distrakt.add_show(self.user_id, "2026-09", {"ids": {"tmdb": 777}, "season": 1})
+        await distrakt.add_month_record(self.user_id, "2026-09", {
+            "ids": {"tmdb": 777}, "season": 1,
+            "kind": distrakt.RecordKind.SERIES_PREMIERE})
         self.assertIn("2026-09", await distrakt.list_months(self.user_id))
 
         await distrakt.restore_user_data(self.user_id, doc)
@@ -173,7 +189,8 @@ class RestoreScopingTests(ExportTestCase):
         await _seed_dataset(self.user_id, tag="mine")
         doc = await distrakt.export_user_data(self.user_id)
         before = await distrakt.export_user_data(self.user_id)
-        doc["distrakt_shows"].append({"month": "2026-07", "match_id": None, "season": None})
+        doc["distrakt_month_records"].append(
+            {"month": "2026-07", "kind": "completed", "match_id": None, "season": None})
 
         with self.assertRaises(db.DatabaseError):
             await distrakt.restore_user_data(self.user_id, doc)
@@ -299,12 +316,17 @@ class LegacyBackupTests(ExportTestCase):
                                 "default_network_emoji": ":tv:", "updated_at": 1750000000}],
         }
 
+    async def _march(self, kind: str) -> dict:
+        records = await distrakt.month_records(self.user_id, "2026-03", [kind])
+        self.assertEqual(len(records), 1, f"expected exactly one {kind} record")
+        return records[0]
+
     async def test_a_pre_rekey_backup_still_restores_its_roster(self):
         await distrakt.restore_user_data(self.user_id, self._legacy_doc())
 
         march = await distrakt.load_month(self.user_id, "2026-03")
         self.assertTrue(march["closed"])
-        row, = march["shows"]
+        row = await self._march("abandoned")
         # Re-keyed by running the waterfall over the ids the row already held —
         # the same resolution the migration does to a live database.
         self.assertEqual((row["match_source"], row["match_id"]), ("tmdb", "9001"))
@@ -316,12 +338,35 @@ class LegacyBackupTests(ExportTestCase):
         self.assertTrue(row["started_airing"])
         self.assertEqual([m["title"] for m in march["movies"]], ["Frozen Film"])
 
+    async def test_a_row_that_premiered_and_was_settled_in_one_month_becomes_two(self):
+        """Its 3/1 premiere falls in the month it sits on AND the month recorded a
+        verdict on it. Two statements about March, not a duplicate — and season 2
+        makes the premiere a returning one rather than a series premiere."""
+        await distrakt.restore_user_data(self.user_id, self._legacy_doc())
+        self.assertEqual(
+            {r["kind"] for r in await distrakt.month_records(self.user_id, "2026-03")},
+            {"season_premiere", "abandoned"})
+        # A premiere record carries no viewer progress, whatever the row said.
+        self.assertEqual((await self._march("season_premiere"))["watched"], 0)
+
+    async def test_a_row_still_in_progress_becomes_the_viewer_s_own_record(self):
+        """It belongs to no month: the old row's month said only where the copy
+        happened to sit."""
+        doc = self._legacy_doc()
+        doc["distrakt_shows"][0].update({"abandoned": 0, "bucket": "keepup",
+                                         "premiere": "1/5", "finished_airing": 0})
+        await distrakt.restore_user_data(self.user_id, doc)
+        self.assertEqual(await distrakt.month_records(self.user_id, "2026-03"), [])
+        listed, = await distrakt.user_records(self.user_id)
+        self.assertEqual((listed["kind"], listed["watched"], listed["total"]),
+                         ("keepup", 3, 8))
+
     async def test_the_provenance_column_is_read_under_its_old_name(self):
-        """`source` became `added_by`. Losing it would make every restored row
+        """`source` became `added_by`. Losing it would make every restored record
         look hand-added, and removing one would stop marking the calendar."""
         await distrakt.restore_user_data(self.user_id, self._legacy_doc())
-        row, = (await distrakt.load_month(self.user_id, "2026-03"))["shows"]
-        self.assertEqual(row["added_by"], distrakt.ADDED_BY_CALENDAR)
+        self.assertEqual((await self._march("abandoned"))["added_by"],
+                         distrakt.ADDED_BY_CALENDAR)
 
     async def test_the_emoji_map_survives_because_nothing_else_holds_it(self):
         await distrakt.restore_user_data(self.user_id, self._legacy_doc())
@@ -362,19 +407,21 @@ class LegacyBackupTests(ExportTestCase):
         self.assertEqual(await distrakt.list_months(self.user_id), [])
 
     async def test_a_restored_legacy_row_can_then_be_addressed(self):
-        """The point of the re-key: after the restore the row answers to the
-        identity the page would name it by, so it can be abandoned or removed."""
+        """The point of the re-key: after the restore the records answer to the
+        identity the page would name them by, so they can be removed."""
         await distrakt.restore_user_data(self.user_id, self._legacy_doc())
         key = ItemKey("show", "tmdb", "9001")
-        self.assertTrue(await distrakt.remove_show(self.user_id, "2026-03", key, 2))
+        self.assertEqual(
+            await distrakt.remove_season_everywhere(self.user_id, key, 2), ["2026-03"])
         self.assertEqual((await distrakt.load_month(self.user_id, "2026-03"))["shows"], [])
 
 class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
-    """The one migration in this change that moves user data.
+    """The migration that re-keyed the tracker onto shared title ids.
 
-    Written against a database built at schema 17 and then migrated, because the
-    thing under test is the SQL that carries rows across — a database created at
-    18 has nothing to carry.
+    Written against a database built at schema 17 and then migrated to 18 exactly,
+    because the thing under test is the SQL that carries rows across — a database
+    created at 18 has nothing to carry, and one taken further has had those rows
+    restructured again by 19.
     """
     async def asyncSetUp(self):
         self.path = new_db_path("m18")
@@ -408,13 +455,17 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
             "INSERT INTO distrakt_watch_state (user_id, last_synced) VALUES (?, '2026-03-20')",
             (self.user_id,))
 
+    async def _to_18(self) -> int:
+        return await db.run(lambda conn: db_migrate_to(conn, 18))
+
     async def test_a_roster_row_is_carried_across_and_re_keyed(self):
         await self._seed_v17()
-        self.assertEqual(await db.migrate(), 18)
+        self.assertEqual(await self._to_18(), 18)
 
-        row, = (await distrakt.load_month(self.user_id, "2026-03"))["shows"]
+        row = await db.fetch_one(
+            "SELECT * FROM distrakt_shows WHERE user_id = ?", (self.user_id,))
         self.assertEqual((row["match_source"], row["match_id"]), ("tmdb", "4242"))
-        self.assertEqual(row["ids"], {"trakt": 601, "tmdb": 4242, "slug": "old"})
+        self.assertEqual((row["trakt_id"], row["tmdb"], row["slug"]), (601, 4242, "old"))
         self.assertEqual((row["title"], row["season"], row["watched"], row["total"]),
                          ("Old", 2, 3, 8))
         # `source` is now `added_by`, with its value unchanged.
@@ -424,7 +475,7 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
         """The progress table never recorded a shared id, so the only place to get
         one is the roster row for the same title."""
         await self._seed_v17()
-        await db.migrate()
+        await self._to_18()
         state = await wh._load(self.user_id)
         self.assertEqual(wh.watched_map(state), {("show:tmdb:4242", 2): 1})
 
@@ -433,7 +484,7 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
         there is nothing to re-key from. Clearing `last_synced` with them is what
         makes the next sync fetch them again rather than start after them."""
         await self._seed_v17()
-        await db.migrate()
+        await self._to_18()
         state = await wh._load(self.user_id)
         self.assertEqual(state["movies"], {})
         self.assertIsNone(state["last_synced"])
@@ -444,12 +495,227 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
         destroys it nor invents an identity for it."""
         await self._seed_v17(tmdb=None)
         with self.assertRaises(RuntimeError) as caught:
-            await db.migrate()
+            await self._to_18()
         self.assertIn("shared ids", str(caught.exception))
         # Nothing was changed: the roster is still there, in its old shape.
         self.assertEqual(await db.schema_version(), 17)
         self.assertEqual(
             await db.fetch_value("SELECT COUNT(*) FROM distrakt_shows"), 1)
+
+
+class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
+    """The split of the one roster table into month records and user records.
+
+    Written against a database built at schema 18 and then migrated, because the
+    thing under test is the SQL that classifies existing rows — a database created
+    at 19 has nothing to classify.
+
+    MONTHS ARE DERIVED FROM THE CLOCK. A migration is not date-dependent, but a
+    test that spells a month out is one bad rollover away from asserting about a
+    month that has since become the current one for some other reason.
+    """
+    async def asyncSetUp(self):
+        new_db_path("m19")
+        await db.run(lambda conn: db_migrate_to(conn, 18))
+        now = db.now()
+        result = await db.execute(
+            "INSERT INTO users (username, is_admin, calendar_approved, distrakt_approved, "
+            "created_at, updated_at) VALUES ('tracker', 1, 1, 1, ?, ?)", (now, now))
+        self.user_id = result.lastrowid
+        self.older, self.newer = month_back(2), month_back(1)
+        self.under_way, self.ahead = month_back(0), month_back(-1)
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def _row(self, month: str, *, tmdb: int = 4242, season: int = 2,
+                   title: str = "Old", premiere: str | None = None, bucket: str | None = None,
+                   abandoned: int = 0, watched: int = 3, total: int = 8,
+                   cadence: str | None = "Mon", finished_airing: int = 0) -> None:
+        await db.execute(
+            "INSERT INTO distrakt_shows (user_id, month, media, match_source, match_id, "
+            "trakt_id, tmdb, slug, title, season, network, abandoned, watched, total, "
+            "cadence, premiere, bucket, started_airing, finished_airing, added_by) "
+            "VALUES (?, ?, 'show', 'tmdb', ?, 601, ?, 'old', ?, ?, 'HBO', ?, ?, ?, ?, ?, ?, "
+            "1, ?, 'calendar')",
+            (self.user_id, month, str(tmdb), tmdb, title, season, abandoned, watched,
+             total, cadence, premiere, bucket, finished_airing))
+
+    async def _month(self, month: str, *, closed: bool) -> None:
+        await db.execute(
+            "INSERT INTO distrakt_months (user_id, month, closed, created_at) "
+            "VALUES (?, ?, ?, 0) ON CONFLICT(user_id, month) DO UPDATE SET "
+            "closed = excluded.closed",
+            (self.user_id, month, int(closed)))
+
+    async def _to_19(self) -> int:
+        return await db.migrate()
+
+    async def _kinds(self, month: str) -> set[str]:
+        return {r["kind"] for r in await distrakt.month_records(self.user_id, month)}
+
+    async def test_a_verdict_stays_on_the_month_that_reached_it(self):
+        await self._row(self.newer, bucket="completed", premiere=None)
+        self.assertEqual(await self._to_19(), 19)
+        self.assertEqual(await self._kinds(self.newer), {"completed"})
+        self.assertEqual(await distrakt.user_records(self.user_id), [])
+
+    async def test_the_abandoned_flag_counts_as_a_verdict_on_its_own(self):
+        """The flag is what the viewer pressed and the bucket is what the month
+        wrote down when it froze; a row carrying one without the other is still a
+        row about giving something up."""
+        await self._row(self.newer, abandoned=1, bucket=None)
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), {"abandoned"})
+
+    async def test_a_row_that_premiered_in_its_month_becomes_a_premiere_record(self):
+        month_number = distrakt.parse_month_key(self.newer)[1]
+        await self._row(self.newer, season=1, premiere=f"{month_number}/12")
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), {"series_premiere"})
+        # A premiere record carries no viewer progress.
+        record, = await distrakt.month_records(self.user_id, self.newer)
+        self.assertEqual(record["watched"], 0)
+        self.assertEqual(record["total"], 8)
+        # ...and the season is still in progress, so it is on the viewer's list too
+        listed, = await distrakt.user_records(self.user_id)
+        self.assertEqual((listed["kind"], listed["watched"]), ("keepup", 3))
+
+    async def test_a_later_season_premiere_is_a_returning_one(self):
+        month_number = distrakt.parse_month_key(self.newer)[1]
+        await self._row(self.newer, season=3, premiere=f"{month_number}/12")
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), {"season_premiere"})
+
+    async def test_a_row_that_premiered_elsewhere_produces_no_premiere_record(self):
+        """Its premiere date names a different month, so this month announced
+        nothing about it."""
+        other = (distrakt.parse_month_key(self.newer)[1] % 12) + 1
+        await self._row(self.newer, premiere=f"{other}/12")
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), set())
+
+    async def test_premiered_and_settled_in_one_month_becomes_two_records(self):
+        month_number = distrakt.parse_month_key(self.newer)[1]
+        await self._row(self.newer, season=1, premiere=f"{month_number}/2",
+                        bucket="completed", watched=8)
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), {"series_premiere", "completed"})
+        self.assertEqual((await distrakt.month_records(
+            self.user_id, self.newer, ["completed"]))[0]["watched"], 8)
+
+    async def test_the_copies_of_a_carried_season_collapse_to_one_user_record(self):
+        """The whole point of the split: a season carried onto three months had
+        three rows saying the same thing about the viewer, and the most recent one
+        carries the most recent counts."""
+        await self._row(month_back(3), watched=1)
+        await self._row(self.older, watched=4)
+        await self._row(self.newer, watched=7)
+        await self._to_19()
+        listed, = await distrakt.user_records(self.user_id)
+        self.assertEqual(listed["watched"], 7)
+
+    async def test_a_season_settled_anywhere_is_off_the_viewer_s_list(self):
+        """Giving up on a season in one month is a statement about the season, so
+        an older in-progress copy must not resurrect it."""
+        await self._row(self.older, watched=1)
+        await self._row(self.newer, abandoned=1)
+        await self._to_19()
+        self.assertEqual(await distrakt.user_records(self.user_id), [])
+        self.assertEqual(await self._kinds(self.newer), {"abandoned"})
+
+    async def test_a_month_still_ahead_becomes_its_own_premieres(self):
+        """A month the calendar has not reached can hold nothing BUT its
+        premieres: the recent-viewing sweep, the only other way a row gets onto a
+        month, was skipped for a month nobody had reached. So its rows need no
+        premiere date to be classified — being there is the proof."""
+        await self._month(self.ahead, closed=False)
+        await self._row(self.ahead, season=1, premiere=None)
+        await self._row(self.ahead, tmdb=7373, season=4, premiere=None)
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.ahead),
+                         {"series_premiere", "season_premiere"})
+        self.assertEqual(await distrakt.user_records(self.user_id), [],
+                         "a month ahead's announcements became work in hand")
+
+    async def test_a_month_ahead_does_not_fill_this_months_verdicts(self):
+        """The bug this guards. Read as the viewer's own list, a pre-filled month
+        ahead is where a title turned away on the calendar sits — and the very
+        same mark that means "never put this in that month" then reads as "I was
+        following this and stopped" and lands as a verdict on the month UNDER WAY.
+        Opening the current month filled its Abandoned section with next month's
+        titles."""
+        await self._month(self.ahead, closed=False)
+        await self._row(self.ahead, premiere=None)
+        await self._to_19()
+        listed = await distrakt.user_records(self.user_id)
+        self.assertEqual(listed, [], "next month's title was on the viewer's list")
+        self.assertEqual(await self._kinds(self.under_way), set())
+
+    async def test_a_month_ahead_never_wins_the_latest_month_race(self):
+        """A season the viewer is part-way through, also sitting on a month ahead,
+        must take its counts from the month that has actually happened — the one
+        ahead has no counts, because nothing on it has aired."""
+        await self._month(self.under_way, closed=False)
+        await self._month(self.ahead, closed=False)
+        await self._row(self.under_way, watched=5)
+        await self._row(self.ahead, watched=0, premiere=None)
+        await self._to_19()
+        listed, = await distrakt.user_records(self.user_id)
+        self.assertEqual(listed["watched"], 5)
+
+    async def test_a_season_that_has_finished_airing_is_one_to_catch_up_on(self):
+        await self._row(self.newer, finished_airing=1)
+        await self._to_19()
+        self.assertEqual((await distrakt.user_records(self.user_id))[0]["kind"], "catchup")
+
+    async def test_a_season_that_drops_all_at_once_is_too(self):
+        await self._row(self.newer, cadence="b")
+        await self._to_19()
+        self.assertEqual((await distrakt.user_records(self.user_id))[0]["kind"], "catchup")
+
+    async def test_a_month_that_never_froze_keeps_its_seasons_and_says_what_it_lost(self):
+        """The live fields were written back only when a month FROZE, so a month
+        still open has no premiere date on any of its rows and nothing can prove
+        which of them it announced. Guessing one would put a title in a month's
+        announcement on no evidence, so the seasons are kept as the viewer's own
+        records and the months are named in the log instead — an operator seeing an
+        empty announcement should not have to work out why."""
+        await self._month(self.newer, closed=False)
+        await self._row(self.newer, premiere=None, cadence=None)
+        with self.assertLogs("app.db", level="INFO") as caught:
+            await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), set())
+        self.assertEqual(len(await distrakt.user_records(self.user_id)), 1)
+        said = "\n".join(caught.output)
+        self.assertIn(self.newer, said)
+        self.assertIn("premiere date", said)
+
+    async def test_a_frozen_month_is_not_reported_as_having_lost_anything(self):
+        """It stored its premiere dates when it froze, so it had everything the
+        classification needed."""
+        month_number = distrakt.parse_month_key(self.older)[1]
+        await self._month(self.older, closed=True)
+        await self._row(self.older, season=1, premiere=f"{month_number}/12")
+        with self.assertLogs("app.db", level="INFO") as caught:
+            await self._to_19()
+        self.assertEqual(await self._kinds(self.older), {"series_premiere"})
+        self.assertNotIn("premiere date", "\n".join(caught.output))
+
+    async def test_a_row_that_cannot_be_addressed_refuses_to_migrate(self):
+        """A record is filed under its identity and, on a month, under its month
+        key. A row missing either would land where nothing could reach it."""
+        await db.execute(
+            "UPDATE distrakt_shows SET month = 'nonsense' WHERE user_id = ?", (self.user_id,))
+        await self._row(self.newer)
+        await db.execute(
+            "UPDATE distrakt_shows SET match_id = '' WHERE user_id = ?", (self.user_id,))
+        with self.assertRaises(RuntimeError) as caught:
+            await self._to_19()
+        self.assertIn("shared id", str(caught.exception))
+        # Nothing was changed: the rows are still there, in their old shape.
+        self.assertEqual(await db.schema_version(), 18)
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM distrakt_shows"), 1)
 
 
 def db_migrate_to(conn, version: int) -> int:

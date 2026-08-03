@@ -11,14 +11,13 @@ This fills those months in from the one record that does go back: the user's own
 Trakt watch history.
 
 WHAT A BACKFILLED MONTH CONTAINS: the seasons FINISHED during it, and nothing
-else. "Finished during M" is the same rule the live tracker uses for its
-Completed bucket — every episode of the season watched, and the last of them
-watched inside M — so a season finished in May lands in May and in no other
-month, and the "remove it from the months before" problem never arises. Shows
-that were in progress but never finished are not recorded: nothing reads them
-(app/ranker/imports.py only ever asks for `bucket == 'completed'`), and
-inventing a Cleanup/Keepup verdict for a month nobody was watching would be a
-guess.
+else — one completed record apiece. "Finished during M" is the same rule the live
+tracker settles a season by: every episode of the season watched, and the last of
+them watched inside M, so a season finished in May lands in May and in no other
+month. Shows that were in progress but never finished are not recorded: what
+somebody is part-way through is a fact about them TODAY and belongs on their own
+list, not on a month they were not being tracked in, and inventing a verdict for
+a month nobody was watching would be a guess.
 
 Each month is written CLOSED, exactly as a month that had been tracked and then
 frozen: the ranker import and the month view both read a frozen month straight
@@ -343,11 +342,17 @@ def _empty_plan(start_month: str, end_month: str) -> dict:
 
 
 def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dict:
-    """One finished season as a frozen roster row.
+    """One finished season as that month's COMPLETED record.
 
-    watched == total by construction: this row only exists because every episode
-    was watched, and a frozen month's counts are never recomputed, so writing
-    anything else here would render as a part-watched season forever.
+    The kind is stated outright rather than left to be worked out later: this row
+    exists precisely because the sweep proved every episode was watched inside the
+    month, which is the whole of what "completed in M" means. A record whose kind
+    had to be inferred afterwards from its counts would be a second opinion about
+    something already known here.
+
+    watched == total by construction, for the same reason, and a settled record's
+    counts are never recomputed — so writing anything else would render as a
+    part-watched season forever.
     """
     return {
         "media": Media.SHOW,
@@ -355,14 +360,13 @@ def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dic
         "title": str(ident.get("title") or ""),
         "season": int(season),
         "network": str(ident.get("network") or ""),
-        "abandoned": False,
+        "kind": distrakt.RecordKind.COMPLETED,
         "abandoned_form": None,
         "watched": total,
         "total": total,
         "cadence": detail.get("cadence"),
         "premiere": detail.get("premiere"),
         "finale": detail.get("finale"),
-        "bucket": distrakt.Bucket.COMPLETED,
         "started_airing": True,
         "finished_airing": True,
         "added_by": distrakt.ADDED_BY_HISTORY,

@@ -12,9 +12,13 @@ visible and removable; spreading a ranker-shaped query into the other feature's
 data layer would make each one harder to change without thinking about the
 other.
 
-WHAT COUNTS AS FINISHED is not re-derived here. A closed month has its verdict
-already stored; an open one is computed with the same function that renders it,
-so the import can never disagree with what the user is looking at.
+WHAT COUNTS AS FINISHED is not re-derived here, and no longer depends on whether
+the month is still open: finishing a season WRITES a record onto the month it was
+finished in, in every standing, so the import reads the same stored verdict the
+other feature's own screen renders from. It used to recompute an open month live,
+because an open month had no stored verdict — that cost the import a history sync
+and a season lookup per title, and it was a second copy of the rule that could
+disagree with what the user was looking at.
 
 AVAILABILITY IS ABSENCE, NOT REFUSAL. An account without the other feature is
 told nothing about it — no disabled button, no explanatory error. The route
@@ -26,7 +30,6 @@ import asyncio
 import logging
 from typing import Any
 
-from . import sources as ranker_sources
 from .sources import Media, TitleRef, int_or_none
 from .. import auth, db, distrakt
 from ..providers.trakt import TraktError, calendar as trakt_calendar, detail as trakt_detail
@@ -59,7 +62,7 @@ async def tracker_available(user_id: int) -> bool:
 
 async def _has_data(user_id: int) -> bool:
     show = await db.fetch_value(
-        "SELECT 1 FROM distrakt_shows WHERE user_id = ? LIMIT 1", (user_id,))
+        "SELECT 1 FROM distrakt_month_records WHERE user_id = ? LIMIT 1", (user_id,))
     if show:
         return True
     return bool(await db.fetch_value(
@@ -97,7 +100,8 @@ async def available_years(user_id: int, media: Media) -> list[int]:
         )
     else:
         rows = await db.fetch_all(
-            "SELECT DISTINCT substr(month, 1, 4) AS y FROM distrakt_shows WHERE user_id = ?",
+            "SELECT DISTINCT substr(month, 1, 4) AS y FROM distrakt_month_records "
+            "WHERE user_id = ?",
             (user_id,),
         )
     years = {int(row["y"]) for row in rows if (row["y"] or "").isdigit()}
@@ -136,19 +140,16 @@ async def _finished_shows(user_id: int, year: int | None) -> list[TitleRef]:
     and ids are all things the other feature refreshes as it goes — the newest
     row is the one that saw them last.
     """
-    months = await db.fetch_all(
-        "SELECT month, closed FROM distrakt_months WHERE user_id = ? ORDER BY month",
-        (user_id,),
-    )
-    wanted = [row for row in months
-              if year is None or str(row["month"]).startswith(f"{year:04d}")]
+    months = await distrakt.list_months(user_id)
+    wanted = [month for month in months
+              if year is None or str(month).startswith(f"{year:04d}")]
 
     # item key -> {identity fields, the completed seasons and their totals}
     finished: dict[str, dict[str, Any]] = {}
     # Months in order, so a later month's record overwrites an earlier one's —
     # which is what makes the identity fields come from the most recent row.
-    for row in wanted:
-        for record in await _completed_in(user_id, row["month"], bool(row["closed"])):
+    for month in wanted:
+        for record in await _completed_in(user_id, month):
             entry = finished.setdefault(str(distrakt.record_key(record)), {"seasons": {}})
             entry.update({
                 "title": record.get("title") or "",
@@ -179,52 +180,17 @@ async def _finished_shows(user_id: int, year: int | None) -> list[TitleRef]:
     return refs
 
 
-async def _completed_in(user_id: int, month: str, closed: bool) -> list[dict[str, Any]]:
-    """The records finished during one month.
+async def _completed_in(user_id: int, month: str) -> list[dict[str, Any]]:
+    """The seasons this account finished during one month.
 
-    A CLOSED MONTH ALREADY DECIDED. Its verdict was computed and stored the
-    moment it froze, and its counts stopped being refreshed then — recomputing
-    from them would unfinish shows that are finished.
-
-    AN OPEN MONTH HAS NO STORED VERDICT, and the counts on its rows are not the
-    live ones either: they are only written back when the month freezes, so a
-    season finished this month sits at 0/0 in the database while the tracker's
-    own screen shows it completed. Reading those rows directly is how this
-    import came to report nothing for an account looking at six finished shows.
-    So it asks the other feature to work the month out exactly as it does for
-    display — one function, one answer, no second copy of the rule that can
-    drift from what the user is looking at.
-
-    That costs what viewing the month costs: an incremental history sync plus a
-    per-record season lookup, both already cached. It happens once, on an
-    explicit import, never on a render. With no usable credential the month is
-    skipped rather than guessed at — an import that silently reported "nothing
-    finished" is the bug this replaced.
+    ONE READ, WHATEVER THE MONTH'S STANDING. Finishing a season writes a record
+    onto the month the watch history says it was finished in, so a month that is
+    still running holds its verdicts exactly as a frozen one does. Nothing is
+    recomputed and nothing is fetched: the counts on the record are the ones the
+    other feature's own screen shows, which is what stops this import ever
+    disagreeing with it.
     """
-    if closed:
-        rows = await db.fetch_all(
-            "SELECT * FROM distrakt_shows WHERE user_id = ? AND month = ?", (user_id, month))
-        # Read through the tracker's own row reader rather than as raw rows: the
-        # id columns become the `ids` map every caller below expects, and this
-        # module does not need a second opinion about the roster's storage shape.
-        return [distrakt.row_to_show(row) for row in rows
-                if row["bucket"] == distrakt.Bucket.COMPLETED]
-
-    settings = await ranker_sources.user_trakt_settings(user_id)
-    if settings is None or not settings.trakt_configured:
-        logger.info("tracker import: skipping open month %s for user %s — no usable credential",
-                    month, user_id)
-        return []
-    doc = await distrakt.load_month(user_id, month)
-    records = (doc or {}).get("shows") or []
-    if not records:
-        return []
-    # allow_degrade: one show whose season lookup fails is rendered from its
-    # last-known fields rather than taking the whole import down with it.
-    shows = await distrakt.compute_live_shows(
-        user_id, records, settings, allow_degrade=True)
-    return [show for show in shows
-            if show.get("bucket") == distrakt.Bucket.COMPLETED]
+    return await distrakt.month_records(user_id, month, [distrakt.RecordKind.COMPLETED])
 
 
 # ---------------------------------------------------------------------------

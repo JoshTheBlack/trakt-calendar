@@ -63,9 +63,10 @@ class ChooserTestCase(AppTestCase):
         """Give the user a month, as a restore or an earlier visit would have."""
         year, month = _month(offset)
         month_key = distrakt_store.month_key(year, month)
-        asyncio.run(distrakt_store.add_show(self.user_id, month_key, {
+        asyncio.run(distrakt_store.add_month_record(self.user_id, month_key, {
             "ids": {"trakt": 77, "tmdb": 77, "slug": "a-show"}, "season": 1,
             "title": "A Show", "network": "HBO", "media": "show",
+            "kind": distrakt_store.RecordKind.SERIES_PREMIERE,
         }))
         return month_key
 

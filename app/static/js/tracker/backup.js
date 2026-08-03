@@ -37,9 +37,14 @@ async function onRestoreFileChosen() {
         input.value = '';
         return;
     }
+    // Counted across BOTH record tables, because a season lives in up to two of
+    // three places and a count off one of them would understate the file: a month
+    // holds what it announced and what it settled, while what is still in hand
+    // belongs to no month at all.
     const months = (trackerRestorePayload.distrakt_months || []).length;
-    const shows = (trackerRestorePayload.distrakt_shows || []).length;
-    setRestoreStatus(`Ready to restore ${months} month(s) and ${shows} show row(s).`, true);
+    const rows = (trackerRestorePayload.distrakt_month_records || []).length
+        + (trackerRestorePayload.distrakt_user_seasons || []).length;
+    setRestoreStatus(`Ready to restore ${months} month(s) and ${rows} record(s).`, true);
     document.getElementById('restoreConfirm').hidden = false;
 }
 

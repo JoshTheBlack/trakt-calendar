@@ -195,7 +195,9 @@ async def list_sessions(user_id: int):
 WIPE_DATA_TABLES: tuple[tuple[str, str], ...] = (
     ("not_watching_shows", "user_id"),
     ("calendar_view_state", "user_id"),
-    ("distrakt_shows", "user_id"),
+    ("distrakt_month_records", "user_id"),
+    ("distrakt_user_seasons", "user_id"),
+    ("distrakt_prompt_dismissals", "user_id"),
     ("distrakt_months", "user_id"),
     ("distrakt_watch_state", "user_id"),
     ("distrakt_show_progress", "user_id"),

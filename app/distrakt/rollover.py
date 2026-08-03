@@ -17,16 +17,14 @@ from datetime import date
 from .. import clock, db
 from ..calendar import state as calendar_state
 from ..providers.base import Media, collect_ids
-from . import calendar_import, store
+from . import calendar_import, lifecycle, store
 from .live import compute_live_shows, live_key
 from .store import (
     ADDED_BY_HISTORY,
     list_months,
     load_month,
     new_month_doc,
-    normalize_show,
     record_key,
-    remove_show,
     save_month,
 )
 
@@ -145,30 +143,45 @@ async def maybe_freeze_prior(user_id: int, month_key: str, settings, today: date
 
 
 async def freeze_month(user_id: int, doc: dict, settings) -> dict:
-    """Compute one final live snapshot for `doc`, persist counts/dates/bucket onto
-    each stored record, mark it closed, stamp totals_refreshed_at, save. After
-    this the month renders forever from the frozen snapshot with no Trakt calls."""
+    """Take one final snapshot for `doc`: correct what its records say about the
+    shows, snapshot the films watched during it, mark it closed and stamp
+    totals_refreshed_at. After this the month renders from its own rows with no
+    provider calls.
+
+    WHAT A FREEZE MAY REWRITE HAS NARROWED, because the records themselves now
+    carry their own answers. A settled record — completed, abandoned — already
+    holds the counts it settled on, written at the moment the verdict was reached,
+    and re-deriving them here from today's history would let a rewatch months
+    later rewrite what a month recorded. A PREMIERE record carries no viewer
+    progress at all, so the only thing a lookup can tell us about it is the
+    catalogue half: how many episodes the season turned out to have, and when it
+    started and ended. That much is corrected, here and afterwards, because it is
+    a statement about the show rather than about the viewer.
+    """
     from . import watch_history
     records = doc.get("shows") or []
-    state = await watch_history.sync_and_baseline(settings, user_id, records, force=True)
-    watched_lookup = watch_history.watched_map(state)
-    shows = await compute_live_shows(user_id, records, settings, fresh=True,
-                                    watched_lookup=watched_lookup)
-    by_key = {live_key(s): s for s in shows}
-    for rec in records:
-        s = by_key.get(live_key(rec))
-        if not s:
-            continue
-        rec["watched"] = int(s["watched"])
-        rec["total"] = int(s["total"])
-        rec["cadence"] = s["cadence"]
-        rec["premiere"] = s["premiere"]
-        rec["finale"] = s["finale"]
-        rec["started_airing"] = bool(s["started_airing"])
-        rec["finished_airing"] = bool(s["finished_airing"])
-        rec["bucket"] = s["bucket"]
-    # Snapshot the movies watched during this month so the frozen POST 2 keeps its
-    # **Movies** section offline forever.
+    premieres = [rec for rec in records if rec["kind"] in store.PREMIERE_KINDS]
+    # THIS MONTH'S history is re-read from its own first day, and every title's
+    # progress is NOT re-fetched. The film list has to be complete, because a
+    # closed month never recomputes it. Re-asking what the viewer has seen of every
+    # title ever tracked buys nothing here: a settled record already holds the
+    # counts it settled on, and a premiere record carries no viewer progress to
+    # correct. The two used to be one switch, so a freeze cost a provider call per
+    # tracked title to write down a dozen films — and read the wrong month's
+    # history while doing it, because the only start it knew was today's.
+    state = await watch_history.sync_and_baseline(
+        settings, user_id, records, since_month=doc["month"])
+    if premieres:
+        shows = await compute_live_shows(user_id, premieres, settings, fresh=True,
+                                         watched_lookup=watch_history.watched_map(state))
+        by_key = {live_key(s): s for s in shows}
+        for rec in premieres:
+            live = by_key.get(live_key(rec))
+            if live is None:
+                continue
+            rec.update({field: live[field] for field in lifecycle.CATALOGUE_FIELDS})
+    # Snapshot the movies watched during this month so the frozen second notice
+    # keeps its **Movies** section offline forever.
     mstart, mend = watch_history.month_bounds(doc["month"])
     doc["movies"] = watch_history.movies_in_range(state, mstart, mend)
     doc["closed"] = True
@@ -177,43 +190,20 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     return doc
 
 
-async def drop_seasons_finished_earlier(user_id: int, month_key: str,
-                                        shows: list[dict]) -> list[dict]:
-    """Take out the shows whose season was finished BEFORE this month began, and
-    delete their roster rows.
-
-    Completed means "completed this month". A month gets its roster once, when it
-    is created, and a title on it can be finished at any point afterwards — a
-    premiere imported into August that turns out to have been finished off in
-    July would otherwise sit in August's Completed for good, being fully watched.
-    This closes that window on every load.
-
-    Removed rather than re-bucketed: with the Completed rule applied, a fully
-    watched season would otherwise fall through to Cleanup or Keepup and read as
-    work outstanding, which is worse than not being on the month at all. It is
-    still on the month it WAS finished in, which is also where the user's own
-    lists read it from (store.user_roster), so nothing is lost by taking it off
-    this one.
-
-    Only acts on a date it actually has: a season the history cache cannot date
-    (nothing dated for it, or a title that predates dated history and has not been
-    re-baselined yet) is left exactly where it is.
-    """
-    from . import watch_history
-    start, _ = watch_history.month_bounds(month_key)
-    keep, stale = [], []
-    for show in shows:
-        done = str(show.get("completed_on") or "")
-        (stale if done and done < start else keep).append(show)
-    for show in stale:
-        await remove_show(user_id, month_key, record_key(show), int(show["season"]))
-    return keep
-
-
 async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]:
-    """In-progress-but-unfinished shows from recent watch history not already in
-    the roster. A candidate is dropped if its season is fully watched (completed)
-    or has zero watched episodes (nothing in progress)."""
+    """Seasons from recent viewing that the viewer is part-way through, as records
+    for their OWN LIST rather than for any month.
+
+    A season somebody is in the middle of is a fact about them and about no
+    particular month, so this is the one source that seeds the viewer's list
+    directly. A candidate is dropped if its season is fully watched (there is
+    nothing left to get through) or has no episodes watched at all (nothing has
+    been started).
+
+    The kind — keepup or catchup — comes from the same season lookup that decides
+    whether the season is finished, so it costs nothing extra and is right from
+    the first write instead of being corrected on the next load.
+    """
     from .. import providers
     from ..providers.trakt.detail import fetch_season_detail
     port = providers.for_tracker()
@@ -247,8 +237,19 @@ async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]
         total = int(detail.get("total") or 0)
         watched = int(entry.get("watched") or 0)
         if total > 0 and watched >= total:
-            continue  # already completed -> not "in-progress-but-unfinished"
-        out.append(rec)
+            continue  # already finished -> nothing left on the pile
+        out.append({
+            **rec,
+            "kind": lifecycle.listed_kind(detail),
+            "watched": watched,
+            "total": total,
+            "cadence": detail.get("cadence"),
+            "premiere": detail.get("premiere"),
+            "finale": detail.get("finale"),
+            "started_airing": bool(detail.get("started_airing")),
+            "finished_airing": bool(detail.get("finished_airing")),
+            "added_by": ADDED_BY_HISTORY,
+        })
     return out
 
 
@@ -307,57 +308,45 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
 
 async def _initialize_month(user_id: int, month_key: str, settings,
                             today: date | None = None) -> dict:
-    """A brand-new month's contents: the calendar's premieres, plus — once the
-    month has begun — whatever a season part-way through in recent viewing adds
-    that the premieres did not. The second source only adds what the first did
-    not, so `added_by` records the truth about who put a row there rather than the
-    last writer to touch it.
+    """A brand-new month's contents: the calendar's premieres, and nothing else.
 
-    A NEW MONTH TAKES NOTHING FROM THE MONTH BEFORE IT. What the user is behind on
-    and what they are keeping up with are facts about the USER — true of no
-    particular month — and they are read live from every month at once
-    (store.user_roster), so there is nothing here for a new month to inherit.
-    Copying them forward is what made a month claim a title that premiered
-    somewhere else, gave a month built ahead of time a roster frozen at build
-    time, and read a calendar turn-away made during that wait as giving up on a
-    show that had never started. None of the three can be stated in a model where
-    a month holds only its own premieres.
+    A MONTH HOLDS WHAT BEGAN IN IT. What the viewer is behind on and what they are
+    keeping up with are facts about the VIEWER, true of no particular month, and
+    they live on their own list (store.user_records) — so there is nothing here for
+    a new month to inherit from the one before it. Copying them forward is what
+    made a month claim a title that premiered somewhere else, gave a month built
+    ahead of time a list frozen at build time, and read a calendar turn-away made
+    during that wait as giving up on a show that had never started. None of the
+    three can be stated in a model where a month holds only its own premieres.
 
-    A MONTH THAT HAS NOT BEGUN TAKES ITS PREMIERES AND NOTHING ELSE. The recent-
-    viewing sweep is a statement about NOW, and it has nothing to say about a
-    month nobody has reached; filed into one anyway its titles were bucketed by
-    whether they had aired YET, which they had not, so a season that began in
-    August was announced as new in October.
+    ONCE THE MONTH HAS BEGUN, recent viewing also seeds the VIEWER'S LIST — the
+    one way a season nobody's calendar announced is ever noticed at all. Those
+    records go onto the list rather than onto this month: being part-way through
+    something is a statement about now, and a month that has not been reached has
+    nothing to say about it. Filed into one anyway, such a title was announced as
+    that month's premiere because it had not aired YET by that month's reckoning,
+    so a season that began in August was announced as new in October.
     """
     doc = new_month_doc(month_key)
     present: set[tuple[str, int]] = set()
     year, month = store.parse_month_key(month_key)
     begun = month_committed(month_key, today)
 
-    # Read ONCE and applied to both sources below: a title the user has turned
-    # away on their calendar does not get built into a month at all. A month that
-    # opens with it listed as Abandoned is announcing a verdict on a show they had
-    # already said they were not following, and there is no row here yet for such
-    # a verdict to be about. WHEN the mark was made is what separates that from "I
-    # was following this and stopped", and it is read against a row that already
-    # exists — see routes._apply_not_watching.
+    # Read ONCE and applied to both sources below: a title the viewer has turned
+    # away on their calendar is not built in at all. A month that opens with it
+    # listed as given up on is announcing a verdict about a show they had already
+    # said they were not following, and there is no record here yet for such a
+    # verdict to be about.
     nw_ids = await calendar_state.not_watching_ids(user_id)
 
     # This month's premieres, minus not-watching.
     await calendar_import.add_premieres(doc, present, user_id, settings, year, month, nw_ids)
 
-    # In-progress-but-unfinished titles from recent history, only once the month
-    # has begun: what somebody is part-way through today is THIS month's material
-    # whichever month is being built, and it was the sweep that filed it under a
-    # month that has not happened. This is also the one way a title nobody's
-    # calendar announced gets onto the roster at all.
     if begun:
+        present |= {(str(store.record_key(rec)), int(rec["season"]))
+                    for rec in await store.user_records(user_id)}
         for rec in await history_records(settings, present):
             if calendar_import.matches_not_watching(rec, nw_ids):
                 continue
-            key = (str(record_key(rec)), int(rec["season"]))
-            if key in present:
-                continue
-            doc["shows"].append(normalize_show({**rec, "added_by": ADDED_BY_HISTORY}))
-            present.add(key)
+            await store.add_user_record(user_id, rec)
     return doc

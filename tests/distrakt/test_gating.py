@@ -59,6 +59,10 @@ DISTRAKT_POSTS = (
     "/api/distrakt/remove",
     "/api/distrakt/add",
     "/api/distrakt/abandon",
+    "/api/distrakt/acknowledge-return",
+    "/api/distrakt/unknown-add",
+    "/api/distrakt/unknown-resume",
+    "/api/distrakt/unknown-dismiss",
     "/api/distrakt/restore",
     "/api/distrakt/share-link",
     "/api/distrakt/add-completed",
@@ -206,16 +210,17 @@ class AdmittedActorTests(DistraktTestCase):
         reads is the session's, not anything the caller names."""
         owner = self.tracker_user("owner", token="owner-token")
         other = self.tracker_user("other", token="other-token")
-        asyncio.run(distrakt_routes.distrakt_store.add_show(owner, "2026-07", {
+        asyncio.run(distrakt_routes.distrakt_store.add_month_record(owner, "2026-07", {
             "ids": {"trakt": 42, "tmdb": 42, "slug": "secret-show"}, "season": 1,
             "title": "Secret Show", "network": "HBO", "media": "show",
+            "kind": distrakt_routes.distrakt_store.RecordKind.SERIES_PREMIERE,
         }))
 
         self.sign_in_as(other)
         listed = self.client.get("/api/distrakt/list?year=2026&month=7").json()
         self.assertEqual(listed["shows"], [])
         exported = self.client.get("/api/distrakt/export").json()
-        self.assertEqual(exported["distrakt_shows"], [])
+        self.assertEqual(exported["distrakt_month_records"], [])
 
         self.sign_in_as(owner)
         listed = self.client.get("/api/distrakt/list?year=2026&month=7").json()
@@ -267,9 +272,10 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
     def test_every_trakt_call_a_month_read_makes_carries_the_users_token(self):
         user_id = self.tracker_user(token="USER-A-TOKEN")
-        asyncio.run(distrakt_routes.distrakt_store.add_show(user_id, "2026-07", {
+        asyncio.run(distrakt_routes.distrakt_store.add_month_record(user_id, "2026-07", {
             "ids": {"trakt": 7, "tmdb": 1, "slug": "show"}, "season": 2, "title": "Show",
             "network": "HBO", "media": "show",
+            "kind": distrakt_routes.distrakt_store.RecordKind.SEASON_PREMIERE,
         }))
         recorder = RecordingClient()
         self.sign_in_as(user_id)
@@ -284,9 +290,10 @@ class RequestingUsersTokenTests(DistraktTestCase):
         first = self.tracker_user("first", token="FIRST-TOKEN")
         second = self.tracker_user("second", token="SECOND-TOKEN")
         for user_id in (first, second):
-            asyncio.run(distrakt_routes.distrakt_store.add_show(user_id, "2026-07", {
+            asyncio.run(distrakt_routes.distrakt_store.add_month_record(user_id, "2026-07", {
                 "ids": {"trakt": 7, "tmdb": 1, "slug": "show"}, "season": 2, "title": "Show",
                 "network": "HBO", "media": "show",
+                "kind": distrakt_routes.distrakt_store.RecordKind.SEASON_PREMIERE,
             }))
 
         seen = {}

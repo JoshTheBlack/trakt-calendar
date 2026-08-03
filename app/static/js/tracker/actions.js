@@ -1,8 +1,9 @@
 // What a row's own buttons do: forget a show, forget a film, abandon or
-// un-abandon a season.
+// un-abandon a season, and acknowledge a season that came back.
 //
-// All three are destructive-ish and all three confirm first; each ends by
-// handing the recomputed month back to applyMonthResponse.
+// The first three are destructive-ish and all three confirm first; each ends by
+// handing the recomputed month back to applyMonthResponse. Acknowledging is the
+// odd one out — it destroys nothing, so it neither confirms nor redraws.
 
 // Delete a show from the tracker entirely (cleanup mistakes, incl. abandoned ones).
 // A row the calendar put here is also marked not-watching there — otherwise a
@@ -67,6 +68,104 @@ async function deleteFilm(key, button) {
                 toast(e.message || 'Could not remove that film', false);
             }
         }, { danger: true });
+}
+
+// "I've seen that this one came back." No confirm — nothing is lost by pressing
+// it, and a confirm on a thing whose whole job is to be read once would be more
+// in the way than the mark is.
+//
+// The mark is removed from the page rather than the month redrawn: the server
+// answers with the acknowledgement alone (see api_distrakt_acknowledge_return),
+// because recomputing a month to drop one word would cost a season lookup per
+// listed title. Left in place if the request fails, so it is still there to press
+// again rather than silently gone while the flag is still set.
+async function acknowledgeReturn(key, season, button) {
+    try {
+        const res = await fetch('/api/distrakt/acknowledge-return', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, season })
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        button.remove();
+    } catch (e) {
+        toast(e.message || 'Could not dismiss that mark', false);
+    }
+}
+
+// "Yes, add that." The expensive half of the untracked-episode question: the row
+// itself cost nothing to draw, and this is where the season finally gets looked
+// up. The month comes back recomputed because a new row has appeared in one of
+// the buckets and the page has to redraw to show it.
+//
+// No confirm — it is an add, and the ✕ undoes it.
+async function addUnknownSeason(key, season, button) {
+    const row = button.closest('.distrakt-unknown-row');
+    let ids = {};
+    try { ids = JSON.parse((row && row.dataset.ids) || '{}'); } catch (e) { ids = {}; }
+    try {
+        const res = await fetch('/api/distrakt/unknown-add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                key, season, ids, title: (row && row.dataset.title) || '',
+                year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+            }),
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        toast('Added', true);
+        applyMonthResponse(d);  // a new row exists now, so the month is redrawn
+    } catch (e) {
+        toast(e.message || 'Could not add that season', false);
+    }
+}
+
+// "Yes, put that back." Cheaper than adding something new and not the same act:
+// the record already exists with the counts it was given up on, so nothing is
+// looked up — it just moves off the month that recorded the verdict and back onto
+// the list, and the calendar turn-away that came with it is undone at the same
+// time. The month is redrawn because a row has moved between sections.
+async function resumeGivenUpSeason(key, season, button) {
+    try {
+        const res = await fetch('/api/distrakt/unknown-resume', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                key, season,
+                year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+            }),
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        toast('Added back', true);
+        applyMonthResponse(d);
+    } catch (e) {
+        toast(e.message || 'Could not add that back', false);
+    }
+}
+
+// "No, and stop asking." The row is derived from viewing every time viewing is
+// read, so the refusal is recorded server-side or it comes straight back on the
+// next load. Nothing else on the page changes, so the row is taken out in place
+// rather than the whole month redrawn — and it is left standing if the request
+// failed, so it can be pressed again instead of vanishing while nothing was
+// written down.
+async function dismissUnknownSeason(key, season, button) {
+    const row = button.closest('.distrakt-unknown-row');
+    try {
+        const res = await fetch('/api/distrakt/unknown-dismiss', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, season }),
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        if (row) row.remove();
+    } catch (e) {
+        toast(e.message || 'Could not dismiss that', false);
+    }
 }
 
 async function toggleAbandon(key, season, abandoned) {

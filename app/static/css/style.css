@@ -943,12 +943,29 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .distrakt-show-row.unavailable { opacity: 0.6; }
 .distrakt-show-row.unavailable .distrakt-dates { color: var(--danger, #e0736b); font-style: italic; }
 /* A season that was finished and now has more of it. Quiet enough not to compete
-   with the title, loud enough that the row does not read as a mistake. */
+   with the title, loud enough that the row does not read as a mistake. It is a
+   button — pressing it is the only thing that clears the mark — so the browser's
+   own button styling is undone here and only the badge look is left. */
 .distrakt-return {
     margin-left: 6px; padding: 0 5px; border-radius: 6px; font-size: 0.62rem;
     text-transform: uppercase; letter-spacing: 0.06em; vertical-align: middle;
     color: var(--accent, #7fb2ff); border: 1px solid currentColor; opacity: 0.85;
+    background: none; font-family: inherit; font-weight: inherit; line-height: 1.6;
+    cursor: pointer;
 }
+.distrakt-return:hover { opacity: 1; }
+/* An episode watched that nothing here knows about. Thin, and set apart from the
+   bucket rows below it: it is a question rather than part of the month, and it
+   sits above every section because a question under six headings is one nobody
+   answers. */
+.distrakt-unknown-row {
+    display: flex; align-items: center; gap: 10px; padding: 7px 10px;
+    margin-bottom: 6px; border-radius: 8px; font-size: 0.82rem;
+    color: var(--text-faint); border: 1px dashed var(--border, #39404d);
+    background: color-mix(in srgb, var(--accent, #7fb2ff) 6%, transparent);
+}
+.distrakt-unknown-text { flex: 1 1 auto; min-width: 0; }
+.distrakt-unknown-row strong { color: var(--text, #e6e9ef); font-weight: 600; }
 .distrakt-badge {
     flex: 0 0 auto; width: 26px; height: 26px; display: flex; align-items: center;
     justify-content: center; font-size: 0.72rem; color: var(--text-faint); overflow: hidden;

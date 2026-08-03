@@ -46,6 +46,7 @@ from typing import Any, TypeVar
 
 import anyio.to_thread
 
+from . import clock
 from .config import DATA_DIR, ensure_data_dir
 
 logger = logging.getLogger(__name__)
@@ -1213,6 +1214,365 @@ def MIGRATION_18(conn: sqlite3.Connection) -> None:
         )
 
 
+# Migration 19 — month-facts and user-facts stop sharing one table.
+#
+# distrakt_shows held BOTH kinds of statement in one row: "this season premiered
+# in July" (a fact about July, true for ever) and "you are four episodes into it"
+# (a fact about the viewer, true only right now). Because they shared a row, the
+# only way to keep the second up to date was to copy the row onto every month the
+# season was live in, and the only way to ask what the viewer was behind on was to
+# union every month and dedupe. A title's presence on today's list then depended
+# on which month had last copied it forward.
+#
+# They are now two tables:
+#   distrakt_month_records  what a month announced or settled — its premieres and
+#     its completed/abandoned verdicts. `kind` is IN the primary key, so a season
+#     that premiered and was settled in the SAME month holds two rows on it. That
+#     is correct rather than a duplicate: the month both announced it and reached
+#     a verdict on it, and dropping either statement loses one of them.
+#   distrakt_user_seasons   what the viewer is in the middle of, belonging to no
+#     month at all. `kind` here is keepup or catchup — two states of ONE row, so a
+#     season that finishes airing is an UPDATE and can never be on the list twice.
+#
+# A PREMIERE RECORD CARRIES NO VIEWER PROGRESS. `watched` is written 0 on one and
+# means nothing there: it is a snapshot of the show as it premiered, which is
+# exactly what makes it safe to keep for ever and safe to correct when a later
+# season lookup reports a different episode total.
+#
+# HOW EVERY EXISTING ROW IS CLASSIFIED, and why a row can produce two records:
+#   - it premiered in the month it sits on (its "M/D" premiere date's month equals
+#     the month key's) -> a premiere record, series when season <= 1 and season
+#     otherwise. Independent of everything below, which is where the two-record
+#     case comes from.
+#   - the viewer gave up on it (the `abandoned` flag, or the frozen bucket) -> an
+#     abandoned record on that month. The flag and the bucket are both read
+#     because either alone is enough: the flag is what the viewer pressed and the
+#     bucket is what the month wrote down when it froze.
+#   - the month recorded it finished -> a completed record on that month.
+#   - anything else -> ONE user record for the season, from its latest month's row
+#     (the most recent copy carries the most recent counts), catchup when the
+#     season has finished airing or drops all at once, keepup otherwise.
+# A season settled on ANY month is off the user list entirely, because giving up
+# on a season in March is a statement about the season and an older in-progress
+# copy of it must not resurrect it.
+#
+# THE COPIES ARE WHAT GOES. A season carried onto three months had three rows and
+# now has one user record or one verdict; that collapse is the point of the change
+# and is reported rather than silent.
+#
+# A MONTH THAT HAD NOT YET FROZEN CANNOT BE CLASSIFIED BY PREMIERE DATE. In the old
+# schema the live fields — premiere, finale, cadence, started_airing,
+# finished_airing — were written back onto a row only when its month FROZE; until
+# then they were recomputed from the provider on every view and never stored. So on
+# any month with `closed = 0` those columns are empty, and the premiere pass above,
+# which asks whether the row's premiere date falls in the row's month, can prove
+# nothing about them. Those seasons are carried across as user records — which is
+# where an unfinished season belongs — and the month keeps no premiere records.
+#
+#   THIS IS NOT REPAIRED HERE, DELIBERATELY. The date is not in this database, so
+#   restoring it would mean a provider call from inside a migration, and `added_by`
+#   is '' on rows written before that column existed, so provenance cannot say
+#   which of them the calendar put there either. Inventing a premiere date would
+#   put a title in a month's announcement on a guess. Classifying only what the row
+#   can prove is the honest outcome; the migration LOGS the affected months so an
+#   operator can see why an open month's announcement is empty, and re-importing
+#   that month's premieres from the calendar is what fills it back in.
+#
+#   THE KEEPUP/CATCHUP SPLIT HEALS ITSELF, and for the same reason it is skewed to
+#   begin with. It is decided here from `finished_airing` and `cadence`, which are
+#   empty on those same rows, so every one of them starts as keepup. A user record
+#   is refreshed from a season lookup that reports the episode count and the last
+#   episode's air date, so the split is re-derived from those dates rather than
+#   read back from what this migration wrote. The initial skew is stale, not wrong.
+#
+# distrakt_prompt_dismissals records the viewer declining to add a season the
+# tracker has never heard of. Without somewhere to record the refusal it would be
+# re-derived from the same watch history on the very next load and the ✗ would do
+# nothing. It is keyed by SEASON, not by episode, or every further episode of the
+# same season would ask again.
+MIGRATION_19_SQL = """
+CREATE TABLE distrakt_month_records (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    month           TEXT    NOT NULL,          -- 'YYYY-MM'
+    -- 'series_premiere' | 'season_premiere' | 'completed' | 'abandoned'.
+    kind            TEXT    NOT NULL,
+    media           TEXT    NOT NULL,
+    match_source    TEXT    NOT NULL,
+    match_id        TEXT    NOT NULL,
+    season          INTEGER NOT NULL,
+    trakt_id        INTEGER,
+    simkl_id        INTEGER,
+    tmdb            INTEGER,
+    tvdb            INTEGER,
+    imdb            TEXT,
+    mal             INTEGER,
+    slug            TEXT,
+    title           TEXT    NOT NULL DEFAULT '',
+    network         TEXT    NOT NULL DEFAULT '',
+    -- Meaningless on a premiere record and written 0 there; see above.
+    watched         INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    cadence         TEXT,
+    premiere        TEXT,
+    finale          TEXT,
+    started_airing  INTEGER NOT NULL DEFAULT 0,
+    finished_airing INTEGER NOT NULL DEFAULT 0,
+    -- The rendered inline Discord line, frozen at the moment of giving up so it
+    -- stays stable afterwards. NULL on every kind but 'abandoned'.
+    abandoned_form  TEXT,
+    added_by        TEXT    NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL,
+    PRIMARY KEY (user_id, month, kind, media, match_source, match_id, season)
+);
+
+CREATE TABLE distrakt_user_seasons (
+    user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media           TEXT    NOT NULL,
+    match_source    TEXT    NOT NULL,
+    match_id        TEXT    NOT NULL,
+    season          INTEGER NOT NULL,
+    trakt_id        INTEGER,
+    simkl_id        INTEGER,
+    tmdb            INTEGER,
+    tvdb            INTEGER,
+    imdb            TEXT,
+    mal             INTEGER,
+    slug            TEXT,
+    title           TEXT    NOT NULL DEFAULT '',
+    network         TEXT    NOT NULL DEFAULT '',
+    -- 'keepup' | 'catchup'. Two states of one row, never two rows.
+    kind            TEXT    NOT NULL,
+    watched         INTEGER NOT NULL DEFAULT 0,
+    total           INTEGER NOT NULL DEFAULT 0,
+    cadence         TEXT,
+    premiere        TEXT,
+    finale          TEXT,
+    started_airing  INTEGER NOT NULL DEFAULT 0,
+    finished_airing INTEGER NOT NULL DEFAULT 0,
+    -- Set when a season the viewer had finished turns out to have grown. The
+    -- month record that proved it was ever finished is deleted as part of that
+    -- move, so this flag is the only thing left that remembers; it is cleared by
+    -- the viewer acknowledging the marker and by nothing else.
+    came_back       INTEGER NOT NULL DEFAULT 0,
+    added_by        TEXT    NOT NULL DEFAULT '',
+    created_at      INTEGER NOT NULL,
+    PRIMARY KEY (user_id, media, match_source, match_id, season)
+);
+
+CREATE TABLE distrakt_prompt_dismissals (
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media        TEXT    NOT NULL,
+    match_source TEXT    NOT NULL,
+    match_id     TEXT    NOT NULL,
+    season       INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, media, match_source, match_id, season)
+);
+
+-- The premieres. Deliberately not exclusive with the verdict pass below: a
+-- season that premiered and was settled in the same month gets both records.
+INSERT INTO distrakt_month_records
+       (user_id, month, kind, media, match_source, match_id, season,
+        trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
+        watched, total, cadence, premiere, finale, started_airing, finished_airing,
+        abandoned_form, added_by, created_at)
+    SELECT user_id, month,
+           CASE WHEN season <= 1 THEN 'series_premiere' ELSE 'season_premiere' END,
+           media, match_source, match_id, season,
+           trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
+           0, total, cadence, premiere, finale, started_airing, finished_airing,
+           NULL, added_by, CAST(strftime('%s', 'now') AS INTEGER)
+      FROM distrakt_shows
+     WHERE premiere IS NOT NULL AND instr(premiere, '/') > 1
+       AND CAST(substr(premiere, 1, instr(premiere, '/') - 1) AS INTEGER)
+           = CAST(substr(month, 6, 2) AS INTEGER);
+
+-- The verdicts a month reached.
+INSERT INTO distrakt_month_records
+       (user_id, month, kind, media, match_source, match_id, season,
+        trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
+        watched, total, cadence, premiere, finale, started_airing, finished_airing,
+        abandoned_form, added_by, created_at)
+    SELECT user_id, month,
+           CASE WHEN abandoned = 1 OR bucket = 'abandoned' THEN 'abandoned'
+                ELSE 'completed' END,
+           media, match_source, match_id, season,
+           trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
+           watched, total, cadence, premiere, finale, started_airing, finished_airing,
+           abandoned_form, added_by, CAST(strftime('%s', 'now') AS INTEGER)
+      FROM distrakt_shows
+     WHERE abandoned = 1 OR bucket IN ('abandoned', 'completed');
+
+"""
+
+# A month the calendar has not reached yet can hold NOTHING BUT ITS PREMIERES, and
+# that is provable rather than assumed: the recent-viewing sweep that is the only
+# other way a row reaches a month was deliberately skipped for a month that had
+# not begun, because what somebody is part-way through today says nothing about a
+# month nobody has reached. So every row on such a month is one of its
+# announcements, whatever its stored fields do or do not say — and they say
+# nothing at all, because a month that never froze never had them written.
+#
+# WITHOUT THIS THOSE ROWS BECOME VIEWER RECORDS, and that does not stay quiet. A
+# month pre-filled ahead of time is exactly where a title turned away on the
+# calendar sits: a turn-away there means "never put this in that month", which the
+# month-ahead rule honours by taking the row off. Read as something the viewer has
+# in hand instead, the very same mark reads as "I was following this and stopped"
+# and lands as a verdict on the month UNDER WAY — so opening the current month
+# fills its Abandoned section with next month's titles.
+#
+# Parameterised on the month under way rather than written into the script,
+# because "has the calendar reached this month" is a question about today and the
+# answer is different on the day this runs than it was when it was written.
+_MIGRATION_19_MONTHS_AHEAD = """
+INSERT INTO distrakt_month_records
+       (user_id, month, kind, media, match_source, match_id, season,
+        trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
+        watched, total, cadence, premiere, finale, started_airing, finished_airing,
+        abandoned_form, added_by, created_at)
+    SELECT s.user_id, s.month,
+           CASE WHEN s.season <= 1 THEN 'series_premiere' ELSE 'season_premiere' END,
+           s.media, s.match_source, s.match_id, s.season,
+           s.trakt_id, s.simkl_id, s.tmdb, s.tvdb, s.imdb, s.mal, s.slug,
+           s.title, s.network,
+           0, s.total, s.cadence, s.premiere, s.finale,
+           s.started_airing, s.finished_airing,
+           NULL, s.added_by, CAST(strftime('%s', 'now') AS INTEGER)
+      FROM distrakt_shows s
+     WHERE s.month > ?
+       AND NOT EXISTS (
+               SELECT 1 FROM distrakt_month_records r
+                WHERE r.user_id = s.user_id AND r.month = s.month
+                  AND r.media = s.media AND r.match_source = s.match_source
+                  AND r.match_id = s.match_id AND r.season = s.season
+                  AND r.kind IN ('series_premiere', 'season_premiere'));
+"""
+
+# Everything still in the middle: one record per season, from its latest month.
+# Months still ahead are excluded on both counts — a row on one is that month's
+# announcement and was filed as such above, and it must not win the "latest month"
+# race either, or a season the viewer is part-way through would take its counts
+# from a month that has not happened.
+_MIGRATION_19_USER_RECORDS = """
+INSERT INTO distrakt_user_seasons
+       (user_id, media, match_source, match_id, season,
+        trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network, kind,
+        watched, total, cadence, premiere, finale, started_airing, finished_airing,
+        came_back, added_by, created_at)
+    SELECT s.user_id, s.media, s.match_source, s.match_id, s.season,
+           s.trakt_id, s.simkl_id, s.tmdb, s.tvdb, s.imdb, s.mal, s.slug,
+           s.title, s.network,
+           CASE WHEN s.finished_airing = 1 OR s.cadence = 'b' THEN 'catchup'
+                ELSE 'keepup' END,
+           s.watched, s.total, s.cadence, s.premiere, s.finale,
+           s.started_airing, s.finished_airing,
+           0, s.added_by, CAST(strftime('%s', 'now') AS INTEGER)
+      FROM distrakt_shows s
+     WHERE s.month <= ?
+       AND NOT EXISTS (
+               SELECT 1 FROM distrakt_shows v
+                WHERE v.user_id = s.user_id AND v.media = s.media
+                  AND v.match_source = s.match_source AND v.match_id = s.match_id
+                  AND v.season = s.season
+                  AND (v.abandoned = 1 OR v.bucket IN ('abandoned', 'completed')))
+       AND s.month = (
+               SELECT MAX(t.month) FROM distrakt_shows t
+                WHERE t.user_id = s.user_id AND t.media = s.media
+                  AND t.match_source = s.match_source AND t.match_id = s.match_id
+                  AND t.season = s.season AND t.month <= ?);
+"""
+
+
+def MIGRATION_19(conn: sqlite3.Connection) -> None:
+    # Counted BEFORE anything is rebuilt, because the answer decides whether the
+    # rebuild may happen at all. Both checks are about a row that could not be
+    # ADDRESSED afterwards: the new tables file a record under its identity triple
+    # and, for a month record, under its month key. A row missing either would
+    # land somewhere nothing can reach it, and a migration that silently strands
+    # somebody's roster is worse than one that stops and says what is wrong.
+    unaddressable = conn.execute(
+        "SELECT COUNT(*) FROM distrakt_shows "
+        "WHERE match_id IS NULL OR match_id = '' "
+        "   OR month IS NULL OR month NOT GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]'"
+    ).fetchone()[0]
+    if unaddressable:
+        raise RuntimeError(
+            f"{unaddressable} tracker roster row(s) carry no shared id or no "
+            "readable 'YYYY-MM' month, so they cannot be filed under the identity "
+            "the tracker's records are now keyed on. Nothing has been changed. "
+            "Fix or delete those rows and start the app again."
+        )
+    total_rows = conn.execute("SELECT COUNT(*) FROM distrakt_shows").fetchone()[0]
+    distinct_seasons = conn.execute(
+        "SELECT COUNT(*) FROM (SELECT DISTINCT user_id, media, match_source, "
+        "match_id, season FROM distrakt_shows)"
+    ).fetchone()[0]
+    # The rows a month that never froze cannot prove a premiere date for. Counted
+    # here, before the rebuild, because afterwards the evidence is gone: the rows
+    # have become user records and nothing left says which month they sat on. The
+    # complement of the premiere pass's own test, so the two cannot disagree about
+    # which rows it skipped.
+    # The month under way, as a "YYYY-MM" key. Zero-padded so it compares
+    # chronologically against the stored keys with `<=` and `>`, which is the same
+    # reason the tracker pads its own; an unpadded month would sort "2026-9" after
+    # "2026-12" and mis-file a whole month's rows.
+    #
+    # Read through the clock seam rather than from date.today(), so an instance
+    # running on an overridden date classifies its rows by the same calendar the
+    # app will then read them with. Split one way and rendered the other, a month
+    # ahead would be rebuilt as premieres and then read as the month under way.
+    today = clock.today()
+    under_way = f"{today.year:04d}-{today.month:02d}"
+    # Rows on a month that HAS begun and never froze, so no premiere date was ever
+    # written for them. Counted before the rebuild, because afterwards the evidence
+    # is gone. Months still ahead are excluded: their rows are filed as that
+    # month's premieres below and lose nothing, so naming them here would report a
+    # gap that is not there.
+    undated = conn.execute(
+        "SELECT s.month, COUNT(*) FROM distrakt_shows s "
+        "JOIN distrakt_months m ON m.user_id = s.user_id AND m.month = s.month "
+        "WHERE m.closed = 0 AND s.month <= ? "
+        "  AND (s.premiere IS NULL OR instr(s.premiere, '/') <= 1) "
+        "GROUP BY s.month ORDER BY s.month",
+        (under_way,),
+    ).fetchall()
+    _run_script(conn, MIGRATION_19_SQL)
+    # The two passes that turn on where the calendar stands, so they take the month
+    # under way as a parameter rather than being written into the script above.
+    conn.execute(_MIGRATION_19_MONTHS_AHEAD, (under_way,))
+    conn.execute(_MIGRATION_19_USER_RECORDS, (under_way, under_way))
+    conn.execute("DROP TABLE distrakt_shows")
+    # The copies are what the split removes: a season carried onto four months had
+    # four rows saying the same thing about the viewer, and now has one record.
+    # Reported because it is a large drop in the row count and a reader finding it
+    # in the logs should not have to guess whether something was lost.
+    carried = total_rows - distinct_seasons
+    logger.info(
+        "Split the tracker's rows into month records and user records: %d row(s) "
+        "covering %d season(s) became %d month record(s) and %d user record(s); "
+        "%d were repeat copies of a season carried onto a later month.",
+        total_rows, distinct_seasons,
+        conn.execute("SELECT COUNT(*) FROM distrakt_month_records").fetchone()[0],
+        conn.execute("SELECT COUNT(*) FROM distrakt_user_seasons").fetchone()[0],
+        carried,
+    )
+    if undated:
+        # Said plainly and named by month, because the visible symptom is a
+        # month's announcement going quiet and nothing else would explain it.
+        logger.info(
+            "%s had not frozen yet, so their rows never stored a premiere date and "
+            "none of them could be filed as that month's premieres here: %s. Their "
+            "seasons were kept as the viewer's own records and nothing was lost. "
+            "Opening such a month files back the ones that have not aired yet — by "
+            "then a season lookup has supplied the date this could not — so only "
+            "the titles that had ALREADY premiered stay unannounced, and "
+            "re-importing that month's premieres from the calendar is what "
+            "restores those.",
+            "One month" if len(undated) == 1 else f"{len(undated)} months",
+            ", ".join(f"{month} ({count} row(s))" for month, count in undated),
+        )
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -1235,6 +1595,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (16, MIGRATION_16),
     (17, MIGRATION_17),
     (18, MIGRATION_18),
+    (19, MIGRATION_19),
 ]
 
 

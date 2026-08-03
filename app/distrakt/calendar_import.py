@@ -1,8 +1,21 @@
-"""Bringing the calendar's premieres onto the roster.
+"""Bringing the calendar's premieres onto a month.
 
-ONE JOB — turn this month's calendar items into roster records, and decide which
-of them the user has already said they are not watching. The month document it
-merges into is the store's; what a premiere MEANS for rollover is the rollover's.
+ONE JOB — turn this month's calendar items into that month's PREMIERE records,
+and decide which of them the user has already said they are not watching. The
+month document it merges into is the store's; what a premiere BECOMES afterwards
+is the lifecycle's.
+
+IT ALSO OWNS THE TRACKER'S HALF OF THE CALENDAR'S TURN-AWAY VOCABULARY — how a
+mark is recognised (matches_not_watching) and what id one is written under
+(calendar_mark_id). Those two are the same fact read in opposite directions, and
+they are stated together here so they cannot come to disagree about what a
+calendar card is called.
+
+WHICH PREMIERE A RECORD IS — a series premiere (a first season) or a season
+premiere (a later one) — is decided HERE, once, by store.premiere_kind, at the
+moment the record is made. They are two distinct sections of the month's first
+notice, and deriving the split from the season number every time something renders
+is how the two sections come to disagree.
 """
 from __future__ import annotations
 
@@ -31,12 +44,27 @@ def calendar_record(item: Item) -> dict:
     }
 
 
+def calendar_mark_id(rec: dict) -> str:
+    """The id the MAIN CALENDAR would key this title's card by: the slug when the
+    source gave one, else the source's own id. "" when it can name neither.
+
+    THIS IS NOT THE ID THE TRACKER FILES THE RECORD UNDER. A record is keyed by
+    whichever shared id the identity waterfall picked (store.record_key), and a
+    turn-away written in those terms would silently match no card at all. Both
+    directions of the calendar's marks are stated here, once, so the id a mark is
+    written under and the ids a mark is recognised by cannot drift apart.
+    """
+    ids = rec.get("ids") or {}
+    return str(ids.get("slug") or "") or str(ids.get("trakt") or "")
+
+
 def matches_not_watching(rec: dict, nw_ids: set[str]) -> bool:
     """Whether the user has marked this title not-watching on the calendar.
 
-    The marks are keyed exactly as the calendar keys its own cards — the slug when
-    the source gave one, else the source's own id — so this asks the same question
-    in the same vocabulary rather than translating.
+    BOTH ids are asked about rather than just calendar_mark_id's answer, because a
+    mark already in the store was written under whichever id the card carried at
+    the time: a title that has since gained a slug would stop matching a mark made
+    before it had one, and the show would quietly come back.
     """
     ids = rec.get("ids") or {}
     return str(ids.get("slug") or "") in nw_ids or str(ids.get("trakt") or "") in nw_ids
@@ -115,14 +143,18 @@ def _present_key(rec: dict) -> tuple[str, int]:
 
 async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, settings,
                         year: int, month: int, nw_ids: set[str]) -> int:
-    """Append this month's premieres to `doc` (skip existing + not-watching).
-    Mutates `doc['shows']`/`present`; returns the number added."""
+    """Append this month's premieres to `doc` as premiere records (skip existing +
+    not-watching). Mutates `doc['shows']`/`present`; returns the number added."""
     added = 0
     for rec in await premiere_records(user_id, settings, year, month):
         key = _present_key(rec)
         if key in present or matches_not_watching(rec, nw_ids):
             continue
-        doc["shows"].append(normalize_show({**rec, "added_by": ADDED_BY_CALENDAR}))
+        doc["shows"].append(normalize_show({
+            **rec,
+            "kind": store.premiere_kind(rec["season"]),
+            "added_by": ADDED_BY_CALENDAR,
+        }))
         present.add(key)
         added += 1
     return added
@@ -137,38 +169,12 @@ async def import_premieres(user_id: int, month_key: str, settings) -> dict | Non
         return doc
     year, month = store.parse_month_key(month_key)
     present = {_present_key(s) for s in doc.get("shows") or []}
-    # EVERY mark, whenever it was made: this is an ADD path, and putting a title
-    # the user has turned away back on the roster is never the right answer. When
-    # the mark was made matters to a row that is ALREADY on the month — that is
-    # the difference between "I never intended to watch this" and "I was following
-    # this and stopped", and it is read where such a row is judged
-    # (routes._apply_not_watching), not here where there is no row yet.
+    # Putting a title the user has turned away back onto a month is never the
+    # right answer, so every mark filters this ADD path. What a turn-away means
+    # for a row that ALREADY exists is a different question — it is a verdict on
+    # that row rather than a reason never to write one — and it is answered where
+    # such a row is acted on, not here where there is no row yet.
     nw_ids = await calendar_state.not_watching_ids(user_id)
     if await add_premieres(doc, present, user_id, settings, year, month, nw_ids):
         await save_month(user_id, doc)
     return doc
-
-
-async def is_calendar_premiere(user_id: int, month_key: str, settings,
-                               key, season: int) -> bool:
-    """Whether this month's calendar premieres include this title+season.
-
-    Only for rows written before provenance was recorded (see MIGRATION_16 in
-    app/db.py), where the question "did the calendar put this here" has no
-    recorded answer: a show the premiere import would hand straight back is one
-    the calendar is asserting, and removing it has to say something to the
-    calendar or it cannot stick. Reads through the same cache import_premieres
-    uses, which the page load that rendered the ✕ has just warmed.
-
-    Answers False rather than raising if Trakt is unreachable: not knowing means
-    not marking, which is the conservative half — the row simply comes back.
-    """
-    if not (settings and getattr(settings, "trakt_configured", False)):
-        return False
-    year, month = store.parse_month_key(month_key)
-    try:
-        records = await premiere_records(user_id, settings, year, month)
-    except Exception:  # noqa: BLE001 — a hiccup here must not fail the removal
-        return False
-    wanted = (str(key), int(season))
-    return any(_present_key(r) == wanted for r in records)

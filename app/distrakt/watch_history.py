@@ -39,6 +39,10 @@ distrakt_show_progress, distrakt_movie_watches). In memory:
      shows:  {key: {ids: {...}, seasons: {season: {episode: watched_at}}}},
      movies: {key: {ids: {...}, title, year, watched_at}}}
 
+A sync also leaves the episode plays it just folded in on the state it returns,
+read back through episode_plays. Those are NOT part of the four things above and
+are never stored — see _PLAYS.
+
 Episodes carry their watch DATE (they were a bare list of numbers until the
 Completed bucket needed to know which month a season was finished in — see
 season_completed_map). A date is "" when it is genuinely unknown, which readers
@@ -53,6 +57,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import date, datetime, timezone
+from typing import NamedTuple
 
 from . import store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
@@ -67,6 +72,21 @@ _perf = logging.getLogger("app.perf")
 # ROSTER row, which is where a later resolution pass would read them — a cache of
 # one service's answers has no use for an id it never calls with.
 _CACHE_ID_COLUMNS = {column: ID_COLUMNS[column] for column in ("trakt_id", "simkl_id")}
+
+# Where a sync leaves the episode plays it has just folded in, on the state dict
+# it returns. IN MEMORY ONLY: _save writes the four things _load rebuilds and this
+# is not among them, deliberately. A play is a signal to act on once — a season
+# that has grown, an episode nothing knows about — and a stored copy would have
+# every later load replay a decision already taken.
+_PLAYS = "plays"
+
+# The season number a title is filed under when it HAS no seasons — when the
+# viewer has watched none of it. distrakt_show_progress holds one row per season,
+# so such a title would otherwise write no row at all and _load could not tell it
+# from one that was never baselined; every load would then re-fetch it from the
+# provider. Negative because season 0 is a real season (specials) and a negative
+# one cannot be, so nothing can collide with it.
+NO_SEASONS = -1
 
 
 def _default_state() -> dict:
@@ -116,6 +136,12 @@ async def _load(user_id: int) -> dict:
     shows: dict = {}
     for row in prog:
         entry = shows.setdefault(_row_key(row), {"ids": _row_ids(row), "seasons": {}})
+        # The NO_SEASONS row exists only to say the title WAS baselined and has
+        # nothing watched. Creating the entry above is its whole purpose, so it is
+        # not carried into `seasons` — a caller counting seasons must not find one
+        # that does not exist.
+        if int(row["season"]) == NO_SEASONS:
+            continue
         entry["seasons"][str(int(row["season"]))] = episode_watches(
             json.loads(row["watched_episodes_json"] or "{}")
         )
@@ -164,7 +190,21 @@ async def _save(user_id: int, state: dict) -> None:
         )
         conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
         for key, entry in shows.items():
-            for season_s, eps in (entry.get("seasons") or {}).items():
+            seasons = entry.get("seasons") or {}
+            # A TITLE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
+            # holds one row per SEASON, so a title the viewer has seen none of
+            # writes no rows at all — and _load, which rebuilds the cache from
+            # these rows, then cannot tell "asked about, nothing watched" from
+            # "never asked about". It read as never-baselined on every load, so
+            # sync_and_baseline re-fetched it from the provider every time, for
+            # ever. A brand-new premiere is exactly that case, so a month of them
+            # cost a fetch each on every page load.
+            #
+            # NO_SEASONS is not a season and is never rendered as one: _load drops
+            # it after using its presence to reconstruct the entry. A negative
+            # number is safe to reserve because season 0 is real (it is where
+            # specials live) but a negative one cannot be.
+            for season_s, eps in (seasons or {NO_SEASONS: {}}).items():
                 conn.execute(progress_sql, (
                     user_id, *_key_params(key), int(season_s),
                     json.dumps(episode_watches(eps or {})), *_ids_params(entry),
@@ -288,6 +328,62 @@ def _apply_event(state: dict, event: dict) -> None:
         movie = event.get("movie") or {}
         _apply_movie(state, _event_key(movie, Media.MOVIE), movie.get("ids") or {},
                      movie.get("title"), movie.get("year"), event.get("watched_at"))
+
+
+class EpisodePlay(NamedTuple):
+    """One episode the history reported as watched, and nothing beyond what the
+    event itself said.
+
+    DELIBERATELY THIN. The shared identity of the title, the season, the episode
+    number, the show's name as the event spelled it, and the ids the event
+    carried — no stored record read, nothing fetched. That is exactly what makes
+    it safe to raise a play for a season the tracker has never heard of: looking
+    one of those up would cost a provider call for every unmatched episode of a
+    viewing life, which is the cost the whole ask-the-viewer path exists to avoid.
+
+    `ids` IS NOT A SECOND IDENTITY. `key` is what the tracker files a record
+    under; these are the service ids that travel with it, and they are here for
+    one reason — a season the viewer asks to be added has to be LOOKED UP, and a
+    lookup needs the id of the service being asked. Carrying them costs nothing
+    because the history event already spelled them out.
+    """
+    key: ItemKey
+    season: int
+    number: int
+    title: str
+    ids: dict
+
+
+def _episode_play(event: dict) -> EpisodePlay | None:
+    """One history event as a play, or None when it is not an episode, names no
+    shared id, or does not say which episode it was.
+
+    An event naming no shared id is dropped for the same reason _event_key
+    returns None for it: there is no identity to match it against a record, so
+    nothing could be said about it either way.
+    """
+    if event.get("type") != "episode":
+        return None
+    show = event.get("show") or {}
+    episode = event.get("episode") or {}
+    key = _event_key(show, Media.SHOW)
+    if key is None or episode.get("season") is None or episode.get("number") is None:
+        return None
+    return EpisodePlay(key, int(episode["season"]), int(episode["number"]),
+                       str(show.get("title") or ""),
+                       collect_ids(show.get("ids") or {}))
+
+
+def episode_plays(state: dict) -> list[EpisodePlay]:
+    """The episode plays THIS sync folded in, in the order the history reported
+    them.
+
+    EMPTY IS THE ORDINARY ANSWER and it is what keeps a routine load a read: the
+    activity beacon had not moved, no history was pulled, and there is nothing
+    for a caller to reconcile. Empty as well for a state that came out of storage
+    rather than out of a sync — see _PLAYS for why the plays are never stored.
+    """
+    return list(state.get(_PLAYS) or [])
 
 
 def watched_map(state: dict) -> dict[tuple[str, int], int]:
@@ -439,11 +535,28 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
     await _save(user_id, state)
 
 
-async def sync(settings, user_id: int, force: bool = False, today: date | None = None) -> dict:
+async def sync(settings, user_id: int, force: bool = False, today: date | None = None,
+               since_month: str | None = None) -> dict:
     """Gated incremental sync (see module docstring). Returns the (saved) state.
 
     Fast path: the activity beacon is unchanged -> return cache, no history pull.
     Change path: re-baseline on unwatch/force, then fold in new history events.
+
+    `since_month` ("YYYY-MM") RE-READS THAT MONTH'S HISTORY FROM ITS FIRST DAY
+    WITHOUT RE-ASKING ABOUT EVERY TITLE — the half of `force` a month being closed
+    actually needs. Forcing does two separable things: it re-fetches the progress
+    of every title in the cache, one provider call each and growing with
+    everything ever tracked, and it winds the cursor back. A freeze needs a
+    complete read of ITS OWN month, because its film list will never be recomputed
+    afterwards, and almost none of the re-fetch: a settled record already holds the
+    counts it settled on, and a premiere record carries no viewer progress at all.
+
+    THE MONTH IS NAMED RATHER THAN INFERRED, and that is the whole point of the
+    parameter. Winding the cursor back only moved the start to the month TODAY is
+    in — so closing October during November read November's history and never
+    touched October's, which is the one month that mattered. `force` has always had
+    the same blind spot; it goes unnoticed there because a refresh is only ever
+    asked for on the month under way, where the two coincide.
     """
     from ..perftrace import span
     port = _port()
@@ -455,7 +568,8 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
         la = await port.fetch_last_activities(settings)
     beacons = _beacons(la)
 
-    if not force and state.get("last_synced") and state.get("beacons") == beacons:
+    if (not force and since_month is None
+            and state.get("last_synced") and state.get("beacons") == beacons):
         _perf.debug("wh.sync GATED (beacon unchanged) — no history pull")
         return state  # nothing changed since last sync -> serve cache
 
@@ -476,15 +590,31 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
                 for key, entry in cached.items():
                     _set_show_baseline(state, key, entry.get("ids") or {},
                                        details.get(int(_source_id(entry))) or {})
-        if force:
-            state["last_synced"] = None  # re-seed movie history from the month start
+    if force:
+        state["last_synced"] = None  # re-seed movie history from the month start
 
-    start_at = state.get("last_synced") or _month_start_of(today)
+    # A named month is read from its own first day; everything else carries on
+    # from the cursor, or from the start of the month today falls in when there is
+    # no cursor to carry on from. store.month_first_day both validates the key and
+    # spells the date, so a malformed month is refused here rather than reaching
+    # the provider as a plausible-looking string.
+    start_at = (store.month_first_day(since_month).isoformat() if since_month
+                else state.get("last_synced") or _month_start_of(today))
     with span("wh.history", start_at=start_at) as sp:
         events = await port.fetch_history(settings, start_at=start_at)
+        plays = []
         for event in events:
             _apply_event(state, event)
+            # Taken from the RAW event rather than from the fold above, because
+            # the two answer different questions: the fold counts progress for
+            # titles the tracker already has baselined and drops everything else,
+            # while a play for a title it has never heard of is precisely the one
+            # a caller has to ask the viewer about.
+            play = _episode_play(event)
+            if play is not None:
+                plays.append(play)
         sp.set(events=len(events))
+    state[_PLAYS] = plays
 
     state["last_synced"] = _now_date_iso()
     state["beacons"] = beacons
@@ -493,7 +623,8 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
 
 
 async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: bool = False,
-                            today: date | None = None) -> dict:
+                            today: date | None = None,
+                            since_month: str | None = None) -> dict:
     """`sync`, then guarantee every roster title has a baseline (so titles that
     entered via calendar/rollover/history — not the manual add flow — still get
     counts on first view). Returns the state; read counts via `watched_map` and
@@ -503,7 +634,8 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     needs the shared identity and fetching one needs the source's id, and only the
     record carries both."""
     from ..perftrace import span
-    state = await sync(settings, user_id, force=force, today=today)
+    state = await sync(settings, user_id, force=force, today=today,
+                       since_month=since_month)
     port = _port()
     if port is None:
         return state

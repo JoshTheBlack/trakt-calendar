@@ -154,6 +154,9 @@ class UnauthenticatedTests(GatingTestCase):
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",
                      "/api/distrakt/backfill-networks", "/api/distrakt/remove",
                      "/api/distrakt/add", "/api/distrakt/abandon",
+                     "/api/distrakt/acknowledge-return",
+                     "/api/distrakt/unknown-add", "/api/distrakt/unknown-resume",
+                     "/api/distrakt/unknown-dismiss",
                      "/api/distrakt/add-completed", "/api/distrakt/backfill/survey",
                      "/api/distrakt/backfill/apply", "/api/distrakt/add-movie",
                      "/api/distrakt/remove-movie"):

@@ -11,7 +11,8 @@ import logging
 
 from .. import db
 from ..providers.base import Media, collect_ids, resolve_key
-from .store import IDENTITY_COLUMNS, SHOW_COLUMNS
+from . import store
+from .store import IDENTITY_COLUMNS, MONTH_RECORD_COLUMNS, USER_RECORD_COLUMNS
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,11 @@ logger = logging.getLogger(__name__)
 # version it doesn't understand rather than guessing at an older/newer layout.
 # 2 added distrakt_prefs (the network->emoji map). 3 re-keyed the roster and the
 # two caches onto (media, match_source, match_id) — see MIGRATION_18 in app/db.py.
-# Version 1 and 2 documents still restore; see _upgrade_legacy for what that
-# takes and what it cannot carry across.
-EXPORT_SCHEMA = 3
-SUPPORTED_EXPORT_SCHEMAS = (1, 2, 3)
+# 4 split the single roster table into month records and user records — see
+# MIGRATION_19. Version 1, 2 and 3 documents still restore; see _upgrade_legacy
+# for what that takes and what it cannot carry across.
+EXPORT_SCHEMA = 4
+SUPPORTED_EXPORT_SCHEMAS = (1, 2, 3, 4)
 
 # The tables that hold nothing but a cache of a provider's own answers. A legacy
 # document's copies of these are DROPPED rather than migrated: their rows are
@@ -35,7 +37,9 @@ _CACHE_TABLES = ("distrakt_show_progress", "distrakt_movie_watches")
 # the session, never from the file.
 _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("distrakt_months", ("month", "closed", "totals_refreshed_at", "movies_json", "created_at")),
-    ("distrakt_shows", ("month", *SHOW_COLUMNS)),
+    ("distrakt_month_records", MONTH_RECORD_COLUMNS),
+    ("distrakt_user_seasons", USER_RECORD_COLUMNS),
+    ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at")),
     ("distrakt_watch_state", ("last_synced", "beacons_json")),
     ("distrakt_show_progress", (*IDENTITY_COLUMNS, "season", "watched_episodes_json",
                                 "trakt_id", "simkl_id")),
@@ -65,8 +69,8 @@ async def export_user_data(user_id: int) -> dict:
     return doc
 
 
-def _upgrade_legacy(doc: dict) -> dict:
-    """A schema 1 or 2 document read into the current shape.
+def _rekey_roster(doc: dict) -> list[dict]:
+    """The `distrakt_shows` rows of a schema 1 or 2 document, re-keyed.
 
     Those documents pre-date the re-key: their rows name a title by Trakt's own
     id. Roster rows carry `tmdb` as well, so the identity waterfall can be run
@@ -74,18 +78,11 @@ def _upgrade_legacy(doc: dict) -> dict:
     live database, deliberately, so a backup and a database of the same vintage
     come out the same.
 
-    The two CACHE tables cannot be resolved that way (they never recorded a shared
-    id for anything) and are dropped, with `last_synced` cleared so the next sync
-    re-seeds them from the start of the current month. That is a re-fetch, not a
-    loss: films in months that were already FROZEN live on the month row, which
-    this carries across untouched.
-
     A roster row that resolves to no shared id at all REFUSES the whole restore
     rather than being dropped or given an invented key. It is somebody's roster,
     and a partial restore that silently omitted rows would be worse than one that
     says what it cannot do.
     """
-    upgraded = dict(doc)
     rows = []
     unkeyable: list[str] = []
     for row in doc.get("distrakt_shows") or []:
@@ -116,18 +113,132 @@ def _upgrade_legacy(doc: dict) -> dict:
             f"inventing an identity for them (first: {unkeyable[0]}). Nothing was "
             "changed."
         )
-    upgraded["distrakt_shows"] = rows
-    for table in _CACHE_TABLES:
-        upgraded.pop(table, None)
-    if doc.get("distrakt_watch_state"):
-        upgraded["distrakt_watch_state"] = [
-            {**dict(row), "last_synced": None} for row in doc["distrakt_watch_state"]
-            if isinstance(row, dict)
-        ]
+    return rows
+
+
+def _premiered_in(row: dict) -> bool:
+    """Whether a legacy row's "M/D" premiere date falls in the month it sits on.
+
+    Read here rather than through discord_fmt so this stays a pure document
+    transform with no feature module behind it; the format is two integers either
+    side of a slash and a row that does not carry one simply did not premiere in
+    a month anybody can name.
+    """
+    premiere = str(row.get("premiere") or "")
+    month = str(row.get("month") or "")
+    try:
+        premiere_month = int(premiere.split("/", 1)[0])
+        return premiere_month == int(month[5:7])
+    except (IndexError, ValueError):
+        return False
+
+
+def _settled_kind(row: dict) -> str | None:
+    """The verdict a legacy row recorded, or None if its month settled nothing.
+
+    The `abandoned` flag and the frozen `bucket` are both read because either
+    alone is enough: the flag is what the viewer pressed and the bucket is what
+    the month wrote down when it froze, and a row carrying one without the other
+    is still a row about giving something up.
+    """
+    if row.get("abandoned") or row.get("bucket") == store.RecordKind.ABANDONED:
+        return str(store.RecordKind.ABANDONED)
+    if row.get("bucket") == store.RecordKind.COMPLETED:
+        return str(store.RecordKind.COMPLETED)
+    return None
+
+
+def _split_roster(rows: list[dict], stamp: int) -> tuple[list[dict], list[dict]]:
+    """A schema-3 document's single roster list as (month records, user records).
+
+    The same classification MIGRATION_19 applies to a live database, so a backup
+    and a database of the same vintage come out the same. It is written twice —
+    once in SQL there, once here — because a document is not a database and
+    neither form can call the other; when the rule changes, both change.
+
+    A row can produce TWO records: one that premiered in its month AND was settled
+    there gets a premiere record and a verdict, which is two statements about that
+    month rather than a duplicate.
+    """
+    month_records: list[dict] = []
+    # Keyed by (identity, season) with the latest month winning, because the same
+    # season had a copy on every month it was live in and the most recent one
+    # carries the most recent counts.
+    listed: dict[tuple, dict] = {}
+    settled_seasons = {
+        (r.get("media"), r.get("match_source"), r.get("match_id"), r.get("season"))
+        for r in rows if _settled_kind(r)
+    }
+    for row in rows:
+        season_key = (row.get("media"), row.get("match_source"),
+                      row.get("match_id"), row.get("season"))
+        # `created_at` is new in this shape. A legacy row never recorded when it
+        # was written, so it is stamped with the moment the backup was TAKEN
+        # rather than the moment of the restore: that is the closest thing the
+        # document knows to when the row existed.
+        shared = {"created_at": stamp,
+                  **{k: v for k, v in row.items() if k not in {"bucket", "abandoned"}}}
+        if _premiered_in(row):
+            # A premiere record carries no viewer progress: it is a snapshot of
+            # the show as it premiered, which is what makes it safe to keep.
+            month_records.append({**shared, "watched": 0, "abandoned_form": None,
+                                  "kind": str(store.premiere_kind(row.get("season")))})
+        kind = _settled_kind(row)
+        if kind:
+            month_records.append({**shared, "kind": kind})
+        elif season_key not in settled_seasons:
+            # Giving up on a season in March is a statement about the season, so a
+            # copy of it left on February must not put it back on the list.
+            previous = listed.get(season_key)
+            if previous is None or str(row.get("month")) >= str(previous.get("month")):
+                listed[season_key] = row
+    user_records = [
+        {"created_at": stamp}
+        | {k: v for k, v in row.items() if k not in {"bucket", "abandoned", "month",
+                                                     "abandoned_form"}}
+        | {"kind": str(store.RecordKind.CATCHUP if row.get("finished_airing")
+                       or row.get("cadence") == "b" else store.RecordKind.KEEPUP),
+           "came_back": 0}
+        for row in listed.values()
+    ]
+    return month_records, user_records
+
+
+def _upgrade_legacy(doc: dict) -> dict:
+    """A schema 1, 2 or 3 document read into the current shape.
+
+    Each step is applied only to the documents that need it, so a schema-3 backup
+    is split without being re-keyed and a schema-1 one gets both.
+
+    The two CACHE tables cannot be re-keyed (they never recorded a shared id for
+    anything) and are dropped from a pre-3 document, with `last_synced` cleared so
+    the next sync re-seeds them from the start of the current month. That is a
+    re-fetch, not a loss: films in months that were already FROZEN live on the
+    month row, which this carries across untouched.
+    """
+    schema = doc.get("schema")
+    upgraded = dict(doc)
+    rows = list(doc.get("distrakt_shows") or [])
+    if schema < 3:
+        rows = _rekey_roster(doc)
+        for table in _CACHE_TABLES:
+            upgraded.pop(table, None)
+        if doc.get("distrakt_watch_state"):
+            upgraded["distrakt_watch_state"] = [
+                {**dict(row), "last_synced": None} for row in doc["distrakt_watch_state"]
+                if isinstance(row, dict)
+            ]
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RestoreError("distrakt_shows rows must be objects")
+    upgraded.pop("distrakt_shows", None)
+    month_records, user_records = _split_roster(rows, int(doc.get("exported_at") or db.now()))
+    upgraded["distrakt_month_records"] = month_records
+    upgraded["distrakt_user_seasons"] = user_records
     logger.info(
-        "Restoring a schema-%s tracker backup: %d roster row(s) re-keyed onto "
-        "shared ids; its cached progress and film watches are left to re-fetch.",
-        doc.get("schema"), len(rows),
+        "Restoring a schema-%s tracker backup: %d roster row(s) became %d month "
+        "record(s) and %d user record(s).",
+        schema, len(rows), len(month_records), len(user_records),
     )
     return upgraded
 
