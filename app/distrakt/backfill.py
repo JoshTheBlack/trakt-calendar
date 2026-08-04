@@ -48,7 +48,7 @@ from . import watch_history
 # in — a backfill job has no business knowing which half of the tracker
 # `load_month` or `save_month` lives in.
 from .. import distrakt
-from .. import cache, clock, db, providers
+from .. import cache, clock, db
 from ..providers.base import Media, resolve_key
 
 logger = logging.getLogger(__name__)
@@ -148,9 +148,18 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
 
     # ONE paged history sweep for the whole range, read twice — once for the
     # seasons, once for the films.
-    port = providers.for_tracker()
-    if port is None:
+    #
+    # THE PRIMARY SOURCE ALONE, and it is a deliberate narrowing. A backfill is a
+    # PROPOSAL the viewer confirms in a dialog that lists what it found; two
+    # services' histories merged into it would need the dialog to be able to show
+    # a disagreement, and there is nowhere in that flow for one to be resolved.
+    # Once a month is built from it, the ordinary sync reads every admitted
+    # source and fills the second one in — so nothing is lost, it just arrives on
+    # the next load rather than in the survey.
+    ports = await watch_history.tracker_ports(settings, user_id)
+    if not ports:
         return _empty_plan(start_month, end_month)
+    source, port = ports[0]
     start_day = distrakt.month_first_day(months[0])
     events = await port.fetch_history(settings, start_at=start_day.isoformat())
     films, films_known = await _split_films(user_id, port.movie_plays_from(events), set(months))
@@ -168,8 +177,13 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
             key = resolve_key(Media.SHOW, candidate.get("ids") or {})
             if key is not None:
                 by_key[(str(key), int(candidate["season"]))] = candidate
+        # THE SURVEYING SOURCE'S OWN ID, never another service's — the same
+        # rule the watch cache follows. A candidate that source cannot name is
+        # dropped rather than asked about with an id belonging to a different
+        # catalogue, which would answer about a different title.
+        name = str(source)
         show_ids = list(dict.fromkeys(
-            int(c["ids"]["trakt"]) for c in by_key.values() if c.get("ids", {}).get("trakt")
+            int(c["ids"][name]) for c in by_key.values() if c.get("ids", {}).get(name)
         ))
 
         progress = await _progress_by_show(settings, port, show_ids)
@@ -178,7 +192,7 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         wanted_set = set(wanted)
         for (key, season), ident in by_key.items():
             seasons_seen += 1
-            source_id = int(ident["ids"]["trakt"]) if ident.get("ids", {}).get("trakt") else None
+            source_id = int(ident["ids"][name]) if ident.get("ids", {}).get(name) else None
             episodes = (progress.get(source_id) or {}).get(season) or {}
             detail = totals.get((key, season)) or {}
             total = int(detail.get("total") or 0)
@@ -393,16 +407,17 @@ async def _progress_by_show(settings, port, show_ids: list[int]) -> dict[int, di
 async def _season_totals(settings, candidates: list[dict]) -> dict[tuple[str, int], dict]:
     """{(item key, season): season detail} — the episode total that decides
     whether a season is finished, plus the dates a frozen row carries."""
-    from ..providers.trakt.detail import fetch_season_detail
-    from ..providers.trakt.transport import shared_client
+    from . import live
     if not candidates:
         return {}
-    client = shared_client()
     keys = [(str(resolve_key(Media.SHOW, c["ids"])), int(c["season"])) for c in candidates]
-    details = await asyncio.gather(*(
-        fetch_season_detail(settings, c["ids"].get("trakt"), c["season"], client=client)
-        for c in candidates
-    ), return_exceptions=True)
+    # Through the shared season lookup rather than one service's, so a title only
+    # one of them knows is still measured against a real episode count instead of
+    # against zero.
+    details = await live.fetch_season_details(
+        settings, [{"ids": c["ids"], "season": c["season"], "media": Media.SHOW}
+                   for c in candidates],
+        fresh=False, allow_degrade=True)
     out: dict[tuple[str, int], dict] = {}
     for key, detail in zip(keys, details):
         if isinstance(detail, Exception):

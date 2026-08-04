@@ -205,7 +205,21 @@ async def correct_premiere(user_id: int, month: str, show: Mapping) -> dict:
     })
 
 
-async def finish(user_id: int, key: ItemKey, season: int, *, month: str) -> dict | None:
+def by_source_of(show: Mapping) -> dict:
+    """What each service said about a season, ready to be frozen onto a month.
+
+    Read off a LIVE show, where the numbers came from, rather than re-derived at
+    the moment a verdict is written — the two would be a second opinion about the
+    same season, taken at a different instant. Empty for a row that never went
+    through the live pass, which reads back as "no breakdown was written down".
+    """
+    return {name: dict(show.get(name) or {})
+            for name in ("watched_by_source", "total_by_source")
+            if show.get(name)}
+
+
+async def finish(user_id: int, key: ItemKey, season: int, *, month: str,
+                 by_source: dict | None = None) -> dict | None:
     """The viewer finished the season, so it leaves their list and becomes
     `month`'s completed record. None if it was not on the list.
 
@@ -216,7 +230,8 @@ async def finish(user_id: int, key: ItemKey, season: int, *, month: str) -> dict
     here is how a browse of an old month would have re-dated somebody's viewing.
     """
     return await store.migrate_to_month(user_id, key, season, month=month,
-                                        kind=RecordKind.COMPLETED)
+                                        kind=RecordKind.COMPLETED,
+                                        by_source=by_source)
 
 
 async def give_up(user_id: int, show: dict, *, month: str,
@@ -235,7 +250,8 @@ async def give_up(user_id: int, show: dict, *, month: str,
     key, season = store.record_key(show), int(show["season"])
     moved = await store.migrate_to_month(user_id, key, season, month=month,
                                          kind=RecordKind.ABANDONED,
-                                         abandoned_form=abandoned_form)
+                                         abandoned_form=abandoned_form,
+                                         by_source=by_source_of(show))
     if moved is not None:
         return moved
     return await store.add_month_record(user_id, month, {
@@ -325,7 +341,8 @@ async def finish_if_done(user_id: int, row: dict,
     when = str(completed_on.get(live.live_key(row)) or "")
     if not (is_finished(row) and when):
         return False
-    await finish(user_id, store.record_key(row), int(row["season"]), month=when[:7])
+    await finish(user_id, store.record_key(row), int(row["season"]), month=when[:7],
+                 by_source=by_source_of(row))
     return True
 
 

@@ -25,6 +25,7 @@ from app import providers
 from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.endpoints import ENDPOINTS, get_endpoint
+from app.sources import prefs
 from app.providers.base import (
     Capabilities,
     Item,
@@ -203,14 +204,55 @@ class TestIdentityWaterfall:
             parse_item_key(bad)
 
 
+# A preference that admits everything, the set of every service name, and a
+# Settings carrying a usable credential for both — the three arguments the
+# selector takes, spelled once because most of these tests vary exactly one of
+# them.
+_ALL_SOURCES = prefs.SourcePrefs(user_id=1, tracker_source=prefs.BOTH)
+_ALL_NAMES = frozenset(str(source) for source in providers.Source)
+_CONFIGURED = Settings(trakt_client_id="c", trakt_access_token="t",
+                       simkl_client_id="c", simkl_access_token="t")
+
+
 class TestTrackerPort:
     """The registry answering "who can read one person's own viewing", so the
     tracker never has to name a service."""
 
-    def test_it_finds_the_source_that_reaches_private_data(self):
-        port = providers.for_tracker()
-        assert port is not None
-        assert port is providers.get(Source.TRAKT).sync_port
+    def test_it_finds_every_source_that_reaches_private_data(self):
+        ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, _CONFIGURED)
+        assert [source for source, _p in ports] == [Source.TRAKT, Source.SIMKL]
+        assert ports[0][1] is providers.get(Source.TRAKT).sync_port
+
+    def test_the_primary_source_is_the_first_declared_one(self):
+        """The order is the registry's, and the FIRST entry is what a frozen
+        month and the announcement post carry when there is room for one number.
+        Trakt leads because every existing instance already reads it."""
+        ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, _CONFIGURED)
+        assert ports[0][0] is Source.TRAKT
+
+    def test_a_preference_naming_one_source_admits_only_that_one(self):
+        ports = providers.for_tracker_ports(
+            prefs.SourcePrefs(user_id=1, tracker_source=str(Source.SIMKL)),
+            _ALL_NAMES, _CONFIGURED)
+        assert [source for source, _p in ports] == [Source.SIMKL]
+
+    def test_auto_follows_the_links(self):
+        """`auto` is the default and asks whatever the account has connected, so
+        an account with one service is on exactly the path it always was."""
+        ports = providers.for_tracker_ports(
+            prefs.SourcePrefs(user_id=1), {str(Source.TRAKT)}, _CONFIGURED)
+        assert [source for source, _p in ports] == [Source.TRAKT]
+
+    def test_an_unconfigured_source_is_never_asked(self):
+        """Admitted by the preference and linked, but with no credential on this
+        request's settings, is not something to call — see _distrakt_settings,
+        which is what puts an account's own tokens there."""
+        ports = providers.for_tracker_ports(
+            _ALL_SOURCES, _ALL_NAMES, Settings(trakt_client_id="c", trakt_access_token="t"))
+        assert [source for source, _p in ports] == [Source.TRAKT]
+
+    def test_tracker_sources_names_who_could_back_it_at_all(self):
+        assert providers.tracker_sources() == {str(Source.TRAKT), str(Source.SIMKL)}
 
     def test_only_a_source_that_declares_private_data_can_back_the_tracker(self):
         for provider in providers.registered().values():
@@ -218,7 +260,7 @@ class TestTrackerPort:
                 assert provider.capabilities.private_user_data
 
     def test_the_port_answers_every_question_the_protocol_names(self):
-        port = providers.for_tracker()
+        port = providers.get(Source.TRAKT).sync_port
         for name in ("fetch_last_activities", "fetch_history", "fetch_progress_details",
                      "fetch_watched_progress", "watched_progress_from", "movie_plays_from"):
             assert callable(getattr(port, name))
@@ -229,7 +271,7 @@ class TestTrackerPort:
         longer reach, and the test then exercises the real call. Asserted directly
         because a port that quietly stopped being patchable would show up as live
         provider traffic, not as a failure."""
-        port = providers.for_tracker()
+        port = providers.get(Source.TRAKT).sync_port
         with patch("app.providers.trakt.sync.fetch_last_activities",
                    new=AsyncMock(return_value={"episodes": {"watched_at": "T"}})) as spy:
             answer = asyncio.run(port.fetch_last_activities(Settings()))

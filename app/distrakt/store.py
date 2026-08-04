@@ -225,6 +225,13 @@ USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back")
 _INT_COLUMNS = frozenset(("season", "watched", "total"))
 _BOOL_COLUMNS = frozenset(("started_airing", "finished_airing", "came_back"))
 _TEXT_COLUMNS = frozenset(("title", "network", "added_by"))
+# Columns whose value is a small mapping in a record and JSON text in the
+# database. Named here rather than serialized at each call site so a record can
+# be handed around as a record — every reader of `watched_by_source` gets a dict,
+# and only the two functions below ever see the text form. An empty mapping is
+# stored as NULL, which is what "nobody wrote a breakdown down" already looks
+# like on every row written before these columns existed.
+_JSON_COLUMNS = frozenset(("watched_by_source", "total_by_source"))
 
 # Who put a record there. Only CALENDAR records mean "the calendar says you're
 # watching this", which is why removing one marks the show turned away there and
@@ -424,6 +431,11 @@ def normalize_show(show: dict) -> dict:
         "finished_airing": bool(incoming.get("finished_airing", False)),
         "added_by": str(incoming.get("added_by") or ""),
         "created_at": incoming.get("created_at"),
+        # Carried through as mappings; only a MONTH record has columns for them,
+        # and a user record simply drops them on the way to the database because
+        # MONTH_RECORD_COLUMNS is what names them.
+        "watched_by_source": dict(incoming.get("watched_by_source") or {}),
+        "total_by_source": dict(incoming.get("total_by_source") or {}),
     }
 
 
@@ -443,6 +455,9 @@ def _column_value(column: str, rec: dict):
         return str(rec.get(column) or "")
     if column == "kind":
         return str(rec["kind"])
+    if column in _JSON_COLUMNS:
+        value = rec.get(column)
+        return json.dumps(value) if value else None
     return rec.get(column)
 
 
@@ -483,6 +498,23 @@ def _differences(existing, updates: dict) -> dict:
     """
     return {name: value for name, value in updates.items()
             if existing[name] != value}
+
+
+def _stored_json(document) -> dict:
+    """A JSON column back as a mapping, or an empty one.
+
+    Unreadable reads as empty rather than raising: these columns hold a
+    BREAKDOWN of numbers the row also carries in full, so the cost of not
+    understanding one is a row that shows a single number, and refusing to render
+    somebody's month over it would be far worse.
+    """
+    if not document:
+        return {}
+    try:
+        parsed = json.loads(document)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def row_to_record(row) -> dict:
@@ -530,6 +562,15 @@ def row_to_record(row) -> dict:
     }
     if "month" in columns:
         rec["month"] = row["month"]
+    # WHAT EACH SOURCE SAID, on a month that recorded it. A month frozen while
+    # two services disagreed keeps both numbers here and can still render the
+    # disagreement years later; a month frozen with one service linked has one
+    # entry, which reads back identically to a single number. NULL — every row
+    # written before the columns existed — reads as "no breakdown was written
+    # down", not as "the sources agreed on nothing".
+    for column in ("watched_by_source", "total_by_source"):
+        if column in columns:
+            rec[column] = _stored_json(row[column])
     if "abandoned_form" in columns:
         rec["abandoned_form"] = row["abandoned_form"]
     if "came_back" in columns:
@@ -944,7 +985,8 @@ async def remove_user_record(user_id: int, key: ItemKey, season: int) -> bool:
 
 async def migrate_to_month(user_id: int, key: ItemKey, season: int, *, month: str,
                            kind: RecordKind | str,
-                           abandoned_form: str | None = None) -> dict | None:
+                           abandoned_form: str | None = None,
+                           by_source: dict | None = None) -> dict | None:
     """Move a season OFF the viewer's list and onto `month` as a completed or
     abandoned record. Returns the record written, or None if it was not on the
     list.
@@ -957,6 +999,13 @@ async def migrate_to_month(user_id: int, key: ItemKey, season: int, *, month: st
     The record's fields come from the row that was on the list — its counts, its
     dates, who first filed it — because the verdict is about that season as the
     viewer last had it, and re-deriving any of it here would be a second opinion.
+
+    `by_source` IS THE ONE THING THE LIST ROW CANNOT SUPPLY: what each service
+    said, which only a MONTH record has columns for. It is passed in by the caller
+    that had the live show in hand rather than re-fetched here, and it is what
+    lets a month frozen while two services disagreed still render the
+    disagreement years later. Absent, the record keeps its single number and
+    reads back exactly as every record written before this existed.
     """
     settled = _validate_kind(kind, SETTLED_KINDS, "settled")
     month = _validate_month(month)
@@ -968,7 +1017,8 @@ async def migrate_to_month(user_id: int, key: ItemKey, season: int, *, month: st
             f"SELECT * FROM distrakt_user_seasons {_SEASON_WHERE}", address).fetchone()
         if row is None:
             return None
-        record = {**row_to_record(row), "kind": str(settled), "month": month,
+        record = {**row_to_record(row), **(by_source or {}), "kind": str(settled),
+                  "month": month,
                   "abandoned_form": abandoned_form if settled is RecordKind.ABANDONED else None,
                   "created_at": now}
         conn.execute(

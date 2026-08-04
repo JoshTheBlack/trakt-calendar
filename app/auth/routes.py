@@ -577,7 +577,7 @@ async def me_page(request: Request):
         # This page gates the tracker's menu item server-side rather than leaving
         # it to CSS — it must not mention the tracker at all to an account without
         # the grant. Same two conditions the tracker's own access level enforces.
-        "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
+        "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "user": user,
         "linked": linked,
         "trakt_login_configured": settings.trakt_login_configured,

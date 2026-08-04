@@ -124,11 +124,22 @@ function applyReadonlyState(readonly, kind) {
 // degraded payload, so its presence — not the rate_limited flag, which is just
 // metadata on the cause — is what drives the banner. Surface it persistently
 // above the list so the shown numbers aren't mistaken for a fresh, correct read.
+// A source that could not be read gets the same banner, and it has to: with two
+// accounts linked, a season showing one number would otherwise look like the two
+// agreeing rather than like only one of them having answered. Never a hard
+// failure — whatever DID answer is still on the page.
 function renderNotice(d) {
     const el = document.getElementById('distraktNotice');
     if (!el) return;
-    if (d && d.notice) {
-        el.textContent = '⚠ ' + d.notice;
+    const down = (d && d.sources_unreadable) || [];
+    const lines = [];
+    if (d && d.notice) lines.push(d.notice);
+    if (down.length) {
+        lines.push(down.join(' and ') + (down.length > 1 ? ' could not be read' : ' could not be read')
+            + ' just now — the counts below are what the other account reports.');
+    }
+    if (lines.length) {
+        el.textContent = '⚠ ' + lines.join(' ');
         el.hidden = false;
     } else {
         el.textContent = '';

@@ -27,6 +27,7 @@ import httpx
 from ... import cache
 from ... import http_pool
 from ...config import Settings
+from ..base import SourceUnavailable
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
@@ -42,14 +43,13 @@ APP_VERSION = "2.0"
 USER_AGENT = "trakt-new-shows-py/2.0"
 
 
-class SimklError(Exception):
-    """Simkl could not answer. The app-wide degradation contract for this
-    source, mirroring TraktError: every caller that writes `except SimklError`
-    is saying "Simkl could not answer", not "the transport layer raised"."""
+class SimklError(SourceUnavailable):
+    """Simkl could not answer. Every caller that writes `except SimklError` is
+    saying "Simkl could not answer", not "the transport layer raised".
 
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
+    Its base is the app-wide "a source could not answer" contract, the same one
+    TraktError derives from, so a caller reading BOTH sources can degrade
+    whichever failed without an except clause per service."""
 
 
 class SimklRateLimitError(SimklError):

@@ -15,7 +15,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 
-from .. import db
+from .. import db, providers
 
 SESSION_SLIDING_SECONDS = 14 * 24 * 3600
 SESSION_ABSOLUTE_SECONDS = 60 * 24 * 3600
@@ -42,12 +42,39 @@ class CurrentUser:
     # a fully working one.
     ranker_approved: bool
     timezone: str | None
-    # distrakt reads the requesting user's own Trakt watch history through their
-    # own token, so an account with no linked Trakt identity has nothing for it
-    # to read — approval alone isn't enough to make the page work.
-    has_trakt_identity: bool
+    # WHICH SERVICES THIS ACCOUNT HAS LINKED, as bare provider names. A SET
+    # rather than a flag per service, because the two things that read it ask
+    # different questions of it — the tracker gate asks whether ANY source that
+    # can read a watch history is linked, and the source preferences ask which
+    # ones to follow — and a flag per provider would have to be added to this
+    # row, to the query and to every construction site each time a service is
+    # added.
+    linked_providers: frozenset[str]
     expires_at: int
     absolute_expires_at: int
+
+    @property
+    def has_trakt_identity(self) -> bool:
+        """Whether this account is linked to Trakt specifically.
+
+        Still asked by name in the places that genuinely mean Trakt and not "a
+        service": the Settings screen's warning about an operator with no Trakt
+        link, and the account page's own row. Derived rather than stored, so
+        there is one answer to "what is linked" and not two that can disagree.
+        """
+        return "trakt" in self.linked_providers
+
+    @property
+    def has_tracker_identity(self) -> bool:
+        """Whether any linked service can read this person's own watch history.
+
+        The tracker reads the requesting user's viewing through their own token,
+        so approval alone is not enough to make the page work — but WHICH service
+        supplies it is not the gate's business. The registry answers which
+        sources have private reads at all, so a source gaining them widens this
+        by being registered rather than by an edit here.
+        """
+        return bool(self.linked_providers & providers.tracker_sources())
 
     @property
     def label(self) -> str:
@@ -91,8 +118,13 @@ SELECT s.id                AS session_id,
        u.ranker_approved   AS ranker_approved,
        u.is_disabled       AS is_disabled,
        u.timezone          AS timezone,
-       EXISTS (SELECT 1 FROM linked_identities li
-                WHERE li.user_id = u.id AND li.provider = 'trakt') AS has_trakt
+       -- Every provider this account has linked, comma-separated. One
+       -- correlated subquery rather than one EXISTS per service: the set is what
+       -- both readers want (see CurrentUser.linked_providers), and adding a
+       -- service to a list of EXISTS clauses is an edit nobody would remember to
+       -- make. NULL when nothing is linked, which reads as the empty set.
+       (SELECT group_concat(li.provider) FROM linked_identities li
+         WHERE li.user_id = u.id)                                 AS linked_providers
   FROM sessions s
   JOIN users u ON u.id = s.user_id
  WHERE s.id = ?
@@ -148,7 +180,8 @@ async def validate_session(
             distrakt_approved=bool(row["distrakt_approved"]),
             ranker_approved=bool(row["ranker_approved"]),
             timezone=row["timezone"],
-            has_trakt_identity=bool(row["has_trakt"]),
+            linked_providers=frozenset(
+                name for name in str(row["linked_providers"] or "").split(",") if name),
             expires_at=expires_at,
             absolute_expires_at=absolute,
         )

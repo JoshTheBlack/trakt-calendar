@@ -26,14 +26,14 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import backfill, discord_fmt, lifecycle, unsettled, watch_history
+from . import backfill, counts, discord_fmt, lifecycle, live, unsettled, watch_history
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
 from .. import auth, authz, chrome, clock, db, route_params
-from ..auth import trakt_routes
+from ..auth import simkl_routes, trakt_routes
 from ..auth import AuthLevel
 from ..calendar import share_links
 # The turn-away marks themselves, written where a tracker verdict has to reach the
@@ -128,20 +128,32 @@ async def _distrakt_user_id(request: Request) -> int:
 
 
 async def _distrakt_settings(user_id: int):
-    """The app-wide settings with the Trakt credential swapped for `user_id`'s own.
+    """The app-wide settings with EVERY source's credential swapped for
+    `user_id`'s own.
 
     The tracker reads one person's private watch history — their progress, their
-    plays, their movies — so every Trakt call it makes has to authenticate as
-    THEM. The token in settings.json belongs to the operator and would hand every
-    user the operator's viewing instead of their own. Everything else on the
-    object (the network emoji map, the TMDB key, the genre/country strings) is
-    genuinely app-wide and is carried through untouched.
+    plays, their movies — so every call it makes has to authenticate as THEM. The
+    tokens in settings.json belong to the operator and would hand every user the
+    operator's viewing instead of their own. Everything else on the object (the
+    network emoji map, the TMDB key, the genre/country strings) is genuinely
+    app-wide and is carried through untouched.
+
+    BOTH TOKENS RIDE ON THE ONE SETTINGS OBJECT rather than each source being
+    handed a credential of its own. Each port already reads its own field off
+    `settings` — that is what `is_configured` asks about — so a per-source
+    credential object would be a second mechanism for something this one already
+    expresses, and the SyncPort protocol would have to grow an argument for it.
+    A user with no Simkl identity gets an empty Simkl token, `simkl_configured`
+    goes false, and that port is simply never asked; the same has always been
+    true of Trakt.
 
     The refresh token is cleared as well: nothing downstream refreshes, and
     leaving the operator's beside somebody else's access token would be a pairing
-    that means nothing. The access level guarantees a linked Trakt identity, but
-    a row can still hold an empty token, in which case `trakt_configured` goes
-    false and the handlers take their existing "not configured" path.
+    that means nothing. (There is no Simkl counterpart to clear — Simkl issues no
+    refresh token.) The access level guarantees SOME linked identity that can
+    read a history, but a row can still hold an empty token, in which case that
+    source's `*_configured` goes false and the handlers take their existing "not
+    configured" path.
 
     The network->emoji map is per-user too, but it is NOT on this object: it was
     removed from Settings entirely when it stopped being app-wide, so the
@@ -149,9 +161,13 @@ async def _distrakt_settings(user_id: int):
     `settings` is deliberate — there is no longer an app-wide value for a caller
     to reach for by mistake.
     """
-    token = await trakt_routes.access_token_for_user(user_id)
+    trakt_token, simkl_token = await asyncio.gather(
+        trakt_routes.access_token_for_user(user_id),
+        simkl_routes.access_token_for_user(user_id),
+    )
     return dataclasses.replace(
-        load_settings(), trakt_access_token=token or "", trakt_refresh_token="",
+        load_settings(), trakt_access_token=trakt_token or "", trakt_refresh_token="",
+        simkl_access_token=simkl_token or "",
     )
 
 
@@ -327,8 +343,16 @@ def _rows_for(shape: lifecycle.MonthShape,
     for show in (*unaired, *shape.listed, *shape.settled):
         if show["bucket"] not in allowed:
             continue
-        # The stored flag under the name the browser draws the marker from.
-        rows.append({**show, "returned": bool(show.get("came_back"))})
+        # The stored flag under the name the browser draws the marker from, and
+        # the counts string the row draws — which a live show already carries and
+        # a row read straight out of storage does not. Built here rather than in
+        # the browser because a frozen month keeps what each service said and has
+        # to be able to render that disagreement years later, from the same rule
+        # that wrote it (app/distrakt/counts.py).
+        rows.append({**show, "returned": bool(show.get("came_back")),
+                     "counts": show.get("counts") or counts.counts_label(
+                         show.get("watched_by_source") or show.get("watched"),
+                         show.get("total"), live.source_labels(), live.source_order())})
     return rows
 
 
@@ -404,7 +428,7 @@ def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji
 
 async def _sync_watch_history(settings, user_id: int, records: list[dict],
                               month_key: str, force_fresh: bool,
-                              today: date) -> tuple[dict, dict, list[dict], list]:
+                              today: date) -> tuple[dict, dict, list[dict], list, list[str]]:
     """Bring this user's incremental watch-history cache up to date ONCE, and take
     the four answers the month needs out of it: how much of each season they have
     watched, when each season was finished, which films they watched in the month,
@@ -431,8 +455,11 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         mstart, mend = watch_history.month_bounds(month_key)
         movies = watch_history.movies_in_range(state, mstart, mend)
         plays = watch_history.episode_plays(state)
+        # Which sources this pass could not read, so the page can say a number is
+        # one service's alone rather than presenting it as what everybody agrees.
+        unreadable = watch_history.unreadable_sources(state)
         sp.set(watched_keys=len(watched_lookup), movies=len(movies), plays=len(plays))
-    return watched_lookup, completed_lookup, movies, plays
+    return watched_lookup, completed_lookup, movies, plays, unreadable
 
 
 def _season_lookup(settings) -> lifecycle.SeasonLookup:
@@ -524,7 +551,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # counts it was reached on, and re-deriving them from today's history would let
     # a rewatch months later rewrite what a month recorded.
     everything = premieres + listed
-    if everything and not settings.trakt_configured:
+    # WHETHER ANY SOURCE CAN BE ASKED AT ALL, rather than whether one named
+    # service is configured. An account signed in with Simkl alone has a perfectly
+    # readable history and used to be refused here for not having Trakt.
+    ports = await watch_history.tracker_ports(settings, user_id)
+    if everything and not ports:
         return {"ok": False, "error": "Not configured"}, 400
 
     # Two INDEPENDENT freshness knobs (they were wrongly coupled, which made every
@@ -539,8 +570,9 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     completed_lookup: dict = {}
     movies: list[dict] = []
     questions = lifecycle.HistoryQuestions([], [])
-    if settings.trakt_configured:
-        watched_lookup, completed_lookup, movies, plays = await _sync_watch_history(
+    unreadable: list[str] = []
+    if ports:
+        watched_lookup, completed_lookup, movies, plays, unreadable = await _sync_watch_history(
             settings, user_id, everything, month_key, force_fresh, today)
         if under_way and plays:
             # The history has moved, so what it reported is folded back into the
@@ -589,7 +621,7 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # before logos existed doesn't depend on some OTHER show requesting its
     # network's logo first (see logos.ensure_logos). Best-effort and
     # self-limiting: a no-op once each network's tile is on disk.
-    if settings.trakt_configured and shows:
+    if ports and shows:
         with span("payload.ensure_logos"):
             await logos.ensure_logos(settings, [
                 (s.get("network"), (s.get("ids") or {}).get("tmdb")) for s in shows
@@ -617,6 +649,10 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # history pull produced them.
         "unknown_episodes": _unknown_episode_rows(questions.unknown),
         "given_up_episodes": _unknown_episode_rows(questions.given_up),
+        # The services that could not be read on this pass, under the names they
+        # are shown by. Present so a season showing one number says WHY that is
+        # all there is, instead of reading as two services agreeing.
+        "sources_unreadable": [live.source_labels().get(name, name) for name in unreadable],
         "post1": post1,
         "post2": post2,
         "generated_at": datetime.now(timezone.utc).isoformat(),

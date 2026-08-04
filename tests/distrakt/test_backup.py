@@ -59,9 +59,9 @@ async def _seed_dataset(user_id: int, *, tag: str) -> None:
     })
     await distrakt.save_month(user_id, doc)
     await wh._save(user_id, {
-        "last_synced": "2026-07-20",
-        "beacons": {"ep_watched": tag, "ep_removed": None,
-                    "mv_watched": tag, "mv_removed": None},
+        "cursors": {"trakt": "2026-07-20"},
+        "beacons": {"trakt": {"ep_watched": tag, "ep_removed": None,
+                              "mv_watched": tag, "mv_removed": None}},
         "shows": {"show:tmdb:555": {"ids": {"trakt": 101},
                                    "seasons": {"1": [1, 2, 3, 4]}}},
         "movies": {"movie:tmdb:9": {"ids": {"trakt": 9},
@@ -123,8 +123,8 @@ class RoundTripTests(ExportTestCase):
                          {("show:tmdb:808", 3)})
         # and the watch-history side came back too
         state = await wh._load(self.user_id)
-        self.assertEqual(wh.watched_map(state), {("show:tmdb:555", 1): 4})
-        self.assertEqual(state["last_synced"], "2026-07-20")
+        self.assertEqual(wh.watched_map(state), {("show:tmdb:555", 1): {"trakt": 4}})
+        self.assertEqual(state["cursors"], {"trakt": "2026-07-20"})
         self.assertIn("movie:tmdb:9", state["movies"])
 
     async def test_export_contains_only_the_requesting_users_data(self):
@@ -384,7 +384,7 @@ class LegacyBackupTests(ExportTestCase):
         state = await wh._load(self.user_id)
         self.assertEqual(state["shows"], {})
         self.assertEqual(state["movies"], {})
-        self.assertIsNone(state["last_synced"])
+        self.assertEqual(state["cursors"], {})
 
     def _schema_4_doc(self) -> dict:
         """An export taken after the roster split but before the caches gained a
@@ -416,10 +416,11 @@ class LegacyBackupTests(ExportTestCase):
         service named, rather than being dropped to re-fetch."""
         await distrakt.restore_user_data(self.user_id, self._schema_4_doc())
         state = await wh._load(self.user_id)
-        self.assertEqual(wh.watched_map(state), {("show:tmdb:9001", 2): 1})
+        self.assertEqual(wh.watched_map(state), {("show:tmdb:9001", 2): {"trakt": 1}})
         self.assertIn("movie:tmdb:55", state["movies"])
-        self.assertEqual(state["last_synced"], "2026-03-20")
-        self.assertEqual(state["beacons"], {"ep_watched": "2026-03-20T00:00:00Z"})
+        self.assertEqual(state["cursors"], {"trakt": "2026-03-20"})
+        self.assertEqual(state["beacons"],
+                         {"trakt": {"ep_watched": "2026-03-20T00:00:00Z"}})
         for table in ("distrakt_show_progress", "distrakt_movie_watches"):
             row = await db.fetch_one(
                 f"SELECT source FROM {table} WHERE user_id = ?", (self.user_id,))
@@ -554,7 +555,7 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
         await self._seed_v17()
         await self._to_current()
         state = await wh._load(self.user_id)
-        self.assertEqual(wh.watched_map(state), {("show:tmdb:4242", 2): 1})
+        self.assertEqual(wh.watched_map(state), {("show:tmdb:4242", 2): {"trakt": 1}})
 
     async def test_cached_film_watches_are_dropped_and_re_seeded(self):
         """Nothing in the database has ever recorded a shared id for a film, so
@@ -564,7 +565,7 @@ class MigrationEighteenTests(unittest.IsolatedAsyncioTestCase):
         await self._to_current()
         state = await wh._load(self.user_id)
         self.assertEqual(state["movies"], {})
-        self.assertIsNone(state["last_synced"])
+        self.assertEqual(state["cursors"], {})
 
     async def test_a_row_with_no_shared_id_refuses_to_migrate(self):
         """Every read path keys on the triple afterwards, so a row that resolves

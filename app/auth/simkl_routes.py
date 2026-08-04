@@ -40,7 +40,7 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import RedirectResponse
 
-from .. import auth, authz
+from .. import auth, authz, db, secrets_box
 from ..config import Settings, load_settings
 from ..providers.simkl import transport as simkl_transport
 from ..templating import templates
@@ -305,3 +305,30 @@ async def _finish_login(request: Request, settings: Settings,
     # the handshake cookie coming off are one act, not two.
     provider_login.attach_session(response, outcome, settings, request)
     return response
+
+
+async def access_token_for_user(user_id: int) -> str | None:
+    """This user's own Simkl access token, or None when they have not linked one.
+
+    THE WHOLE OF IT. Trakt's counterpart carries an expiry check and a serialized
+    refresh lease; Simkl issues no refresh token at all and its tokens are valid
+    until the person revokes the app, so `token_expires_at` is NULL on every row
+    this app writes. A branch on it could only ever take the "no expiry" path, so
+    there is none — dead code that looks like a safety check is worse than the
+    plain read, because the next reader has to work out that it never runs.
+
+    A 401 later is what a revoked grant looks like, and the transport's message
+    for it already says the link has to be made again.
+
+    The token is stored sealed and is opened here, at the point of use. With no
+    key set it passes through unchanged; a sealed value whose key is missing
+    opens to None, so the row degrades to "no usable token" and the tracker takes
+    its existing not-configured path rather than sending ciphertext to Simkl.
+    """
+    row = await db.fetch_one(
+        "SELECT access_token FROM linked_identities WHERE user_id = ? AND provider = ?",
+        (user_id, PROVIDER),
+    )
+    if row is None:
+        return None
+    return secrets_box.open_(row["access_token"])

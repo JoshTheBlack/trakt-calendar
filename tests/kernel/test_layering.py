@@ -220,6 +220,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (SETTINGS, INTEGRATIONS): Edge(
         "saving settings invalidates the cached library so the add-buttons stop "
         "showing marks from the old configuration"),
+    (DISTRAKT, SOURCES): Edge(
+        "which services back the tracker for an account is that account's stated "
+        "preference, so the sync asks the preference store before it asks any "
+        "source"),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
         "links a Discord post at the viewer's own calendar"),

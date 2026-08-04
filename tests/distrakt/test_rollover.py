@@ -27,7 +27,12 @@ from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from tests.support import new_db_path
 
-SETTINGS = SimpleNamespace(trakt_configured=True, network_emojis={}, default_network_emoji=":tv:",
+# The two credential flags the tracker's source selection reads. A fake
+# settings object has to answer both, because the selector asks every
+# registered source whether this request carries a usable credential for it
+# — see app/distrakt/routes.py's _distrakt_settings.
+SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
+                           network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 
 
@@ -324,7 +329,7 @@ class RolloverTests(RolloverTestCase):
 
     async def test_unconfigured_month_not_persisted(self):
         out = await distrakt.ensure_month(
-            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False),
+            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False, simkl_configured=False),
             today=self.TODAY)
         self.assertEqual(out["shows"], [])
         self.assertIsNone(await distrakt.load_month(self.user_id, self.AHEAD))

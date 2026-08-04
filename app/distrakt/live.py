@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from . import discord_fmt
+from . import counts, discord_fmt
+from .. import providers
 from ..perftrace import span
 from .store import Bucket, record_key
 
@@ -32,6 +33,46 @@ def live_key(rec: dict) -> tuple[str, int]:
     return (str(record_key(rec)), int(rec["season"]))
 
 
+def detail_source(rec: dict) -> str | None:
+    """Which service is asked how long a season is, or None when none can be.
+
+    DECIDED BY WHICH ID THE RECORD CARRIES, in the registry's declared order, and
+    NOT by which services the account has linked. A season's episode total is
+    CATALOGUE data — the same for everyone, no token involved — so a title known
+    to Trakt is asked of Trakt whether or not this viewer signed in with it, and
+    a Simkl-only title is asked of Simkl. Tying it to the linked accounts would
+    make a public fact depend on a private one and leave a Simkl-only roster
+    showing every season as having no episodes.
+
+    ONE SOURCE PER TITLE, NOT BOTH. Paying a second catalogue call per season to
+    discover the two services count episodes slightly differently would spend the
+    instance's budget on a disagreement nothing renders: what a viewer is shown
+    two of is what they have WATCHED (see counts.py), which is a fact about them
+    and genuinely differs.
+    """
+    ids = rec.get("ids") or {}
+    for source in providers.registered():
+        if ids.get(str(source)) not in (None, ""):
+            return str(source)
+    return None
+
+
+async def _season_detail(settings, rec: dict, *, fresh: bool, client):
+    """One record's season summary, from whichever source can answer for it."""
+    from ..providers import season as season_rules
+    from ..providers.simkl import detail as simkl_detail
+    from ..providers.trakt.detail import fetch_season_detail
+    ids = rec.get("ids") or {}
+    source = detail_source(rec)
+    if source == "simkl":
+        return await simkl_detail.fetch_season_detail(
+            settings, ids.get("simkl"), rec["season"], rec.get("media") or "show")
+    if source is None:
+        return season_rules.empty_season(int(rec["season"]))
+    return await fetch_season_detail(settings, ids.get("trakt"), rec["season"],
+                                     fresh=fresh, client=client)
+
+
 async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
                                allow_degrade: bool) -> list:
     """One season lookup per record, in parallel, in the records' own order.
@@ -41,28 +82,26 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
     the only difference, and it is the caller's policy rather than this
     function's — see compute_live_shows.
     """
-    from ..providers.trakt.detail import fetch_season_detail
     from ..providers.trakt.transport import shared_client
     # The app-wide shared client for the whole fan-out (no per-call client).
     client = shared_client()
     return await asyncio.gather(*(
-        fetch_season_detail(settings, (rec.get("ids") or {}).get("trakt"),
-                            rec["season"], fresh=fresh, client=client)
-        for rec in records
+        _season_detail(settings, rec, fresh=fresh, client=client) for rec in records
     ), return_exceptions=allow_degrade)
 
 
-def _merge_available(rec: dict, detail: dict, watched: int) -> dict:
-    show = {**rec, "key": str(record_key(rec)), "watched": watched, "unavailable": False}
+def _merge_available(rec: dict, detail: dict, watched: dict[str, int]) -> dict:
+    show = {**rec, "key": str(record_key(rec)), "unavailable": False}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
+    _apply_counts(show, rec, watched)
     return show
 
 
-def _merge_unavailable(rec: dict, watched: int) -> dict:
+def _merge_unavailable(rec: dict, watched: dict[str, int]) -> dict:
     """This one title's totals could not be fetched. Render it from its stored
     record's last-known fields and flag it, so the UI can say "unavailable,
     refresh to retry" rather than presenting a fabricated 0/0 as real."""
-    show = {**rec, "key": str(record_key(rec)), "watched": watched, "unavailable": True}
+    show = {**rec, "key": str(record_key(rec)), "unavailable": True}
     show.update({
         "total": int(rec.get("total") or 0),
         "cadence": rec.get("cadence"),
@@ -71,7 +110,47 @@ def _merge_unavailable(rec: dict, watched: int) -> dict:
         "started_airing": bool(rec.get("started_airing")),
         "finished_airing": bool(rec.get("finished_airing")),
     })
+    _apply_counts(show, rec, watched)
     return show
+
+
+def source_order() -> tuple[str, ...]:
+    """The registry's declared source order, as bare names. The FIRST entry a
+    season actually has a number from is that season's primary — the one number
+    a frozen month and the announcement post carry."""
+    return tuple(str(source) for source in providers.registered())
+
+
+def source_labels() -> dict[str, str]:
+    """What to call each source on screen, read off the providers themselves so a
+    badge can never spell a service differently from the rest of the app."""
+    return {str(source): provider.label
+            for source, provider in providers.registered().items()}
+
+
+def _apply_counts(show: dict, rec: dict, watched: dict[str, int]) -> None:
+    """Put the watched counts on a live show, in all three forms it is read in.
+
+    `watched` is the primary source's number and is what every existing reader
+    already asks for — the bucket rule, the Discord post, a frozen month's column
+    — so it keeps meaning exactly what it always did. `watched_by_source` beside
+    it is the whole picture, and `counts` is the string the row draws, which is
+    one number when the services agree and both when they do not. The label is
+    built HERE rather than in the browser because the rule for it is the same
+    rule a frozen month is written with, and a copy in JavaScript could not be
+    tested against the one that matters.
+    """
+    order = source_order()
+    per_source = watched if isinstance(watched, dict) else {}
+    total = int(show.get("total") or 0)
+    show["watched"] = counts.primary_count(watched, order)
+    show["watched_by_source"] = dict(per_source)
+    # The catalogue half, per source too, so a month frozen today can still say
+    # which service's episode count it was measured against. One entry: a
+    # season's total comes from one source (see detail_source).
+    detail_from = detail_source(rec)
+    show["total_by_source"] = {detail_from: total} if detail_from else {}
+    show["counts"] = counts.counts_label(watched, total, source_labels(), order)
 
 
 def _log_watched_coverage(records: list[dict], watched_lookup: dict, matched: int) -> None:
@@ -144,9 +223,13 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
         if isinstance(detail, Exception):
             # allow_degrade path only (else the gather would have raised).
             unavailable += 1
-            show = _merge_unavailable(rec, watched_lookup.get(key, int(rec.get("watched") or 0)))
+            # No live count for this title: fall back to the number its stored
+            # record last settled on, filed under the source that can answer for
+            # it so the row still renders one number rather than none.
+            fallback = {detail_source(rec) or "": int(rec.get("watched") or 0)}
+            show = _merge_unavailable(rec, watched_lookup.get(key) or fallback)
         else:
-            show = _merge_available(rec, detail, watched_lookup.get(key, 0))
+            show = _merge_available(rec, detail, watched_lookup.get(key) or {})
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # WHEN the season was finished, and only for a season that IS finished:
         # on a partly-watched season the same date is just "last time I watched

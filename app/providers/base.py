@@ -24,6 +24,26 @@ if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media fro
     from ..config import Settings
 
 
+class SourceUnavailable(Exception):
+    """A source could not answer. THE app-wide degradation contract, stated once
+    and named by nobody in particular.
+
+    Each source's own error type derives from this — `TraktError`,
+    `SimklError` — so a caller that genuinely wants to handle one service's
+    failure specifically still can, while a caller that reads TWO sources and has
+    to carry on with whichever answered has something to catch that does not name
+    either of them. Without it, the tracker would need one `except` clause per
+    registered source, which is exactly the shape a registry exists to prevent.
+
+    `status` is the HTTP status where there was one, and None where the failure
+    never got that far.
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
+
+
 class Media(StrEnum):
     """The two kinds of title this app deals in.
 
@@ -296,7 +316,23 @@ class SyncPort(Protocol):
 
     async def fetch_last_activities(self, settings: Settings) -> dict:
         """A small, fixed-size "last changed at" blob, independent of library
-        size, that a sync can gate on so an unchanged history costs one call."""
+        size, that a sync can gate on so an unchanged history costs one call.
+
+        THE SHAPE IS DECLARED HERE, and it is the one thing in this protocol that
+        is not simply passed through:
+
+            {"episodes": {"watched_at": <stamp|None>, "removed_at": <stamp|None>},
+             "movies":   {"watched_at": <stamp|None>, "removed_at": <stamp|None>}}
+
+        The gate compares the whole blob for equality and watches `removed_at`
+        separately, because a removal is not a play and never appears in the
+        history — so when one moves, cached progress has to be re-baselined
+        rather than folded forward. Extra keys are ignored; a source that files
+        its lists differently maps them onto these four AT ITS OWN BOUNDARY. It
+        has to live here rather than in the one module that reads it, because
+        every source has to uphold it and a rule written inside one reader is a
+        claim the other implementers never see.
+        """
         ...
 
     async def fetch_history(self, settings: Settings, start_at: str | None = None) -> list[dict]:

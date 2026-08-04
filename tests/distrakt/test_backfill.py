@@ -23,7 +23,12 @@ from app.config import Settings, save_settings
 from app.main import app
 from tests.support import ORIGIN, migrated_db, new_db_path
 
-SETTINGS = SimpleNamespace(configured=True, timezone="UTC")
+# The two credential flags the tracker's source selection reads. A fake
+# settings object has to answer both, because the selector asks every
+# registered source whether this request carries a usable credential for it
+# — see app/distrakt/routes.py's _distrakt_settings.
+SETTINGS = SimpleNamespace(configured=True, timezone="UTC",
+                           trakt_configured=True, simkl_configured=False)
 
 
 def _ep_event(trakt_id, season, number, watched_at, title="Show", network="Net"):

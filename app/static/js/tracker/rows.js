@@ -171,8 +171,13 @@ function returnMark(s) {
 
 function showRow(s) {
     const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
-    let counts = isNewRet ? `${s.watched}/${s.total}${s.cadence ? ', ' + s.cadence : ''}`
-        : (s.bucket === 'completed') ? '' : `${s.watched}/${s.total}`;
+    // The x/y comes from the server already written out, because when two
+    // accounts report different numbers for a season the row shows BOTH, each
+    // labelled — and that rule is the same one a closed month is written with, so
+    // it has one home rather than a copy here that could disagree with it.
+    const xy = s.counts || `${s.watched}/${s.total}`;
+    let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}`
+        : (s.bucket === 'completed') ? '' : xy;
     // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;

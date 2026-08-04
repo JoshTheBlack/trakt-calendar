@@ -58,13 +58,14 @@ class RegistrationTests(unittest.TestCase):
             with self.subTest(endpoint=key):
                 self.assertFalse(self.simkl.capabilities.answers(key))
 
-    def test_a_source_with_no_port_does_not_claim_private_data(self):
+    def test_the_port_and_the_private_data_flag_moved_together(self):
         """The same rule the conformance suite enforces across the registry,
         stated here as this source's own property: claiming the tracker can be
-        backed by it while carrying nothing to call is the one lie the registry
-        cannot catch."""
-        self.assertIsNone(self.simkl.sync_port)
-        self.assertFalse(self.simkl.capabilities.private_user_data)
+        backed by it while carrying nothing to call — or carrying a port while
+        denying it has private data — is the one lie the registry cannot catch,
+        which is why the two are asserted in one place."""
+        self.assertIsNotNone(self.simkl.sync_port)
+        self.assertTrue(self.simkl.capabilities.private_user_data)
 
     def test_the_declared_window_is_bounded_at_both_ends(self):
         """Simkl's calendar is a set of pre-baked files with a real beginning and
@@ -83,13 +84,17 @@ class RegistrationTests(unittest.TestCase):
 
 
 class TrackerSelectionTests(unittest.TestCase):
-    """The tracker asks the registry for a source with private reads. Until
-    Simkl has a port, that answer must be exactly what it was before."""
+    """The tracker asks the registry which sources can read private data."""
 
-    def test_the_tracker_still_gets_trakts_port(self):
-        port = providers.for_tracker()
-        self.assertIsNotNone(port)
-        self.assertIs(port, providers.registered()[Source.TRAKT].sync_port)
+    def test_both_sources_can_now_back_the_tracker(self):
+        self.assertEqual(providers.tracker_sources(),
+                         {str(Source.TRAKT), str(Source.SIMKL)})
+
+    def test_trakt_is_still_first(self):
+        """The declared order decides which source is an account's PRIMARY — the
+        one number a frozen month keeps — so a second source appearing must not
+        displace the one every existing instance already reads."""
+        self.assertEqual(list(providers.registered())[0], Source.TRAKT)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -11,19 +11,49 @@ The three error types ARE re-exported, because they are not one module's detail.
 every caller that writes it is saying "Simkl could not answer".
 
 WHAT THIS PACKAGE CANNOT DO YET, said plainly so an empty Capabilities does not
-read as a mistake: it answers no calendar endpoint and carries no port for
-private per-person reads. Both are declared below rather than implied, so
-nothing has to know that Simkl is the newer source in order to avoid asking it
-questions it cannot answer.
+read as a mistake: it answers no calendar endpoint. Its private per-person reads
+DO exist now and are declared below.
 """
 from __future__ import annotations
 
 from ...config import Settings
 from .. import register
 from ..base import Capabilities, Source
+from . import sync
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
 __all__ = ["SimklError", "SimklRateLimitError", "SimklBlockedError"]
+
+
+class _SimklSyncPort:
+    """The private, per-person reads, as the registry hands them out.
+
+    A THIN OBJECT OVER sync.py's FUNCTIONS, exactly as the Trakt package's port
+    is. It exists so the registry has something to hold and the tracker has
+    something to call without importing a provider module by name; it holds no
+    state and makes no decisions, and every method here delegates through the
+    MODULE object so a test double installed on app.providers.simkl.sync is
+    actually the thing that gets called.
+    """
+
+    async def fetch_last_activities(self, settings: Settings) -> dict:
+        return await sync.fetch_last_activities(settings)
+
+    async def fetch_history(self, settings: Settings, start_at: str | None = None) -> list[dict]:
+        return await sync.fetch_history(settings, start_at=start_at)
+
+    async def fetch_progress_details(self, settings: Settings, show_ids):
+        return await sync.fetch_progress_details(settings, show_ids)
+
+    async def fetch_watched_progress(self, settings: Settings,
+                                     since_days: int | None = None) -> list[dict]:
+        return await sync.fetch_watched_progress(settings, since_days=since_days)
+
+    def watched_progress_from(self, events: list[dict]) -> list[dict]:
+        return sync.watched_progress_from(events)
+
+    def movie_plays_from(self, events: list[dict]) -> list[dict]:
+        return sync.movie_plays_from(events)
 
 
 class _SimklProvider:
@@ -47,15 +77,15 @@ class _SimklProvider:
         # then" rather than "this source does not go there".
         days_before=1080,
         days_after=90,
-        # FALSE FOR NOW, AND THIS IS NOT A CLAIM ABOUT SIMKL. Simkl does expose a
-        # person's own library and history; this package has no module that reads
-        # them yet, and a source declaring private data while carrying no port is
-        # lying in the one way the registry cannot catch — the tracker would find
-        # a usable source and then have nothing to call. So this flips to True in
-        # the same change that adds the port below.
-        private_user_data=False,
+        # TRUE, AND IT MOVED IN THE SAME CHANGE AS THE PORT BELOW. A source
+        # declaring private data while carrying no port is lying in the one way
+        # the registry cannot catch — the tracker would find a usable source and
+        # then have nothing to call — so the flag and the port are one fact
+        # stated twice and must never be changed apart. The conformance test is
+        # what fails if only one of them moves.
+        private_user_data=True,
     )
-    sync_port = None
+    sync_port = _SimklSyncPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured

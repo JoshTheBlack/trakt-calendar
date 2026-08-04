@@ -29,7 +29,8 @@ from .base import (
 __all__ = [
     "Capabilities", "ID_KEYS", "Item", "Media", "Provider", "Source", "SyncPort",
     "collect_ids", "parse_media",
-    "register", "get", "registered", "for_calendar", "for_tracker",
+    "register", "get", "registered", "for_calendar", "for_tracker_ports",
+    "tracker_sources",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -57,11 +58,10 @@ def _load_builtins() -> None:
     if _loaded:
         return
     _loaded = True
-    # THE ORDER IS LOAD-BEARING while for_calendar and for_tracker below are
-    # first-match-wins over this dict: registration order is what decides which
-    # source answers when more than one is configured. Trakt first, because it
-    # is the source every existing instance already reads and a second one
-    # appearing must not silently displace it.
+    # WHICH ORDER THESE RUN IN DOES NOT MATTER — `registered()` sorts by the
+    # `Source` declaration, which is the app's one statement of the declared
+    # order, precisely so that importing a provider for some unrelated reason
+    # cannot decide which source is an account's primary.
     from . import trakt  # noqa: F401  — registers itself on import
     from . import simkl  # noqa: F401  — same
 
@@ -76,9 +76,19 @@ def get(source: Source | str) -> Provider:
 
 def registered() -> dict[Source, Provider]:
     """Every registered provider, as a copy so a caller iterating it cannot
-    mutate the registry."""
+    mutate the registry.
+
+    IN `Source` DECLARATION ORDER, WHICH IS THE DECLARED ORDER, and that is not
+    cosmetic: the first entry a title or an account has an answer from is its
+    PRIMARY source — the one number a frozen month keeps and the announcement
+    post carries. Ordering by the enum rather than by insertion means it cannot
+    depend on which module happened to be imported first, which is a real hazard
+    here: a provider registers itself on import, and importing one for something
+    unrelated (a login route reaching its transport) is enough to put it at the
+    front of an insertion-ordered dict.
+    """
     _load_builtins()
-    return dict(_REGISTRY)
+    return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
 def for_calendar(settings) -> Provider | None:
@@ -102,27 +112,53 @@ def for_calendar(settings) -> Provider | None:
     answer is "there is exactly one calendar source"; a per-account preference is
     what it has to become.
     """
-    _load_builtins()
-    for provider in _REGISTRY.values():
+    for provider in registered().values():
         if provider.capabilities.endpoints and provider.is_configured(settings):
             return provider
     return None
 
 
-def for_tracker() -> SyncPort | None:
-    """The port whose private, per-person reads back the tracker, or None when no
-    registered source has any.
+def tracker_sources() -> frozenset[str]:
+    """The names of every source that could back the tracker at all.
 
-    NO `settings` ARGUMENT, unlike for_calendar. Whether a token happens to be
-    filled in does not change WHICH source the tracker reads — it changes whether
-    that source answers, which the port's own callers already degrade on (an
-    unreadable history serves the cache). With one private-data source registered
-    the answer does not depend on configuration at all; when there are two,
-    choosing between them becomes a stored preference, and this is the function
-    that grows the argument for it.
+    "Could" is a property of the SOURCE, not of an account: it is the sources
+    that expose one person's own viewing and carry a port to read it with. The
+    access gate asks this so it can say "you need one of these linked" without
+    naming a service, and so a source gaining private reads widens the gate by
+    being registered rather than by a second edit somewhere in auth.
     """
-    _load_builtins()
-    for provider in _REGISTRY.values():
-        if provider.capabilities.private_user_data and provider.sync_port is not None:
-            return provider.sync_port
-    return None
+    return frozenset(
+        str(source) for source, provider in registered().items()
+        if provider.capabilities.private_user_data and provider.sync_port is not None
+    )
+
+
+def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
+    """Every source the tracker should read for this account, in declared order.
+
+    Three conditions, and each one is a different question:
+      - the SOURCE can answer at all (private data, and a port to read it with);
+      - the ACCOUNT wants it (`prefs.admits_tracker`, given what it has linked);
+      - the CREDENTIAL is there (`is_configured` against a Settings carrying that
+        account's own tokens — see app/distrakt/routes.py's _distrakt_settings).
+
+    The order is registry order, which is Trakt first, and it is load-bearing in
+    one narrow place: the FIRST entry is the account's primary source, whose
+    number is the one a frozen month and the announcement post carry when a
+    single number is all there is room for. Everything else about reading two
+    sources treats them as equals.
+
+    An empty list is an ordinary answer — an account that has linked nothing, or
+    whose one linked service has no usable token — and every caller already
+    degrades to "serve what is cached" for it.
+    """
+    ports: list[tuple[Source, SyncPort]] = []
+    for source, provider in registered().items():
+        if not provider.capabilities.private_user_data or provider.sync_port is None:
+            continue
+        if not prefs.admits_tracker(source, linked):
+            continue
+        if not provider.is_configured(settings):
+            continue
+        ports.append((source, provider.sync_port))
+    return ports

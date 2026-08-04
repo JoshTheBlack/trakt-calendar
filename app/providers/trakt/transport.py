@@ -18,6 +18,7 @@ import httpx
 from ... import cache
 from ... import http_pool
 from ...config import Settings
+from ..base import SourceUnavailable
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
@@ -25,10 +26,13 @@ _perf = logging.getLogger("app.perf")
 API_BASE = "https://api.trakt.tv"
 
 
-class TraktError(Exception):
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
+class TraktError(SourceUnavailable):
+    """Trakt could not answer.
+
+    Its base is the app-wide "a source could not answer" contract, so a caller
+    reading several sources can degrade whichever one failed without naming this
+    one. Every `except TraktError` already written keeps its exact meaning.
+    """
 
 
 class TraktRateLimitError(TraktError):

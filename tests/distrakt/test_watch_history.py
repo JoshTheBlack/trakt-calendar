@@ -16,7 +16,12 @@ from app import db
 from app.distrakt import watch_history as wh
 from tests.support import new_db_path
 
-SETTINGS = SimpleNamespace(configured=True)
+# One linked service and nothing else, which is what almost every account has.
+# The tracker asks each registered source whether this request's settings carry a
+# usable credential for it, so a fake settings object has to be able to answer —
+# see app/distrakt/routes.py's _distrakt_settings, which is what fills these in
+# with one person's own tokens.
+SETTINGS = SimpleNamespace(configured=True, trakt_configured=True, simkl_configured=False)
 
 
 def _ep_event(tid, season, number, watched_at="2026-07-10T00:00:00.000Z"):
@@ -53,6 +58,18 @@ def _show(tid, seasons) -> dict:
     return {"ids": {"trakt": tid}, "seasons": seasons}
 
 
+def _slot(entry: dict, season: str, source: str = "trakt") -> dict:
+    """One season's episodes as ONE SERVICE reported them.
+
+    The state files a season's watches per source, because two services can
+    legitimately know different things about the same season and neither is
+    wrong. The fixtures above hand seasons in the flat shape a single service
+    produced before there was a second one — which the state still accepts and
+    reads as that service's — so this is how they are read back.
+    """
+    return entry["seasons"][season][source]
+
+
 def SHOW(tid) -> str:
     return f"show:tmdb:{tid}"
 
@@ -65,14 +82,15 @@ class PureStateTests(unittest.TestCase):
     def test_watched_map_counts_len(self):
         state = {"shows": {SHOW(101): _show(101, {"1": {"1": "", "2": "", "3": ""},
                                                  "2": {"1": ""}})}}
-        self.assertEqual(wh.watched_map(state), {(SHOW(101), 1): 3, (SHOW(101), 2): 1})
+        self.assertEqual(wh.watched_map(state),
+                         {(SHOW(101), 1): {"trakt": 3}, (SHOW(101), 2): {"trakt": 1}})
 
     def test_apply_episode_dedups_and_skips_untracked(self):
         state = {"shows": {SHOW(101): _show(101, {"1": {"1": "", "2": ""}})}}
         wh._apply_episode(state, SHOW(101), 1, 2)   # already known -> no change
         wh._apply_episode(state, SHOW(101), 1, 3)   # new -> added
         wh._apply_episode(state, SHOW(999), 1, 1)   # untracked title -> ignored
-        self.assertEqual(sorted(state["shows"][SHOW(101)]["seasons"]["1"]), ["1", "2", "3"])
+        self.assertEqual(sorted(_slot(state["shows"][SHOW(101)], "1")), ["1", "2", "3"])
         self.assertNotIn(SHOW(999), state["shows"])
 
     def test_apply_episode_keeps_the_latest_date_for_an_episode(self):
@@ -83,14 +101,12 @@ class PureStateTests(unittest.TestCase):
         wh._apply_episode(state, SHOW(101), 1, 4, "2026-08-09T00:00:00Z")  # later -> wins
         wh._apply_episode(state, SHOW(101), 1, 4, "2026-06-01T00:00:00Z")  # earlier -> ignored
         wh._apply_episode(state, SHOW(101), 1, 4)                          # undated -> ignored
-        self.assertEqual(state["shows"][SHOW(101)]["seasons"]["1"]["4"],
-                         "2026-08-09T00:00:00Z")
+        self.assertEqual(_slot(state["shows"][SHOW(101)], "1")["4"], "2026-08-09T00:00:00Z")
 
     def test_apply_episode_new_season_on_tracked_show(self):
         state = {"shows": {SHOW(101): _show(101, {"1": {"1": ""}})}}
         wh._apply_episode(state, SHOW(101), 2, 1, "2026-07-04T00:00:00Z")
-        self.assertEqual(state["shows"][SHOW(101)]["seasons"]["2"],
-                         {"1": "2026-07-04T00:00:00Z"})
+        self.assertEqual(_slot(state["shows"][SHOW(101)], "2"), {"1": "2026-07-04T00:00:00Z"})
 
     def test_a_play_carries_only_what_the_event_said(self):
         """The title and the episode, and nothing looked up. That is what makes a
@@ -136,7 +152,7 @@ class PureStateTests(unittest.TestCase):
         state = {"shows": {SHOW(101): _show(101, {"1": {}})}, "movies": {}}
         wh._apply_event(state, _ep_event(101, 1, 4))
         wh._apply_event(state, _mv_event(7, "Movie", 2024, "2026-07-15T00:00:00Z"))
-        self.assertEqual(list(state["shows"][SHOW(101)]["seasons"]["1"]), ["4"])
+        self.assertEqual(list(_slot(state["shows"][SHOW(101)], "1")), ["4"])
         self.assertEqual(state["movies"][MOVIE(7)]["title"], "Movie")
 
     def test_an_event_naming_no_shared_id_is_dropped(self):
@@ -205,19 +221,35 @@ class StorageRoundTripTests(WatchStateTestCase):
         self.assertEqual(await wh._load(self.user_id), wh._default_state())
 
     async def test_round_trip_preserves_shows_movies_and_beacons(self):
+        """Everything per source, which is how a state that has been through a
+        sync looks: a cursor and a beacon for each service asked, and each
+        season's episodes under the service that reported them."""
         state = {
-            "last_synced": "2026-07-20",
-            "beacons": {"ep_watched": "T1", "ep_removed": None,
-                        "mv_watched": "T1", "mv_removed": None},
-            "shows": {SHOW(101): _show(101, {"1": {"1": "2026-07-01T00:00:00Z",
-                                                   "2": "", "3": ""},
-                                             "2": {"1": ""}})},
-            "movies": {MOVIE(9): {"ids": {"trakt": 9}, "title": "M",
-                                  "year": 2026, "watched_at": "2026-07-05T00:00:00Z"}},
+            "cursors": {"trakt": "2026-07-20"},
+            "beacons": {"trakt": {"ep_watched": "T1", "ep_removed": None,
+                                  "mv_watched": "T1", "mv_removed": None}},
+            "shows": {SHOW(101): _show(101, {
+                "1": {"trakt": {"1": "2026-07-01T00:00:00Z", "2": "", "3": ""}},
+                "2": {"trakt": {"1": ""}}})},
+            "movies": {MOVIE(9): {"ids": {"trakt": 9}, "title": "M", "year": 2026,
+                                  "watched_at": "2026-07-05T00:00:00Z",
+                                  "source": "trakt"}},
         }
         await wh._save(self.user_id, state)
         back = await wh._load(self.user_id)
         self.assertEqual(back, state)
+
+    async def test_the_flat_shape_restores_as_the_service_that_wrote_it(self):
+        """A backup taken while one service could answer, or a state a caller
+        assembled from plays alone, carries a season's episodes with no source
+        name on them. Reading them as that one service's is a statement of fact —
+        it is the only one that had written a row — rather than a guess."""
+        await wh._save(self.user_id, {
+            "cursors": {}, "beacons": {},
+            "shows": {SHOW(101): _show(101, {"1": {"1": "", "2": ""}})}, "movies": {}})
+        back = await wh._load(self.user_id)
+        self.assertEqual(back["shows"][SHOW(101)]["seasons"],
+                         {"1": {"trakt": {"1": "", "2": ""}}})
 
     async def test_the_pre_dates_shape_is_read_as_dates_unknown(self):
         """A backup taken before episodes carried dates still restores: the old
@@ -231,7 +263,7 @@ class StorageRoundTripTests(WatchStateTestCase):
         none of wrote no row at all and came back looking as though it had never
         been baselined — so every load re-fetched it from the provider, for ever.
         A month of new premieres is exactly that case."""
-        state = {"last_synced": None, "beacons": None,
+        state = {"cursors": {}, "beacons": {},
                  "shows": {SHOW(77): _show(77, {})}, "movies": {}}
         await wh._save(self.user_id, state)
         back = await wh._load(self.user_id)
@@ -241,39 +273,40 @@ class StorageRoundTripTests(WatchStateTestCase):
         self.assertEqual(back, state)
 
     async def test_the_marker_is_replaced_once_something_is_watched(self):
-        await wh._save(self.user_id, {"last_synced": None, "beacons": None,
+        await wh._save(self.user_id, {"cursors": {}, "beacons": {},
                                       "shows": {SHOW(77): _show(77, {})}, "movies": {}})
-        await wh._save(self.user_id, {"last_synced": None, "beacons": None,
+        await wh._save(self.user_id, {"cursors": {}, "beacons": {},
                                       "shows": {SHOW(77): _show(77, {"1": {"1": ""}})},
                                       "movies": {}})
         back = await wh._load(self.user_id)
-        self.assertEqual(back["shows"][SHOW(77)]["seasons"], {"1": {"1": ""}})
+        self.assertEqual(back["shows"][SHOW(77)]["seasons"], {"1": {"trakt": {"1": ""}}})
 
     async def test_save_replaces_rather_than_accumulates(self):
-        await wh._save(self.user_id, {"last_synced": "a", "beacons": None,
+        await wh._save(self.user_id, {"cursors": {"trakt": "a"}, "beacons": {},
                                       "shows": {SHOW(1): _show(1, {"1": {"1": ""}})},
                                       "movies": {}})
-        await wh._save(self.user_id, {"last_synced": "b", "beacons": None,
+        await wh._save(self.user_id, {"cursors": {"trakt": "b"}, "beacons": {},
                                       "shows": {SHOW(2): _show(2, {"1": {"5": ""}})},
                                       "movies": {}})
         back = await wh._load(self.user_id)
-        self.assertEqual(back["shows"], {SHOW(2): _show(2, {"1": {"5": ""}})})
-        self.assertEqual(back["last_synced"], "b")
+        self.assertEqual(back["shows"],
+                         {SHOW(2): _show(2, {"1": {"trakt": {"5": ""}}})})
+        self.assertEqual(back["cursors"], {"trakt": "b"})
 
     async def test_two_users_keep_independent_watch_state(self):
         other = await _make_user("other")
-        await wh._save(self.user_id, {"last_synced": "mine", "beacons": None,
+        await wh._save(self.user_id, {"cursors": {"trakt": "mine"}, "beacons": {},
                                       "shows": {SHOW(101): _show(101, {"1": {"1": "", "2": ""}})},
                                       "movies": {MOVIE(1): {"ids": {"trakt": 1},
                                                             "title": "Mine", "year": 2026,
                                                             "watched_at": "2026-07-01T00:00:00Z"}}})
-        await wh._save(other, {"last_synced": "theirs", "beacons": None,
+        await wh._save(other, {"cursors": {"trakt": "theirs"}, "beacons": {},
                                "shows": {SHOW(202): _show(202, {"1": [9]})}, "movies": {}})
         mine, theirs = await wh._load(self.user_id), await wh._load(other)
-        self.assertEqual(wh.watched_map(mine), {(SHOW(101), 1): 2})
-        self.assertEqual(wh.watched_map(theirs), {(SHOW(202), 1): 1})
-        self.assertEqual(mine["last_synced"], "mine")
-        self.assertEqual(theirs["last_synced"], "theirs")
+        self.assertEqual(wh.watched_map(mine), {(SHOW(101), 1): {"trakt": 2}})
+        self.assertEqual(wh.watched_map(theirs), {(SHOW(202), 1): {"trakt": 1}})
+        self.assertEqual(mine["cursors"], {"trakt": "mine"})
+        self.assertEqual(theirs["cursors"], {"trakt": "theirs"})
         self.assertEqual(theirs["movies"], {})
 
 
@@ -305,8 +338,8 @@ class SyncTests(WatchStateTestCase):
         await wh._save(self.user_id, {
             "shows": {SHOW(101): _show(101, {"1": {"1": ""}}),
                       SHOW(102): _show(102, {"1": {"1": ""}})},
-            "movies": {}, "last_synced": "2026-07-20",
-            "beacons": wh._beacons(la)})
+            "movies": {}, "cursors": {"trakt": "2026-07-20"},
+            "beacons": {"trakt": wh._beacons(la)}})
 
     async def test_a_named_month_is_read_without_re_asking_every_title(self):
         """The half of a forced sync a freeze actually needs: read that month
@@ -367,8 +400,8 @@ class SyncTests(WatchStateTestCase):
     async def test_change_applies_history_delta(self):
         await wh._save(self.user_id, {"shows": {SHOW(101): _show(101, {"1": {"1": ""}})},
                                       "movies": {},
-                                      "last_synced": "2026-07-01",
-                                      "beacons": {"ep_watched": "OLD"}})
+                                      "cursors": {"trakt": "2026-07-01"},
+                                      "beacons": {"trakt": {"ep_watched": "OLD"}}})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "NEW", "removed_at": None}}
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
@@ -377,18 +410,18 @@ class SyncTests(WatchStateTestCase):
                                  _mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")]), \
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
-        self.assertEqual(sorted(state["shows"][SHOW(101)]["seasons"]["1"]), ["1", "2"])
+        self.assertEqual(sorted(_slot(state["shows"][SHOW(101)], "1")), ["1", "2"])
         self.assertIn(MOVIE(9), state["movies"])
         # and it was persisted under this user, not just returned
         reloaded = await wh._load(self.user_id)
-        self.assertEqual(sorted(reloaded["shows"][SHOW(101)]["seasons"]["1"]), ["1", "2"])
+        self.assertEqual(sorted(_slot(reloaded["shows"][SHOW(101)], "1")), ["1", "2"])
 
     async def test_a_sync_reports_the_plays_it_folded_in_and_stores_none_of_them(self):
         """What the history has just reported is a signal to act on once. A stored
         copy would have every later load replay a decision already taken."""
         await wh._save(self.user_id, {"shows": {SHOW(101): _show(101, {"1": {"1": ""}})},
-                                      "movies": {}, "last_synced": "2026-07-01",
-                                      "beacons": {"ep_watched": "OLD"}})
+                                      "movies": {}, "cursors": {"trakt": "2026-07-01"},
+                                      "beacons": {"trakt": {"ep_watched": "OLD"}}})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "NEW", "removed_at": None}}
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
@@ -422,9 +455,9 @@ class SyncTests(WatchStateTestCase):
         other = await _make_user("other")
         await wh._save(self.user_id, {"shows": {SHOW(101): _show(101, {"1": {"1": ""}})},
                                       "movies": {},
-                                      "last_synced": "2026-07-01", "beacons": None})
+                                      "cursors": {"trakt": "2026-07-01"}, "beacons": {}})
         await wh._save(other, {"shows": {SHOW(101): _show(101, {"1": {}})}, "movies": {},
-                               "last_synced": "2026-07-01", "beacons": None})
+                               "cursors": {"trakt": "2026-07-01"}, "beacons": {}})
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "NEW", "removed_at": None}}
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
@@ -432,9 +465,9 @@ class SyncTests(WatchStateTestCase):
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
             await wh.sync(SETTINGS, other, today=date(2026, 7, 20))
         self.assertEqual(
-            list((await wh._load(other))["shows"][SHOW(101)]["seasons"]["1"]), ["7"])
+            list(_slot((await wh._load(other))["shows"][SHOW(101)], "1")), ["7"])
         self.assertEqual(
-            list((await wh._load(self.user_id))["shows"][SHOW(101)]["seasons"]["1"]), ["1"])
+            list(_slot((await wh._load(self.user_id))["shows"][SHOW(101)], "1")), ["1"])
 
     async def test_baseline_show_lands_on_the_named_user(self):
         other = await _make_user("other")
@@ -444,7 +477,8 @@ class SyncTests(WatchStateTestCase):
         with patch("app.providers.trakt.sync.fetch_progress_details",
                    return_value={404: {1: {1: "2026-07-01T00:00:00Z", 2: "", 3: ""}}}):
             await wh.baseline_show(SETTINGS, self.user_id, record)
-        self.assertEqual(wh.watched_map(await wh._load(self.user_id)), {(SHOW(404), 1): 3})
+        self.assertEqual(wh.watched_map(await wh._load(self.user_id)),
+                         {(SHOW(404), 1): {"trakt": 3}})
         self.assertEqual(wh.watched_map(await wh._load(other)), {})
 
 

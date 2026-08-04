@@ -422,7 +422,7 @@ async def calendar_page(request: Request):
         # endpoint answering "may I?" is itself a disclosure that there is
         # something to be allowed into. Note this gates the REVEAL, not the menu
         # item — see _nav.html.
-        "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
+        "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "integrations": integrations_routes.INTEGRATION_HEALTH if is_admin else {},
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of

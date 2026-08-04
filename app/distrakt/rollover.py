@@ -190,7 +190,7 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     return doc
 
 
-async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]:
+async def history_records(user_id: int, settings, present: set[tuple[str, int]]) -> list[dict]:
     """Seasons from recent viewing that the viewer is part-way through, as records
     for their OWN LIST rather than for any month.
 
@@ -204,11 +204,18 @@ async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]
     whether the season is finished, so it costs nothing extra and is right from
     the first write instead of being corrected on the next load.
     """
-    from .. import providers
-    from ..providers.trakt.detail import fetch_season_detail
-    port = providers.for_tracker()
-    if port is None:
+    from . import live, watch_history
+    # THE PRIMARY SOURCE ALONE. This seeds the viewer's OWN LIST with seasons they
+    # are part-way through, and a season is on that list or it is not — there is
+    # no half-listed. Two services proposing overlapping sets of "you seem to be
+    # watching this" would add the union — the one collapse the counts rule
+    # refuses everywhere a disagreement can actually be shown. The ordinary sync
+    # then counts every admitted source against whatever ends up listed, so the
+    # second service still contributes its numbers to every row here.
+    ports = await watch_history.tracker_ports(settings, user_id)
+    if not ports:
         return []
+    _source, port = ports[0]
     progress = await port.fetch_watched_progress(settings, since_days=WATCHED_RECENCY_DAYS)
     candidates = []
     for entry in progress:
@@ -228,10 +235,8 @@ async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]
         candidates.append((rec, entry))
     if not candidates:
         return []
-    details = await asyncio.gather(*(
-        fetch_season_detail(settings, (rec["ids"]).get("trakt"), rec["season"])
-        for rec, _ in candidates
-    ))
+    details = await live.fetch_season_details(
+        settings, [rec for rec, _ in candidates], fresh=False, allow_degrade=False)
     out = []
     for (rec, entry), detail in zip(candidates, details):
         total = int(detail.get("total") or 0)
@@ -345,7 +350,7 @@ async def _initialize_month(user_id: int, month_key: str, settings,
     if begun:
         present |= {(str(store.record_key(rec)), int(rec["season"]))
                     for rec in await store.user_records(user_id)}
-        for rec in await history_records(settings, present):
+        for rec in await history_records(user_id, settings, present):
             if calendar_import.matches_not_watching(rec, nw_ids):
                 continue
             await store.add_user_record(user_id, rec)
