@@ -39,8 +39,8 @@ from ..config import load_settings
 # `plex` is the flow's client; bound as plex_auth to keep it distinct from the
 # Plex-shaped names in this module.
 from . import plex as plex_auth
+from . import provider_login
 from .levels import AuthLevel
-from .routes import INVALID_CREDENTIALS, INVALID_INVITE
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,12 @@ UPSTREAM_FAILED = "Plex could not complete the sign-in. Please try again in a mo
 
 
 TOO_MANY_STARTS = "Too many sign-in attempts from this address. Try again in a few minutes."
+
+KEY_UNHEALTHY = (
+    "Stored secrets are encrypted, but the key is currently missing or wrong, "
+    "so linking is refused rather than writing a fresh token in the clear. An "
+    "administrator needs to restore ENCRYPTION_KEY before linking can continue."
+)
 
 
 async def _begin(request: Request, *, purpose: str, session_id: str | None = None,
@@ -184,65 +190,51 @@ async def plex_poll(request: Request):
     return await _finish_login(request, settings, identity, handshake)
 
 
+def _refusal_json(refusal: provider_login.Refusal) -> JSONResponse:
+    """Render a shared refusal as this medium's error body.
+
+    The encryption one carries a machine-readable `reason` on top of the prose,
+    because it is the single refusal here the page can DO something about —
+    it points an administrator at a fixable instance-level state rather than at
+    anything about this account. The others deliberately look alike to a client.
+    """
+    if refusal.kind == provider_login.KEY_UNHEALTHY:
+        return authz.error(refusal.message, refusal.status, reason="key_unhealthy")
+    return authz.error(refusal.message, refusal.status)
+
+
 async def _finish_link(request: Request, settings, identity: auth.ProviderIdentity, current):
-    if current is None:  # pragma: no cover — consume_handshake already required it
-        return authz.error(auth.HANDSHAKE_REJECTED, 400)
-    try:
-        await auth.link_provider_identity(identity=identity, user_id=current.user_id)
-    except auth.IdentityInUse:
-        return authz.error(ALREADY_LINKED, 409)
-    except auth.AccountUnavailable:
-        return authz.error(auth.HANDSHAKE_REJECTED, 403)
-    except auth.IdentityWritesBlocked:
-        return authz.error(
-            "Stored secrets are encrypted, but the key is currently missing or wrong, "
-            "so linking is refused rather than writing a fresh token in the clear. An "
-            "administrator needs to restore ENCRYPTION_KEY before linking can continue.",
-            409, reason="key_unhealthy",
-        )
-    response = JSONResponse({"ok": True, "redirect": "/me"})
+    """Render provider_login's link completion as this flow's JSON answer.
+
+    The policy — who may link what, and the refusals — is in
+    app/auth/provider_login.py, shared with Trakt. What is left here is the
+    medium: a poll is answered by an XHR, not by a navigation.
+    """
+    outcome = await provider_login.complete_provider_link(
+        identity=identity, current=current,
+        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+    )
+    if isinstance(outcome, provider_login.Refusal):
+        return _refusal_json(outcome)
+    response = JSONResponse({"ok": True, "redirect": outcome.redirect_target})
     auth.clear_handshake_cookie(response, settings, request)
     return response
 
 
 async def _finish_login(request: Request, settings, identity: auth.ProviderIdentity, handshake):
-    ip = auth.client_ip(request, settings)
-    token = handshake["invite_token"]
-    # Only a REGISTRATION is throttled, the same distinction Trakt's callback
-    # makes — an ordinary sign-in with a known identity costs no more than one
-    # with a password, and throttling it would lock out a household sharing one
-    # address.
-    if await auth.find_identity(PROVIDER, identity.provider_user_id) is None:
-        if await auth.registration_rate_limited(ip, token):
-            return authz.error(
-                "Too many sign-up attempts from this address. Try again later.", 429,
-            )
-    try:
-        outcome = await auth.login_with_provider_identity(
-            identity=identity, invite_token=token, ip_address=ip, settings=settings,
-        )
-    except auth.RegistrationRefused:
-        await auth.record_registration_attempt(ip, token, False)
-        return authz.error(INVALID_INVITE, 403)
-    except auth.IdentityInUse:  # pragma: no cover — needs a concurrent registration
-        return authz.error(ALREADY_LINKED, 409)
-    except auth.AccountUnavailable:
-        # A disabled account, reported exactly like a failed password sign-in so
-        # a Plex poll is not an oracle for account state.
-        return authz.error(INVALID_CREDENTIALS, 403)
+    """Render provider_login's sign-in completion as this flow's JSON answer.
 
-    if outcome.kind == "registered":
-        await auth.record_registration_attempt(ip, token, True)
-
-    session_id = await auth.create_session(
-        outcome.user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
+    The browser navigates itself using `redirect` — there is no 303 to follow,
+    because the caller here is a fetch inside a page that is already open.
+    """
+    outcome = await provider_login.complete_provider_login(
+        identity=identity, handshake=handshake, request=request, settings=settings,
+        already_linked=ALREADY_LINKED,
     )
-    response = JSONResponse({
-        "ok": True,
-        "redirect": "/" if outcome.calendar_approved else "/me",
-    })
-    auth.set_session_cookie(response, session_id, settings, request)
-    auth.clear_handshake_cookie(response, settings, request)
+    if isinstance(outcome, provider_login.Refusal):
+        return _refusal_json(outcome)
+    response = JSONResponse({"ok": True, "redirect": outcome.redirect_target})
+    provider_login.attach_session(response, outcome, settings, request)
     return response
 
 
