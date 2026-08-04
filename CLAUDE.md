@@ -72,6 +72,18 @@ warms poster ARTWORK, bounded to what the grid draws and to a wall clock, for
 titles the calendar cache already holds. It never fetches the CALENDAR
 (`allow_fetch=False`), so an empty cached month stays an empty card.
 
+**Migrations are append-only, and migration 19 is the one recorded exception.**
+`app/db.py` owns the rule; this is the note it points at. 19 shipped classifying an
+unfrozen month's rows by comparing their month against the CLOCK, which turned a
+whole month's roster into month-less viewer records and destroyed the only record
+of which month they sat on. It was corrected in place rather than superseded
+because a corrective migration could not have helped anyone: 19 ends by dropping
+the old roster table, so by the time a 20 could run there was nothing left to fix.
+Migration 20 exists only to give an instance that applied the original 19 the
+held-rows table, so the drain pass finds it empty rather than absent. Do not treat
+this as precedent — the reason it was allowed is that the alternative repaired
+nothing, and that is a rare shape.
+
 **Trakt does not honour the `days` bound it is given** — a 7-day window has come
 back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.

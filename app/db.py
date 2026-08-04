@@ -46,7 +46,6 @@ from typing import Any, TypeVar
 
 import anyio.to_thread
 
-from . import clock
 from .config import DATA_DIR, ensure_data_dir
 
 logger = logging.getLogger(__name__)
@@ -1249,9 +1248,11 @@ def MIGRATION_18(conn: sqlite3.Connection) -> None:
 #     because either alone is enough: the flag is what the viewer pressed and the
 #     bucket is what the month wrote down when it froze.
 #   - the month recorded it finished -> a completed record on that month.
-#   - anything else -> ONE user record for the season, from its latest month's row
-#     (the most recent copy carries the most recent counts), catchup when the
-#     season has finished airing or drops all at once, keepup otherwise.
+#   - anything else ON A MONTH THAT FROZE -> ONE user record for the season, from
+#     its latest frozen month's row (the most recent copy carries the most recent
+#     counts), catchup when the season has finished airing or drops all at once,
+#     keepup otherwise.
+#   - anything else on a month that NEVER froze -> the stash, untouched. See below.
 # A season settled on ANY month is off the user list entirely, because giving up
 # on a season in March is a statement about the season and an older in-progress
 # copy of it must not resurrect it.
@@ -1260,36 +1261,96 @@ def MIGRATION_18(conn: sqlite3.Connection) -> None:
 # now has one user record or one verdict; that collapse is the point of the change
 # and is reported rather than silent.
 #
-# A MONTH THAT HAD NOT YET FROZEN CANNOT BE CLASSIFIED BY PREMIERE DATE. In the old
-# schema the live fields — premiere, finale, cadence, started_airing,
-# finished_airing — were written back onto a row only when its month FROZE; until
-# then they were recomputed from the provider on every view and never stored. So on
-# any month with `closed = 0` those columns are empty, and the premiere pass above,
-# which asks whether the row's premiere date falls in the row's month, can prove
-# nothing about them. Those seasons are carried across as user records — which is
-# where an unfinished season belongs — and the month keeps no premiere records.
+# A MONTH THAT NEVER FROZE CANNOT BE CLASSIFIED AT ALL, AND IS NOT GUESSED AT. In
+# the old schema `premiere`, `finale`, `cadence`, `started_airing`,
+# `finished_airing`, `watched`, `total` and `bucket` were written onto a row only
+# when its month FROZE; until then they were recomputed from the provider on every
+# view and never stored. So on a month with `closed = 0` all of them are empty, and
+# the premiere pass above — which asks whether the row's premiere date falls in the
+# row's month — can prove nothing about a single one of its rows.
 #
-#   THIS IS NOT REPAIRED HERE, DELIBERATELY. The date is not in this database, so
-#   restoring it would mean a provider call from inside a migration, and `added_by`
-#   is '' on rows written before that column existed, so provenance cannot say
-#   which of them the calendar put there either. Inventing a premiere date would
-#   put a title in a month's announcement on a guess. Classifying only what the row
-#   can prove is the honest outcome; the migration LOGS the affected months so an
-#   operator can see why an open month's announcement is empty, and re-importing
-#   that month's premieres from the calendar is what fills it back in.
+#   THE ANSWER IS NOT IN THIS DATABASE AND NO COLUMN STANDS IN FOR IT. Whether a
+#   row is that month's ANNOUNCEMENT or a season the viewer was part-way through is
+#   the premiere date's question, and the premiere date is a fact about the show
+#   that lives at the provider. Every local substitute was tried against a real
+#   frozen month and every one of them was wrong in both directions: "the viewer has
+#   watched none of it" calls a premiere they started watching a viewer record, and
+#   "it appears on no earlier month" calls a years-old catch-up title that had been
+#   sitting unwatched on the list a premiere. `added_by` cannot arbitrate either —
+#   it is '' on every row written before that column existed.
 #
-#   THE KEEPUP/CATCHUP SPLIT HEALS ITSELF, and for the same reason it is skewed to
-#   begin with. It is decided here from `finished_airing` and `cadence`, which are
-#   empty on those same rows, so every one of them starts as keepup. A user record
-#   is refreshed from a season lookup that reports the episode count and the last
-#   episode's air date, so the split is re-derived from those dates rather than
-#   read back from what this migration wrote. The initial skew is stale, not wrong.
+#   SO THOSE ROWS ARE KEPT, VERBATIM, AND SETTLED LATER. They go to
+#   `distrakt_unsettled_rows` carrying the one thing that cannot be recovered from
+#   anywhere else — WHICH MONTH THEY SAT ON — and app/distrakt/unsettled.py settles
+#   them on the first tracker load, where a season lookup can supply the date this
+#   migration has no way to ask for. A migration that does not know must not decide;
+#   what it must not do is DESTROY the evidence, and it is that — not the missing
+#   date — that made the first version of this pass unrecoverable. Feeding those
+#   rows to the user-records pass discarded their month, and once a month is gone no
+#   later pass, provider call or operator can work out what it was.
+#
+# THIS PASS ASKS THE STORE WHAT FROZE, NOT THE CLOCK. `distrakt_months.closed` is
+# the whole test, and it is a fact recorded at the time. The first version of this
+# migration read `clock.today()` and split rows on whether their month was still
+# ahead, which is a question whose answer CHANGES between the day a month is built
+# and the day the migration runs: a month built ahead of time in July was a preview
+# then and the month under way by August, so its announcements were read as seasons
+# the viewer had in hand, and every calendar turn-away on one of them landed as
+# "I was following this and gave up". It also meant this migration produced
+# different output on the same database depending on the date — which is why it
+# passed in development, against a store whose months had all frozen, and destroyed
+# a month in production, where nobody had opened the app since before it ended.
 #
 # distrakt_prompt_dismissals records the viewer declining to add a season the
 # tracker has never heard of. Without somewhere to record the refusal it would be
 # re-derived from the same watch history on the very next load and the ✗ would do
 # nothing. It is keyed by SEASON, not by episode, or every further episode of the
 # same season would ask again.
+# The rows a roster split could not classify, held until something can ask a
+# provider what they were. Drained by app/distrakt/unsettled.py on the first
+# tracker load.
+#
+# ONE DEFINITION, RUN FROM TWO MIGRATIONS. Migration 19 creates it and fills it;
+# migration 20 creates it empty for an instance that applied the version of 19 that
+# predates it, which dropped the old roster table without keeping anything. Those
+# instances have nothing left to hold, but the drain pass reads this table on every
+# tracker load and a missing table is an error rather than an empty answer. Written
+# once here so the two cannot disagree about the shape.
+#
+# `month` IS WHY THIS TABLE EXISTS. Every other column can be re-fetched or
+# re-derived; which month the row sat on is recorded nowhere else in this database,
+# and the pass that once fed these rows to the user records dropped it on the floor.
+# Carrying it is the whole job.
+#
+# The live columns are deliberately NOT carried. `watched`, `total`, `cadence`,
+# `premiere`, `finale`, `started_airing` and `finished_airing` were written only by
+# a freeze, so on these rows they are zero and NULL — copying them would move a set
+# of empty fields around and invite a later reader to trust them. The season lookup
+# the drain makes is what fills them, and it is the same lookup every listed season
+# already costs on every load.
+UNSETTLED_ROWS_DDL = """
+CREATE TABLE IF NOT EXISTS distrakt_unsettled_rows (
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    month        TEXT    NOT NULL,
+    media        TEXT    NOT NULL,
+    match_source TEXT    NOT NULL,
+    match_id     TEXT    NOT NULL,
+    season       INTEGER NOT NULL,
+    trakt_id     INTEGER,
+    simkl_id     INTEGER,
+    tmdb         INTEGER,
+    tvdb         INTEGER,
+    imdb         TEXT,
+    mal          INTEGER,
+    slug         TEXT,
+    title        TEXT    NOT NULL DEFAULT '',
+    network      TEXT    NOT NULL DEFAULT '',
+    added_by     TEXT    NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, month, media, match_source, match_id, season)
+)
+"""
+
 MIGRATION_19_SQL = """
 CREATE TABLE distrakt_month_records (
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1371,6 +1432,10 @@ CREATE TABLE distrakt_prompt_dismissals (
 
 -- The premieres. Deliberately not exclusive with the verdict pass below: a
 -- season that premiered and was settled in the same month gets both records.
+--
+-- Self-restricting to months that FROZE, with no test for it: `premiere` is one
+-- of the columns only a freeze ever wrote, so a row on a month that never froze
+-- carries NULL here and cannot match. Those rows reach the stash instead.
 INSERT INTO distrakt_month_records
        (user_id, month, kind, media, match_source, match_id, season,
         trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
@@ -1388,6 +1453,12 @@ INSERT INTO distrakt_month_records
            = CAST(substr(month, 6, 2) AS INTEGER);
 
 -- The verdicts a month reached.
+--
+-- NOT restricted to months that froze, and the `abandoned` flag is why. A freeze
+-- wrote `bucket`, so that half only ever matches a frozen month — but the flag was
+-- set the moment the viewer pressed Abandon, on whatever month was open at the
+-- time. Giving up is the one verdict an UNFROZEN month can prove it reached, so it
+-- is honoured here rather than deferred to the stash.
 INSERT INTO distrakt_month_records
        (user_id, month, kind, media, match_source, match_id, season,
         trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
@@ -1403,56 +1474,45 @@ INSERT INTO distrakt_month_records
       FROM distrakt_shows
      WHERE abandoned = 1 OR bucket IN ('abandoned', 'completed');
 
-"""
-
-# A month the calendar has not reached yet can hold NOTHING BUT ITS PREMIERES, and
-# that is provable rather than assumed: the recent-viewing sweep that is the only
-# other way a row reaches a month was deliberately skipped for a month that had
-# not begun, because what somebody is part-way through today says nothing about a
-# month nobody has reached. So every row on such a month is one of its
-# announcements, whatever its stored fields do or do not say — and they say
-# nothing at all, because a month that never froze never had them written.
-#
-# WITHOUT THIS THOSE ROWS BECOME VIEWER RECORDS, and that does not stay quiet. A
-# month pre-filled ahead of time is exactly where a title turned away on the
-# calendar sits: a turn-away there means "never put this in that month", which the
-# month-ahead rule honours by taking the row off. Read as something the viewer has
-# in hand instead, the very same mark reads as "I was following this and stopped"
-# and lands as a verdict on the month UNDER WAY — so opening the current month
-# fills its Abandoned section with next month's titles.
-#
-# Parameterised on the month under way rather than written into the script,
-# because "has the calendar reached this month" is a question about today and the
-# answer is different on the day this runs than it was when it was written.
-_MIGRATION_19_MONTHS_AHEAD = """
-INSERT INTO distrakt_month_records
-       (user_id, month, kind, media, match_source, match_id, season,
+-- The rows this migration cannot settle: everything on a month that never froze
+-- and reached no verdict. The table itself is created by UNSETTLED_ROWS_DDL, just
+-- before this script runs — see there for what it holds and why.
+INSERT INTO distrakt_unsettled_rows
+       (user_id, month, media, match_source, match_id, season,
         trakt_id, simkl_id, tmdb, tvdb, imdb, mal, slug, title, network,
-        watched, total, cadence, premiere, finale, started_airing, finished_airing,
-        abandoned_form, added_by, created_at)
-    SELECT s.user_id, s.month,
-           CASE WHEN s.season <= 1 THEN 'series_premiere' ELSE 'season_premiere' END,
-           s.media, s.match_source, s.match_id, s.season,
+        added_by, created_at)
+    SELECT s.user_id, s.month, s.media, s.match_source, s.match_id, s.season,
            s.trakt_id, s.simkl_id, s.tmdb, s.tvdb, s.imdb, s.mal, s.slug,
-           s.title, s.network,
-           0, s.total, s.cadence, s.premiere, s.finale,
-           s.started_airing, s.finished_airing,
-           NULL, s.added_by, CAST(strftime('%s', 'now') AS INTEGER)
+           s.title, s.network, s.added_by, CAST(strftime('%s', 'now') AS INTEGER)
       FROM distrakt_shows s
-     WHERE s.month > ?
+     WHERE NOT EXISTS (
+               SELECT 1 FROM distrakt_months m
+                WHERE m.user_id = s.user_id AND m.month = s.month AND m.closed = 1)
+       -- A season settled on ANY month is settled, and the same rule the user
+       -- records pass applies: an older in-progress copy must not resurrect it.
+       -- This also takes out the rows the verdict pass above just claimed from an
+       -- unfrozen month, so nothing is both settled and pending.
        AND NOT EXISTS (
                SELECT 1 FROM distrakt_month_records r
-                WHERE r.user_id = s.user_id AND r.month = s.month
-                  AND r.media = s.media AND r.match_source = s.match_source
-                  AND r.match_id = s.match_id AND r.season = s.season
-                  AND r.kind IN ('series_premiere', 'season_premiere'));
+                WHERE r.user_id = s.user_id AND r.media = s.media
+                  AND r.match_source = s.match_source AND r.match_id = s.match_id
+                  AND r.season = s.season
+                  AND r.kind IN ('completed', 'abandoned'));
+
 """
 
-# Everything still in the middle: one record per season, from its latest month.
-# Months still ahead are excluded on both counts — a row on one is that month's
-# announcement and was filed as such above, and it must not win the "latest month"
-# race either, or a season the viewer is part-way through would take its counts
-# from a month that has not happened.
+# Everything still in the middle ON A MONTH THAT FROZE: one record per season, from
+# its latest such month, since the most recent copy carries the most recent counts.
+#
+# A MONTH THAT NEVER FROZE IS EXCLUDED FROM BOTH HALVES, and that exclusion is the
+# fix this pass exists in. Its rows go to the stash, so they must not be written
+# here — and they must not win the "latest month" race either, or a season the
+# viewer is part-way through would take its counts from a row whose count columns
+# were never written and read as 0 of 0.
+#
+# The old version of this asked the clock instead: `month <= today`, which swept in
+# every unfrozen month up to and including the one under way. That is how an entire
+# month's roster lost its month.
 _MIGRATION_19_USER_RECORDS = """
 INSERT INTO distrakt_user_seasons
        (user_id, media, match_source, match_id, season,
@@ -1468,7 +1528,9 @@ INSERT INTO distrakt_user_seasons
            s.started_airing, s.finished_airing,
            0, s.added_by, CAST(strftime('%s', 'now') AS INTEGER)
       FROM distrakt_shows s
-     WHERE s.month <= ?
+     WHERE EXISTS (
+               SELECT 1 FROM distrakt_months m
+                WHERE m.user_id = s.user_id AND m.month = s.month AND m.closed = 1)
        AND NOT EXISTS (
                SELECT 1 FROM distrakt_shows v
                 WHERE v.user_id = s.user_id AND v.media = s.media
@@ -1479,7 +1541,10 @@ INSERT INTO distrakt_user_seasons
                SELECT MAX(t.month) FROM distrakt_shows t
                 WHERE t.user_id = s.user_id AND t.media = s.media
                   AND t.match_source = s.match_source AND t.match_id = s.match_id
-                  AND t.season = s.season AND t.month <= ?);
+                  AND t.season = s.season
+                  AND EXISTS (SELECT 1 FROM distrakt_months m2
+                               WHERE m2.user_id = t.user_id AND m2.month = t.month
+                                 AND m2.closed = 1));
 """
 
 
@@ -1507,40 +1572,17 @@ def MIGRATION_19(conn: sqlite3.Connection) -> None:
         "SELECT COUNT(*) FROM (SELECT DISTINCT user_id, media, match_source, "
         "match_id, season FROM distrakt_shows)"
     ).fetchone()[0]
-    # The rows a month that never froze cannot prove a premiere date for. Counted
-    # here, before the rebuild, because afterwards the evidence is gone: the rows
-    # have become user records and nothing left says which month they sat on. The
-    # complement of the premiere pass's own test, so the two cannot disagree about
-    # which rows it skipped.
-    # The month under way, as a "YYYY-MM" key. Zero-padded so it compares
-    # chronologically against the stored keys with `<=` and `>`, which is the same
-    # reason the tracker pads its own; an unpadded month would sort "2026-9" after
-    # "2026-12" and mis-file a whole month's rows.
-    #
-    # Read through the clock seam rather than from date.today(), so an instance
-    # running on an overridden date classifies its rows by the same calendar the
-    # app will then read them with. Split one way and rendered the other, a month
-    # ahead would be rebuilt as premieres and then read as the month under way.
-    today = clock.today()
-    under_way = f"{today.year:04d}-{today.month:02d}"
-    # Rows on a month that HAS begun and never froze, so no premiere date was ever
-    # written for them. Counted before the rebuild, because afterwards the evidence
-    # is gone. Months still ahead are excluded: their rows are filed as that
-    # month's premieres below and lose nothing, so naming them here would report a
-    # gap that is not there.
-    undated = conn.execute(
-        "SELECT s.month, COUNT(*) FROM distrakt_shows s "
-        "JOIN distrakt_months m ON m.user_id = s.user_id AND m.month = s.month "
-        "WHERE m.closed = 0 AND s.month <= ? "
-        "  AND (s.premiere IS NULL OR instr(s.premiere, '/') <= 1) "
-        "GROUP BY s.month ORDER BY s.month",
-        (under_way,),
-    ).fetchall()
+    conn.execute(UNSETTLED_ROWS_DDL)
     _run_script(conn, MIGRATION_19_SQL)
-    # The two passes that turn on where the calendar stands, so they take the month
-    # under way as a parameter rather than being written into the script above.
-    conn.execute(_MIGRATION_19_MONTHS_AHEAD, (under_way,))
-    conn.execute(_MIGRATION_19_USER_RECORDS, (under_way, under_way))
+    conn.execute(_MIGRATION_19_USER_RECORDS)
+    # Read AFTER the script, because the script is what fills the stash. Nothing
+    # here reads the clock: what this migration does to a row is decided entirely
+    # by what is written in the database, so the same database migrates to the same
+    # thing on any day, which is what makes the result testable at all.
+    pending = conn.execute(
+        "SELECT month, COUNT(*) FROM distrakt_unsettled_rows "
+        "GROUP BY month ORDER BY month"
+    ).fetchall()
     conn.execute("DROP TABLE distrakt_shows")
     # The copies are what the split removes: a season carried onto four months had
     # four rows saying the same thing about the viewer, and now has one record.
@@ -1556,21 +1598,36 @@ def MIGRATION_19(conn: sqlite3.Connection) -> None:
         conn.execute("SELECT COUNT(*) FROM distrakt_user_seasons").fetchone()[0],
         carried,
     )
-    if undated:
-        # Said plainly and named by month, because the visible symptom is a
-        # month's announcement going quiet and nothing else would explain it.
+    if pending:
+        # Said plainly and named by month. An operator who opens the tracker in the
+        # seconds before the first load drains this would otherwise find a month
+        # short of its titles with nothing anywhere saying why, and "wait for the
+        # first load" is only reassuring if you know it is coming.
         logger.info(
-            "%s had not frozen yet, so their rows never stored a premiere date and "
-            "none of them could be filed as that month's premieres here: %s. Their "
-            "seasons were kept as the viewer's own records and nothing was lost. "
-            "Opening such a month files back the ones that have not aired yet — by "
-            "then a season lookup has supplied the date this could not — so only "
-            "the titles that had ALREADY premiered stay unannounced, and "
-            "re-importing that month's premieres from the calendar is what "
-            "restores those.",
-            "One month" if len(undated) == 1 else f"{len(undated)} months",
-            ", ".join(f"{month} ({count} row(s))" for month, count in undated),
+            "%s had not frozen yet, so nothing stored says which of their rows were "
+            "announcements and which were seasons in hand: %s. Those rows are held "
+            "as they were and settled on the first tracker load, when a season "
+            "lookup can supply the premiere dates this could not ask for. Nothing "
+            "is lost in the meantime and nothing needs doing.",
+            "One month" if len(pending) == 1 else f"{len(pending)} months",
+            ", ".join(f"{month} ({count} row(s))" for month, count in pending),
         )
+
+
+# The held-rows table, for an instance that applied the FIRST version of migration
+# 19 — the one that classified an unfrozen month's rows by comparing their month
+# against the clock, turned every one of them into a viewer record, and dropped the
+# old roster table. Nothing here can give those instances their months back: the
+# rows are gone and no migration can invent what is not written down. What it does
+# is make them consistent with an instance that migrated after the correction, so
+# the drain pass finds an empty table rather than no table.
+#
+# Migration 19 was corrected in place rather than superseded, which is a departure
+# from the rule right below this and is recorded in CLAUDE.md with the reason: a
+# corrective migration cannot help anyone here, because 19 had already dropped the
+# only copy of the data by the time one could run.
+def MIGRATION_20(conn: sqlite3.Connection) -> None:
+    conn.execute(UNSETTLED_ROWS_DDL)
 
 
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
@@ -1596,6 +1653,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (17, MIGRATION_17),
     (18, MIGRATION_18),
     (19, MIGRATION_19),
+    (20, MIGRATION_20),
 ]
 
 

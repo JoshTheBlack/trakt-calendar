@@ -304,6 +304,31 @@ async def reopen(user_id: int, placement: Placement, *,
     return await follow(user_id, fresh)
 
 
+async def finish_if_done(user_id: int, row: dict,
+                         completed_on: Mapping[tuple[str, int], str]) -> bool:
+    """Settle `row` onto the month its history names, if it is finished and that
+    history says when. True when it was settled and has left the viewer's list.
+
+    ITS OWN VERB BECAUSE TWO PASSES REACH IT. advance() runs it for the month under
+    way, which is the ordinary case; the held-row drain (unsettled.py) runs it for
+    a rebuilt list whose seasons have never been through advance at all, because
+    the months they were held on had already ended. Written twice, the two would
+    drift on the one question that matters here — whether an undated finish may be
+    recorded — and that is a question about somebody's records being wrong rather
+    than merely late.
+
+    A SEASON WITH NO DATED LAST EPISODE IS LEFT ON THE LIST. "Finished, month
+    unknown" would have to guess a month, and a wrong completed record is worse
+    than a season that lingers. The date the history gives names the month, and
+    that month is usually not the one being looked at.
+    """
+    when = str(completed_on.get(live.live_key(row)) or "")
+    if not (is_finished(row) and when):
+        return False
+    await finish(user_id, store.record_key(row), int(row["season"]), month=when[:7])
+    return True
+
+
 async def reconcile_turn_aways(user_id: int, month: str, *,
                                standing: store.MonthStanding) -> None:
     """Bring `month` into line with the viewer's main-calendar turn-away marks:
@@ -636,14 +661,7 @@ async def advance(user_id: int, month: str, *, premieres: list[dict],
             continue
         stored = await follow(user_id, show)
         row = {**show, **stored}
-        when = str(completed_on.get(live.live_key(row)) or "")
-        if is_finished(row) and when:
-            # The date the history gives names the month, and that month is
-            # usually not this one. A season with no dated last episode is left on
-            # the list: "finished, month unknown" would have to guess a month, and
-            # a wrong completed record is worse than a season that lingers.
-            await finish(user_id, store.record_key(row), int(row["season"]),
-                         month=when[:7])
+        if await finish_if_done(user_id, row, completed_on):
             continue
         still_listed.append(row)
 

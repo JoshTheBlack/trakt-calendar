@@ -16,11 +16,13 @@ Both the data-layer functions and the two HTTP routes are exercised. No network.
 from __future__ import annotations
 
 import asyncio
+import os
 import unittest
+from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from app import auth, db, distrakt
+from app import auth, clock, db, distrakt
 from app.providers.base import ItemKey
 from app.distrakt import watch_history as wh
 from app.config import Settings, save_settings
@@ -510,9 +512,18 @@ class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
     thing under test is the SQL that classifies existing rows — a database created
     at 19 has nothing to classify.
 
-    MONTHS ARE DERIVED FROM THE CLOCK. A migration is not date-dependent, but a
-    test that spells a month out is one bad rollover away from asserting about a
-    month that has since become the current one for some other reason.
+    WHAT A MONTH IS DECIDES WHAT ITS ROWS BECOME, and the migration asks
+    `distrakt_months.closed` rather than the calendar. Only a month that FROZE ever
+    had premiere dates, buckets and counts written onto its rows, so only a frozen
+    month can be classified at all; the rest are held for app/distrakt/unsettled.py
+    to settle from a season lookup. `_row` therefore marks its month frozen unless
+    the test says otherwise, because a row carrying a bucket and a premiere date
+    IS a row from a month that froze — an unfrozen one carrying either is a state
+    the old schema could not produce.
+
+    Months are still spelled relative to today so a test cannot assert about a
+    month that has since become the current one for some other reason. Nothing
+    here depends on WHICH month that is, and one test below proves it.
     """
     async def asyncSetUp(self):
         new_db_path("m19")
@@ -532,6 +543,15 @@ class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
                    title: str = "Old", premiere: str | None = None, bucket: str | None = None,
                    abandoned: int = 0, watched: int = 3, total: int = 8,
                    cadence: str | None = "Mon", finished_airing: int = 0) -> None:
+        # The month is recorded as FROZEN unless the test already said otherwise —
+        # DO NOTHING, so an explicit _month() before this one wins. A row carrying
+        # counts, a cadence and a bucket is a row a freeze wrote, and a fixture
+        # that made one on an open month would be asserting about a database the
+        # old schema could not produce.
+        await db.execute(
+            "INSERT INTO distrakt_months (user_id, month, closed, created_at) "
+            "VALUES (?, ?, 1, 0) ON CONFLICT(user_id, month) DO NOTHING",
+            (self.user_id, month))
         await db.execute(
             "INSERT INTO distrakt_shows (user_id, month, media, match_source, match_id, "
             "trakt_id, tmdb, slug, title, season, network, abandoned, watched, total, "
@@ -556,7 +576,7 @@ class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_verdict_stays_on_the_month_that_reached_it(self):
         await self._row(self.newer, bucket="completed", premiere=None)
-        self.assertEqual(await self._to_19(), 19)
+        self.assertGreaterEqual(await self._to_19(), 19)
         self.assertEqual(await self._kinds(self.newer), {"completed"})
         self.assertEqual(await distrakt.user_records(self.user_id), [])
 
@@ -624,45 +644,80 @@ class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await distrakt.user_records(self.user_id), [])
         self.assertEqual(await self._kinds(self.newer), {"abandoned"})
 
-    async def test_a_month_still_ahead_becomes_its_own_premieres(self):
-        """A month the calendar has not reached can hold nothing BUT its
-        premieres: the recent-viewing sweep, the only other way a row gets onto a
-        month, was skipped for a month nobody had reached. So its rows need no
-        premiere date to be classified — being there is the proof."""
+    async def test_an_unfrozen_months_rows_are_held_rather_than_guessed_at(self):
+        """The bug this guards, and it cost a month. A month that never froze wrote
+        no premiere date onto any of its rows, so nothing stored says which of them
+        it ANNOUNCED and which were seasons the viewer had in hand. Read as the
+        latter, a pre-filled month ahead is exactly where a title turned away on
+        the calendar sits — and the very same mark that means "never put this in
+        that month" then reads as "I was following this and stopped" and lands as a
+        verdict on the month under way. So neither is guessed: the rows are held,
+        with their month, until a season lookup can say."""
         await self._month(self.ahead, closed=False)
         await self._row(self.ahead, season=1, premiere=None)
         await self._row(self.ahead, tmdb=7373, season=4, premiere=None)
         await self._to_19()
-        self.assertEqual(await self._kinds(self.ahead),
-                         {"series_premiere", "season_premiere"})
+        self.assertEqual(await self._kinds(self.ahead), set(),
+                         "a month that never froze announced something anyway")
         self.assertEqual(await distrakt.user_records(self.user_id), [],
-                         "a month ahead's announcements became work in hand")
+                         "a held row became work in hand and can be abandoned")
+        held = await db.fetch_all(
+            "SELECT month, season FROM distrakt_unsettled_rows WHERE user_id = ? "
+            "ORDER BY season", (self.user_id,))
+        self.assertEqual([(r["month"], r["season"]) for r in held],
+                         [(self.ahead, 1), (self.ahead, 4)])
 
-    async def test_a_month_ahead_does_not_fill_this_months_verdicts(self):
-        """The bug this guards. Read as the viewer's own list, a pre-filled month
-        ahead is where a title turned away on the calendar sits — and the very
-        same mark that means "never put this in that month" then reads as "I was
-        following this and stopped" and lands as a verdict on the month UNDER WAY.
-        Opening the current month filled its Abandoned section with next month's
-        titles."""
+    async def test_an_unfrozen_month_never_wins_the_latest_month_race(self):
+        """A season the viewer is part-way through, also sitting on a month that
+        never froze, must take its counts from the month that actually recorded
+        some — an unfrozen month's row reads 0 of 0, because a freeze is the only
+        thing that ever wrote those columns."""
         await self._month(self.ahead, closed=False)
-        await self._row(self.ahead, premiere=None)
-        await self._to_19()
-        listed = await distrakt.user_records(self.user_id)
-        self.assertEqual(listed, [], "next month's title was on the viewer's list")
-        self.assertEqual(await self._kinds(self.under_way), set())
-
-    async def test_a_month_ahead_never_wins_the_latest_month_race(self):
-        """A season the viewer is part-way through, also sitting on a month ahead,
-        must take its counts from the month that has actually happened — the one
-        ahead has no counts, because nothing on it has aired."""
-        await self._month(self.under_way, closed=False)
-        await self._month(self.ahead, closed=False)
-        await self._row(self.under_way, watched=5)
-        await self._row(self.ahead, watched=0, premiere=None)
+        await self._row(self.newer, watched=5)
+        await self._row(self.ahead, watched=0, total=0, premiere=None)
         await self._to_19()
         listed, = await distrakt.user_records(self.user_id)
         self.assertEqual(listed["watched"], 5)
+
+    async def test_the_same_database_migrates_the_same_way_on_any_day(self):
+        """The property whose absence made this migration destroy a month. It used
+        to split rows on whether their month was still ahead of TODAY, so the same
+        database migrated differently depending on when it was run — which is why
+        it passed against a development store whose months had all frozen and lost
+        a month in production, where nobody had opened the app since before it
+        ended. Nothing here reads the clock, so there is no such day."""
+        await self._month(self.ahead, closed=False)
+        await self._row(self.older, bucket="completed")
+        await self._row(self.newer, tmdb=7373, watched=5)
+        await self._row(self.ahead, tmdb=8484, premiere=None)
+
+        def snapshot(conn):
+            return [tuple(r) for table in
+                    ("SELECT month, kind, match_id, season FROM distrakt_month_records "
+                     "ORDER BY month, kind, match_id",
+                     "SELECT match_id, season, kind, watched FROM distrakt_user_seasons "
+                     "ORDER BY match_id",
+                     "SELECT month, match_id, season FROM distrakt_unsettled_rows "
+                     "ORDER BY month, match_id")
+                    for r in conn.execute(table)]
+
+        with clock_fixed_at("2026-03-15"):
+            await self._to_19()
+            in_march = await db.run(snapshot)
+        # The same rows, migrated again from scratch nine months later.
+        new_db_path("m19-again")
+        await db.run(lambda conn: db_migrate_to(conn, 18))
+        await db.execute(
+            "INSERT INTO users (username, is_admin, calendar_approved, "
+            "distrakt_approved, created_at, updated_at) VALUES ('tracker', 1, 1, 1, 0, 0)")
+        await self._month(self.ahead, closed=False)
+        await self._row(self.older, bucket="completed")
+        await self._row(self.newer, tmdb=7373, watched=5)
+        await self._row(self.ahead, tmdb=8484, premiere=None)
+        with clock_fixed_at("2026-12-15"):
+            await self._to_19()
+            in_december = await db.run(snapshot)
+        self.assertEqual(in_march, in_december)
 
     async def test_a_season_that_has_finished_airing_is_one_to_catch_up_on(self):
         await self._row(self.newer, finished_airing=1)
@@ -674,33 +729,69 @@ class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
         await self._to_19()
         self.assertEqual((await distrakt.user_records(self.user_id))[0]["kind"], "catchup")
 
-    async def test_a_month_that_never_froze_keeps_its_seasons_and_says_what_it_lost(self):
-        """The live fields were written back only when a month FROZE, so a month
-        still open has no premiere date on any of its rows and nothing can prove
-        which of them it announced. Guessing one would put a title in a month's
-        announcement on no evidence, so the seasons are kept as the viewer's own
-        records and the months are named in the log instead — an operator seeing an
-        empty announcement should not have to work out why."""
+    async def test_a_month_that_never_froze_keeps_its_rows_and_says_they_are_held(self):
+        """A month still open has no premiere date on any of its rows, so nothing
+        can prove which of them it announced. The rows are kept exactly as they
+        are — WITH THEIR MONTH, which is the one thing nothing else records and the
+        one thing a later pass cannot re-derive — and the months are named in the
+        log, because an operator looking at a month short of its titles in the
+        seconds before the first load drains it should not have to work it out."""
         await self._month(self.newer, closed=False)
-        await self._row(self.newer, premiere=None, cadence=None)
+        await self._row(self.newer, premiere=None, cadence=None, watched=0, total=0)
         with self.assertLogs("app.db", level="INFO") as caught:
             await self._to_19()
         self.assertEqual(await self._kinds(self.newer), set())
-        self.assertEqual(len(await distrakt.user_records(self.user_id)), 1)
+        self.assertEqual(await distrakt.user_records(self.user_id), [])
+        held, = await db.fetch_all(
+            "SELECT month, title, season FROM distrakt_unsettled_rows WHERE user_id = ?",
+            (self.user_id,))
+        self.assertEqual((held["month"], held["title"], held["season"]),
+                         (self.newer, "Old", 2))
         said = "\n".join(caught.output)
         self.assertIn(self.newer, said)
-        self.assertIn("premiere date", said)
+        self.assertIn("had not frozen", said)
 
-    async def test_a_frozen_month_is_not_reported_as_having_lost_anything(self):
+    async def test_a_frozen_month_holds_nothing_back(self):
         """It stored its premiere dates when it froze, so it had everything the
-        classification needed."""
+        classification needed and nothing is left for a later pass."""
         month_number = distrakt.parse_month_key(self.older)[1]
         await self._month(self.older, closed=True)
         await self._row(self.older, season=1, premiere=f"{month_number}/12")
         with self.assertLogs("app.db", level="INFO") as caught:
             await self._to_19()
         self.assertEqual(await self._kinds(self.older), {"series_premiere"})
-        self.assertNotIn("premiere date", "\n".join(caught.output))
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM distrakt_unsettled_rows"), 0)
+        self.assertNotIn("had not frozen", "\n".join(caught.output))
+
+    async def test_a_verdict_on_an_unfrozen_month_is_still_a_verdict(self):
+        """The `abandoned` flag was set the moment the viewer pressed the button,
+        on whatever month was open at the time — not at a freeze, like `bucket`.
+        Giving up is the one thing an unfrozen month can prove it decided, so it is
+        honoured rather than held."""
+        await self._month(self.newer, closed=False)
+        await self._row(self.newer, abandoned=1, bucket=None, premiere=None)
+        await self._to_19()
+        self.assertEqual(await self._kinds(self.newer), {"abandoned"})
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM distrakt_unsettled_rows"), 0,
+            "a season already settled was also held for settling")
+
+    async def test_an_instance_already_past_the_split_gets_the_held_rows_table(self):
+        """The first version of the split dropped the roster table without keeping
+        anything, so an instance that applied it has no held rows and never will.
+        It still needs the TABLE: the drain pass reads it on every tracker load,
+        and a missing table is an error rather than an empty answer."""
+        await self._row(self.older, bucket="completed")
+        await db.run(lambda conn: db_migrate_to(conn, 19))
+        await db.run(lambda conn: conn.execute("DROP TABLE distrakt_unsettled_rows"))
+        await db.migrate()
+        self.assertEqual(await db.fetch_value(
+            "SELECT COUNT(*) FROM distrakt_unsettled_rows"), 0)
+        # ...and it is not created a second time for an instance that migrated
+        # after the correction and already has it, held rows and all.
+        await db.migrate()
+        self.assertEqual(await self._kinds(self.older), {"completed"})
 
     async def test_a_row_that_cannot_be_addressed_refuses_to_migrate(self):
         """A record is filed under its identity and, on a month, under its month
@@ -716,6 +807,14 @@ class MigrationNineteenTests(unittest.IsolatedAsyncioTestCase):
         # Nothing was changed: the rows are still there, in their old shape.
         self.assertEqual(await db.schema_version(), 18)
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM distrakt_shows"), 1)
+
+
+def clock_fixed_at(iso: str):
+    """Run the block believing today is `iso`.
+
+    Only there to prove the migration does NOT care what day it is, so it moves
+    the one seam that could make it care and nothing else."""
+    return mock.patch.dict(os.environ, {clock.FAKE_TODAY_ENV: iso})
 
 
 def db_migrate_to(conn, version: int) -> int:

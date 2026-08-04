@@ -26,7 +26,7 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import backfill, discord_fmt, lifecycle, watch_history
+from . import backfill, discord_fmt, lifecycle, unsettled, watch_history
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
@@ -644,6 +644,15 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     degrades the same way; only the notice wording differs.
     """
     today = clock.today()
+    # BEFORE ANYTHING IS READ, and before ensure_month's freeze and turn-away
+    # reconciliation in particular. The roster split leaves the rows of a month
+    # that never froze held rather than guessed at (app/distrakt/unsettled.py), and
+    # until they are settled the viewer's list is missing seasons and a month is
+    # missing its announcements. Reconciling turn-aways against that half-built
+    # list is what would read a held announcement as a season the viewer gave up
+    # on. Costs one indexed lookup once the rows are drained, which is every call
+    # but the first.
+    await unsettled.settle(user_id, settings)
     month_key = distrakt_store.month_key(year, month)
     # Where this month stands relative to the calendar decides which sections it
     # may show at all (discord_fmt.READER_BUCKETS), so every shape below is

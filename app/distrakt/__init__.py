@@ -16,17 +16,19 @@ the reason it changes:
   watch_history.py    the incremental per-user cache of what has been seen
   calendar_import.py  the calendar's premieres becoming month premiere records
   rollover.py         what a new month contains, and when a month freezes
+  unsettled.py        the rows a month that never froze left behind, settled
+                      once from the provider the migration could not ask
   backfill.py         months nobody was keeping, rebuilt from watch history
   prefs.py            the per-user network -> emoji map
   backup.py           the JSON export and its inverse
   discord_fmt.py      the two Discord notices
   routes.py           the tracker page and the whole /api/distrakt/* API
 
-lifecycle.py is deliberately NOT re-exported below, for the same reason the
-router and the backfill job are not: what it holds are ACTS — a season being
-taken up, settled, given up on — rather than facts to read, and a caller that
-wants one of those is asking for that module by name (`from .distrakt import
-lifecycle`). The names re-exported below are the DATA LAYER — what a caller means when it says
+lifecycle.py and unsettled.py are deliberately NOT re-exported below, for the same
+reason the router and the backfill job are not: what they hold are ACTS — a season
+being taken up, settled, given up on; a held month's rows being worked out — rather
+than facts to read, and a caller that wants one of those is asking for that module
+by name (`from .distrakt import lifecycle`). The names re-exported below are the DATA LAYER — what a caller means when it says
 `distrakt.load_month`, versus `distrakt.store.load_month`, which would make every
 caller responsible for knowing which half of the tracker a name lives in. The
 router and the backfill job are deliberately NOT among them: they are jobs to run
