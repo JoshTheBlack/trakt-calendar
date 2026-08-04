@@ -256,6 +256,26 @@ class RequestingUsersTokenTests(DistraktTestCase):
         # Everything genuinely app-wide still comes through.
         self.assertEqual(settings.trakt_client_id, "client-id")
 
+    def test_both_services_tokens_ride_on_the_one_settings_object(self):
+        """Each source reads its own field off `settings` — that is what
+        `is_configured` asks about — so a per-source credential object would be a
+        second mechanism for something this one already expresses, and the port
+        protocol would have to grow an argument for it."""
+        user_id = self.tracker_user(token="THE-USERS-TOKEN")
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user_id, provider="simkl", provider_user_id=90210,
+            access_token="THEIR-SIMKL-TOKEN")))
+        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+        self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
+        self.assertEqual(settings.simkl_access_token, "THEIR-SIMKL-TOKEN")
+
+    def test_an_account_with_no_simkl_link_carries_no_simkl_token(self):
+        """`simkl_configured` then goes false and that port is simply not asked,
+        which is exactly what has always been true of Trakt."""
+        settings = asyncio.run(distrakt_routes._distrakt_settings(self.tracker_user()))
+        self.assertEqual(settings.simkl_access_token, "")
+        self.assertFalse(settings.simkl_configured)
+
     def test_it_comes_from_the_per_user_token_source(self):
         """Pinned to the function that knows how to renew a user's token, rather
         than to a direct read of the identity row, so an expired token is

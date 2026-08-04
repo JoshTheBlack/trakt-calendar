@@ -73,17 +73,26 @@ def agreed(per_source: Mapping[str, int] | None) -> bool:
 
 
 def counts_label(per_source: Mapping[str, int] | int | None, total,
-                 labels: Mapping[str, str] | None = None, order=()) -> str:
+                 labels: Mapping[str, str] | None = None, order=(), asked=()) -> str:
     """The "x/y" a row shows, which is two of them when the services disagree.
 
     `labels` maps a source name to what to call it on screen (the registry's
     `label`); a source with no entry is shown under its own name rather than
     dropped, because an unlabelled number is still better than a missing one.
+
+    `asked` IS WHICH SERVICES WERE READ FOR THIS ACCOUNT, and it is what tells a
+    season only ONE of two services knows about from a season both of them agree
+    on. Both arrive here as a single number, and they mean different things: the
+    first is one service's claim that the other never made, and it carries that
+    service's badge. With one service read — which is what almost every account
+    has — there is nothing to distinguish, and every row is a bare number exactly
+    as it always was.
     """
     y = int(total or 0)
     if not isinstance(per_source, Mapping) or not per_source:
         return f"{int(per_source or 0)}/{y}"
-    if agreed(per_source):
+    complete = len(asked) <= 1 or {str(source) for source in asked} <= set(per_source)
+    if agreed(per_source) and complete:
         return f"{primary_count(per_source, order)}/{y}"
     names = [str(s) for s in order if str(s) in per_source]
     names += [s for s in sorted(per_source) if s not in names]

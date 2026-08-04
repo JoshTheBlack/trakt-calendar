@@ -172,8 +172,12 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     state = await watch_history.sync_and_baseline(
         settings, user_id, records, since_month=doc["month"])
     if premieres:
-        shows = await compute_live_shows(user_id, premieres, settings, fresh=True,
-                                         watched_lookup=watch_history.watched_map(state))
+        shows = await compute_live_shows(
+            user_id, premieres, settings, fresh=True,
+            watched_lookup=watch_history.watched_map(state),
+            # The freeze did its own sync above, so it is the one that knows
+            # which services answered for this account.
+            sources_read=await watch_history.tracker_sources(settings, user_id))
         by_key = {live_key(s): s for s in shows}
         for rec in premieres:
             live = by_key.get(live_key(rec))

@@ -90,14 +90,15 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
     ), return_exceptions=allow_degrade)
 
 
-def _merge_available(rec: dict, detail: dict, watched: dict[str, int]) -> dict:
+def _merge_available(rec: dict, detail: dict, watched: dict[str, int],
+                     asked=()) -> dict:
     show = {**rec, "key": str(record_key(rec)), "unavailable": False}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
-    _apply_counts(show, rec, watched)
+    _apply_counts(show, rec, watched, asked)
     return show
 
 
-def _merge_unavailable(rec: dict, watched: dict[str, int]) -> dict:
+def _merge_unavailable(rec: dict, watched: dict[str, int], asked=()) -> dict:
     """This one title's totals could not be fetched. Render it from its stored
     record's last-known fields and flag it, so the UI can say "unavailable,
     refresh to retry" rather than presenting a fabricated 0/0 as real."""
@@ -110,7 +111,7 @@ def _merge_unavailable(rec: dict, watched: dict[str, int]) -> dict:
         "started_airing": bool(rec.get("started_airing")),
         "finished_airing": bool(rec.get("finished_airing")),
     })
-    _apply_counts(show, rec, watched)
+    _apply_counts(show, rec, watched, asked)
     return show
 
 
@@ -128,7 +129,7 @@ def source_labels() -> dict[str, str]:
             for source, provider in providers.registered().items()}
 
 
-def _apply_counts(show: dict, rec: dict, watched: dict[str, int]) -> None:
+def _apply_counts(show: dict, rec: dict, watched: dict[str, int], asked=()) -> None:
     """Put the watched counts on a live show, in all three forms it is read in.
 
     `watched` is the primary source's number and is what every existing reader
@@ -139,6 +140,11 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int]) -> None:
     built HERE rather than in the browser because the rule for it is the same
     rule a frozen month is written with, and a copy in JavaScript could not be
     tested against the one that matters.
+
+    `asked` is which services were read for this account, which is what tells a
+    season only one of two of them knows about from a season both agree on — see
+    counts.counts_label. It is threaded down rather than looked up here because
+    it is one answer for the whole pass, not one per row.
     """
     order = source_order()
     per_source = watched if isinstance(watched, dict) else {}
@@ -150,7 +156,7 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int]) -> None:
     # season's total comes from one source (see detail_source).
     detail_from = detail_source(rec)
     show["total_by_source"] = {detail_from: total} if detail_from else {}
-    show["counts"] = counts.counts_label(watched, total, source_labels(), order)
+    show["counts"] = counts.counts_label(watched, total, source_labels(), order, asked)
 
 
 def _log_watched_coverage(records: list[dict], watched_lookup: dict, matched: int) -> None:
@@ -173,7 +179,8 @@ def _log_watched_coverage(records: list[dict], watched_lookup: dict, matched: in
 async def compute_live_shows(user_id: int, records: list[dict], settings, fresh: bool = False,
                              watched_lookup: dict | None = None,
                              allow_degrade: bool = False,
-                             completed_lookup: dict | None = None) -> list[dict]:
+                             completed_lookup: dict | None = None,
+                             sources_read=()) -> list[dict]:
     """Merge each stored record with its live Trakt-derived fields into the flat
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
 
@@ -193,6 +200,13 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     counts) is NOT degraded here — its failure still propagates for the caller's
     top-level handler, because it can't be pinned on any one title.
 
+    `sources_read` IS WHICH SERVICES WERE ASKED FOR THIS ACCOUNT, and it belongs
+    beside `watched_lookup` because it describes the same read: it is what lets a
+    row tell "only one of the two services knows this season" from "both of them
+    agree", which arrive as the same single number and mean different things (see
+    counts.counts_label). A caller that hands in a pre-synced lookup knows what it
+    asked and says so; one that leaves the sync to this function does not have to.
+
     Every show that comes back carries `key`, whether or not the record handed in
     did: it is what the browser names a row by, and deriving it here means a
     record assembled anywhere is addressable once it has been through this."""
@@ -208,10 +222,17 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             )
         watched_lookup = watch_history.watched_map(state)
         completed_lookup = watch_history.season_completed_map(state)
+        # WHICH SERVICES ANSWER FOR THIS ACCOUNT — asked here because this branch
+        # has just synced them, so it is one preference read on a path that has
+        # already gone to the database. The other branch is handed it by the
+        # caller that did the sync (`sources_read`), which keeps a pre-synced
+        # call free of storage entirely.
+        sources_read = sources_read or await watch_history.tracker_sources(settings, user_id)
     else:
         with span("cls.season_gather", n=len(records), fresh=fresh):
             details = await fetch_season_details(
                 settings, records, fresh=fresh, allow_degrade=allow_degrade)
+    asked = tuple(str(source) for source in sources_read or ())
 
     shows = []
     matched = 0
@@ -227,9 +248,9 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             # record last settled on, filed under the source that can answer for
             # it so the row still renders one number rather than none.
             fallback = {detail_source(rec) or "": int(rec.get("watched") or 0)}
-            show = _merge_unavailable(rec, watched_lookup.get(key) or fallback)
+            show = _merge_unavailable(rec, watched_lookup.get(key) or fallback, asked)
         else:
-            show = _merge_available(rec, detail, watched_lookup.get(key) or {})
+            show = _merge_available(rec, detail, watched_lookup.get(key) or {}, asked)
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # WHEN the season was finished, and only for a season that IS finished:
         # on a partly-watched season the same date is just "last time I watched

@@ -110,6 +110,22 @@ class ClosedMonthPayloadTests(unittest.TestCase):
         self.assertIn("https://example.test/c/abc", with_link["post1"])
         self.assertNotIn("https://example.test/c/abc", self._payload(doc)["post1"])
 
+    def test_a_month_that_froze_on_a_disagreement_still_shows_both_numbers(self):
+        """The whole point of writing each service's number down: years later,
+        with nothing to re-ask, the row can still say the two of them counted
+        this season differently instead of quietly picking one."""
+        record = _record(1, "Frozen Show", kind="completed", watched=6, total=8)
+        record["watched_by_source"] = {"trakt": 6, "simkl": 7}
+        payload = self._payload({"month": "2026-03", "closed": True, "shows": [record]})
+        self.assertEqual(payload["shows"][0]["counts"], "6/8 (Trakt) · 7/8 (Simkl)")
+
+    def test_a_month_that_recorded_one_number_still_shows_one(self):
+        """Every month written before a second service existed, and every month
+        an account with one linked service will ever write."""
+        payload = self._payload({"month": "2026-03", "closed": True, "shows": [
+            _record(1, "Frozen Show", kind="completed", watched=6, total=6)]})
+        self.assertEqual(payload["shows"][0]["counts"], "6/6")
+
     def test_it_never_reports_a_degraded_read(self):
         """`notice` and `rate_limited` belong to the stale fallback alone — the
         client shows its banner off `notice`, so a frozen month must not carry

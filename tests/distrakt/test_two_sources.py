@@ -1,0 +1,386 @@
+"""The tracker with two services answering for one account.
+
+The rule under test is stated in one sentence: where two services agree about a
+season the viewer sees one number, and where they disagree the viewer sees BOTH,
+each named. Nothing is unioned, averaged or picked, because the disagreement is
+the honest part — one service received a play the other never did, and every way
+of collapsing that asserts something neither of them said.
+
+THE REGRESSION THAT MATTERS MOST IS AT THE BOTTOM OF THIS FILE: an account with
+one linked service behaves exactly as it did before there could be two. It is
+last because everything above it is what could break it.
+
+No network. Both providers' sync modules are patched at the module object, which
+is why the app calls across a package through the module rather than binding the
+name at import — a name bound at import is a second reference no double reaches.
+"""
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from app import db, distrakt
+from app.distrakt import counts, lifecycle, live, store, watch_history as wh
+from app.providers.base import ItemKey
+from app.providers.simkl import SimklError
+from tests.support import new_db_path
+
+# What each account's request-scoped Settings looks like. A source is "linked"
+# for the tracker exactly when this object carries a usable credential for it —
+# see app/distrakt/routes.py's _distrakt_settings, which is what puts one
+# person's own tokens on it.
+TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False)
+BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True)
+
+LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
+ORDER = ("trakt", "simkl")
+
+BEACON = {"episodes": {"watched_at": "T1", "removed_at": None},
+          "movies": {"watched_at": "T1", "removed_at": None}}
+
+
+def KEY(tid) -> str:
+    return f"show:tmdb:{tid}"
+
+
+def _record(tid, season=1) -> dict:
+    """A roster record naming the title to BOTH services, which is what lets each
+    of them be asked about it with its own id."""
+    return {"media": "show", "match_source": "tmdb", "match_id": str(tid),
+            "season": season, "title": f"Show {tid}",
+            "ids": {"trakt": tid, "simkl": tid, "tmdb": tid}}
+
+
+def _episodes(*numbers) -> dict:
+    return {n: "2026-07-0%d" % min(n, 9) for n in numbers}
+
+
+def _patch(source: str, *, progress=None, history=None, activities=BEACON):
+    """Patch one provider's three sync entry points."""
+    module = f"app.providers.{source}.sync"
+    return (
+        patch(f"{module}.fetch_last_activities",
+              new=AsyncMock(side_effect=activities) if isinstance(activities, Exception)
+              else AsyncMock(return_value=activities)),
+        patch(f"{module}.fetch_history", new=AsyncMock(return_value=history or [])),
+        patch(f"{module}.fetch_progress_details",
+              new=AsyncMock(return_value=progress or {})),
+    )
+
+
+class TwoSourceTestCase(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        new_db_path("two-sources")
+        await db.migrate()
+        now = db.now()
+        result = await db.execute(
+            "INSERT INTO users (username, is_admin, calendar_approved, distrakt_approved, "
+            "created_at, updated_at) VALUES ('viewer', 1, 1, 1, ?, ?)", (now, now))
+        self.user_id = result.lastrowid
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def _baseline(self, settings, records, *, trakt=None, simkl=None,
+                        simkl_activities=BEACON):
+        """Sync both services with a scripted progress record each, and return the
+        watch state that came out of it."""
+        patches = [*_patch("trakt", progress=trakt),
+                   *_patch("simkl", progress=simkl, activities=simkl_activities)]
+        for p in patches:
+            p.start()
+        try:
+            return await wh.sync_and_baseline(settings, self.user_id, records)
+        finally:
+            for p in patches:
+                p.stop()
+
+
+class WhoIsAskedTests(TwoSourceTestCase):
+    async def test_one_linked_service_is_asked_and_the_other_is_not(self):
+        self.assertEqual([str(s) for s in await wh.tracker_sources(TRAKT_ONLY, self.user_id)],
+                         ["trakt"])
+
+    async def test_both_are_asked_when_both_are_linked_in_the_declared_order(self):
+        """Trakt first, and the order is load-bearing: the first service with an
+        answer is the account's primary, whose number a frozen month and the
+        announcement post carry when there is room for only one."""
+        self.assertEqual([str(s) for s in await wh.tracker_sources(BOTH, self.user_id)],
+                         ["trakt", "simkl"])
+
+    async def test_two_services_cost_two_beacon_calls_and_not_two_full_syncs(self):
+        """Each has its own beacon and its own cursor, so an unchanged history on
+        one still returns after a single call while the other is being pulled."""
+        first = _patch("trakt"), _patch("simkl")
+        for group in first:
+            for p in group:
+                p.start()
+        try:
+            await wh.sync(BOTH, self.user_id)
+            # Second pass: both beacons unchanged, so neither history is read.
+            await wh.sync(BOTH, self.user_id)
+            trakt_history = first[0][1].get_original()[0]
+            simkl_history = first[1][1].get_original()[0]
+        finally:
+            for group in first:
+                for p in group:
+                    p.stop()
+        self.assertEqual(trakt_history.await_count, 1)
+        self.assertEqual(simkl_history.await_count, 1)
+
+
+class AgreementTests(TwoSourceTestCase):
+    async def test_two_services_agreeing_render_one_number(self):
+        state = await self._baseline(
+            BOTH, [_record(101)],
+            trakt={101: {1: _episodes(1, 2, 3)}},
+            simkl={101: {1: _episodes(1, 2, 3)}})
+        per_source = wh.watched_map(state)[(KEY(101), 1)]
+        self.assertEqual(per_source, {"trakt": 3, "simkl": 3})
+        self.assertTrue(counts.agreed(per_source))
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER), "3/8")
+
+    async def test_two_services_disagreeing_render_both_with_their_names(self):
+        """Neither is wrong. One of them received a play the other never did, and
+        a single number would have to throw one of those facts away."""
+        state = await self._baseline(
+            BOTH, [_record(101)],
+            trakt={101: {1: _episodes(1, 2, 3)}},
+            simkl={101: {1: _episodes(1, 2, 3, 4)}})
+        per_source = wh.watched_map(state)[(KEY(101), 1)]
+        self.assertEqual(per_source, {"trakt": 3, "simkl": 4})
+        self.assertFalse(counts.agreed(per_source))
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER),
+                         "3/8 (Trakt) · 4/8 (Simkl)")
+
+    async def test_a_season_only_one_service_knows_carries_that_services_name(self):
+        """It arrives as a single number exactly as agreement does, and it means
+        something different: a claim the other service never made."""
+        state = await self._baseline(
+            BOTH, [_record(101)], trakt={}, simkl={101: {1: _episodes(1, 2)}})
+        per_source = wh.watched_map(state)[(KEY(101), 1)]
+        self.assertEqual(per_source, {"simkl": 2})
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER),
+                         "2/8 (Simkl)")
+
+    async def test_the_one_number_a_month_keeps_is_the_primary_services(self):
+        """Not the highest and not the union: those would each be a different
+        number depending on which services happened to answer, and a frozen month
+        has to keep meaning the same thing years later."""
+        per_source = {"simkl": 7, "trakt": 6}
+        self.assertEqual(counts.primary_count(per_source, ORDER), 6)
+
+
+class DegradationTests(TwoSourceTestCase):
+    async def test_a_service_that_could_not_be_read_leaves_the_others_numbers(self):
+        """Never a fabricated agreement and never a hard failure of the whole
+        tracker: the season shows what answered, and the page says the other one
+        could not be read."""
+        state = await self._baseline(
+            BOTH, [_record(101)], trakt={101: {1: _episodes(1, 2, 3)}},
+            simkl_activities=SimklError("Simkl is unreachable"))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 3})
+        self.assertEqual(wh.unreadable_sources(state), ["simkl"])
+
+    async def test_what_the_missing_service_had_already_said_is_not_erased(self):
+        """Its absence this pass says nothing about what it holds, so its slot is
+        left exactly as it was rather than emptied."""
+        await self._baseline(BOTH, [_record(101)],
+                             trakt={101: {1: _episodes(1)}},
+                             simkl={101: {1: _episodes(1, 2, 3, 4)}})
+        state = await self._baseline(
+            BOTH, [_record(101)], trakt={101: {1: _episodes(1)}},
+            simkl_activities=SimklError("Simkl is unreachable"))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)],
+                         {"trakt": 1, "simkl": 4})
+
+    async def test_a_stored_state_reports_nothing_unreadable(self):
+        """The fact is about one sync attempt, not about the account, so it is
+        never stored — otherwise a page would keep saying a service was down long
+        after it came back."""
+        await self._baseline(BOTH, [_record(101)],
+                             simkl_activities=SimklError("down"))
+        self.assertEqual(wh.unreadable_sources(await wh.load_state(self.user_id)), [])
+
+    async def test_nothing_answering_at_all_is_still_the_trackers_failure(self):
+        """With one service linked, "that service failed" and "the tracker
+        failed" are the same sentence — which is what keeps an account with one
+        service on the path it has always been on."""
+        patches = [*_patch("trakt", activities=SimklError("trakt down")),
+                   *_patch("simkl", activities=SimklError("simkl down"))]
+        for p in patches:
+            p.start()
+        try:
+            with self.assertRaises(SimklError):
+                await wh.sync(BOTH, self.user_id)
+        finally:
+            for p in patches:
+                p.stop()
+
+    async def test_one_services_rows_survive_the_others_being_saved(self):
+        """Both services' rows live in one table and a save rewrites the whole
+        account's half of it, so this is the assertion that the write carries
+        every source rather than only the one that just moved."""
+        await self._baseline(BOTH, [_record(101)],
+                             trakt={101: {1: _episodes(1, 2)}},
+                             simkl={101: {1: _episodes(1, 2, 3)}})
+        rows = await db.fetch_all(
+            "SELECT source, watched_episodes_json FROM distrakt_show_progress "
+            "WHERE user_id = ? ORDER BY source", (self.user_id,))
+        self.assertEqual([row["source"] for row in rows], ["simkl", "trakt"])
+
+
+class TheRowTests(TwoSourceTestCase):
+    """What a live row actually carries, built where the rule lives rather than
+    in the browser — a copy in JavaScript could not be tested against the one a
+    month is frozen with."""
+
+    async def _rows(self, watched_lookup, sources_read):
+        async def _season(settings, trakt_id, season, fresh=False, client=None):
+            return {"total": 8, "cadence": "Tue", "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+        with patch("app.providers.trakt.detail.fetch_season_detail", _season):
+            return await live.compute_live_shows(
+                self.user_id, [_record(101)], BOTH, watched_lookup=watched_lookup,
+                sources_read=sources_read)
+
+    async def test_a_disagreement_reaches_the_row_as_both_numbers(self):
+        row, = await self._rows({(KEY(101), 1): {"trakt": 3, "simkl": 4}}, ORDER)
+        self.assertEqual(row["counts"], "3/8 (Trakt) · 4/8 (Simkl)")
+        self.assertEqual(row["watched_by_source"], {"trakt": 3, "simkl": 4})
+        # The single number every existing reader asks for is the primary's.
+        self.assertEqual(row["watched"], 3)
+
+    async def test_agreement_reaches_the_row_as_one_number(self):
+        row, = await self._rows({(KEY(101), 1): {"trakt": 3, "simkl": 3}}, ORDER)
+        self.assertEqual(row["counts"], "3/8")
+
+    async def test_one_linked_service_puts_no_badge_on_anything(self):
+        row, = await self._rows({(KEY(101), 1): {"trakt": 3}}, ("trakt",))
+        self.assertEqual(row["counts"], "3/8")
+        self.assertEqual(row["watched"], 3)
+
+    async def test_the_episode_total_is_recorded_against_the_service_asked(self):
+        """A season's total comes from ONE service — it is catalogue data and
+        paying a second call to learn the two count episodes slightly differently
+        would spend the instance's budget on a disagreement nothing renders."""
+        row, = await self._rows({(KEY(101), 1): {"trakt": 3, "simkl": 4}}, ORDER)
+        self.assertEqual(row["total_by_source"], {"trakt": 8})
+
+
+class FrozenMonthTests(TwoSourceTestCase):
+    """A month that closed while the two disagreed keeps both numbers, and can
+    still render the disagreement years later."""
+
+    async def _listed(self, tid=101) -> dict:
+        show = {**_record(tid), "kind": store.RecordKind.KEEPUP, "watched": 3,
+                "total": 8, "network": "Net", "cadence": "Mon",
+                "started_airing": True, "finished_airing": True,
+                "premiere": "7/1", "finale": "7/29",
+                "watched_by_source": {"trakt": 3, "simkl": 4},
+                "total_by_source": {"trakt": 8}}
+        await store.add_user_record(self.user_id, show)
+        return show
+
+    async def test_a_month_frozen_on_a_disagreement_reads_back_with_both(self):
+        show = await self._listed()
+        await lifecycle.finish(self.user_id, ItemKey("show", "tmdb", "101"), 1,
+                               month="2026-07", by_source=lifecycle.by_source_of(show))
+        record, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual(record["watched_by_source"], {"trakt": 3, "simkl": 4})
+        self.assertEqual(record["total_by_source"], {"trakt": 8})
+        # And the single number every existing reader asks for is unchanged.
+        self.assertEqual((record["watched"], record["total"]), (3, 8))
+
+    async def test_the_frozen_breakdown_is_what_the_row_is_drawn_from(self):
+        show = await self._listed()
+        await lifecycle.finish(self.user_id, ItemKey("show", "tmdb", "101"), 1,
+                               month="2026-07", by_source=lifecycle.by_source_of(show))
+        record, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual(
+            counts.counts_label(record["watched_by_source"], record["total"],
+                                LABELS, ORDER, ORDER),
+            "3/8 (Trakt) · 4/8 (Simkl)")
+
+    async def test_a_month_frozen_with_one_service_reads_back_as_one_number(self):
+        """Identical to every month written before a second service existed, and
+        so is a record that never carried a breakdown at all."""
+        show = {**await self._listed(102), "watched_by_source": {"trakt": 3}}
+        await store.add_user_record(self.user_id, show)
+        await lifecycle.finish(self.user_id, ItemKey("show", "tmdb", "102"), 1,
+                               month="2026-07", by_source=lifecycle.by_source_of(show))
+        record, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual(record["watched_by_source"], {"trakt": 3})
+        self.assertEqual(counts.counts_label(record["watched_by_source"], 8, LABELS,
+                                             ORDER, ("trakt",)), "3/8")
+
+    async def test_a_record_written_before_the_breakdown_existed_reads_as_empty(self):
+        """NULL means "nobody wrote a breakdown down", which is true — not "the
+        services agreed on nothing"."""
+        await store.add_month_record(self.user_id, "2026-06", {
+            **_record(103), "kind": store.RecordKind.COMPLETED, "watched": 5, "total": 5})
+        record, = await store.month_records(self.user_id, "2026-06")
+        self.assertEqual(record["watched_by_source"], {})
+        self.assertEqual(counts.counts_label(record["watched_by_source"] or record["watched"],
+                                             5, LABELS, ORDER, ORDER), "5/5")
+
+
+class OneServiceIsUnchangedTests(TwoSourceTestCase):
+    """The regression that matters most. An account that has linked one service
+    reads, renders and freezes exactly as it did before there could be two — and
+    it takes no code path of its own to do it."""
+
+    async def test_the_other_service_is_never_called(self):
+        patches = [*_patch("trakt", progress={101: {1: _episodes(1, 2, 3)}}),
+                   *_patch("simkl")]
+        for p in patches:
+            p.start()
+        try:
+            state = await wh.sync_and_baseline(TRAKT_ONLY, self.user_id, [_record(101)])
+            simkl_beacon = patches[3].get_original()[0]
+        finally:
+            for p in patches:
+                p.stop()
+        simkl_beacon.assert_not_awaited()
+        self.assertEqual(wh.watched_map(state), {(KEY(101), 1): {"trakt": 3}})
+        self.assertEqual(wh.unreadable_sources(state), [])
+
+    async def test_the_row_shows_one_number_with_no_badge(self):
+        state = await self._baseline(TRAKT_ONLY, [_record(101)],
+                                     trakt={101: {1: _episodes(1, 2, 3)}})
+        per_source = wh.watched_map(state)[(KEY(101), 1)]
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ("trakt",)),
+                         "3/8")
+
+    async def test_every_reader_that_wants_one_number_still_gets_one(self):
+        """`watched` keeps meaning what it always meant — the bucket rule, the
+        announcement post and a frozen month's column all read it."""
+        state = await self._baseline(TRAKT_ONLY, [_record(101)],
+                                     trakt={101: {1: _episodes(1, 2, 3)}})
+        self.assertEqual(counts.primary_count(wh.watched_map(state)[(KEY(101), 1)], ORDER), 3)
+
+    async def test_a_month_it_freezes_is_written_exactly_as_before(self):
+        await store.add_user_record(self.user_id, {
+            **_record(101), "kind": store.RecordKind.KEEPUP, "watched": 3, "total": 8,
+            "network": "Net", "started_airing": True, "finished_airing": True})
+        await lifecycle.finish(self.user_id, ItemKey("show", "tmdb", "101"), 1,
+                               month="2026-07")
+        record, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual((record["watched"], record["total"]), (3, 8))
+        self.assertEqual(record["watched_by_source"], {})
+
+
+class SourceNamesTests(unittest.TestCase):
+    """What a badge says comes off the providers themselves, so it can never
+    spell a service differently from the rest of the app."""
+
+    def test_the_labels_are_the_registrys_own(self):
+        self.assertEqual(live.source_labels(), LABELS)
+
+    def test_the_order_is_the_declared_one(self):
+        self.assertEqual(live.source_order(), ORDER)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

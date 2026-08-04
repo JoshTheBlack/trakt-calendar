@@ -1,0 +1,262 @@
+"""Simkl's private, per-person reads: the beacon, the history sweep and the
+batched progress record.
+
+THE ONE THING THIS FILE EXISTS TO PIN is that none of it can ever reach the
+shared response cache. The cache is keyed by the URL and Simkl carries the token
+in a header, so every account's /sync/ request has the identical URL — a single
+call made without `private=True` would serve one person's viewing to the next
+one who asked. Every call is asserted, by name, rather than spot-checked.
+
+No network: the transport's two entry points are patched and the calls they were
+handed are inspected. That is also what makes "this went through SYNC_POOL"
+assertable — the pool a call names is an argument, deliberately, so it cannot be
+defaulted into the parallel-allowed one.
+"""
+from __future__ import annotations
+
+import unittest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+from app.providers.simkl import sync, transport
+
+SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="tok",
+                           cache_ttl_minutes=10)
+
+
+class _Response:
+    """Just enough of an httpx response for fetch_progress_details."""
+
+    def __init__(self, payload, status_code=200, text=""):
+        self._payload = payload
+        self.status_code = status_code
+        self.text = text
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
+
+
+def _cached_get(*answers):
+    """A stand-in for transport.cached_get that serves `answers` in order and
+    records every call, so what was asked and how is inspectable."""
+    return AsyncMock(side_effect=list(answers))
+
+
+class PrivacyTests(unittest.IsolatedAsyncioTestCase):
+    """Every read here is one person's. None of it may be cached, and none of it
+    may travel on the pool that allows parallel requests."""
+
+    async def test_every_get_is_private_and_on_the_sync_pool(self):
+        answers = [
+            {"tv_shows": {"all": "T"}},                       # the beacon
+            *[{} for _ in range(12)],                         # every history bucket
+        ]
+        spy = _cached_get(*answers)
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            await sync.fetch_last_activities(SETTINGS)
+            await sync.fetch_history(SETTINGS)
+        self.assertGreater(spy.await_count, 1)
+        for call in spy.await_args_list:
+            with self.subTest(path=call.args[2]):
+                self.assertIs(call.kwargs["private"], True)
+                self.assertIs(call.kwargs["pool"], transport.SYNC_POOL)
+
+    async def test_the_batched_progress_read_is_a_post_and_is_never_cached(self):
+        """A POST whose meaning is entirely in its body cannot be expressed by a
+        URL key, and this one is also one person's viewing. It goes through
+        `send`, which does not cache at all — so a test that it never reaches
+        cached_get is the whole assertion."""
+        send = AsyncMock(return_value=_Response([]))
+        cached = _cached_get()
+        with patch("app.providers.simkl.transport.send", new=send), \
+             patch("app.providers.simkl.transport.cached_get", new=cached):
+            await sync.fetch_progress_details(SETTINGS, [1, 2])
+        cached.assert_not_awaited()
+        self.assertEqual(send.await_args.args[1], "POST")
+        self.assertIs(send.await_args.kwargs["pool"], transport.SYNC_POOL)
+
+    async def test_nothing_here_writes_to_simkl(self):
+        """This build reads a person's viewing and never edits it. The write path
+        is POST /sync/history, and no call in this module may name it."""
+        send = AsyncMock(return_value=_Response([]))
+        with patch("app.providers.simkl.transport.send", new=send), \
+             patch("app.providers.simkl.transport.cached_get", new=_cached_get(*[{}] * 13)):
+            await sync.fetch_progress_details(SETTINGS, [1])
+            await sync.fetch_history(SETTINGS)
+        for call in send.await_args_list:
+            self.assertNotIn("sync/history", call.args[2])
+
+
+class BeaconTests(unittest.IsolatedAsyncioTestCase):
+    """The beacon answers in the shape SyncPort declares, not in Simkl's."""
+
+    async def test_the_newest_of_two_episode_lists_is_the_episode_stamp(self):
+        """Simkl files anime apart from television and both move a person's
+        episode history, so the beacon is the newer of the two. The tracker gates
+        on this blob and must not have to know that."""
+        payload = {"tv_shows": {"all": "2026-07-01T00:00:00Z",
+                                "removed_from_list": "2026-06-01T00:00:00Z"},
+                   "anime": {"all": "2026-08-01T00:00:00Z"},
+                   "movies": {"all": "2026-05-05T00:00:00Z",
+                              "removed_from_list": "2026-05-06T00:00:00Z"}}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            beacon = await sync.fetch_last_activities(SETTINGS)
+        self.assertEqual(beacon, {
+            "episodes": {"watched_at": "2026-08-01T00:00:00Z",
+                         "removed_at": "2026-06-01T00:00:00Z"},
+            "movies": {"watched_at": "2026-05-05T00:00:00Z",
+                       "removed_at": "2026-05-06T00:00:00Z"}})
+
+    async def test_an_unreadable_beacon_is_an_empty_blob(self):
+        """No beacon costs one history pull, which is the cheap failure. Refusing
+        the sync over it would cost the whole tracker."""
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(None)):
+            self.assertEqual(await sync.fetch_last_activities(SETTINGS), {})
+
+
+class HistoryTests(unittest.IsolatedAsyncioTestCase):
+    """A library, flattened into the plays the tracker's history contract wants."""
+
+    def _library(self):
+        return {"shows": [{
+            "show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+            "seasons": [{"number": 1, "episodes": [
+                {"number": 1, "watched_at": "2026-07-02T00:00:00Z"},
+                {"number": 2, "watched_at": "2026-07-09T00:00:00Z"},
+                {"number": 3},                       # watched, but not dated
+            ]}],
+        }]}
+
+    async def _sweep(self, documents, **kwargs):
+        """One bucket per (catalogue, status), in the order the sweep asks for
+        them. A document is served for the FIRST status of its catalogue and the
+        rest come back empty, because Simkl files an item under exactly one
+        status — a fixture that answered every bucket the same way would be
+        testing a shape the service cannot produce."""
+        answers = []
+        for media in (*sync.EPISODE_TYPES, "movies"):
+            answers += [documents.get(media) if n == 0 else {}
+                        for n, _status in enumerate(sync.WATCHED_STATUSES)]
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(*answers)):
+            return await sync.fetch_history(SETTINGS, **kwargs)
+
+    async def test_a_library_becomes_dated_episode_plays(self):
+        events = await self._sweep({"shows": self._library()})
+        self.assertEqual(
+            [(e["episode"]["season"], e["episode"]["number"]) for e in events],
+            [(1, 1), (1, 2)])
+        self.assertEqual(events[0]["show"]["ids"], {"simkl": 55, "tmdb": "900"})
+
+    async def test_an_undated_episode_is_not_an_event(self):
+        """It cannot be placed in a month, which is the only thing the sweep is
+        for. It still reaches the tracker through the progress baseline, where a
+        missing date reads as "unknown" rather than as a play on the epoch."""
+        events = await self._sweep({"shows": self._library()})
+        self.assertNotIn(3, [e["episode"]["number"] for e in events])
+
+    async def test_the_window_bounds_episodes_and_not_only_items(self):
+        """`date_from` bounds which ITEMS come back, not which episodes inside
+        them, so an item that moved yesterday arrives carrying its whole history.
+        Without re-applying the bound here, "what did I watch recently" would
+        answer "everything, ever"."""
+        events = await self._sweep({"shows": self._library()}, start_at="2026-07-05")
+        self.assertEqual([e["episode"]["number"] for e in events], [2])
+
+    async def test_simkls_own_id_is_read_under_this_apps_spelling(self):
+        """The payloads say `simkl_id` in places and `simkl` in others. Mapping
+        it at the provider boundary is what keeps a second spelling out of the
+        rest of the app."""
+        events = await self._sweep({"movies": {"movies": [{
+            "movie": {"title": "Film", "year": 2026, "ids": {"simkl": 7, "imdb": "tt1"}},
+            "last_watched_at": "2026-07-04T00:00:00Z"}]}})
+        self.assertEqual(sync.movie_plays_from(events),
+                         [{"ids": {"simkl": 7, "imdb": "tt1"}, "title": "Film",
+                           "year": 2026, "watched_at": "2026-07-04T00:00:00Z"}])
+
+    async def test_a_bucket_that_cannot_be_read_does_not_sink_the_sweep(self):
+        """Somebody whose "dropped" list fails should still have their "watching"
+        list counted."""
+        events = await self._sweep({"shows": self._library(), "anime": None})
+        self.assertTrue(events)
+
+
+class ProgressTests(unittest.IsolatedAsyncioTestCase):
+    """One request for a whole roster, and what comes back matched to what was
+    asked."""
+
+    async def test_a_whole_roster_is_one_request(self):
+        """The 1 POST/second cap is what makes this essential rather than an
+        optimisation: seventy titles asked one at a time would take over a
+        minute."""
+        answers = [{"ids": {"simkl": n}, "seasons": [
+            {"number": 1, "episodes": [{"number": 1, "watched_at": "2026-07-01"}]}]}
+            for n in range(1, 71)]
+        send = AsyncMock(return_value=_Response(answers))
+        with patch("app.providers.simkl.transport.send", new=send):
+            got = await sync.fetch_progress_details(SETTINGS, list(range(1, 71)))
+        self.assertEqual(send.await_count, 1)
+        self.assertEqual(len(got), 70)
+        self.assertEqual(got[1], {1: {1: "2026-07-01"}})
+
+    async def test_an_answer_is_matched_by_position_when_it_names_no_id(self):
+        """The response is a parallel array. An entry that names its own id is
+        believed over its position, because a service that started filtering its
+        answers would otherwise shift every row silently."""
+        answers = [{"seasons": [{"number": 2, "episodes": [{"number": 4}]}]}]
+        send = AsyncMock(return_value=_Response(answers))
+        with patch("app.providers.simkl.transport.send", new=send):
+            got = await sync.fetch_progress_details(SETTINGS, [91])
+        self.assertEqual(got, {91: {2: {4: ""}}})
+
+    async def test_a_season_with_no_breakdown_contributes_nothing(self):
+        """Turning a watched COUNT into "episodes 1..n" would invent both the
+        numbers and the dates."""
+        send = AsyncMock(return_value=_Response(
+            [{"ids": {"simkl": 5}, "seasons": [{"number": 1, "total_episodes_watched": 4}]}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
+
+    async def test_nothing_to_ask_about_costs_no_request(self):
+        send = AsyncMock()
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, []), {})
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [None, "x"]), {})
+        send.assert_not_awaited()
+
+    async def test_an_unreadable_answer_is_skipped_rather_than_fatal(self):
+        send = AsyncMock(return_value=_Response(ValueError("not json"), text="<html>"))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
+
+
+class DerivationTests(unittest.TestCase):
+    """The two pure readers, which a caller uses to read one sweep twice."""
+
+    def _events(self):
+        return [
+            {"type": "episode", "watched_at": "2026-07-02T00:00:00Z",
+             "show": {"title": "Show", "ids": {"simkl": 55, "tmdb": "900"}},
+             "episode": {"season": 1, "number": 1}},
+            {"type": "episode", "watched_at": "2026-07-03T00:00:00Z",
+             "show": {"title": "Show", "ids": {"simkl": 55, "tmdb": "900"}},
+             "episode": {"season": 1, "number": 2}},
+            {"type": "episode", "watched_at": "2026-07-04T00:00:00Z",
+             "show": {"title": "Show", "ids": {"simkl": 55}},
+             "episode": {"season": 0, "number": 1}},   # specials
+        ]
+
+    def test_seasons_are_counted_and_specials_are_not(self):
+        self.assertEqual(sync.watched_progress_from(self._events()),
+                         [{"ids": {"simkl": 55, "tmdb": "900"}, "season": 1,
+                           "watched": 2, "title": "Show", "network": ""}])
+
+    def test_the_broadcaster_comes_back_empty_rather_than_invented(self):
+        """Simkl's library payload does not carry it, and every reader already
+        treats an empty string as "not stated"."""
+        self.assertEqual(sync.watched_progress_from(self._events())[0]["network"], "")
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

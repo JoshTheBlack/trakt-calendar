@@ -596,7 +596,10 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # renders the rest, instead of failing every title at once.
         computed = await distrakt_store.compute_live_shows(
             user_id, everything, settings, fresh=season_fresh, watched_lookup=watched_lookup,
-            allow_degrade=True, completed_lookup=completed_lookup) if everything else []
+            allow_degrade=True, completed_lookup=completed_lookup,
+            # The services this pass actually read, which is what tells a season
+            # only one of them knows about from one they agree on.
+            sources_read=[source for source, _port in ports]) if everything else []
     # compute_live_shows answers in the order it was asked, so the split is where
     # the two inputs were joined.
     live_premieres, live_listed = computed[:len(premieres)], computed[len(premieres):]

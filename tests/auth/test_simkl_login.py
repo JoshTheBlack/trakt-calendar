@@ -588,6 +588,36 @@ class NoRefreshTests(SimklOAuthTestCase):
         self.assertEqual(self.identities()[0]["refresh_token"], "not-a-real-refresh-token")
 
 
+class PerUserTokenTests(SimklOAuthTestCase):
+    """Reading back the token the tracker authenticates one person's reads with.
+
+    The whole of it is a row lookup: no expiry check, no lease, no refresh. A
+    branch on `token_expires_at` could only ever take the "no expiry" path,
+    because it is NULL on every Simkl row this app writes, and dead code that
+    looks like a safety check is worse than the plain read.
+    """
+
+    def test_a_linked_account_reads_back_its_own_token(self):
+        user = self.make_user("linker", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/simkl/link"))
+        self.assertEqual(asyncio.run(simkl_routes.access_token_for_user(user)),
+                         "simkl-access-1")
+
+    def test_an_account_with_no_simkl_link_has_no_token(self):
+        """Which is what makes `simkl_configured` false on that request's
+        settings, and the Simkl port simply never asked."""
+        self.assertIsNone(asyncio.run(
+            simkl_routes.access_token_for_user(self.make_user("plain"))))
+
+    def test_one_persons_token_is_never_another_persons(self):
+        user = self.make_user("linker", calendar_approved=True)
+        self.sign_in_as(user)
+        self.callback(self.start("/auth/simkl/link"))
+        other = self.make_user("stranger", calendar_approved=True)
+        self.assertIsNone(asyncio.run(simkl_routes.access_token_for_user(other)))
+
+
 class UnlinkTests(SimklOAuthTestCase):
     def test_a_linked_simkl_account_can_be_unlinked(self):
         user = self.make_user("linker", calendar_approved=True)
