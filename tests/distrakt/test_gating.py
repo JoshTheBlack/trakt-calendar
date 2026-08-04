@@ -343,7 +343,14 @@ class RequestingUsersTokenTests(DistraktTestCase):
     def test_a_link_with_no_token_does_not_fall_back_to_the_instances(self):
         """An identity row whose token was cleared reads as "this user has no
         Trakt access", not as "use the operator's". Falling back would show them
-        the operator's watch history."""
+        the operator's watch history.
+
+        THE SEARCH STILL RUNS, and that is not a weakening of this rule. Trakt's
+        /search is a public catalogue read that authenticates with the instance's
+        client id; what must never happen is somebody else's BEARER riding on it,
+        which is what this asserts. The request goes out with no Authorization
+        header at all — see transport.api_headers.
+        """
         user_id = self._make_user("tokenless", calendar_approved=True, distrakt_approved=True)
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
         settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
@@ -354,8 +361,8 @@ class RequestingUsersTokenTests(DistraktTestCase):
         self.sign_in_as(user_id)
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             resp = self.client.get("/api/distrakt/search?q=test")
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(recorder.authorizations, [])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(set(recorder.authorizations), {""})
 
     def test_a_private_trakt_response_is_never_written_to_the_shared_cache(self):
         """The blob cache is keyed by URL and shared by the whole instance, so two

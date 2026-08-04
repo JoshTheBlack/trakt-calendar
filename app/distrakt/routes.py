@@ -604,6 +604,17 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # the two inputs were joined.
     live_premieres, live_listed = computed[:len(premieres)], computed[len(premieres):]
 
+    # A SERVICE CAN GO QUIET IN TWO WAYS AND THE BANNER MUST NAME IT EITHER WAY.
+    # The sync above reports one whose HISTORY could not be read; the live pass
+    # reports one whose EPISODE COUNTS could not be read, which is a public
+    # catalogue lookup made per record and so fails on its own schedule (see
+    # live.unreadable_detail_sources). Joined here rather than rendered as two
+    # notices because they say the same thing to a reader — that service could
+    # not be reached — and a row can be short of either number.
+    for name in live.unreadable_detail_sources(computed):
+        if name not in unreadable:
+            unreadable.append(name)
+
     # The transitions, all of them, off the facts just gathered and with no further
     # provider call — see lifecycle.advance. A month that is not the one under way
     # has no viewer list to move anything on or off, so it only has its premiere
@@ -864,10 +875,18 @@ async def api_distrakt_details(request: Request):
     the query string: the caller names a row it can already see, and everything
     this looks up follows from that row. So the Trakt links it builds — and the
     title it fetches — cannot be pointed somewhere else by the caller.
+
+    NEITHER HALF OF THIS NEEDS THE VIEWER'S TRAKT TOKEN, which is why the gate
+    asks the catalogue question. The detail half is public catalogue data cached
+    for the whole instance (overview, cast, the season's episode list); the
+    watched half is read out of this app's own distrakt_show_progress, where it
+    was written by whichever services the account actually syncs. An account
+    that signs in with Simkl alone therefore opens the modal on any roster row
+    that carries a Trakt id, and sees its own watched episodes on it.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     season = route_params.season(request.query_params.get("season"))
     try:
@@ -1037,8 +1056,15 @@ async def api_distrakt_remove(request: Request):
 
 @guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_search(request: Request):
+    """Show search for the add flow.
+
+    Trakt's /search is a public catalogue read — it authenticates with the
+    instance's client id and returns the same results to everybody — so this
+    gate asks the catalogue question rather than whether this viewer linked
+    Trakt. Adding what it finds is a separate act with its own gate.
+    """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
     try:
@@ -1052,9 +1078,11 @@ async def api_distrakt_search(request: Request):
 async def api_distrakt_search_movie(request: Request):
     """Film search for the add-a-film flow. Its own route rather than a media
     flag on the show search, because what comes back is a different shape with
-    no seasons in it and the caller does something else entirely with it."""
+    no seasons in it and the caller does something else entirely with it.
+
+    Public catalogue read, gated as api_distrakt_search is."""
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
     try:
@@ -1175,9 +1203,12 @@ async def api_distrakt_remove_movie(request: Request):
 @guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_seasons(request: Request):
     """Aired seasons for a show (add-flow season picker) — required so the
-    browser can call fetch_show_seasons()."""
+    browser can call fetch_show_seasons().
+
+    A show's season list is public catalogue data, so this asks the catalogue
+    question and not whether this viewer linked Trakt."""
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     trakt_id = request.query_params.get("id")
     if not trakt_id:

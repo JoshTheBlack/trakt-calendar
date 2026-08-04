@@ -57,12 +57,24 @@ def api_headers(settings: Settings, paginate: bool = True) -> dict:
     count coming back 0. Non-paginated, it returns the full watched library WITH
     seasons in one call."""
     headers = {
-        "Authorization": f"Bearer {settings.trakt_access_token}",
         "trakt-api-version": "2",
         "trakt-api-key": settings.trakt_client_id,
         "Content-Type": "application/json",
         "User-Agent": "trakt-new-shows-py/2.0",
     }
+    # THE BEARER IS OMITTED, NOT EMPTIED, WHEN THERE IS NO TOKEN. An empty bearer
+    # is not an anonymous request, it is an invalid one: httpx refuses to send the
+    # literal value "Bearer " and raises `Illegal header value b'Bearer '` before
+    # a socket is opened. That failed EVERY Trakt call for an account with no
+    # token, including the public catalogue lookups in detail.py — a season's
+    # episode list, a title's overview and cast — which authenticate with the
+    # `trakt-api-key` header above (the INSTANCE's client id) and want no bearer
+    # at all. Only the per-person reads under /sync/ need one, and a caller with
+    # no token was never going to get a useful answer out of those anyway; it now
+    # gets Trakt's own 401 instead of a client-side crash.
+    token = settings.trakt_access_token.strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if paginate:
         headers["X-Pagination-Page"] = "1"
         headers["X-Pagination-Limit"] = str(settings.pagination_limit)

@@ -92,7 +92,8 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
 
 def _merge_available(rec: dict, detail: dict, watched: dict[str, int],
                      asked=()) -> dict:
-    show = {**rec, "key": str(record_key(rec)), "unavailable": False}
+    show = {**rec, "key": str(record_key(rec)), "unavailable": False,
+            "unavailable_source": ""}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
     _apply_counts(show, rec, watched, asked)
     return show
@@ -101,8 +102,16 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int],
 def _merge_unavailable(rec: dict, watched: dict[str, int], asked=()) -> dict:
     """This one title's totals could not be fetched. Render it from its stored
     record's last-known fields and flag it, so the UI can say "unavailable,
-    refresh to retry" rather than presenting a fabricated 0/0 as real."""
-    show = {**rec, "key": str(record_key(rec)), "unavailable": True}
+    refresh to retry" rather than presenting a fabricated 0/0 as real.
+
+    IT ALSO NAMES THE SERVICE THAT DID NOT ANSWER. Which one it was is decided
+    per record (see detail_source), so the row is the only place that knows, and
+    a page full of these otherwise says "unavailable" fifty-three times without
+    ever saying who was quiet — see unreadable_detail_sources, which is what
+    turns these into the banner.
+    """
+    show = {**rec, "key": str(record_key(rec)), "unavailable": True,
+            "unavailable_source": detail_source(rec) or ""}
     show.update({
         "total": int(rec.get("total") or 0),
         "cadence": rec.get("cadence"),
@@ -120,6 +129,28 @@ def source_order() -> tuple[str, ...]:
     season actually has a number from is that season's primary — the one number
     a frozen month and the announcement post carry."""
     return tuple(str(source) for source in providers.registered())
+
+
+def unreadable_detail_sources(shows) -> list[str]:
+    """The services that could not answer a CATALOGUE question on this pass, in
+    the registry's declared order.
+
+    A SECOND WAY FOR A SOURCE TO GO QUIET, and it needs saying out loud because
+    it looks nothing like the first. watch_history.unreadable_sources names a
+    service whose HISTORY could not be read — one person's watched episodes. This
+    names one whose EPISODE COUNTS could not be read, which is public catalogue
+    data asked of whichever service the record carries an id for (see
+    detail_source) and therefore fails independently of what the viewer linked.
+    Both end up in the same banner because to a reader they are the same
+    sentence: that service could not be reached, so what you are looking at is
+    the other one's numbers.
+
+    Without this, a whole roster whose only source is unreachable renders every
+    row flagged "unavailable — refresh to retry" with nothing anywhere on the
+    page naming what to fix.
+    """
+    down = {show.get("unavailable_source") for show in shows if show.get("unavailable")}
+    return [name for name in source_order() if name in down]
 
 
 def source_labels() -> dict[str, str]:

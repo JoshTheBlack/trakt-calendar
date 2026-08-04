@@ -257,3 +257,63 @@ class TestModalShaping:
         """cache_only can leave the episodes lookup with nothing at all, and the
         modal renders around it."""
         assert _episodes_from(None, ZoneInfo("UTC")) == []
+
+
+class TestATokenlessCallStillGoesOut:
+    """Trakt without a bearer, which is most of what this app asks it for.
+
+    The public catalogue endpoints — a title's summary, its cast, a season's
+    episode list, /search — authenticate with the `trakt-api-key` header, which
+    carries the INSTANCE's client id. Only the per-person reads under /sync/ want
+    an Authorization header at all.
+
+    THE FAILURE THIS PINS was not a refusal from Trakt; it never reached Trakt.
+    An account with no Trakt token produced the literal header value "Bearer ",
+    the HTTP layer refused to put that on the wire, and every call the app made
+    died locally — including the season episode counts, which are the same
+    number for everybody and need no token. A whole roster rendered
+    "unavailable" because of it.
+    """
+
+    def _headers(self, token):
+        settings = SimpleNamespace(trakt_access_token=token, trakt_client_id="id",
+                                   pagination_limit=100, cache_ttl_minutes=10)
+        return transport.api_headers(settings)
+
+    def test_a_token_is_still_sent_as_a_bearer(self):
+        assert self._headers("token")["Authorization"] == "Bearer token"
+
+    def test_no_token_means_no_authorization_header_at_all(self):
+        """Omitted, not empty. An empty bearer is not an anonymous request."""
+        assert "Authorization" not in self._headers("")
+
+    def test_a_blank_token_is_no_token(self):
+        """A pasted credential that is only whitespace is the same nothing, and
+        it used to be the same illegal header."""
+        assert "Authorization" not in self._headers("   ")
+
+    def test_the_api_key_is_what_carries_a_tokenless_call(self):
+        assert self._headers("")["trakt-api-key"] == "id"
+
+    def test_the_headers_are_ones_the_wire_will_actually_accept(self):
+        """THE REGRESSION, at the layer that raised it. h11 validates header
+        values as it frames the request, and it is what rejected b'Bearer ' —
+        so asserting the header is absent is only half the claim, and this is
+        the other half. Building the same request with a token proves the check
+        is real rather than vacuous.
+        """
+        import h11
+        for token in ("", "token"):
+            headers = [("host", "api.trakt.tv")] + list(self._headers(token).items())
+            h11.Request(method="GET", target="/shows/1/seasons/2", headers=headers)
+
+    def test_a_tokenless_get_comes_back_with_its_body(self):
+        client = _CaptureClient(body={"aired_episodes": 8})
+        settings = SimpleNamespace(trakt_access_token="", trakt_client_id="id",
+                                   pagination_limit=100, cache_ttl_minutes=10)
+        fake_cache = _FakeCache()
+        with patch.object(transport, "cache", fake_cache):
+            body = asyncio.run(transport.cached_get(client, settings, "shows/1", {}))
+        assert body == {"aired_episodes": 8}
+        assert "Authorization" not in client.sent_headers
+        assert client.sent_headers["trakt-api-key"] == "id"

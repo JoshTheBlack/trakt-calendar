@@ -547,9 +547,15 @@ async def calendar_day(request: Request):
 
 @guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)
 async def api_tile(request: Request):
-    """Compact season info for a tile."""
+    """Compact season info for a tile.
+
+    Gated on the CATALOGUE credential, not on the instance's access token: a
+    season's episode list is public, globally cached and the same for everybody
+    (app/providers/trakt/detail.py), so it must not stop working because a token
+    lapsed.
+    """
     settings = load_settings()
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
     trakt_id = request.query_params.get("id")
@@ -567,9 +573,13 @@ async def api_tile(request: Request):
 
 @guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)
 async def api_details(request: Request):
-    """Full detail payload for the modal."""
+    """Full detail payload for the modal.
+
+    Catalogue credential only, for the same reason as /api/tile: everything this
+    returns — overview, cast, the episode list — is public and shared.
+    """
     settings = load_settings()
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
     trakt_id = request.query_params.get("id")

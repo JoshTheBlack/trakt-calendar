@@ -135,8 +135,12 @@ function renderNotice(d) {
     const lines = [];
     if (d && d.notice) lines.push(d.notice);
     if (down.length) {
-        lines.push(down.join(' and ') + (down.length > 1 ? ' could not be read' : ' could not be read')
-            + ' just now — the counts below are what the other account reports.');
+        // Worded so it is true whether or not anything else answered. When a
+        // second account did, the counts below are its alone; when nothing did,
+        // they are the last ones that were written down. Either way the honest
+        // statement is that this service is not in them.
+        lines.push(down.join(' and ')
+            + ' could not be read just now — the counts below are only what could be read without it.');
     }
     if (lines.length) {
         el.textContent = '⚠ ' + lines.join(' ');

@@ -55,6 +55,25 @@ class TestConfiguredProperties:
         assert not Settings(trakt_access_token="token").trakt_configured
         assert Settings(trakt_client_id="id", trakt_access_token="token").trakt_configured
 
+    def test_trakt_catalogue_configured_is_the_client_id_alone(self):
+        """The PUBLIC question, and it is deliberately a different one.
+
+        Trakt's catalogue endpoints authenticate with the instance's client id;
+        only /sync/ wants a per-person bearer. Asking the private question in
+        front of a public read made instance-wide, globally-cached data depend
+        on one account's token — an account signed in with another service saw
+        every roster row fail.
+        """
+        assert not Settings().trakt_catalogue_configured
+        assert Settings(trakt_client_id="id").trakt_catalogue_configured
+        assert not Settings(trakt_access_token="token").trakt_catalogue_configured
+
+    def test_the_private_question_did_not_quietly_widen(self):
+        """The point of two properties rather than one loosened one: every sync
+        gate still demands the token."""
+        assert Settings(trakt_client_id="id").trakt_catalogue_configured
+        assert not Settings(trakt_client_id="id").trakt_configured
+
     def test_calendar_source_configured_tracks_the_registry(self):
         """Not a second spelling of trakt_configured: it asks the registry
         whether ANY source can supply a calendar, which is the question the

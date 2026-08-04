@@ -299,8 +299,33 @@ class Settings:
         stop being the same statement the moment there is a second source, and
         the calendar route in particular wants the other question — see
         calendar_source_configured.
+
+        THIS IS THE PRIVATE QUESTION and it is deliberately the narrower of the
+        pair: it means "this request can read or write somebody's own Trakt
+        data". A gate in front of a PUBLIC catalogue read wants
+        trakt_catalogue_configured instead, or losing one person's token
+        disables data that never depended on it.
         """
         return bool(self.trakt_client_id.strip() and self.trakt_access_token.strip())
+
+    @property
+    def trakt_catalogue_configured(self) -> bool:
+        """Whether this instance can make PUBLIC Trakt catalogue reads.
+
+        Trakt's public endpoints — a title's summary, its cast, a season's
+        episode list, /search — authenticate with the `trakt-api-key` header
+        alone, which carries the INSTANCE's client id. Only the per-person reads
+        under /sync/ take a bearer. So the answer to "can we look a title up" is
+        the client id and nothing else, and asking trakt_configured in front of
+        one of those reads asks whether a PARTICULAR VIEWER linked Trakt — which
+        made an instance-wide, globally-cached fact hinge on one account's token
+        and turned a Simkl-only viewer's every roster row into an error.
+
+        Two questions rather than one widened one: the sync gates genuinely do
+        need the token, and quietly making trakt_configured mean less would
+        weaken every one of them at once.
+        """
+        return bool(self.trakt_client_id.strip())
 
     @property
     def calendar_source_configured(self) -> bool:
