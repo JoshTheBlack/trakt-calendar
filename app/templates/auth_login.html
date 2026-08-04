@@ -19,6 +19,21 @@
 
     <p class="auth-notice" id="cookieWarning" role="alert" hidden></p>
 
+    {# Said HERE because this is the only page an administrator can reach while it
+       is true: everything else is steered to the recovery screen, and the recovery
+       screen sends a signed-out viewer back to this page. Without it the sign-in
+       form looks ordinary while every credential on the instance reads as unset. #}
+    {% if key_mismatch %}
+    <p class="auth-notice" role="alert">
+      <strong>The encryption key doesn't match this instance's stored secrets.</strong>
+      Saved credentials can't be read until it's fixed, so Trakt sign-in is off and
+      the app's own Trakt features won't work. If you still have the original
+      <code>ENCRYPTION_KEY</code>, put it back and restart. Otherwise sign in as an
+      administrator with your password — the recovery screen can discard the
+      unreadable values so you can enter them again.
+    </p>
+    {% endif %}
+
     <div class="auth-providers">
       {% if trakt_login_configured %}
       {# Leaves the app: the route 303s to trakt.tv, and a boosted link fetches

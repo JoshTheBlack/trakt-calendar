@@ -134,6 +134,31 @@ class EncryptionRouteTestCase(unittest.TestCase):
         self.assertEqual(gated.status_code, 503)
         self.assertEqual(gated.json()["reason"], "key_mismatch")
 
+    def test_the_login_page_still_renders_under_a_wrong_key(self):
+        """The one page that must not 500 on a key mismatch. Everything else is
+        steered to the recovery screen, /login is exempt so an administrator whose
+        session has lapsed can get back in — and the recovery screen sends a
+        signed-out viewer to /login. A /login that raises while loading secrets is
+        a closed loop with no way into the instance at all."""
+        self._onboard()
+        self._encrypt_under(KEY)
+        _set_key(OTHER_KEY)
+        self.assertEqual(asyncio.run(encryption_flow.refresh_health()),
+                         encryption_flow.KEY_MISMATCH)
+
+        # Signed out, exactly as an administrator coming back to a restarted
+        # instance would be.
+        self.client.cookies.clear()
+        page = self.client.get("/login", headers=HTML)
+        self.assertEqual(page.status_code, 200)
+        # ...and it says what is wrong and what to do about it, because this is the
+        # only place a person can be told.
+        self.assertIn("encryption key", page.text.lower())
+        self.assertIn("ENCRYPTION_KEY", page.text)
+        # Trakt sign-in is off: the code exchange authenticates with the client
+        # secret, which is one of the values that will not open.
+        self.assertNotIn('href="/auth/trakt/start"', page.text)
+
     def test_missing_key_reaches_recovery_page_directly_with_generate_key_door(self):
         """KEY_MISSING does not gate the whole app (it fails open, by design), so
         nothing forces an admin here the way a wrong key does — but the page must

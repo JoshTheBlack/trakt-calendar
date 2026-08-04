@@ -39,8 +39,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 # `auth` is the package this module lives in, reached through the parent so the
 # routes read the public surface app/auth/__init__.py exposes rather than
 # knowing which submodule each name is defined in.
-from .. import auth, authz, chrome, db
-from ..config import load_settings, save_settings
+from .. import auth, authz, chrome, db, secrets_box
+from ..config import Settings, load_settings, save_settings
 from ..media import user_images
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
@@ -393,13 +393,45 @@ async def register(request: Request):
 # sign in / sign out
 # ---------------------------------------------------------------------------
 
+def _settings_even_if_sealed() -> tuple[Settings, bool]:
+    """Settings for a page that has to render while the at-rest key may be wrong,
+    and whether it is. `open_secrets=False` on the second attempt, so the fields
+    that come from app_secrets read as unset rather than raising.
+
+    THE ONE PAGE THAT MUST NOT 500 ON A KEY MISMATCH IS THIS ONE. Every other route
+    is steered to the recovery screen by authz.key_mismatch_gate, and /login is
+    deliberately exempt so an administrator whose session has lapsed can get back in
+    and fix it — but the recovery screen sends a signed-out viewer here, so a /login
+    that cannot render is a closed loop with no way into the instance at all.
+    Loading secrets is the only part of the page that can fail that way: the sign-in
+    form itself needs the globals and the recovery fields and never a credential.
+
+    Not conditioned on encryption_flow.health(), which is what the gate asks. That
+    would be a second copy of the condition, in a route, that has to stay in step
+    with the middleware's — and the direct question here is simply whether the
+    secrets could be opened.
+    """
+    try:
+        return load_settings(), False
+    except secrets_box.SealedButWrongKey:
+        # Deliberately not logged: the gate already reports this state at startup
+        # and the page is about to say so in the one place a person will see it.
+        return load_settings(open_secrets=False), True
+
+
 @guard.get("/login", AuthLevel.PUBLIC)
 async def login_page(request: Request):
     if not await auth.any_users_exist():
         return RedirectResponse("/onboarding", status_code=303)
-    settings = load_settings()
+    settings, key_mismatch = _settings_even_if_sealed()
     return templates.TemplateResponse(request, "auth_login.html", {
         "request": request,
+        # Sign in with Trakt cannot work while a secret is sealed under the wrong
+        # key — the code exchange authenticates with the client secret, which is one
+        # of the values that will not open — so the button is off for the same
+        # reason it is off when the credential was never set. Password sign-in is
+        # the way in, and it is the way to the recovery screen.
+        "key_mismatch": key_mismatch,
         "trakt_login_configured": settings.trakt_login_configured,
         # Whether the cookie a successful sign-in issues will carry `Secure`. The
         # page compares it against the protocol the browser is really on: if this
