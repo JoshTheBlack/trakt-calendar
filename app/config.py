@@ -75,9 +75,9 @@ DEFAULT_MOVIE_CERTIFICATIONS = ""
 # either a bearer token or a key that grants access to somebody's account, so a
 # route that returned them would hand the whole instance to whoever asked.
 #
-# `trakt_client_id` is deliberately NOT in this set: it is a public OAuth client
-# identifier that ends up in the browser during authorization anyway, and the
-# Settings screen needs to show it.
+# `trakt_client_id` and `simkl_client_id` are deliberately NOT in this set: a
+# client id is a public OAuth identifier that ends up in the browser during
+# authorization anyway, and the Settings screen needs to show it.
 #
 # ADDING A SETTING? If it holds a secret, add it here. A test fails on any
 # string field whose NAME looks like a credential but is missing from this set.
@@ -85,6 +85,8 @@ SECRET_FIELDS = frozenset({
     "trakt_client_secret",
     "trakt_access_token",
     "trakt_refresh_token",
+    "simkl_client_secret",
+    "simkl_access_token",
     "sonarr_api_key",
     "radarr_api_key",
     "seer_api_key",
@@ -106,6 +108,15 @@ class Settings:
     trakt_access_token: str = ""
     trakt_refresh_token: str = ""
     trakt_token_expires_at: int = 0  # unix timestamp; 0 = unknown/never obtained via OAuth
+    simkl_client_id: str = ""
+    simkl_client_secret: str = ""
+    simkl_access_token: str = ""
+    # NO simkl_refresh_token AND NO simkl_token_expires_at, and their absence is
+    # a fact about Simkl rather than an omission: its token exchange issues no
+    # refresh token and the access token stays valid until the user revokes the
+    # application. There is nothing to put in either field, and a refresh path
+    # built on one would silently do nothing. A 401 from Simkl means the link has
+    # to be made again.
     timezone: str = "Europe/Athens"
     endpoint: str = "shows/new"
     genres: str = DEFAULT_GENRES
@@ -318,6 +329,39 @@ class Settings:
         return bool(
             self.trakt_client_id.strip()
             and self.trakt_client_secret.strip()
+            and self.public_base_url.strip()
+        )
+
+    @property
+    def simkl_configured(self) -> bool:
+        """True once this instance can ask Simkl a question that needs a token.
+
+        The pair Trakt's property uses, for the same reason: an id names the
+        application and a token authorizes it, and neither alone can be sent
+        anywhere useful.
+
+        WORTH KNOWING, because it is not true of Trakt: the two halves of Simkl
+        this app reads are not equally gated. Its calendar arrives from public
+        CDN files that take no client id and no token at all, so a source that
+        is "not configured" by this property can still answer for a month. This
+        property is about the AUTHENTICATED half — the person's own library —
+        which is what the registry asks about before offering the source.
+        """
+        return bool(self.simkl_client_id.strip() and self.simkl_access_token.strip())
+
+    @property
+    def simkl_login_configured(self) -> bool:
+        """Whether "Log in with Simkl" can be offered.
+
+        All three parts are mandatory and none has a fallback: the client id and
+        secret authenticate the code exchange, and without a base URL there is no
+        redirect URI to send — and one guessed from the request headers could not
+        match what the operator registered with Simkl, which compares it byte for
+        byte exactly as Trakt does.
+        """
+        return bool(
+            self.simkl_client_id.strip()
+            and self.simkl_client_secret.strip()
             and self.public_base_url.strip()
         )
 

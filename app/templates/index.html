@@ -238,6 +238,13 @@
                         data-tab="server" onclick="showSettingsTab('server')">🖥️ Server</button>
                 <button type="button" class="tab-btn" role="tab" aria-selected="false"
                         data-tab="trakt" onclick="showSettingsTab('trakt')">🎟️ Trakt</button>
+                {# Its own group rather than more fields under Trakt: these are a
+                   DIFFERENT service's credentials, and filing them beside
+                   Trakt's would invite pasting one service's client id into the
+                   other's field — the failure that then reads as "the source is
+                   broken" rather than "that value belongs elsewhere". #}
+                <button type="button" class="tab-btn" role="tab" aria-selected="false"
+                        data-tab="simkl" onclick="showSettingsTab('simkl')">🟡 Simkl</button>
                 <button type="button" class="tab-btn" role="tab" aria-selected="false"
                         data-tab="calendar" onclick="showSettingsTab('calendar')">📅 Calendar</button>
                 <button type="button" class="tab-btn" role="tab" aria-selected="false"
@@ -401,6 +408,37 @@
                     <div class="hint">Device pairing — needs no redirect URI, so it still works if
                         the registered one is wrong. This authorizes the app-wide connection used
                         for calendar data, not any one person's login.</div>
+                </div>
+                </div>
+
+                <div class="tab-panel" data-tab-panel="simkl" role="tabpanel" hidden>
+                {# Simkl's calendar files are public — no id, no token — so these
+                   credentials are only about the parts that belong to a PERSON:
+                   signing in with Simkl, and reading your own library. An
+                   instance can leave all three blank and still read Simkl's
+                   calendar. #}
+                <p class="hint">A developer application at
+                    <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>
+                    — free, and approved on the spot.</p>
+                <div class="field">
+                    <label for="s_simkl_client_id">Simkl Client ID</label>
+                    <input type="text" id="s_simkl_client_id" name="simkl_client_id" autocomplete="off" spellcheck="false">
+                    <span class="hint">From your Simkl developer application.</span>
+                </div>
+                <div class="field">
+                    <label for="s_simkl_client_secret">Simkl Client Secret</label>
+                    <input type="password" id="s_simkl_client_secret" data-secret="1" name="simkl_client_secret" autocomplete="off" spellcheck="false">
+                    <span class="hint">Same page as the Client ID — it is what the sign-in exchange is authenticated with.</span>
+                </div>
+                <div class="field">
+                    <label for="s_simkl_access_token">Simkl Access Token</label>
+                    <input type="password" id="s_simkl_access_token" data-secret="1" name="simkl_access_token" autocomplete="off" spellcheck="false">
+                    {# Simkl issues no refresh token: the value stands until the
+                       user revokes the application on Simkl's side, at which
+                       point it has to be replaced rather than renewed. #}
+                    <span class="hint">The instance-wide token, for anything read with nobody signed in.
+                        It does not expire, and there is nothing to refresh — if Simkl starts refusing it,
+                        authorize the application again.</span>
                 </div>
                 </div>
 

@@ -120,6 +120,10 @@ async function openSettings() {
             s.auto_approve_calendar ? 'true' : 'false';
         updateRegistrationHint();
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
+        // Not a credential — a client id is public and the screen has to show it
+        // back. The two Simkl secrets beside it are handled by applySecretState
+        // like every other one.
+        document.getElementById('s_simkl_client_id').value = s.simkl_client_id || '';
         applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
         updateTraktLoginHints(s);
@@ -312,6 +316,7 @@ async function saveSettings(event) {
         allow_open_registration: document.getElementById('s_open_registration').value === 'true',
         auto_approve_calendar: document.getElementById('s_auto_approve').value === 'true',
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
+        simkl_client_id: document.getElementById('s_simkl_client_id').value.trim(),
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
         pagination_limit: parseInt(document.getElementById('s_limit').value, 10) || 300,

@@ -57,7 +57,13 @@ def _load_builtins() -> None:
     if _loaded:
         return
     _loaded = True
+    # THE ORDER IS LOAD-BEARING while for_calendar and for_tracker below are
+    # first-match-wins over this dict: registration order is what decides which
+    # source answers when more than one is configured. Trakt first, because it
+    # is the source every existing instance already reads and a second one
+    # appearing must not silently displace it.
     from . import trakt  # noqa: F401  — registers itself on import
+    from . import simkl  # noqa: F401  — same
 
 
 def get(source: Source | str) -> Provider:
@@ -82,10 +88,23 @@ def for_calendar(settings) -> Provider | None:
     Returns None rather than raising: an instance whose credentials have not
     been filled in yet is an ordinary state the calendar page has always had to
     render an explanation for, not an error.
+
+    BEING CONFIGURED IS NOT ENOUGH — the source also has to answer at least one
+    calendar endpoint. A source can be perfectly usable for something else and
+    still have no calendar to give: returning it here would report the instance
+    as having a calendar source and then render an empty month, which reads as
+    "nothing airs" rather than "nobody was asked". The check is
+    `capabilities.endpoints` rather than a name, so no route learns which source
+    is in that state.
+
+    FIRST MATCH WINS OVER A DICT, which means registration order decides the
+    answer once more than one source qualifies. That is tolerable only while the
+    answer is "there is exactly one calendar source"; a per-account preference is
+    what it has to become.
     """
     _load_builtins()
     for provider in _REGISTRY.values():
-        if provider.is_configured(settings):
+        if provider.capabilities.endpoints and provider.is_configured(settings):
             return provider
     return None
 

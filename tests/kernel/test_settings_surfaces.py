@@ -233,7 +233,7 @@ class PrewarmSettingWidgetTests(SettingsSurfaceTestCase):
 
 
 class SettingsTabsTests(SettingsSurfaceTestCase):
-    """Settings is four tabbed groups in one form."""
+    """Settings is a handful of tabbed groups in one form."""
 
     def setUp(self):
         super().setUp()
@@ -246,11 +246,12 @@ class SettingsTabsTests(SettingsSurfaceTestCase):
         body = self._body()
         tabs = re.findall(r'data-tab="([\w-]+)"', body)
         panels = re.findall(r'data-tab-panel="([\w-]+)"', body)
-        self.assertEqual(tabs, ["server", "trakt", "calendar", "integrations"])
+        self.assertEqual(tabs, ["server", "trakt", "simkl", "calendar", "integrations"])
         self.assertEqual(panels, tabs)
-        # Three of the four start hidden; the CSS cannot be relied on to hide
-        # them, so the attribute has to be in the markup.
-        self.assertEqual(len(re.findall(r'data-tab-panel="\w+" role="tabpanel" hidden', body)), 3)
+        # Every tab but the first starts hidden; the CSS cannot be relied on to
+        # hide them, so the attribute has to be in the markup.
+        self.assertEqual(len(re.findall(r'data-tab-panel="\w+" role="tabpanel" hidden', body)),
+                         len(tabs) - 1)
 
     def test_no_field_was_dropped_on_the_way_into_the_tabs(self):
         """The regrouping moved markup around every input the save path reads by
@@ -260,7 +261,8 @@ class SettingsTabsTests(SettingsSurfaceTestCase):
                          "s_access_token", "s_timezone", "s_endpoint", "s_limit", "s_cache",
                          "s_calcache", "s_cachecap", "s_hide", "s_sonarr_url", "s_sonarr_key",
                          "s_radarr_url", "s_radarr_key", "s_seer_url", "s_seer_key",
-                         "s_tmdb_key"):
+                         "s_tmdb_key", "s_simkl_client_id", "s_simkl_client_secret",
+                         "s_simkl_access_token"):
             with self.subTest(field=field_id):
                 self.assertIn(f'id="{field_id}"', body)
 

@@ -50,12 +50,15 @@ def parse_media(value: Any, default: Media | None = None) -> Media:
 class Source(StrEnum):
     """Which service produced a record.
 
-    One member today. It is an enum rather than a bare "trakt" string because
-    this value is written into `Item.source` by every provider and read back to
-    decide who to ask for a detail lookup — a typo in either half would produce
-    a record that silently belongs to nobody.
+    An enum rather than a bare string because this value is written into
+    `Item.source` by every provider and read back to decide who to ask for a
+    detail lookup — a typo in either half would produce a record that silently
+    belongs to nobody. With two members that is no longer hypothetical: the same
+    title can arrive from both, and which one a given field came from is a fact
+    the reader has to be able to state.
     """
     TRAKT = "trakt"
+    SIMKL = "simkl"
 
 
 # The id namespaces an Item may carry, and the only keys `Item.ids` uses. These
