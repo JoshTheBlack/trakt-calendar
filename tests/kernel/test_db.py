@@ -195,6 +195,124 @@ class MigrationTests(DbTestCase):
         finally:
             conn.close()
 
+    async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
+        """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
+        which made admitting a third service a table rebuild.
+
+        Two things have to hold at once. The name set must genuinely be open
+        afterwards — that is the whole point of the rebuild — and every existing
+        row must come across, because a linked identity is how somebody signs in
+        and an account created through a provider has no password to fall back
+        on. `purpose` stays constrained: that set is this app's own and really
+        is closed.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-21-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 20]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                "display_name, access_token, created_at, last_login_at) "
+                "VALUES (1, 'trakt', 'uuid-1', 'Viewer', 'tok', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO auth_handshakes (state, provider, purpose, created_at, expires_at) "
+                "VALUES ('st-1', 'plex', 'login', ?, ?)", (now, now + 600))
+            # The constraint this migration exists to remove, still in force.
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                    "created_at) VALUES (1, 'simkl', 'acct-9', ?)", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            identity = conn.execute("SELECT * FROM linked_identities").fetchall()
+            self.assertEqual(len(identity), 1)
+            self.assertEqual(identity[0]["provider"], "trakt")
+            self.assertEqual(identity[0]["provider_user_id"], "uuid-1")
+            self.assertEqual(identity[0]["display_name"], "Viewer")
+            self.assertEqual(identity[0]["access_token"], "tok")
+            self.assertEqual(identity[0]["created_at"], now)
+            handshake = conn.execute("SELECT * FROM auth_handshakes").fetchall()
+            self.assertEqual(len(handshake), 1)
+            self.assertEqual(handshake[0]["state"], "st-1")
+            self.assertEqual(handshake[0]["provider"], "plex")
+
+            # A third service now writes to both tables with no schema change.
+            conn.execute(
+                "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                "created_at) VALUES (1, 'simkl', 'acct-9', ?)", (now,))
+            conn.execute(
+                "INSERT INTO auth_handshakes (state, provider, purpose, created_at, expires_at) "
+                "VALUES ('st-2', 'simkl', 'link', ?, ?)", (now, now + 600))
+            # ...but the identity is still unique per (provider, account).
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                    "created_at) VALUES (1, 'simkl', 'acct-9', ?)", (now,))
+            # ...and `purpose` is still a closed set, because that one is ours.
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO auth_handshakes (state, provider, purpose, created_at, "
+                    "expires_at) VALUES ('st-3', 'simkl', 'sideways', ?, ?)", (now, now + 600))
+
+            # The rebuild drops the old table's indexes with it. A missing one
+            # here is invisible until every account page full-scans.
+            indexes = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'")}
+            self.assertIn("ix_linked_identities_user", indexes)
+            self.assertIn("ix_auth_handshakes_expires", indexes)
+        finally:
+            conn.close()
+
+    async def test_migration_21_refuses_rather_than_dropping_an_orphaned_identity(self):
+        """An identity row whose account is gone cannot be carried across, and
+        the migration says which rows and why instead of failing on a bare
+        foreign key error — or, far worse, quietly copying fewer rows than it
+        found. Nothing is changed when it refuses."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-21-orphan-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 20]):
+                db.migrate_sync(conn)
+            now = db.now()
+            # Written with the enforcement off, which is how a hand-repaired or
+            # partially restored database acquires one in the first place.
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute(
+                "INSERT INTO linked_identities (user_id, provider, provider_user_id, created_at) "
+                "VALUES (404, 'trakt', 'uuid-orphan', ?)", (now,))
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+
+            with self.assertRaises(RuntimeError) as caught:
+                db.migrate_sync(conn)
+            self.assertIn("no longer exists", str(caught.exception))
+
+            # Rolled back whole: the row is still there and so is the old version.
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM linked_identities").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0], 20)
+        finally:
+            conn.close()
+
 
 class PragmaTests(DbTestCase):
     async def test_foreign_keys_are_actually_on(self):

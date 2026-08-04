@@ -1630,6 +1630,148 @@ def MIGRATION_20(conn: sqlite3.Connection) -> None:
     conn.execute(UNSETTLED_ROWS_DDL)
 
 
+# Migration 21 — which services may issue an identity stops being written into
+# the schema.
+#
+# `linked_identities.provider` and `auth_handshakes.provider` both carried
+# `CHECK (provider IN ('plex', 'trakt'))`, and SQLite cannot alter a CHECK in
+# place, so admitting a third service means rebuilding both tables.
+#
+# THE CHECK IS REMOVED RATHER THAN WIDENED, following show_posters.source: an
+# open set of names rather than a CHECK constraint, so adding a provider is not a
+# migration. Listing three names buys nothing a fourth would not cost this same
+# rebuild for. The set of services that may mint an identity is decided in the
+# auth code that mints one — each provider's route module owns its own PROVIDER
+# constant and there is exactly one place per service that writes it — and a
+# constraint restating that decision only makes it expensive to change, not
+# safer: a value the application never produces cannot arrive here anyway.
+#
+# `auth_handshakes.purpose` KEEPS its CHECK. That one is a genuinely closed set
+# this app defines ('login' or 'link', and there is no third thing a handshake
+# can be for), not an open list of other people's service names.
+#
+# Both rebuilds are the shape migration 14 used and 18 repeated: build `_new`,
+# INSERT ... SELECT every column by name, DROP, RENAME, and RE-CREATE THE INDEX —
+# a rebuild drops the old table's indexes with it, and a missing
+# ix_linked_identities_user is a silent full scan on every account page.
+MIGRATION_21_SQL = """
+CREATE TABLE linked_identities_new (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id          INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- Which service authorized this account. An open set of names rather than a
+    -- CHECK constraint, so adding a provider is not a migration; the valid set
+    -- is enforced where it is decided, in the auth flow that mints an identity.
+    provider         TEXT    NOT NULL,
+    -- The provider's immutable numeric account id, stored as text. NEVER a
+    -- username, slug, or email: those are user-changeable and can be released
+    -- and re-registered by someone else, so keying on one would let a released
+    -- name inherit the linked account.
+    provider_user_id TEXT    NOT NULL,
+    -- Display only, refreshed on each login. Nothing may key off it.
+    display_name     TEXT,
+    access_token     TEXT,
+    refresh_token    TEXT,
+    token_expires_at INTEGER,
+    -- Held while a token refresh is in flight, so two concurrent requests can't
+    -- both spend the same single-use refresh token and invalidate each other.
+    refreshing_until INTEGER,
+    created_at       INTEGER NOT NULL,
+    last_login_at    INTEGER,
+    -- What makes "this provider account is already known -> log in as its
+    -- owner" a single lookup.
+    UNIQUE (provider, provider_user_id)
+);
+INSERT INTO linked_identities_new
+    (id, user_id, provider, provider_user_id, display_name, access_token,
+     refresh_token, token_expires_at, refreshing_until, created_at, last_login_at)
+    SELECT id, user_id, provider, provider_user_id, display_name, access_token,
+           refresh_token, token_expires_at, refreshing_until, created_at, last_login_at
+      FROM linked_identities;
+DROP TABLE linked_identities;
+ALTER TABLE linked_identities_new RENAME TO linked_identities;
+CREATE INDEX ix_linked_identities_user ON linked_identities(user_id);
+
+CREATE TABLE auth_handshakes_new (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    state          TEXT    NOT NULL UNIQUE,
+    -- Open, for the same reason as linked_identities.provider above.
+    provider       TEXT    NOT NULL,
+    -- Closed, and staying closed: a handshake is begun either to sign in or to
+    -- attach an identity to an account already in session, and there is no
+    -- third thing it can be for. This one is our own vocabulary, not a list of
+    -- other people's service names.
+    purpose        TEXT    NOT NULL CHECK (purpose IN ('login', 'link')),
+    -- Set only when linking a provider to an account that is already signed in;
+    -- the callback must match it against the session making the callback
+    -- request. Null for a plain login.
+    session_id     TEXT REFERENCES sessions(id) ON DELETE CASCADE,
+    invite_token   TEXT,
+    pkce_verifier  TEXT,
+    plex_pin_id    TEXT,
+    created_at     INTEGER NOT NULL,
+    expires_at     INTEGER NOT NULL,
+    -- Stamped in the same transaction that reads the row, so single-use is
+    -- enforced by the database rather than by a read-then-write.
+    consumed_at    INTEGER
+);
+INSERT INTO auth_handshakes_new
+    (id, state, provider, purpose, session_id, invite_token, pkce_verifier,
+     plex_pin_id, created_at, expires_at, consumed_at)
+    SELECT id, state, provider, purpose, session_id, invite_token, pkce_verifier,
+           plex_pin_id, created_at, expires_at, consumed_at
+      FROM auth_handshakes;
+DROP TABLE auth_handshakes;
+ALTER TABLE auth_handshakes_new RENAME TO auth_handshakes;
+CREATE INDEX ix_auth_handshakes_expires ON auth_handshakes(expires_at);
+"""
+
+
+def MIGRATION_21(conn: sqlite3.Connection) -> None:
+    # COUNTED EITHER SIDE OF THE REBUILD, and a mismatch refuses.
+    #
+    # These two tables are how a person gets into their account. An identity row
+    # quietly lost here is a login method gone — for an account created purely by
+    # signing in with a provider, and holding no password, it is the whole
+    # account gone, with nothing anywhere saying it happened and nothing to
+    # re-derive it from. Migration 19 is this repository's standing example of
+    # exactly that, so the loud refusal is cheap insurance against the shape of
+    # failure that costs the most.
+    #
+    # The realistic way a copy loses rows is an identity whose user_id no longer
+    # names a user: the new table's foreign key would reject it. That is counted
+    # FIRST so the operator is told which rows and why, rather than reading a
+    # bare FOREIGN KEY constraint failed and guessing.
+    orphans = conn.execute(
+        "SELECT COUNT(*) FROM linked_identities li "
+        "WHERE NOT EXISTS (SELECT 1 FROM users u WHERE u.id = li.user_id)"
+    ).fetchone()[0]
+    if orphans:
+        raise RuntimeError(
+            f"{orphans} linked provider identity row(s) belong to a user account "
+            "that no longer exists, so they cannot be carried into the rebuilt "
+            "table. Nothing has been changed. Delete those rows, or restore the "
+            "accounts they name, and start the app again."
+        )
+    identities = conn.execute("SELECT COUNT(*) FROM linked_identities").fetchone()[0]
+    handshakes = conn.execute("SELECT COUNT(*) FROM auth_handshakes").fetchone()[0]
+
+    _run_script(conn, MIGRATION_21_SQL)
+
+    after_identities = conn.execute("SELECT COUNT(*) FROM linked_identities").fetchone()[0]
+    after_handshakes = conn.execute("SELECT COUNT(*) FROM auth_handshakes").fetchone()[0]
+    if (after_identities, after_handshakes) != (identities, handshakes):
+        # Raising rolls the whole migration back — the runner wraps each step in
+        # its own transaction — so the old tables survive intact and the operator
+        # still has the rows to look at.
+        raise RuntimeError(
+            "Rebuilding the provider tables did not carry every row across "
+            f"({identities} -> {after_identities} linked identities, "
+            f"{handshakes} -> {after_handshakes} handshakes). Nothing has been "
+            "changed. This should be impossible; please report it rather than "
+            "working around it."
+        )
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -1654,6 +1796,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (18, MIGRATION_18),
     (19, MIGRATION_19),
     (20, MIGRATION_20),
+    (21, MIGRATION_21),
 ]
 
 
