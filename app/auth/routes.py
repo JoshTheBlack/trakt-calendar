@@ -288,6 +288,7 @@ async def register_page(request: Request):
         # in a cookie or the redirect URL, so registering that way is gated
         # exactly as tightly as registering with a password.
         "trakt_login_configured": settings.trakt_login_configured,
+        "simkl_login_configured": settings.simkl_login_configured,
         **_og_context(settings, f"/register?invite={quote(token)}" if token else "/register"),
     })
 
@@ -433,6 +434,10 @@ async def login_page(request: Request):
         # the way in, and it is the way to the recovery screen.
         "key_mismatch": key_mismatch,
         "trakt_login_configured": settings.trakt_login_configured,
+        # Same story one provider along: the Simkl code exchange authenticates
+        # with a client secret that will not open under the wrong key, so the
+        # button is off exactly when Trakt's is and for the same reason.
+        "simkl_login_configured": settings.simkl_login_configured,
         # Whether the cookie a successful sign-in issues will carry `Secure`. The
         # page compares it against the protocol the browser is really on: if this
         # is true over plain http:// the cookie is dropped on arrival and sign-in
@@ -576,6 +581,7 @@ async def me_page(request: Request):
         "user": user,
         "linked": linked,
         "trakt_login_configured": settings.trakt_login_configured,
+        "simkl_login_configured": settings.simkl_login_configured,
         # Whether unlinking is offered at all. Without a password an account's
         # linked identities are its only way in, so the last one may not be
         # removed — showing a button that always refuses would be worse than
@@ -601,7 +607,7 @@ async def unlink_identity(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if provider not in ("trakt", "plex"):
+    if provider not in ("trakt", "plex", "simkl"):
         return authz.error("Unknown provider.")
     # Imported here rather than at module scope: trakt_routes.py reads this
     # module's message constants, so the dependency only runs one way at import
@@ -611,6 +617,12 @@ async def unlink_identity(request: Request):
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — an unlink that gets refused below must not
     # leave the account linked to a token this app just killed.
+    #
+    # TRAKT ONLY, and not for want of trying at the others: Plex's token is
+    # invalidated by the user on plex.tv, and Simkl documents no revocation
+    # endpoint at all. For those two, deleting the local row is the whole of what
+    # this app can do, and the grant is removed by the user on the service's own
+    # settings page.
     token = await trakt_routes.stored_access_token(user.user_id) if provider == "trakt" else None
     try:
         removed = await auth.unlink_identity(user.user_id, provider)

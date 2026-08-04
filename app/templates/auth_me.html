@@ -190,6 +190,22 @@
         {% endif %}
       </div>
       <div class="row">
+        <span class="label">Simkl</span>
+        {% if 'simkl' in linked %}
+        <span class="auth-badge ok">{{ linked.get('simkl') or "Linked" }}</span>
+        {% if can_unlink %}
+        <button class="btn-ghost tiny" type="button" data-unlink="simkl">Unlink</button>
+        {% endif %}
+        {% elif simkl_login_configured %}
+        {# Leaves the app — see the same link on the sign-in page. #}
+        <a class="btn-ghost tiny" href="/auth/simkl/link" hx-boost="false">Connect</a>
+        {% else %}
+        {# Not a dead end: say who can fix it, so this doesn't read as "linking
+           is broken". Only an administrator can, and only they are told how. #}
+        <span class="auth-badge off" title="{{ "Set the Simkl client ID, client secret, and public base URL in Settings." if user.is_admin else "An administrator has to finish setting up Simkl sign-in on this instance." }}">Unavailable</span>
+        {% endif %}
+      </div>
+      <div class="row">
         <span class="label">Plex</span>
         {% if 'plex' in linked %}
         <span class="auth-badge ok">{{ linked.get('plex') or "Linked" }}</span>

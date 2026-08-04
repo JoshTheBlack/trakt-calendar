@@ -29,7 +29,7 @@ from fastapi.responses import JSONResponse
 
 from . import auth, authz, config, db
 from .auth import encryption_flow, encryption_routes
-from .auth import routes as auth_routes, trakt as trakt_auth, trakt_routes
+from .auth import routes as auth_routes, simkl as simkl_auth, trakt as trakt_auth, trakt_routes
 from .integrations import routes as integrations_routes
 from .auth import AuthLevel
 from .config import (
@@ -134,6 +134,14 @@ async def get_settings(request: Request):
         "public_base_url_overridden": bool(config.public_base_url_override()),
         "trakt_redirect_uri": (
             trakt_auth.redirect_uri(settings.public_base_url)
+            if settings.public_base_url else ""
+        ),
+        # Simkl byte-matches its redirect URI too, and unlike Trakt it offers no
+        # device-code fallback for an operator who registers the wrong one — so
+        # showing the exact value is the only remedy there is.
+        "simkl_login_configured": settings.simkl_login_configured,
+        "simkl_redirect_uri": (
+            simkl_auth.redirect_uri(settings.public_base_url)
             if settings.public_base_url else ""
         ),
     })

@@ -169,9 +169,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
 
     # --- into the sources --------------------------------------------------
     (AUTH, PROVIDERS): Edge(
-        "the Trakt login flow exchanges its device code on the same pooled "
-        "client and against the same API base the source itself uses, so the "
-        "two cannot drift apart"),
+        "a login flow exchanges its codes on the same pooled client and against "
+        "the same API base the source itself uses, so the two cannot drift "
+        "apart — and so the sign-in call is covered by whatever pacing, retry "
+        "and circuit-breaking that source's transport already owes the service"),
     (MEDIA, PROVIDERS): Edge("poster art is looked up per title through the source"),
     (CALENDAR, PROVIDERS): Edge("the cache asks a source what airs in a window"),
     (DISTRAKT, PROVIDERS): Edge("the tracker reads the viewer's own history and progress"),

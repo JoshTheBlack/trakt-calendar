@@ -430,6 +430,19 @@
                     <input type="password" id="s_simkl_client_secret" data-secret="1" name="simkl_client_secret" autocomplete="off" spellcheck="false">
                     <span class="hint">Same page as the Client ID — it is what the sign-in exchange is authenticated with.</span>
                 </div>
+                {# Simkl compares the redirect URI byte for byte, exactly as Trakt
+                   does, and registering the ORIGIN instead of this callback path
+                   is the mistake that costs an afternoon. Shown as a copyable
+                   value rather than described. #}
+                <div class="field" id="s_simkl_redirect_field" hidden>
+                    <label for="s_simkl_redirect_uri">Simkl redirect URI</label>
+                    <div class="share-link-box">
+                        <input type="text" id="s_simkl_redirect_uri" readonly>
+                        <button type="button" class="btn-ghost small" onclick="copySimklRedirectUri()">Copy</button>
+                    </div>
+                    <span class="hint">Paste this <strong>exactly</strong> into your Simkl application's
+                        Redirect URI field — the whole path, not just the site address.</span>
+                </div>
                 <div class="field">
                     <label for="s_simkl_access_token">Simkl Access Token</label>
                     <input type="password" id="s_simkl_access_token" data-secret="1" name="simkl_access_token" autocomplete="off" spellcheck="false">

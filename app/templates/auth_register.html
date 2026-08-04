@@ -26,6 +26,9 @@
       {# Leaves the app — see the same link on the sign-in page. #}
       <a class="auth-provider-btn ready" href="/auth/trakt/start{% if invite_token %}?invite={{ invite_token | urlencode }}{% endif %}" hx-boost="false">Sign up with Trakt</a>
       {% endif %}
+      {% if simkl_login_configured %}
+      <a class="auth-provider-btn ready" href="/auth/simkl/start{% if invite_token %}?invite={{ invite_token | urlencode }}{% endif %}" hx-boost="false">Sign up with Simkl</a>
+      {% endif %}
       <button type="button" class="auth-provider-btn ready" id="plexBtn">Sign up with Plex</button>
     </div>
     <div class="auth-divider">or</div>

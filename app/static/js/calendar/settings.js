@@ -124,6 +124,7 @@ async function openSettings() {
         // back. The two Simkl secrets beside it are handled by applySecretState
         // like every other one.
         document.getElementById('s_simkl_client_id').value = s.simkl_client_id || '';
+        updateSimklRedirectHint(s);
         applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
         updateTraktLoginHints(s);
@@ -246,6 +247,27 @@ function updateProxyHint(s) {
 // field's own explanatory text. `s` may be the settings response OR nothing (a
 // re-check after the dropdown changes), so the mode is read from the control
 // when not passed.
+// Shows the exact redirect URI to register on the Simkl developer application.
+// Simkl compares it byte for byte — the same trap Trakt's field exists for —
+// so the screen shows the value rather than describing how to build it.
+function updateSimklRedirectHint(s) {
+    const field = document.getElementById('s_simkl_redirect_field');
+    const input = document.getElementById('s_simkl_redirect_uri');
+    if (!field || !input) return;
+    input.value = s.simkl_redirect_uri || '';
+    // Nothing to register until a public base URL exists to build it from.
+    field.hidden = !s.simkl_redirect_uri;
+}
+
+function copySimklRedirectUri() {
+    const input = document.getElementById('s_simkl_redirect_uri');
+    if (!input || !input.value) return;
+    navigator.clipboard.writeText(input.value).then(
+        () => toast('Redirect URI copied', true),
+        () => toast('Could not copy', false)
+    );
+}
+
 function updateCookieHint(s) {
     const select = document.getElementById('s_cookie_secure');
     const hint = document.getElementById('s_cookie_hint');

@@ -43,6 +43,12 @@
       {% else %}
       <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Trakt client ID, client secret, and public base URL in Settings">Continue with Trakt <span class="soon">Off</span></button>
       {% endif %}
+      {% if simkl_login_configured %}
+      {# Leaves the app for the same reason the Trakt link above does. #}
+      <a class="auth-provider-btn ready" href="/auth/simkl/start" hx-boost="false">Continue with Simkl</a>
+      {% else %}
+      <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Simkl client ID, client secret, and public base URL in Settings">Continue with Simkl <span class="soon">Off</span></button>
+      {% endif %}
       <button type="button" class="auth-provider-btn ready" id="plexBtn">Continue with Plex</button>
     </div>
     <div class="auth-divider">or</div>
