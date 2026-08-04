@@ -46,8 +46,21 @@ distrakt_show_progress, distrakt_movie_watches). In memory:
 
     {cursors: {source: 'YYYY-MM-DD'},
      beacons: {source: {...}},
-     shows:   {key: {ids: {...}, seasons: {season: {source: {episode: watched_at}}}}},
+     shows:   {key: {ids: {...},
+                     seasons: {season: {source: {episode: watched_at}}},
+                     baselined: [source, ...]}},
      movies:  {key: {ids: {...}, title, year, watched_at, source}}}
+
+WHETHER A TITLE HAS BEEN BASELINED IS A FACT PER (title, source), which is what
+`baselined` is for. A service that has watches to report says so by having a slot
+in `seasons`; a service that was asked and had NOTHING to report leaves no slot at
+all, and without a mark of its own that is indistinguishable from a service that
+was never asked. Both mistakes are expensive in opposite directions: read as
+"never asked" the whole roster is re-fetched from that service on every load, and
+read as "asked" a service linked later is never baselined at all and its counts
+come out of the month-bounded history sweep, which is a fraction of what it
+knows. So `baselined` carries exactly the services with no slot to speak for
+them, and _baselined_sources is the one place the two halves are added up.
 
 A SEASON IS PER SOURCE AND A FILM IS NOT, and the asymmetry is deliberate. A
 season is a count out of a total, so two services counting differently is a
@@ -166,6 +179,41 @@ def _seasons_by_source(entry: dict) -> dict[str, dict[str, dict[str, str]]]:
             for season, stored in (entry.get("seasons") or {}).items()}
 
 
+def _baselined_sources(entry: dict) -> set[str]:
+    """Which services have ANSWERED about this title — asked, and replied, whether
+    or not they had anything watched to report.
+
+    Two halves, because a baseline leaves two different traces. A service with
+    watches is named in the season slots it filled; a service with none is named
+    in `baselined`, which exists for precisely that case (see the module
+    docstring). Adding them up in one accessor is what keeps every caller asking
+    the same question — "has THIS service been asked about THIS title" — rather
+    than each inventing its own approximation of it.
+    """
+    sources = {str(source) for source in (entry.get("baselined") or [])}
+    for stored in (entry.get("seasons") or {}).values():
+        sources.update(_season_slots(stored))
+    return sources
+
+
+def _mark_baselined(entry: dict, source: str) -> None:
+    """Record that `source` has answered about this title, and keep the mark
+    MINIMAL: a service with a season slot is already accounted for by the slot, so
+    listing it here as well would be the same fact stored twice and the two copies
+    could then disagree. A title the service turns out to have watches for
+    therefore loses its mark on the next baseline, which is correct — the slots
+    now say what the mark was standing in for.
+    """
+    marks = {str(s) for s in (entry.get("baselined") or [])} | {str(source)}
+    marks -= {slot_source
+              for stored in (entry.get("seasons") or {}).values()
+              for slot_source in _season_slots(stored)}
+    if marks:
+        entry["baselined"] = sorted(marks)
+    else:
+        entry.pop("baselined", None)
+
+
 def _row_key(row) -> str:
     return item_key(row["media"], row["match_source"], row["match_id"])
 
@@ -218,11 +266,13 @@ async def _load(user_id: int) -> dict:
         # places its calls with, so reading only the first row's ids would leave
         # the other source unable to ask about a title it knows perfectly well.
         entry["ids"].update(_row_ids(row))
-        # The NO_SEASONS row exists only to say the title WAS baselined and has
-        # nothing watched. Creating the entry above is its whole purpose, so it is
-        # not carried into `seasons` — a caller counting seasons must not find one
-        # that does not exist.
+        # The NO_SEASONS row exists only to say that THE SERVICE ON IT was asked
+        # about this title and had nothing watched to report. Creating the entry
+        # and naming that service are its whole purpose, so it is not carried into
+        # `seasons` — a caller counting seasons must not find one that does not
+        # exist.
         if int(row["season"]) == NO_SEASONS:
+            _mark_baselined(entry, str(row["source"] or _LEGACY_SOURCE))
             continue
         by_source = entry["seasons"].setdefault(str(int(row["season"])), {})
         by_source[str(row["source"] or _LEGACY_SOURCE)] = episode_watches(
@@ -294,28 +344,38 @@ async def _save(user_id: int, state: dict) -> None:
         conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
         for key, entry in shows.items():
             seasons = _seasons_by_source(entry)
-            # A TITLE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
-            # holds one row per SEASON, so a title the viewer has seen none of
-            # writes no rows at all — and _load, which rebuilds the cache from
-            # these rows, then cannot tell "asked about, nothing watched" from
-            # "never asked about". It read as never-baselined on every load, so
-            # sync_and_baseline re-fetched it from the provider every time, for
-            # ever. A brand-new premiere is exactly that case, so a month of them
-            # cost a fetch each on every page load.
+            # A SERVICE WITH NOTHING WATCHED STILL HAS TO LEAVE A MARK. This table
+            # holds one row per (season, service), so a service that was asked
+            # about a title and had nothing to report writes no row at all — and
+            # _load, which rebuilds the cache from these rows, then cannot tell
+            # "asked about, nothing watched" from "never asked about". It read as
+            # never-baselined on every load, so sync_and_baseline re-fetched that
+            # title from that service every time, for ever. A brand-new premiere
+            # is exactly that case, so a month of them cost a fetch each on every
+            # page load.
             #
             # NO_SEASONS is not a season and is never rendered as one: _load drops
-            # it after using its presence to reconstruct the entry. A negative
-            # number is safe to reserve because season 0 is real (it is where
-            # specials live) but a negative one cannot be.
+            # it after using its presence to reconstruct the entry and to name the
+            # service that answered. A negative number is safe to reserve because
+            # season 0 is real (it is where specials live) but a negative one
+            # cannot be.
             #
-            # THE MARK IS PER SOURCE TOO, because the question it answers is per
-            # source: with a title nobody has watched any of, `seasons` is empty
-            # and there is no source name to file the mark under, so it is
-            # written for the account's primary — one row, exactly as before.
+            # THE MARK NAMES THE SERVICE, one row each, because the question it
+            # answers is per service: two of them can be asked about one title and
+            # they do not have to agree about having seen none of it. A service
+            # with slots needs no mark — the slots already say it answered.
             rows = [(season_s, source, eps)
                     for season_s, by_source in seasons.items()
                     for source, eps in by_source.items()]
-            for season_s, source, eps in (rows or [(NO_SEASONS, _LEGACY_SOURCE, {})]):
+            answered = {source for _season_s, source, _eps in rows}
+            marks = [(NO_SEASONS, source, {})
+                     for source in sorted(_baselined_sources(entry) - answered)]
+            # The fallback covers a state assembled by a caller that never went
+            # through a baseline — a restore of a backup taken before the state
+            # was per service, say — where the only service that could have
+            # written the rows is the one every stored row already carried.
+            for season_s, source, eps in (rows + marks or
+                                          [(NO_SEASONS, _LEGACY_SOURCE, {})]):
                 conn.execute(progress_sql, (
                     user_id, *_key_params(key), str(source), int(season_s),
                     json.dumps(episode_watches(eps or {})), *_ids_params(entry),
@@ -407,6 +467,10 @@ def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
     # A season left with no source saying anything is not a season anybody is
     # watching; dropping it here is what keeps an unwatch actually removing it.
     entry["seasons"] = {season: slots for season, slots in seasons.items() if slots}
+    # THIS SERVICE HAS NOW ANSWERED ABOUT THIS TITLE, and that has to be recorded
+    # even when the answer was "nothing" — otherwise the next load reads it as
+    # never asked and pays for the whole roster again. See _baselined_sources.
+    _mark_baselined(entry, str(source))
 
 
 def _apply_episode(state: dict, key, season, number, watched_at=None,
@@ -890,17 +954,28 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     state = await sync(settings, user_id, force=force, today=today,
                        since_month=since_month)
     ports = await tracker_ports(settings, user_id)
-    # SNAPSHOTTED BEFORE THE LOOP, not read live. Baselining a title for the
-    # first source adds it to `state["shows"]`, and reading the live dict would
-    # then make the second source skip every title the first had just filled in —
-    # leaving it permanently blank for that service.
-    already = set(state.get("shows") or {})
+    # WHO HAS BEEN ASKED, PER (title, source) — never per title alone. A title is
+    # baselined once per SERVICE, because a baseline is one service's complete
+    # answer about itself: skipping a title merely because SOME service has filed
+    # it means a service linked later is never baselined for anything the first
+    # one already knew, and its counts then come only from the history sweep,
+    # which reaches back to the start of the current month and no further. That
+    # renders as a nearly-empty library rather than as a service nobody asked.
+    #
+    # SNAPSHOTTED BEFORE THE LOOP, not read live, so the answer is about the state
+    # as previous sessions left it. Baselining a title for the first source adds
+    # it to `state["shows"]` and marks that source on it; taking the snapshot up
+    # front keeps this pass's own writes out of the predicate, so the loop cannot
+    # come to depend on the order the sources happen to be asked in.
+    already = {key: _baselined_sources(entry)
+               for key, entry in (state.get("shows") or {}).items()}
     saved = False
     for source, port in ports:
         missing: dict[str, dict] = {}
         for record in roster or []:
             key = str(record_key(record))
-            if key in already or key in missing or _source_id(record, source) is None:
+            if (str(source) in already.get(key, ()) or key in missing
+                    or _source_id(record, source) is None):
                 continue
             missing[key] = record
         if not missing:

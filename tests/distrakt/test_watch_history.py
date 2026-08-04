@@ -45,8 +45,9 @@ async def _make_user(username: str) -> int:
     return result.lastrowid
 
 
-def _show(tid, seasons) -> dict:
-    """One cached show entry: the ids a refetch is placed with, and the seasons.
+def _show(tid, seasons, baselined=None) -> dict:
+    """One cached show entry: the ids a refetch is placed with, the seasons, and
+    which services have answered about it with nothing watched to report.
 
     Entries are filed under the SHARED identity (see app/providers/base.py) so
     plays reported by two services fold into one record. `ids` carries ONLY the
@@ -54,8 +55,15 @@ def _show(tid, seasons) -> dict:
     and a cache row holding it twice is a second copy of the same fact. The
     fixtures give each show a tmdb equal to its Trakt id, so SHOW(tid) names the
     row a fixture with that Trakt id produces.
+
+    `baselined` is only ever set on a title with no seasons at all: a service
+    that filled a season slot is already named by the slot, and the entry carries
+    the key only for the services that have nothing else to speak for them.
     """
-    return {"ids": {"trakt": tid}, "seasons": seasons}
+    entry = {"ids": {"trakt": tid}, "seasons": seasons}
+    if baselined:
+        entry["baselined"] = list(baselined)
+    return entry
 
 
 def _slot(entry: dict, season: str, source: str = "trakt") -> dict:
@@ -259,12 +267,16 @@ class StorageRoundTripTests(WatchStateTestCase):
             {"shows": {SHOW(101): _show(101, {"1": wh.episode_watches([1, 2, 3])})}}), {})
 
     async def test_a_title_with_nothing_watched_survives_the_round_trip(self):
-        """The table holds one row per SEASON, so a title the viewer has seen
-        none of wrote no row at all and came back looking as though it had never
-        been baselined — so every load re-fetched it from the provider, for ever.
-        A month of new premieres is exactly that case."""
+        """The table holds one row per (season, service), so a title the viewer
+        has seen none of wrote no row at all and came back looking as though it
+        had never been baselined — so every load re-fetched it from the provider,
+        for ever. A month of new premieres is exactly that case.
+
+        The marker NAMES the service that answered, because being asked is a fact
+        per service: a title one of them has nothing to say about is not a title
+        the other has been asked about."""
         state = {"cursors": {}, "beacons": {},
-                 "shows": {SHOW(77): _show(77, {})}, "movies": {}}
+                 "shows": {SHOW(77): _show(77, {}, baselined=["trakt"])}, "movies": {}}
         await wh._save(self.user_id, state)
         back = await wh._load(self.user_id)
         self.assertIn(SHOW(77), back["shows"], "it read as never baselined")

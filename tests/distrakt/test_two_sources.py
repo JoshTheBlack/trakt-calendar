@@ -371,6 +371,115 @@ class OneServiceIsUnchangedTests(TwoSourceTestCase):
         self.assertEqual(record["watched_by_source"], {})
 
 
+class BaseliningEachSourceTests(TwoSourceTestCase):
+    """WHO HAS BEEN ASKED ABOUT A TITLE IS A FACT PER (title, service).
+
+    A season's counts come from the BASELINE — one complete answer per service
+    about what it has seen of a title — and not from the history sweep, which
+    only ever reaches back to the start of the month it is run in and exists to
+    place plays in a month. So a service that is never baselined for a title
+    reports whatever it happens to have aired this month and nothing else, which
+    reads as a nearly-empty library rather than as a service that was not asked.
+
+    That is exactly what a title-only "already baselined" test produced: every
+    title the first service had filed in an earlier session was skipped for the
+    second one for ever, and the batched progress call that would have answered
+    was never placed.
+    """
+
+    def _sources(self, *, trakt_progress=None, simkl_progress=None,
+                 simkl_progress_error=None):
+        """Both services patched, with a handle on each progress call so a test
+        can assert it was placed — or that it was NOT, which is the half that
+        catches a roster being re-fetched on every page load."""
+        trakt_details = AsyncMock(return_value=trakt_progress or {})
+        simkl_details = AsyncMock(side_effect=simkl_progress_error) \
+            if simkl_progress_error is not None \
+            else AsyncMock(return_value=simkl_progress or {})
+        patches = [
+            patch("app.providers.trakt.sync.fetch_last_activities",
+                  new=AsyncMock(return_value=BEACON)),
+            patch("app.providers.trakt.sync.fetch_history", new=AsyncMock(return_value=[])),
+            patch("app.providers.trakt.sync.fetch_progress_details", new=trakt_details),
+            patch("app.providers.simkl.sync.fetch_last_activities",
+                  new=AsyncMock(return_value=BEACON)),
+            patch("app.providers.simkl.sync.fetch_history", new=AsyncMock(return_value=[])),
+            patch("app.providers.simkl.sync.fetch_progress_details", new=simkl_details),
+        ]
+        return patches, trakt_details, simkl_details
+
+    async def _pass(self, settings, records, **scripted):
+        patches, trakt_details, simkl_details = self._sources(**scripted)
+        for p in patches:
+            p.start()
+        try:
+            state = await wh.sync_and_baseline(settings, self.user_id, records)
+        finally:
+            for p in patches:
+                p.stop()
+        return state, trakt_details, simkl_details
+
+    async def test_a_title_one_service_baselined_is_baselined_by_the_next_one_linked(self):
+        """The failure this class is named for. The first session files the title
+        under the only service linked; the second session links another, and the
+        title must be asked about again — of the NEW service, which has never
+        answered about it."""
+        await self._pass(TRAKT_ONLY, [_record(101)],
+                         trakt_progress={101: {1: _episodes(*range(1, 20))}})
+        state, _, simkl_details = await self._pass(
+            BOTH, [_record(101)], trakt_progress={101: {1: _episodes(*range(1, 20))}},
+            simkl_progress={101: {1: _episodes(*range(1, 20))}})
+        simkl_details.assert_awaited_once_with(BOTH, [101])
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)],
+                         {"trakt": 19, "simkl": 19})
+
+    async def test_the_second_baseline_does_not_erase_the_first_services_slots(self):
+        """A baseline is one service's complete answer about ITSELF and no
+        statement at all about the other, so filling in the newcomer must leave
+        what the incumbent reported standing — including where they disagree,
+        which is the only honest thing to render."""
+        await self._pass(TRAKT_ONLY, [_record(101)],
+                         trakt_progress={101: {1: _episodes(1, 2, 3)}})
+        state, _, _ = await self._pass(
+            BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2, 3)}},
+            simkl_progress={101: {1: _episodes(1)}})
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 3, "simkl": 1})
+        self.assertEqual(counts.counts_label(wh.watched_map(state)[(KEY(101), 1)],
+                                             8, LABELS, ORDER, ORDER),
+                         "3/8 (Trakt) · 1/8 (Simkl)")
+
+    async def test_a_service_that_knows_nothing_of_a_title_is_not_asked_again(self):
+        """"Asked, and it had nothing" has to stay distinguishable from "never
+        asked" PER SERVICE, or every page load re-fetches the whole roster from
+        every service for ever. A service with nothing to say still leaves a mark
+        saying it answered."""
+        _, _, first = await self._pass(
+            BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2)}},
+            simkl_progress={})
+        first.assert_awaited_once_with(BOTH, [101])
+        state, _, second = await self._pass(
+            BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2)}},
+            simkl_progress={})
+        second.assert_not_awaited()
+        # And the title still reads as Trakt's alone, which is what it is.
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2})
+
+    async def test_a_service_that_could_not_be_read_is_asked_again_next_time(self):
+        """An outage is not an answer. The slot is left as it was, the other
+        service's numbers still render, and the title stays un-baselined for the
+        silent one so the next load tries it again."""
+        state, _, _ = await self._pass(
+            BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2, 3)}},
+            simkl_progress_error=SimklError("Simkl is unreachable"))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 3})
+        self.assertEqual(wh.unreadable_sources(state), ["simkl"])
+        state, _, retried = await self._pass(
+            BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2, 3)}},
+            simkl_progress={101: {1: _episodes(1, 2, 3, 4)}})
+        retried.assert_awaited_once_with(BOTH, [101])
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 3, "simkl": 4})
+
+
 class SourceNamesTests(unittest.TestCase):
     """What a badge says comes off the providers themselves, so it can never
     spell a service differently from the rest of the app."""
