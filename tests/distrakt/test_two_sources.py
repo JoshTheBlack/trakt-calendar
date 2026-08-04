@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import db, distrakt
 from app.distrakt import counts, lifecycle, live, store, watch_history as wh
-from app.providers.base import ItemKey
+from app.providers.base import ItemKey, LibraryEntry, LibraryRead
 from app.providers.simkl import SimklError
 from tests.support import new_db_path
 
@@ -31,6 +31,7 @@ from tests.support import new_db_path
 # see app/distrakt/routes.py's _distrakt_settings, which is what puts one
 # person's own tokens on it.
 TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False)
+SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True)
 BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True)
 
 LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
@@ -38,6 +39,10 @@ ORDER = ("trakt", "simkl")
 
 BEACON = {"episodes": {"watched_at": "T1", "removed_at": None},
           "movies": {"watched_at": "T1", "removed_at": None}}
+# The same service, later, having been told about something. Only the watched
+# stamp moves: a removal is a different signal and would re-baseline everything.
+MOVED = {"episodes": {"watched_at": "T2", "removed_at": None},
+         "movies": {"watched_at": "T1", "removed_at": None}}
 
 
 def KEY(tid) -> str:
@@ -56,28 +61,64 @@ def _episodes(*numbers) -> dict:
     return {n: "2026-07-0%d" % min(n, 9) for n in numbers}
 
 
+# Which services answer with a whole library rather than one title at a time. It
+# is a property of the service and not of this test file: a source that can hand
+# over the lot is asked for it and matched on the shared identity, and one that
+# cannot is asked per title with its own id. Both paths are exercised here
+# precisely because the two live services differ in this.
+LIBRARY_SOURCES = ("simkl",)
+
+
+def _library_read(progress, *, complete=True, events=None) -> LibraryRead:
+    """The same scripted progress, as the whole-library answer a source that can
+    hand one over gives.
+
+    KEYED BY THE SHARED IDENTITY, not by that service's own id, which is the
+    entire difference: a roster record that names only Trakt still matches, and
+    the service's own id comes back on the entry rather than being needed to ask.
+    """
+    return LibraryRead(
+        entries={KEY(tid): LibraryEntry(ids={"simkl": tid, "tmdb": tid},
+                                        seasons={int(season): dict(episodes)
+                                                 for season, episodes in seasons.items()})
+                 for tid, seasons in (progress or {}).items()},
+        events=list(events or []), complete=complete)
+
+
 def _patch(source: str, *, progress=None, history=None, activities=BEACON):
-    """Patch one provider's three sync entry points."""
+    """Patch one provider's sync entry points — and its library read as well
+    where it has one, since that is the call the tracker actually places for such
+    a source."""
     module = f"app.providers.{source}.sync"
-    return (
+    patches = [
         patch(f"{module}.fetch_last_activities",
               new=AsyncMock(side_effect=activities) if isinstance(activities, Exception)
               else AsyncMock(return_value=activities)),
         patch(f"{module}.fetch_history", new=AsyncMock(return_value=history or [])),
         patch(f"{module}.fetch_progress_details",
               new=AsyncMock(return_value=progress or {})),
-    )
+    ]
+    if source in LIBRARY_SOURCES:
+        patches.append(patch(f"{module}.fetch_library",
+                             new=AsyncMock(return_value=_library_read(progress))))
+    return tuple(patches)
 
 
 class TwoSourceTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         new_db_path("two-sources")
         await db.migrate()
+        self.user_id = await self._account("viewer")
+
+    async def _account(self, username: str) -> int:
+        """A second (or third) account, so a test can put the same title in front
+        of three different sets of linked services without one pass's stored rows
+        answering for another's."""
         now = db.now()
         result = await db.execute(
             "INSERT INTO users (username, is_admin, calendar_approved, distrakt_approved, "
-            "created_at, updated_at) VALUES ('viewer', 1, 1, 1, ?, ?)", (now, now))
-        self.user_id = result.lastrowid
+            "created_at, updated_at) VALUES (?, 1, 1, 1, ?, ?)", (username, now, now))
+        return result.lastrowid
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -118,16 +159,17 @@ class WhoIsAskedTests(TwoSourceTestCase):
                 p.start()
         try:
             await wh.sync(BOTH, self.user_id)
-            # Second pass: both beacons unchanged, so neither history is read.
+            # Second pass: both beacons unchanged, so neither is read again —
+            # whichever call that service's own shape makes it.
             await wh.sync(BOTH, self.user_id)
             trakt_history = first[0][1].get_original()[0]
-            simkl_history = first[1][1].get_original()[0]
+            simkl_library = first[1][3].get_original()[0]
         finally:
             for group in first:
                 for p in group:
                     p.stop()
         self.assertEqual(trakt_history.await_count, 1)
-        self.assertEqual(simkl_history.await_count, 1)
+        self.assertEqual(simkl_library.await_count, 1)
 
 
 class AgreementTests(TwoSourceTestCase):
@@ -388,28 +430,37 @@ class BaseliningEachSourceTests(TwoSourceTestCase):
     """
 
     def _sources(self, *, trakt_progress=None, simkl_progress=None,
-                 simkl_progress_error=None):
-        """Both services patched, with a handle on each progress call so a test
-        can assert it was placed — or that it was NOT, which is the half that
-        catches a roster being re-fetched on every page load."""
+                 simkl_progress_error=None, simkl_beacon=BEACON):
+        """Both services patched, with a handle on the call each of them is
+        actually asked through, so a test can assert it was placed — or that it
+        was NOT, which is the half that catches a roster being re-fetched on every
+        page load.
+
+        THE TWO HANDLES ARE DIFFERENT CALLS, deliberately. Trakt answers per title
+        and is asked with its own id; Simkl hands over its whole library and is
+        matched on the shared identity. That asymmetry is the thing under test in
+        the first case below, not an accident of the fixture.
+        """
         trakt_details = AsyncMock(return_value=trakt_progress or {})
-        simkl_details = AsyncMock(side_effect=simkl_progress_error) \
+        simkl_library = AsyncMock(side_effect=simkl_progress_error) \
             if simkl_progress_error is not None \
-            else AsyncMock(return_value=simkl_progress or {})
+            else AsyncMock(return_value=_library_read(simkl_progress))
         patches = [
             patch("app.providers.trakt.sync.fetch_last_activities",
                   new=AsyncMock(return_value=BEACON)),
             patch("app.providers.trakt.sync.fetch_history", new=AsyncMock(return_value=[])),
             patch("app.providers.trakt.sync.fetch_progress_details", new=trakt_details),
             patch("app.providers.simkl.sync.fetch_last_activities",
-                  new=AsyncMock(return_value=BEACON)),
+                  new=AsyncMock(return_value=simkl_beacon)),
             patch("app.providers.simkl.sync.fetch_history", new=AsyncMock(return_value=[])),
-            patch("app.providers.simkl.sync.fetch_progress_details", new=simkl_details),
+            patch("app.providers.simkl.sync.fetch_progress_details",
+                  new=AsyncMock(return_value={})),
+            patch("app.providers.simkl.sync.fetch_library", new=simkl_library),
         ]
-        return patches, trakt_details, simkl_details
+        return patches, trakt_details, simkl_library
 
     async def _pass(self, settings, records, **scripted):
-        patches, trakt_details, simkl_details = self._sources(**scripted)
+        patches, trakt_details, simkl_library = self._sources(**scripted)
         for p in patches:
             p.start()
         try:
@@ -417,7 +468,7 @@ class BaseliningEachSourceTests(TwoSourceTestCase):
         finally:
             for p in patches:
                 p.stop()
-        return state, trakt_details, simkl_details
+        return state, trakt_details, simkl_library
 
     async def test_a_title_one_service_baselined_is_baselined_by_the_next_one_linked(self):
         """The failure this class is named for. The first session files the title
@@ -426,10 +477,10 @@ class BaseliningEachSourceTests(TwoSourceTestCase):
         answered about it."""
         await self._pass(TRAKT_ONLY, [_record(101)],
                          trakt_progress={101: {1: _episodes(*range(1, 20))}})
-        state, _, simkl_details = await self._pass(
+        state, _, simkl_library = await self._pass(
             BOTH, [_record(101)], trakt_progress={101: {1: _episodes(*range(1, 20))}},
             simkl_progress={101: {1: _episodes(*range(1, 20))}})
-        simkl_details.assert_awaited_once_with(BOTH, [101])
+        simkl_library.assert_awaited_once()
         self.assertEqual(wh.watched_map(state)[(KEY(101), 1)],
                          {"trakt": 19, "simkl": 19})
 
@@ -456,7 +507,7 @@ class BaseliningEachSourceTests(TwoSourceTestCase):
         _, _, first = await self._pass(
             BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2)}},
             simkl_progress={})
-        first.assert_awaited_once_with(BOTH, [101])
+        first.assert_awaited_once()
         state, _, second = await self._pass(
             BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2)}},
             simkl_progress={})
@@ -476,8 +527,146 @@ class BaseliningEachSourceTests(TwoSourceTestCase):
         state, _, retried = await self._pass(
             BOTH, [_record(101)], trakt_progress={101: {1: _episodes(1, 2, 3)}},
             simkl_progress={101: {1: _episodes(1, 2, 3, 4)}})
-        retried.assert_awaited_once_with(BOTH, [101])
+        retried.assert_awaited_once()
         self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 3, "simkl": 4})
+
+
+class AskingWithoutAnIdTests(TwoSourceTestCase):
+    """A SERVICE IS ASKED ABOUT A TITLE IT WAS NEVER NAMED IN.
+
+    Every record on a tracker roster was created from one service, so its ids map
+    holds that service's id and no other's. While a baseline could only be placed
+    with the asked service's own id, that meant the second service was never asked
+    about anything at all: no call went out, no slot was ever filled, and every
+    number on the page came from the first service's stored rows — which renders
+    as the two services agreeing about everything. A silent false agreement is
+    worse than a visible disagreement, because there is nothing on the page to
+    notice.
+
+    The way out is not to teach the roster the second service's id first. It is to
+    ask that service for its whole library and match it on the identity every row
+    is already filed under, so its id arrives as a by-product of the match rather
+    than as its precondition.
+    """
+
+    def _trakt_only(self, tid=101) -> dict:
+        """A roster record as one built from Trakt actually looks: Trakt's id, the
+        shared id the identity is keyed on, and nothing of Simkl's."""
+        return {"media": "show", "match_source": "tmdb", "match_id": str(tid),
+                "season": 1, "title": f"Show {tid}",
+                "ids": {"trakt": tid, "tmdb": tid}}
+
+    async def _pass(self, settings, records, *, user_id=None, trakt=None, simkl=None,
+                    beacon=BEACON, library=None):
+        simkl_library = library if library is not None else AsyncMock(
+            return_value=_library_read(simkl))
+        patches = [
+            *_patch("trakt", progress=trakt),
+            *_patch("simkl", activities=beacon)[:3],
+            patch("app.providers.simkl.sync.fetch_library", new=simkl_library),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            state = await wh.sync_and_baseline(settings, user_id or self.user_id, records)
+        finally:
+            for p in patches:
+                p.stop()
+        return state, simkl_library
+
+    async def test_a_record_naming_only_trakt_is_still_baselined_from_simkls_library(self):
+        """THE REGRESSION. It is matched through the ItemKey, which both sides
+        already agree on, and no Simkl id was needed to place the call."""
+        state, library = await self._pass(
+            BOTH, [self._trakt_only()], trakt={101: {1: _episodes(1, 2, 3)}},
+            simkl={101: {1: _episodes(1, 2, 3, 4)}})
+        library.assert_awaited_once()
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 3, "simkl": 4})
+
+    async def test_the_matched_entry_learns_simkls_id_as_a_by_product(self):
+        """Which is what lets every per-title path ask about it directly from now
+        on — but it was never needed to ask the first time, and that is the whole
+        change."""
+        await self._pass(BOTH, [self._trakt_only()],
+                         trakt={101: {1: _episodes(1)}},
+                         simkl={101: {1: _episodes(1, 2)}})
+        row = await db.fetch_one(
+            "SELECT simkl_id FROM distrakt_show_progress WHERE user_id = ? "
+            "AND source = 'simkl'", (self.user_id,))
+        self.assertEqual(row["simkl_id"], 101)
+
+    async def test_the_three_linkages_do_not_all_report_the_same_number(self):
+        """The symptom the failure actually presented as: Trakt-only, Simkl-only
+        and both-linked rendered IDENTICAL counts, because all three were reading
+        one service's stored rows. For a season the two services genuinely
+        disagree about, the three have to differ."""
+        simkl_only_id = await self._account("simkl-only")
+        both_id = await self._account("both")
+        scripted = {"trakt": {101: {1: _episodes(1, 2, 3)}},
+                    "simkl": {101: {1: _episodes(1, 2, 3, 4)}}}
+        trakt_state, _ = await self._pass(TRAKT_ONLY, [self._trakt_only()], **scripted)
+        simkl_state, _ = await self._pass(SIMKL_ONLY, [self._trakt_only()],
+                                          user_id=simkl_only_id, **scripted)
+        both_state, _ = await self._pass(BOTH, [self._trakt_only()],
+                                         user_id=both_id, **scripted)
+        labels = [
+            counts.counts_label(wh.watched_map(state)[(KEY(101), 1)], 8, LABELS,
+                                ORDER, read)
+            for state, read in ((trakt_state, ("trakt",)), (simkl_state, ("simkl",)),
+                                (both_state, ORDER))]
+        self.assertEqual(labels, ["3/8", "4/8", "3/8 (Trakt) · 4/8 (Simkl)"])
+        self.assertEqual(len(set(labels)), 3)
+
+    async def test_a_title_the_library_does_not_hold_is_marked_and_not_re_asked(self):
+        """The common case rather than an edge one — most of a Trakt-built roster
+        is genuinely absent from a Simkl library — so "asked, and it had nothing"
+        has to be recorded or the whole roster is re-read on every page load."""
+        _, first = await self._pass(BOTH, [self._trakt_only()],
+                                    trakt={101: {1: _episodes(1, 2)}}, simkl={})
+        first.assert_awaited_once()
+        state, second = await self._pass(BOTH, [self._trakt_only()],
+                                         trakt={101: {1: _episodes(1, 2)}}, simkl={})
+        second.assert_not_awaited()
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2})
+
+    async def test_a_moved_beacon_lifts_the_mark_and_the_title_is_asked_again(self):
+        """THE MARK MEANS "AS OF THIS LIBRARY STATE", NEVER "FOR EVER". A title a
+        service has never heard of today is one it may hold tomorrow — an import
+        run at the service fills a library in one go — and a permanent mark would
+        leave the tracker reporting an empty answer from before it, with no way
+        back short of clearing storage by hand.
+        """
+        await self._pass(BOTH, [self._trakt_only()],
+                         trakt={101: {1: _episodes(1, 2)}}, simkl={})
+        state, again = await self._pass(
+            BOTH, [self._trakt_only()], trakt={101: {1: _episodes(1, 2)}},
+            simkl={101: {1: _episodes(1, 2, 3, 4, 5)}}, beacon=MOVED)
+        again.assert_awaited_once()
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2, "simkl": 5})
+
+    async def test_a_partial_read_leaves_a_title_it_did_not_mention_alone(self):
+        """A read that skipped the lists that had not changed cannot say a title
+        is absent, only that it did not come up. Acting on that silence would
+        erase a perfectly good count every time somebody watched one episode."""
+        await self._pass(BOTH, [self._trakt_only()], trakt={101: {1: _episodes(1)}},
+                         simkl={101: {1: _episodes(1, 2, 3)}})
+        state, _ = await self._pass(
+            BOTH, [self._trakt_only()], trakt={101: {1: _episodes(1)}}, beacon=MOVED,
+            library=AsyncMock(return_value=LibraryRead(entries={}, events=[],
+                                                       complete=False)))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 1, "simkl": 3})
+
+    async def test_a_library_that_cannot_be_read_leaves_the_slot_as_it_was(self):
+        """And the other service's counts still render. An outage is not an
+        answer, so the title stays un-baselined for the silent service and the
+        next load tries again."""
+        await self._pass(BOTH, [self._trakt_only()], trakt={101: {1: _episodes(1)}},
+                         simkl={101: {1: _episodes(1, 2, 3)}})
+        state, _ = await self._pass(
+            BOTH, [self._trakt_only()], trakt={101: {1: _episodes(1)}}, beacon=MOVED,
+            library=AsyncMock(side_effect=SimklError("Simkl is unreachable")))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 1, "simkl": 3})
+        self.assertEqual(wh.unreadable_sources(state), ["simkl"])
 
 
 class SourceNamesTests(unittest.TestCase):

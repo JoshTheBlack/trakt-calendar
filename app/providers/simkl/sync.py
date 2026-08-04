@@ -9,7 +9,7 @@ wrong person. Every call in this module passes it, and everything here goes
 through SYNC_POOL, which admits one request at a time because Simkl's docs
 prohibit parallel requests off their Cloudflare-cached paths.
 
-TWO THINGS THIS MODULE NORMALIZES AT THE BOUNDARY, so nothing downstream learns
+THREE THINGS THIS MODULE NORMALIZES AT THE BOUNDARY, so nothing downstream learns
 Simkl's payload shapes:
 
   THE BEACON. `fetch_last_activities` answers in the shape SyncPort declares —
@@ -23,6 +23,14 @@ Simkl's payload shapes:
   history returns is this module's job, because the alternative is the tracker
   holding two readers for one idea.
 
+  THE LIBRARY ITSELF, KEYED BY THE SHARED TITLE IDENTITY. That the library is a
+  complete watch record and not only a recency signal is what lets a caller
+  baseline from it without ever naming a Simkl id — see fetch_library, and see
+  app/providers/base.py for the identity waterfall it runs the ids through, which
+  is not restated here. What this module contributes is which field carries which
+  id and how the lists are spelled; the rule about what makes two titles the same
+  title lives in one place and this is not it.
+
 NOTHING HERE WRITES TO SIMKL. `POST /sync/history` exists and is deliberately
 never called: this app reads a person's viewing and never edits it.
 """
@@ -34,7 +42,7 @@ from urllib.parse import urlencode
 
 from ...config import Settings
 from ...perftrace import span
-from ..base import collect_ids
+from ..base import LibraryEntry, LibraryRead, Media, collect_ids, resolve_key
 from . import transport
 
 logger = logging.getLogger(__name__)
@@ -51,6 +59,18 @@ WATCHED_STATUSES = ("watching", "completed", "hold", "dropped")
 # much as their television is — omitting it would silently under-count the half
 # of Simkl's library it is best at.
 EPISODE_TYPES = ("shows", "anime")
+
+# The catalogues a library read covers, in the order it reads them. Films are
+# read here as well as shows, because a play is a play whichever kind of title it
+# is on; only the SHOW half becomes a keyed library entry (see fetch_library).
+LIBRARY_TYPES = (*EPISODE_TYPES, "movies")
+
+# What /sync/activities calls each catalogue, against what /sync/all-items is
+# asked for. Television is `tv_shows` in one and `shows` in the other, and that
+# mismatch is exactly the kind of provider-local spelling that must not leak
+# upward — the beacon this module returns is already normalized, and this table
+# is what keeps the two halves of the same fact in one place.
+ACTIVITY_LISTS = {"shows": "tv_shows", "anime": "anime", "movies": "movies"}
 
 # How many POSTs one progress read may cost. `POST /sync/watched` is batched, so
 # a whole roster is normally ONE request — but the cap on a POST is one per
@@ -76,6 +96,26 @@ def _latest(*values) -> str | None:
     return stamps[-1] if stamps else None
 
 
+def _list_stamps(data: dict) -> dict[str, dict[str, str | None]]:
+    """The per-(catalogue, status) last-modified stamps, in this module's own
+    spelling of the catalogue names.
+
+    A STATUS THAT IS ABSENT FROM THE PAYLOAD IS LEFT OUT, and a catalogue block
+    that is missing entirely produces no entry at all — deliberately, because
+    "Simkl did not say" and "Simkl said never" are different answers and only the
+    second one is safe to act on. Everything downstream treats a missing stamp as
+    unknown and reads the bucket anyway, so a shape change at the service costs
+    traffic rather than correctness.
+    """
+    stamps: dict[str, dict[str, str | None]] = {}
+    for media, key in ACTIVITY_LISTS.items():
+        block = data.get(key)
+        if isinstance(block, dict):
+            stamps[media] = {status: block.get(status)
+                             for status in WATCHED_STATUSES if status in block}
+    return stamps
+
+
 async def fetch_last_activities(settings: Settings) -> dict:
     """Simkl's per-list last-modified timestamps, in the beacon shape.
 
@@ -93,6 +133,14 @@ async def fetch_last_activities(settings: Settings) -> dict:
     anime = data.get("anime") or {}
     movies = data.get("movies") or {}
     return {
+        # THE PER-LIST STAMPS RIDE ALONG, under a key of this module's own. The
+        # four normalized values below are all the beacon CONTRACT asks for, and
+        # they answer "has anything changed"; these answer "which of the twelve
+        # buckets changed", which is the difference between re-reading a whole
+        # library and re-reading one list of it. The caller never reads them — it
+        # hands the blob back to fetch_library, which is the only thing here that
+        # knows what a bucket is.
+        "lists": _list_stamps(data),
         "episodes": {
             "watched_at": _latest(shows.get("all"), anime.get("all")),
             # A REMOVAL IS NOT A PLAY and never appears in the history, so the
@@ -219,6 +267,132 @@ async def fetch_history(settings: Settings, start_at: str | None = None) -> list
                     events.append(event)
     logger.info("simkl fetch_history(start_at=%s): %d event(s)", start_at, len(events))
     return events
+
+
+# What a stamp lookup answers when the payload did not mention that list at all,
+# which is neither "it moved" nor "it never has". A sentinel rather than None
+# because None is the service's own way of saying a list has never been used, and
+# conflating the two would silently stop reading a bucket over a shape change.
+_UNSTATED = object()
+
+
+def _stamp(stamps: dict, media: str, status: str):
+    block = (stamps or {}).get(media)
+    if not isinstance(block, dict) or status not in block:
+        return _UNSTATED
+    return block.get(status)
+
+
+def _wanted_buckets(activities: dict | None,
+                    since: dict | None) -> tuple[list[tuple[str, str]], bool]:
+    """Which (catalogue, status) buckets a library read has to fetch, and whether
+    fetching only those covers the WHOLE library.
+
+    THIS IS THE ONLY CONDITIONAL REQUEST SIMKL'S PRIVATE HALF SUPPORTS. The
+    /sync/ endpoints carry no ETag, no Last-Modified and no Cache-Control — every
+    response is served as dynamic — so there is nothing to send an If-None-Match
+    against and no 304 is reachable. What IS available is the per-list stamp
+    block on /sync/activities, which answers a better question than an ETag on a
+    whole response could: not "is this response the one I have" but "which of
+    these twelve calls do I still need to make".
+
+    Two reasons to skip a bucket, and they are not the same:
+      - ITS STAMP IS NULL. That list has never been used, so it is empty and will
+        stay empty until it is not — and when it is not, its stamp stops being
+        null. Skipping it costs nothing and leaves the read COMPLETE.
+      - ITS STAMP HAS NOT MOVED since the read `since` came from. Nothing in it
+        has changed, so what the caller already recorded from it still stands —
+        but the bucket was not read, so this read is PARTIAL and a title missing
+        from it means nothing.
+    """
+    now = (activities or {}).get("lists") or {}
+    before = (since or {}).get("lists") or {}
+    wanted: list[tuple[str, str]] = []
+    skipped = False
+    for media in LIBRARY_TYPES:
+        for status in WATCHED_STATUSES:
+            stamp = _stamp(now, media, status)
+            if stamp is None:
+                continue
+            if (since is not None and stamp is not _UNSTATED
+                    and _stamp(before, media, status) == stamp):
+                skipped = True
+                continue
+            wanted.append((media, status))
+    return wanted, not skipped
+
+
+def _fold_library_item(entries: dict[str, LibraryEntry], item: dict) -> None:
+    """One library item filed under the SHARED identity of its title.
+
+    The identity waterfall is app/providers/base.py's and is not restated here;
+    all this module contributes is which field of Simkl's payload carries which
+    id. A title the waterfall cannot key — known to Simkl and to nobody else — is
+    dropped, because there is no id in it that another service could ever have
+    named the same title by, so nothing could be matched to it either way.
+
+    Two items resolving to one identity are MERGED rather than one winning. Simkl
+    files a title under exactly one status, so this is not the ordinary case; when
+    it does happen (a duplicated catalogue entry, an anime title also filed as
+    television) dropping one of them would silently lose the episodes only it
+    carried.
+    """
+    show = item.get("show") or {}
+    ids = _entry_ids(show)
+    key = resolve_key(Media.SHOW, ids)
+    if key is None:
+        return
+    seasons = _progress_from_seasons(item)
+    previous = entries.get(str(key))
+    if previous is None:
+        entries[str(key)] = LibraryEntry(ids=dict(ids), seasons=seasons)
+        return
+    merged = {season: dict(episodes) for season, episodes in previous.seasons.items()}
+    for season, episodes in seasons.items():
+        merged[season] = {**merged.get(season, {}), **episodes}
+    entries[str(key)] = LibraryEntry(ids={**previous.ids, **ids}, seasons=merged)
+
+
+async def fetch_library(settings: Settings, *, start_at: str | None = None,
+                        activities: dict | None = None,
+                        since: dict | None = None) -> LibraryRead:
+    """This person's Simkl library, keyed by the shared title identity, plus the
+    plays inside it on or after `start_at`.
+
+    ONE READ ANSWERS BOTH QUESTIONS, and that is the point of it existing beside
+    fetch_history. /sync/all-items carries the whole watch record — every season,
+    every episode, each with the date it was watched — so the same buckets that
+    produce the play events produce a complete per-title baseline, and asking for
+    them twice would double the cost of the most expensive call this module
+    makes.
+
+    NO `date_from` IS SENT, deliberately, and it is the one place this is more
+    expensive than fetch_history. `date_from` bounds which ITEMS come back, and a
+    baseline needs every title the person holds rather than the ones that moved
+    recently — an item filtered out here would read as a title Simkl does not
+    have. The events are bounded in this process instead, exactly as they already
+    are for the episodes inside an item. What buys the cost back is
+    `_wanted_buckets`: an unchanged list is not read at all.
+    """
+    wanted, complete = _wanted_buckets(activities, since)
+    entries: dict[str, LibraryEntry] = {}
+    events: list[dict] = []
+    with span("simkl.library", buckets=len(wanted), complete=complete):
+        for media, status in wanted:
+            document = await _all_items(settings, media, status, None)
+            if media == "movies":
+                for item in document.get("movies") or []:
+                    event = _movie_event(item, start_at)
+                    if event is not None:
+                        events.append(event)
+                continue
+            for item in document.get(media) or document.get("shows") or []:
+                events.extend(_episode_events(item, start_at))
+                _fold_library_item(entries, item)
+    logger.info("simkl fetch_library(start_at=%s): %d bucket(s), %d title(s), "
+                "%d event(s), complete=%s",
+                start_at, len(wanted), len(entries), len(events), complete)
+    return LibraryRead(entries=entries, events=events, complete=complete)
 
 
 def _progress_from_seasons(entry: dict) -> dict[int, dict[int, str]]:

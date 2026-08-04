@@ -103,11 +103,32 @@ class BeaconTests(unittest.IsolatedAsyncioTestCase):
                               "removed_from_list": "2026-05-06T00:00:00Z"}}
         with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
             beacon = await sync.fetch_last_activities(SETTINGS)
-        self.assertEqual(beacon, {
-            "episodes": {"watched_at": "2026-08-01T00:00:00Z",
-                         "removed_at": "2026-06-01T00:00:00Z"},
-            "movies": {"watched_at": "2026-05-05T00:00:00Z",
-                       "removed_at": "2026-05-06T00:00:00Z"}})
+        self.assertEqual(beacon["episodes"], {"watched_at": "2026-08-01T00:00:00Z",
+                                              "removed_at": "2026-06-01T00:00:00Z"})
+        self.assertEqual(beacon["movies"], {"watched_at": "2026-05-05T00:00:00Z",
+                                            "removed_at": "2026-05-06T00:00:00Z"})
+
+    async def test_the_per_list_stamps_ride_along_beside_the_contract_shape(self):
+        """The four values above are the whole of what the beacon CONTRACT asks
+        for and they answer "has anything changed". The per-list stamps answer
+        "which of the twelve buckets changed", which is the difference between
+        re-reading a library and re-reading one list of it — so they travel back
+        to this module rather than being thrown away at the boundary.
+
+        A LIST NOBODY HAS EVER USED IS null AND SAYS SO. A status the payload does
+        not mention at all is left out, because "Simkl did not say" and "Simkl said
+        never" are different answers and only the second is safe to act on.
+        """
+        payload = {"tv_shows": {"all": "T", "watching": "T1", "completed": "T2",
+                                "hold": None, "dropped": None},
+                   "anime": {"all": "A", "watching": "A1"}}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            beacon = await sync.fetch_last_activities(SETTINGS)
+        self.assertEqual(beacon["lists"]["shows"],
+                         {"watching": "T1", "completed": "T2",
+                          "hold": None, "dropped": None})
+        self.assertEqual(beacon["lists"]["anime"], {"watching": "A1"})
+        self.assertNotIn("movies", beacon["lists"])
 
     async def test_an_unreadable_beacon_is_an_empty_blob(self):
         """No beacon costs one history pull, which is the cheap failure. Refusing
@@ -180,6 +201,116 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
         list counted."""
         events = await self._sweep({"shows": self._library(), "anime": None})
         self.assertTrue(events)
+
+
+class LibraryTests(unittest.IsolatedAsyncioTestCase):
+    """The whole library in one read, keyed by the identity the app files its own
+    rows under — and only the buckets that can still be holding something new."""
+
+    def _item(self, simkl_id=55, tmdb="900", episodes=(1, 2)):
+        return {"show": {"title": "Show", "ids": {"simkl_id": simkl_id, "tmdb": tmdb}},
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": n, "watched_at": "2026-07-0%d" % n} for n in episodes]}]}
+
+    def _activities(self, **stamps):
+        """An activities blob naming every bucket, so a test states which ones
+        moved rather than relying on what is missing."""
+        lists = {media: {status: stamps.get(f"{media}_{status}", "S")
+                         for status in sync.WATCHED_STATUSES}
+                 for media in sync.LIBRARY_TYPES}
+        return {"lists": lists}
+
+    async def _read(self, answers, **kwargs):
+        spy = _cached_get(*answers)
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            return await sync.fetch_library(SETTINGS, **kwargs), spy
+
+    async def test_a_library_is_keyed_by_the_shared_identity(self):
+        """Not by Simkl's own id, which is the whole point: a roster record that
+        names only another service still matches, and Simkl's id comes back on the
+        entry rather than being needed to ask."""
+        read, _ = await self._read([{"shows": [self._item()]}] + [{}] * 11)
+        self.assertEqual(list(read.entries), ["show:tmdb:900"])
+        entry = read.entries["show:tmdb:900"]
+        self.assertEqual(entry.ids, {"simkl": 55, "tmdb": "900"})
+        self.assertEqual(entry.seasons, {1: {1: "2026-07-01", 2: "2026-07-02"}})
+        self.assertTrue(read.complete)
+
+    async def test_a_title_no_shared_id_names_is_not_keyed_at_all(self):
+        """There is no id in it another service could have named the same title
+        by, so nothing could ever be matched to it either way."""
+        item = {"show": {"title": "Only Here", "ids": {"simkl_id": 7}}, "seasons": []}
+        read, _ = await self._read([{"shows": [item]}] + [{}] * 11)
+        self.assertEqual(read.entries, {})
+
+    async def test_a_title_with_nothing_watched_is_still_an_entry(self):
+        """"In the library, seen none of it" is a real answer and a different one
+        from "not in the library at all"."""
+        item = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                "seasons": []}
+        read, _ = await self._read([{"shows": [item]}] + [{}] * 11)
+        self.assertEqual(read.entries["show:tmdb:900"].seasons, {})
+
+    async def test_the_same_read_carries_the_plays_inside_it(self):
+        """One pull answers both questions. Asking for the library and then for
+        the history would read the same buckets twice, and they are the most
+        expensive call this module makes."""
+        read, spy = await self._read([{"shows": [self._item()]}] + [{}] * 11)
+        self.assertEqual([e["episode"]["number"] for e in read.events], [1, 2])
+        self.assertEqual(spy.await_count, 12)
+
+    async def test_the_window_bounds_the_plays_and_never_the_library(self):
+        """A baseline needs every title the person holds; only the EVENTS are
+        about a window. A title filtered out by a date would read as one Simkl
+        does not have, which is the answer that gets recorded permanently."""
+        read, spy = await self._read([{"shows": [self._item()]}] + [{}] * 11,
+                                     start_at="2026-07-02")
+        self.assertEqual([e["episode"]["number"] for e in read.events], [2])
+        self.assertEqual(read.entries["show:tmdb:900"].seasons,
+                         {1: {1: "2026-07-01", 2: "2026-07-02"}})
+        for call in spy.await_args_list:
+            self.assertNotIn("date_from", call.args[3])
+
+    async def test_a_list_that_has_never_been_used_is_never_fetched(self):
+        """Its stamp is null, so it is empty and stays empty until it is not — and
+        when it is not, the stamp stops being null. Skipping it costs nothing and
+        leaves the read complete."""
+        activities = self._activities(shows_hold=None, shows_dropped=None,
+                                      anime_hold=None, anime_dropped=None)
+        read, spy = await self._read([{}] * 8, activities=activities)
+        self.assertEqual(spy.await_count, 8)
+        self.assertTrue(read.complete)
+
+    async def test_a_bucket_whose_stamp_has_not_moved_is_not_fetched(self):
+        """The private endpoints support no conditional request of any kind — no
+        ETag, no Last-Modified — so this per-list comparison is the only thing
+        that can say "you already have that one"."""
+        before = self._activities()
+        now = self._activities(shows_watching="MOVED")
+        read, spy = await self._read([{}] * 1, activities=now, since=before)
+        self.assertEqual(spy.await_count, 1)
+        self.assertEqual(spy.await_args.args[2], "sync/all-items/shows/watching")
+
+    async def test_a_read_that_skipped_a_bucket_says_it_is_not_complete(self):
+        """A title missing from a partial read says nothing at all, and its caller
+        has to leave what it already knew alone."""
+        read, _ = await self._read([{}], activities=self._activities(shows_watching="MOVED"),
+                                   since=self._activities())
+        self.assertFalse(read.complete)
+
+    async def test_nothing_moving_reads_nothing_and_is_still_not_complete(self):
+        read, spy = await self._read([], activities=self._activities(),
+                                     since=self._activities())
+        spy.assert_not_awaited()
+        self.assertFalse(read.complete)
+
+    async def test_a_bucket_the_stamps_do_not_mention_is_read_anyway(self):
+        """A shape change at the service must cost traffic rather than
+        correctness, so an unstated list is unknown rather than unchanged."""
+        read, spy = await self._read([{}] * 12, activities={"lists": {}},
+                                     since={"lists": {}})
+        self.assertEqual(spy.await_count, 12)
+        self.assertTrue(read.complete)
 
 
 class ProgressTests(unittest.IsolatedAsyncioTestCase):

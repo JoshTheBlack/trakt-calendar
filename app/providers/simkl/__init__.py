@@ -45,6 +45,17 @@ class _SimklSyncPort:
     async def fetch_progress_details(self, settings: Settings, show_ids):
         return await sync.fetch_progress_details(settings, show_ids)
 
+    async def fetch_library(self, settings: Settings, *, start_at: str | None = None,
+                            activities: dict | None = None, since: dict | None = None):
+        """Simkl can hand over a whole library at once, so this port is a
+        LibraryPort as well as a SyncPort — see app/providers/base.py for why
+        those are two protocols. It is what lets a title be baselined from Simkl
+        with no Simkl id in hand, which is the only state a roster built entirely
+        from another service is ever in.
+        """
+        return await sync.fetch_library(settings, start_at=start_at,
+                                        activities=activities, since=since)
+
     async def fetch_watched_progress(self, settings: Settings,
                                      since_days: int | None = None) -> list[dict]:
         return await sync.fetch_watched_progress(settings, since_days=since_days)

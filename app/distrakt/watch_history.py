@@ -41,6 +41,17 @@ two different services fold into ONE record instead of two that nothing can tell
 apart. The flat form specifically because these dicts are serialized to JSON,
 where a tuple cannot be a key.
 
+AND THAT KEY IS ALSO HOW A SERVICE IS ASKED ABOUT A TITLE IT WAS NEVER NAMED IN.
+Every record on this roster was created from one service, so its `ids` map holds
+that service's id and no other's — which, if a baseline could only be placed with
+the asked service's own id, would mean a second service was never asked about
+anything and its numbers came out as a silent false agreement. A source that can
+hand over a whole library at once (app/providers/base.py's LibraryPort) is asked
+for it and the answers are matched on the key every row is already filed under,
+so the second service's id arrives as a BY-PRODUCT of the match rather than as
+its precondition. A source with no such read is still asked per title, with its
+own id, exactly as before.
+
 Storage: three per-user SQLite tables (distrakt_watch_state,
 distrakt_show_progress, distrakt_movie_watches). In memory:
 
@@ -93,8 +104,8 @@ from typing import NamedTuple
 from . import store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
-from ..providers.base import (ItemKey, Media, SourceUnavailable, collect_ids, item_key,
-                              resolve_key)
+from ..providers.base import (ItemKey, LibraryPort, Media, SourceUnavailable, collect_ids,
+                              item_key, resolve_key)
 from ..sources import prefs as source_prefs
 
 logger = logging.getLogger(__name__)
@@ -127,6 +138,15 @@ NO_SEASONS = -1
 # pass, and a stored copy would keep saying a service was unreachable long after
 # it came back.
 _UNREADABLE = "unreadable"
+
+# Where a pass leaves a COMPLETE library read, per source, so the baseline that
+# follows a sync does not pay for the same several megabytes twice in one
+# request. IN MEMORY ONLY, for the same reason as _PLAYS and _UNREADABLE: it
+# describes one pass, and a library is precisely the thing that is out of date the
+# moment the person watches something. A PARTIAL read is never left here — it
+# cannot answer "does this service hold this title", which is the only question
+# the baseline asks it.
+_LIBRARY = "library"
 
 # The source a watch is filed under when nothing said which one reported it — a
 # state restored from a backup taken before the state was per source, or one
@@ -414,10 +434,27 @@ def episode_watches(stored) -> dict[str, str]:
     return {str(int(n)): "" for n in (stored or [])}
 
 
+# The four values a sync gates on. Named here because they are also how a stored
+# beacon written before the whole blob was kept is recognized — see _beacons.
+_GATE_KEYS = ("ep_watched", "ep_removed", "mv_watched", "mv_removed")
+
+
 def _beacons(la: dict) -> dict:
     """The subset of the activity blob we gate on: episode + movie watched/
-    removed timestamps."""
+    removed timestamps.
+
+    ACCEPTS A STORED GATE BLOB AS WELL AS A SOURCE'S WHOLE ANSWER, and reads the
+    first as itself. What is stored is now the source's answer entire, because a
+    source may carry detail beside these four that it needs handed back to it next
+    time (which lists moved, say) — but a state written before that holds only the
+    four. The two are told apart by their KEYS, the same way a season's slots are:
+    a gate blob names these four and a source's answer never does. Without this a
+    deploy would read every stored beacon as absent, and every account would pay
+    for one full re-baseline it did not need.
+    """
     la = la or {}
+    if any(key in la for key in _GATE_KEYS):
+        return {key: la.get(key) for key in _GATE_KEYS}
     ep = la.get("episodes") or {}
     mv = la.get("movies") or {}
     return {
@@ -884,58 +921,187 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
     beacon_by_source = state.setdefault("beacons", {})
     with span("wh.last_activities", source=name):
         la = await port.fetch_last_activities(settings)
+    # WHAT THIS SOURCE LAST SAID, kept before anything overwrites it. The gate
+    # reads it, and so does a library read, which is handed it back so the source
+    # can work out what has moved since — the beacon is not only a gate.
+    previous = beacon_by_source.get(name)
+    stored = _beacons(previous) if previous else None
     beacons = _beacons(la)
 
     if (not force and since_month is None
-            and cursors.get(name) and beacon_by_source.get(name) == beacons):
+            and cursors.get(name) and stored == beacons):
         _perf.debug("wh.sync GATED for %s (beacon unchanged) — no history pull", name)
         return False
 
-    if force or _removed_changed(beacon_by_source.get(name), beacons):
-        cached = {key: entry for key, entry in (state.get("shows") or {}).items()
-                  if _source_id(entry, source) is not None}
-        # SPLIT, because the two halves fail slowly for unrelated reasons and the
-        # combined number could not tell them apart: the fetch is one provider
-        # call per show, paced by the outbound rate gate, and grows with the
-        # roster; the apply is pure CPU on the event loop over whatever came back.
-        # A rebaseline that is slow in the fetch is waiting on the provider; one
-        # that is slow in the apply is blocking every other request while it runs.
-        with span("wh.rebaseline", n=len(cached), source=name,
-                  reason="force" if force else "unwatch"):
-            with span("wh.rebaseline.fetch", n=len(cached)):
-                details = await port.fetch_progress_details(
-                    settings, [_source_id(entry, source) for entry in cached.values()])
-            with span("wh.rebaseline.apply", n=len(cached)):
-                for key, entry in cached.items():
-                    _set_show_baseline(
-                        state, key, entry.get("ids") or {},
-                        details.get(int(_source_id(entry, source))) or {}, name)
-    if force:
-        cursors[name] = None  # re-seed movie history from the month start
+    rebaseline = force or _removed_changed(stored, beacons)
 
     # A named month is read from its own first day; everything else carries on
     # from the cursor, or from the start of the month today falls in when there is
     # no cursor to carry on from. store.month_first_day both validates the key and
     # spells the date, so a malformed month is refused here rather than reaching
-    # the provider as a plausible-looking string.
+    # the provider as a plausible-looking string. A force re-seeds movie history
+    # from the month start, which is what winding the cursor back means.
     start_at = (store.month_first_day(since_month).isoformat() if since_month
-                else cursors.get(name) or _month_start_of(today))
-    with span("wh.history", start_at=start_at, source=name) as sp:
-        events = await port.fetch_history(settings, start_at=start_at)
-        for event in events:
-            _apply_event(state, event, name)
-            # Taken from the RAW event rather than from the fold above, because
-            # the two answer different questions: the fold counts progress for
-            # titles the tracker already has baselined and drops everything else,
-            # while a play for a title it has never heard of is precisely the one
-            # a caller has to ask the viewer about.
-            play = _episode_play(event)
-            if play is not None:
-                plays.append(play)
-        sp.set(events=len(events))
+                else (None if force else cursors.get(name)) or _month_start_of(today))
+    if force:
+        cursors[name] = None
+
+    library = port if isinstance(port, LibraryPort) else None
+    if library is not None:
+        events = await _sync_from_library(
+            settings, state, name, library, span,
+            start_at=start_at, activities=la,
+            # HANDED BACK ONLY WHEN THIS PULL CARRIES ON FROM THE LAST ONE. A
+            # source may read only the lists that moved since `since`, which is
+            # sound for an incremental pull and wrong for any pull that reaches
+            # FURTHER BACK than the last one did — a re-read of an earlier month,
+            # or a rebaseline — because a list that has not moved still holds the
+            # older plays that pull is there to find.
+            since=(None if rebaseline or since_month is not None
+                   or not cursors.get(name) else previous))
+    else:
+        if rebaseline:
+            await _rebaseline_by_id(settings, state, name, source, port, span,
+                                    reason="force" if force else "unwatch")
+        with span("wh.history", start_at=start_at, source=name) as sp:
+            events = await port.fetch_history(settings, start_at=start_at)
+            sp.set(events=len(events))
+
+    for event in events:
+        _apply_event(state, event, name)
+        # Taken from the RAW event rather than from the fold above, because the
+        # two answer different questions: the fold counts progress for titles the
+        # tracker already has baselined and drops everything else, while a play
+        # for a title it has never heard of is precisely the one a caller has to
+        # ask the viewer about.
+        play = _episode_play(event)
+        if play is not None:
+            plays.append(play)
 
     cursors[name] = _now_date_iso()
-    beacon_by_source[name] = beacons
+    # THE WHOLE BLOB, not the four values the gate compares. A source may carry
+    # its own detail alongside them and be handed it back on the next pull; what
+    # the gate needs is derived from it either way (see _beacons).
+    beacon_by_source[name] = la
+    return True
+
+
+async def _rebaseline_by_id(settings, state: dict, name: str, source, port, span, *,
+                            reason: str) -> None:
+    """Re-read every cached title's progress from a source that answers per title.
+
+    Only titles this source has its OWN id for can be asked about at all, which is
+    the limit this path has always had; a source that can hand over its whole
+    library is not on it (see _sync_from_library), because for that one the
+    question "which titles may I ask about" does not arise.
+    """
+    cached = {key: entry for key, entry in (state.get("shows") or {}).items()
+              if _source_id(entry, source) is not None}
+    # SPLIT, because the two halves fail slowly for unrelated reasons and the
+    # combined number could not tell them apart: the fetch is one provider call
+    # per show, paced by the outbound rate gate, and grows with the roster; the
+    # apply is pure CPU on the event loop over whatever came back. A rebaseline
+    # that is slow in the fetch is waiting on the provider; one that is slow in
+    # the apply is blocking every other request while it runs.
+    with span("wh.rebaseline", n=len(cached), source=name, reason=reason):
+        with span("wh.rebaseline.fetch", n=len(cached)):
+            details = await port.fetch_progress_details(
+                settings, [_source_id(entry, source) for entry in cached.values()])
+        with span("wh.rebaseline.apply", n=len(cached)):
+            for key, entry in cached.items():
+                _set_show_baseline(
+                    state, key, entry.get("ids") or {},
+                    details.get(int(_source_id(entry, source))) or {}, name)
+
+
+def _fold_library(state: dict, name: str, read) -> None:
+    """Re-baseline the cached titles a library read speaks to.
+
+    A COMPLETE READ SPEAKS TO EVERY CACHED TITLE, including by silence: a title
+    the whole library does not hold is a title this service has seen none of, and
+    saying so is what retires slots it used to fill and what leaves the "asked,
+    and it had nothing" mark behind. A PARTIAL read speaks only about the titles
+    it actually named — it skipped lists that had not changed, so the absence of a
+    title from it says nothing, and touching one on that basis would erase a
+    perfectly good count.
+
+    EITHER WAY THIS IS WHERE A MARK IS LIFTED. A title this service knew nothing
+    about last time and holds today arrives in the read the moment the list it
+    landed in moves, and folding it in replaces the mark with real counts. That is
+    why the mark means "as of this library state" rather than "for ever": the
+    author's Simkl library overlaps their roster only incidentally today, and an
+    import that fills it in must not leave the tracker reporting an empty answer
+    from before it.
+    """
+    shows = state.get("shows") or {}
+    if read.complete:
+        for key, entry in list(shows.items()):
+            found = read.entries.get(str(key))
+            _set_show_baseline(state, key, found.ids if found else (entry.get("ids") or {}),
+                               found.seasons if found else {}, name)
+        return
+    for key, found in read.entries.items():
+        if str(key) in shows:
+            _set_show_baseline(state, key, found.ids, found.seasons, name)
+
+
+async def _sync_from_library(settings, state: dict, name: str, library, span, *,
+                             start_at, activities, since) -> list[dict]:
+    """One source's half of a sync when it can hand over the whole library.
+
+    ONE READ, THREE ANSWERS: which titles this service holds, what it has seen of
+    each of them, and the plays inside that window. The alternative is a progress
+    read and a history read over the same buckets, which doubles the most
+    expensive call there is here for data the first read already carried.
+    """
+    with span("wh.library", source=name, start_at=start_at or "") as sp:
+        read = await library.fetch_library(settings, start_at=start_at,
+                                           activities=activities, since=since)
+        sp.set(titles=len(read.entries), events=len(read.events),
+               complete=read.complete)
+    _fold_library(state, name, read)
+    if read.complete:
+        state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
+    return read.events
+
+
+async def _baseline_from_library(settings, state: dict, name: str, library,
+                                 missing: dict[str, dict], span) -> bool:
+    """Baseline every title in `missing` for one source, out of ONE library read.
+
+    THE READ HAS TO BE COMPLETE, because a title's absence from it is the answer
+    for half of them: on the account this was measured against, 80 of 146 roster
+    titles are genuinely not in the Simkl library, and each of those has to come
+    away marked as asked-and-nothing or the whole roster is re-read on every page
+    load. A partial read cannot say that, so one is never reused here.
+
+    The sync that ran a moment ago may already have made a complete read; taking
+    it from there rather than repeating it is the difference between one pass over
+    a library and two in the same request.
+    """
+    read = (state.get(_LIBRARY) or {}).get(name)
+    if read is None:
+        try:
+            with span("wh.baseline_library", n=len(missing), source=name):
+                read = await library.fetch_library(settings)
+        except SourceUnavailable as exc:
+            # The same per-source degradation the sync takes: a title left
+            # un-baselined for one service still gets the other's count, and the
+            # next load tries again.
+            logger.warning("wh.baseline_library: %s could not be read: %s", name, exc)
+            state.setdefault(_UNREADABLE, [])
+            if name not in state[_UNREADABLE]:
+                state[_UNREADABLE].append(name)
+            return False
+        state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
+    for key, record in missing.items():
+        found = read.entries.get(key)
+        # THE SERVICE'S OWN ID ARRIVES HERE, off the matched library entry, and it
+        # is what lets the per-title paths ask about this title directly from now
+        # on. It was never needed to place THIS call, which is the point.
+        _set_show_baseline(state, key,
+                           {**(record.get("ids") or {}), **(found.ids if found else {})},
+                           found.seasons if found else {}, name)
     return True
 
 
@@ -972,13 +1138,25 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     saved = False
     for source, port in ports:
         missing: dict[str, dict] = {}
+        # A SOURCE THAT CAN HAND OVER ITS WHOLE LIBRARY IS NEVER SKIPPED FOR WANT
+        # OF AN ID. Asking per title needs this service's own id for the title,
+        # and a roster built from another service carries none — which is how a
+        # second service came to be asked about nothing at all while every number
+        # on the page quietly came from the first. Matching a library on the
+        # shared identity removes the precondition instead of trying to satisfy
+        # it, and the id is what comes back.
+        library = port if isinstance(port, LibraryPort) else None
         for record in roster or []:
             key = str(record_key(record))
             if (str(source) in already.get(key, ()) or key in missing
-                    or _source_id(record, source) is None):
+                    or (library is None and _source_id(record, source) is None)):
                 continue
             missing[key] = record
         if not missing:
+            continue
+        if library is not None:
+            saved |= await _baseline_from_library(settings, state, str(source), library,
+                                                  missing, span)
             continue
         try:
             with span("wh.baseline_missing", n=len(missing), source=str(source)):

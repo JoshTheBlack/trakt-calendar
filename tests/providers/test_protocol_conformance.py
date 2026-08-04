@@ -28,7 +28,7 @@ import inspect
 import unittest
 
 from app import providers
-from app.providers.base import Provider, SyncPort
+from app.providers.base import LibraryPort, Provider, SyncPort
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -76,6 +76,36 @@ class RegisteredProvidersConformTests(unittest.TestCase):
                 continue
             with self.subTest(source=source):
                 self.assertIsInstance(port, SyncPort)
+
+
+class LibraryPortIsOptionalTests(unittest.TestCase):
+    """LibraryPort is deliberately NOT part of SyncPort, and this is what says so.
+
+    A source that can hand over a whole library at once is asked for it and
+    matched on the shared identity; one that cannot is asked per title with its
+    own id. Both are correct, so the tracker branches on this isinstance and
+    nothing else — which makes "does this port claim the library read" a fact
+    worth pinning rather than an implementation detail. At least one registered
+    source must satisfy it, or the branch is dead and every test of it is
+    vacuous.
+    """
+
+    def test_at_least_one_registered_source_can_hand_over_a_library(self):
+        ports = [provider.sync_port for provider in providers.registered().values()
+                 if provider.sync_port is not None]
+        self.assertTrue([port for port in ports if isinstance(port, LibraryPort)],
+                        "no source implements the library read; the tracker's "
+                        "identity-keyed baseline is unreachable")
+
+    def test_a_sync_port_without_the_library_read_is_not_one(self):
+        """The negative half, and the one that matters: a port answering per
+        title must not be handed a whole-library question it cannot answer."""
+        for source, provider in providers.registered().items():
+            port = provider.sync_port
+            if port is None or hasattr(port, "fetch_library"):
+                continue
+            with self.subTest(source=source):
+                self.assertNotIsInstance(port, LibraryPort)
 
 
 class TheCheckWouldActuallyFailTests(unittest.TestCase):

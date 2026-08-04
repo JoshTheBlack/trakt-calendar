@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
     from ..config import Settings
@@ -366,6 +366,86 @@ class SyncPort(Protocol):
     def movie_plays_from(self, events: list[dict]) -> list[dict]:
         """The film plays in those same events, as
         [{ids, title, year, watched_at}]. Pure, for the same reason."""
+        ...
+
+
+class LibraryEntry(NamedTuple):
+    """What one source holds about ONE title in somebody's library.
+
+    `ids` is every id space that source named the title in, and it is what makes
+    a library read worth more than a progress read: the caller learns the
+    source's own id for a title it had no id for, as a BY-PRODUCT of the match
+    rather than as its precondition.
+
+    `seasons` is {season: {episode: watched_at}} — the same shape a per-show
+    progress record returns, so a caller folds either in through one path. An
+    empty map is a real answer: the source holds the title and has seen none of
+    it.
+    """
+    ids: dict[str, Any]
+    seasons: dict[int, dict[int, str]]
+
+
+class LibraryRead(NamedTuple):
+    """One pass over a person's library at one source.
+
+    `entries` is keyed by the FLAT ItemKey — `str(resolve_key(...))` — because
+    that is the identity the app files its own rows under, and keying on it here
+    is the whole reason a caller never needs a per-source id in order to ask.
+    Shows only: a film is a play on a day rather than a count out of a total, and
+    it arrives through `events` like any other play.
+
+    `events` are the plays inside that same read, in the shape
+    `SyncPort.fetch_history` returns, so one pull answers both questions instead
+    of two pulls answering one each.
+
+    `complete` says whether this read covered the WHOLE library. A partial read
+    is what makes skipping unchanged lists safe: a title missing from a complete
+    read is a title the source does not hold, while a title missing from a
+    partial one says nothing at all and its caller must leave what it already
+    knew alone.
+    """
+    entries: dict[str, LibraryEntry]
+    events: list[dict]
+    complete: bool
+
+
+@runtime_checkable  # see the note on SyncPort above
+class LibraryPort(Protocol):
+    """A source that can hand over a person's WHOLE library in one read, keyed by
+    the shared title identity.
+
+    SEPARATE FROM SyncPort, AND OPTIONAL, because it is a different question
+    rather than a bigger version of the same one. `SyncPort.fetch_progress_details`
+    asks "what has this person seen of the titles I can already name to you",
+    which needs the source's own id for every title before it can be placed. This
+    asks "what does this person's library say", and answers about titles the
+    caller could not have named — which is the only way a roster built entirely
+    from one service ever learns what a second service holds. A source with no
+    endpoint that returns a whole library simply does not implement this and its
+    caller keeps asking per title.
+
+    THE IDENTITY RULE IS NOT RESTATED HERE OR IN ANY IMPLEMENTATION. `resolve_key`
+    above is the one waterfall; an implementation runs its own payload's ids
+    through it and nothing more. What an implementation DOES own is the payload
+    shape — which field carries which id, and how its lists are spelled.
+    """
+
+    async def fetch_library(self, settings: Settings, *, start_at: str | None = None,
+                            activities: dict | None = None,
+                            since: dict | None = None) -> LibraryRead:
+        """This person's library, and the plays inside it since `start_at`.
+
+        `activities` is what this source's own `fetch_last_activities` returned
+        for THIS pass, and `since` is what it returned at the end of the last
+        successful one, or None. BOTH ARE OPAQUE TO THE CALLER — it hands back
+        what the source gave it and reads nothing out of them. A source that
+        publishes per-list change stamps uses the pair to read only the lists
+        that moved and to skip one that has never been used at all, and says so
+        by returning `complete=False`. A source that cannot tell ignores both,
+        reads everything, and returns `complete=True`; that is why the default
+        for both is None and why neither is required.
+        """
         ...
 
 
