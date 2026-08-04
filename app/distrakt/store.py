@@ -206,7 +206,16 @@ _SHARED_COLUMNS = (
 )
 
 # Every distrakt_month_records column except user_id, in insert order.
-MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form")
+#
+# `watched_by_source` / `total_by_source` are JSON objects keyed by source, held
+# only on a MONTH record: a month that froze while two services disagreed has to
+# keep both numbers, because it will never be recomputed and a single number
+# would claim one of them was the answer. A user record has no such need — it is
+# recomputed on every load, from whatever the services say now. `watched` and
+# `total` beside them keep holding one number, the primary source's, so every
+# reader that asks for one still gets one.
+MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form",
+                        "watched_by_source", "total_by_source")
 
 # Every distrakt_user_seasons column except user_id, in insert order.
 USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back")

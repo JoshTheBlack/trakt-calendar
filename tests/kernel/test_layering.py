@@ -66,6 +66,7 @@ INTEGRATIONS = "integrations"
 CALENDAR = "calendar"
 DISTRAKT = "distrakt"
 RANKER = "ranker"
+SOURCES = "sources"
 SETTINGS = "settings"
 MAIN = "main"
 
@@ -112,6 +113,13 @@ GROUPS: dict[str, str] = {
 
     "ranker": RANKER,
 
+    # Which services answer for an account, and whose value wins when two of them
+    # disagree. Its own group rather than a corner of the calendar or of auth
+    # because it is about neither: both features READ it and neither owns it, and
+    # filing it inside one of them would make the other's dependency on it look
+    # like a dependency on that feature.
+    "sources": SOURCES,
+
     # The admin Settings screen's API, plus the app-wide Trakt device-code flow.
     # Feature tier despite sitting at the root: it reaches sideways into two
     # features and up into auth. One module does not earn a package.
@@ -150,6 +158,7 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (DISTRAKT, KERNEL): Edge("the tracker's tables, settings and templates"),
     (RANKER, KERNEL): Edge("boards are stored, rendered and configured"),
     (SETTINGS, KERNEL): Edge("the Settings screen reads and writes the settings themselves"),
+    (SOURCES, KERNEL): Edge("a source preference is one row in the database, per account"),
 
     # --- the value-type contract, which everything may name ----------------
     (KERNEL, PROVIDER_TYPES): Edge(
@@ -161,6 +170,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (CALENDAR, PROVIDER_TYPES): Edge("the cache stores and replays Items"),
     (DISTRAKT, PROVIDER_TYPES): Edge("watch state is keyed by ItemKey across sources"),
     (RANKER, PROVIDER_TYPES): Edge("a board entry is a title identified the same way"),
+    (SOURCES, PROVIDER_TYPES): Edge(
+        "the services a preference may name ARE the Source members, read from "
+        "there rather than spelled again, so a preference cannot name a service "
+        "the app does not have"),
     (PROVIDER_TYPES, KERNEL): Edge(
         "Settings appears in the Protocol signatures only. Deferred behind "
         "TYPE_CHECKING so the value-type module stays importable from the "

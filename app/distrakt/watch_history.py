@@ -89,8 +89,35 @@ _PLAYS = "plays"
 NO_SEASONS = -1
 
 
+# The stored cursor and beacon are per SOURCE — distrakt_watch_state holds
+# {source: value} for each, because two services are read independently and a
+# shared cursor would make an unchanged history on one re-read from the other's
+# position. The in-memory state still carries ONE cursor and ONE beacon, which is
+# this module's own reading of them, so this is the slot those two project onto.
+# Everything stored before the column existed was this service's and nothing
+# else's, which is what the migration wrote and what this reads back.
+_STORED_SOURCE = "trakt"
+
+
 def _default_state() -> dict:
     return {"last_synced": None, "beacons": None, "shows": {}, "movies": {}}
+
+
+def _stored_slot(document: str | None):
+    """One source's value out of a stored {source: value} document, or None.
+
+    A document that will not parse reads as absent rather than raising: both
+    columns are a CACHE of a service's own answer, so the cost of not
+    understanding one is a single extra call on the next load, and refusing to
+    load somebody's whole watch state over it would be far worse.
+    """
+    if not document:
+        return None
+    try:
+        parsed = json.loads(document)
+    except (TypeError, ValueError):
+        return None
+    return parsed.get(_STORED_SOURCE) if isinstance(parsed, dict) else None
 
 
 def _row_key(row) -> str:
@@ -125,12 +152,12 @@ async def _load(user_id: int) -> dict:
     """
     state = _default_state()
     ws = await db.fetch_one(
-        "SELECT last_synced, beacons_json FROM distrakt_watch_state WHERE user_id = ?",
+        "SELECT cursors_json, beacons_json FROM distrakt_watch_state WHERE user_id = ?",
         (user_id,),
     )
     if ws is not None:
-        state["last_synced"] = ws["last_synced"]
-        state["beacons"] = json.loads(ws["beacons_json"]) if ws["beacons_json"] else None
+        state["last_synced"] = _stored_slot(ws["cursors_json"])
+        state["beacons"] = _stored_slot(ws["beacons_json"])
     prog = await db.fetch_all(
         "SELECT * FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
     shows: dict = {}
@@ -168,8 +195,9 @@ async def _save(user_id: int, state: dict) -> None:
     of rewriting the single JSON document the state used to live in.
     """
     beacons = state.get("beacons")
-    beacons_json = None if beacons is None else json.dumps(beacons)
+    beacons_json = None if beacons is None else json.dumps({_STORED_SOURCE: beacons})
     last_synced = state.get("last_synced")
+    cursors_json = None if last_synced is None else json.dumps({_STORED_SOURCE: last_synced})
     shows = state.get("shows") or {}
     movies = state.get("movies") or {}
     progress_sql = _insert_sql("distrakt_show_progress",
@@ -182,11 +210,11 @@ async def _save(user_id: int, state: dict) -> None:
 
     def _work(conn: db.Connection) -> None:
         conn.execute(
-            "INSERT INTO distrakt_watch_state (user_id, last_synced, beacons_json) "
+            "INSERT INTO distrakt_watch_state (user_id, cursors_json, beacons_json) "
             "VALUES (?, ?, ?) "
             "ON CONFLICT(user_id) DO UPDATE SET "
-            "last_synced = excluded.last_synced, beacons_json = excluded.beacons_json",
-            (user_id, last_synced, beacons_json),
+            "cursors_json = excluded.cursors_json, beacons_json = excluded.beacons_json",
+            (user_id, cursors_json, beacons_json),
         )
         conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
         for key, entry in shows.items():

@@ -1772,6 +1772,214 @@ def MIGRATION_21(conn: sqlite3.Connection) -> None:
         )
 
 
+# Migration 22 — the tracker stops assuming one service answered.
+#
+# Migration 18 re-keyed the tracker onto shared title ids, which made the same
+# season from two services ONE row. That was the right move for identity and the
+# wrong one for progress: two services genuinely know different things about a
+# season, and a single row per season has nowhere to put the second answer. It
+# would have to overwrite the first, silently, on whichever sync ran last.
+#
+# So WHICH SERVICE SAID SO joins the key of the two cache tables. `source` is IN
+# the primary key rather than beside it: the row is one service's statement about
+# a season, and two statements about the same season are two rows that must both
+# survive. Existing rows are Trakt's — nothing else has ever written them — which
+# is what the literal in the INSERT and the column default both state.
+#
+# SQLITE CANNOT ADD A COLUMN TO A PRIMARY KEY, so both are table rebuilds in
+# migration 18's shape: build `_new`, INSERT ... SELECT with the literal source,
+# DROP, RENAME. Neither table carries an index (their primary key is the only way
+# anything reaches them), so there is none to re-create — checked against
+# sqlite_master rather than assumed.
+#
+# THE SINGLETON STATE GAINS THE SAME DIMENSION. `last_synced` was one cursor
+# because there was one history feed to read; two sources have two, gated by two
+# beacons, and a shared cursor would make an unchanged Trakt history re-read from
+# Simkl's position. It becomes `cursors_json`, {source: cursor}, and the existing
+# value moves under "trakt". `beacons_json` is already JSON and is nested the
+# same way, in Python rather than in SQL: the transform reads a stored document
+# and writes a different one, which json_object()/json() would express less
+# clearly and only on a build with JSON1 compiled in.
+#
+# A FROZEN MONTH RECORDS EVERY SOURCE'S NUMBER. `watched_by_source` and
+# `total_by_source` are JSON objects keyed by source. `watched` and `total` STAY
+# and keep holding the primary source's number: every existing reader — the
+# Discord post above all, which is prose and not a ledger — asks for one number
+# and must keep getting one. The pair beside them is what lets a month that froze
+# while two services disagreed still show the disagreement years later, instead of
+# claiming a number neither of them reported.
+MIGRATION_22_SQL = """
+-- Which services this account wants answering for it, and whose value wins when
+-- two of them fill the same field with different things. Per ACCOUNT rather than
+-- per view: it is a statement about which services are yours, not about how one
+-- page is drawn.
+--
+-- An account with no row here has no opinion yet and reads as every default
+-- below, so nothing has to create a row when an account is created.
+CREATE TABLE source_prefs (
+    user_id         INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    -- 'auto' | 'trakt' | 'simkl' | 'both'.
+    --
+    -- 'auto' AND 'both' ARE DELIBERATELY DIFFERENT VALUES and the difference is
+    -- what happens when a link lapses. 'auto' means "every service this account
+    -- has linked" — the right default for somebody who has just linked a second
+    -- one and has no opinion — and it follows the links, so unlinking a service
+    -- quietly stops asking it. 'both' is a STATED preference for two services,
+    -- and a stated preference must not silently become single-source because a
+    -- token expired; it keeps asking, and the missing one shows as missing.
+    -- Collapsing them into one value would make an unlink and a decision
+    -- indistinguishable afterwards.
+    calendar_source TEXT NOT NULL DEFAULT 'auto',
+    tracker_source  TEXT NOT NULL DEFAULT 'auto',
+    -- {"default": <source>, "fields": {field: source}, "show_both": [field, ...]}.
+    -- Resolved at READ over already-cached data, so changing any of it is
+    -- instant and invalidates nothing.
+    precedence_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE distrakt_show_progress_new (
+    user_id               INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media                 TEXT    NOT NULL,
+    match_source          TEXT    NOT NULL,
+    match_id              TEXT    NOT NULL,
+    season                INTEGER NOT NULL,
+    -- WHICH SERVICE REPORTED THIS. In the key, so two services' answers about
+    -- one season are two rows and neither overwrites the other. An open set of
+    -- names rather than a CHECK, following linked_identities.provider: the valid
+    -- set is decided in the registry that hands out sync ports.
+    source                TEXT    NOT NULL DEFAULT 'trakt',
+    watched_episodes_json TEXT    NOT NULL DEFAULT '[]',
+    -- The service's own id, so the progress record can be refetched. Only the
+    -- ids a sync actually calls with live on a cache row; the shared ids the
+    -- waterfall did not pick are on the ROSTER row.
+    trakt_id              INTEGER,
+    simkl_id              INTEGER,
+    PRIMARY KEY (user_id, media, match_source, match_id, season, source)
+);
+INSERT INTO distrakt_show_progress_new
+       (user_id, media, match_source, match_id, season, source,
+        watched_episodes_json, trakt_id, simkl_id)
+    SELECT user_id, media, match_source, match_id, season, 'trakt',
+           watched_episodes_json, trakt_id, simkl_id
+      FROM distrakt_show_progress;
+DROP TABLE distrakt_show_progress;
+ALTER TABLE distrakt_show_progress_new RENAME TO distrakt_show_progress;
+
+CREATE TABLE distrakt_movie_watches_new (
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media        TEXT    NOT NULL,
+    match_source TEXT    NOT NULL,
+    match_id     TEXT    NOT NULL,
+    -- In the key for the same reason as the season table's: two services can
+    -- both have seen the same film, on different dates, and both are true.
+    source       TEXT    NOT NULL DEFAULT 'trakt',
+    watched_at   TEXT,
+    title        TEXT    NOT NULL DEFAULT '',
+    year         INTEGER,
+    trakt_id     INTEGER,
+    simkl_id     INTEGER,
+    PRIMARY KEY (user_id, media, match_source, match_id, source)
+);
+INSERT INTO distrakt_movie_watches_new
+       (user_id, media, match_source, match_id, source, watched_at, title, year,
+        trakt_id, simkl_id)
+    SELECT user_id, media, match_source, match_id, 'trakt', watched_at, title,
+           year, trakt_id, simkl_id
+      FROM distrakt_movie_watches;
+DROP TABLE distrakt_movie_watches;
+ALTER TABLE distrakt_movie_watches_new RENAME TO distrakt_movie_watches;
+
+-- Every source's number, beside the one number `watched`/`total` already hold.
+-- Both are JSON objects keyed by source, and both are NULL on a record written
+-- before this — which reads as "nobody recorded a breakdown", the truth.
+ALTER TABLE distrakt_month_records ADD COLUMN watched_by_source TEXT;
+ALTER TABLE distrakt_month_records ADD COLUMN total_by_source TEXT;
+"""
+
+# The singleton state, rebuilt around per-source cursors. Separate from the script
+# above because the two columns it carries forward are TRANSFORMED rather than
+# copied, and that transform is done in Python (see MIGRATION_22).
+MIGRATION_22_STATE_SQL = """
+CREATE TABLE distrakt_watch_state_new (
+    user_id      INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    -- {source: cursor} — the point in each service's history we have read
+    -- through, as the string that service speaks, kept per source because two
+    -- services are read independently and one being unreachable must not wind
+    -- the other's position back.
+    cursors_json TEXT,
+    -- {source: beacon} — each service's own "last changed at" blob, the gate an
+    -- incremental sync opens with. Nested by source for the same reason: two
+    -- sources means two beacon calls, not one shared answer.
+    beacons_json TEXT
+);
+"""
+
+
+def MIGRATION_22(conn: sqlite3.Connection) -> None:
+    # COUNTED BEFORE THE REBUILD, as migration 18 does, and compared after.
+    #
+    # This is a person's viewing history and it cannot be re-derived: a season's
+    # watched-episode set with its dates is the answer a service gave at a moment
+    # that has passed, and nothing in this app or outside it can reconstruct a
+    # dropped row. A rebuild that carried fewer rows than it found must therefore
+    # stop rather than finish — raising rolls the whole migration back, because
+    # the runner wraps each step in its own transaction, so the old tables survive
+    # intact and the operator still has the rows to look at.
+    progress = conn.execute("SELECT COUNT(*) FROM distrakt_show_progress").fetchone()[0]
+    movies = conn.execute("SELECT COUNT(*) FROM distrakt_movie_watches").fetchone()[0]
+    states = conn.execute("SELECT COUNT(*) FROM distrakt_watch_state").fetchone()[0]
+
+    _run_script(conn, MIGRATION_22_SQL)
+
+    # Read before the old table is dropped, transformed here, written after. One
+    # row per user, so holding them all is bounded by the account count.
+    carried = [
+        (row["user_id"], row["last_synced"], row["beacons_json"])
+        for row in conn.execute(
+            "SELECT user_id, last_synced, beacons_json FROM distrakt_watch_state"
+        ).fetchall()
+    ]
+    _run_script(conn, MIGRATION_22_STATE_SQL)
+    for user_id, last_synced, beacons_json in carried:
+        cursors = json.dumps({"trakt": last_synced}) if last_synced else None
+        # A beacon document that will not parse is left behind rather than nested
+        # blind. It is a cache of one service's "something changed" marker, and
+        # losing it costs exactly one unnecessary history pull on the next load —
+        # where nesting an unreadable string would hand the loader a shape it
+        # cannot use and would have to guess about for ever.
+        nested = None
+        if beacons_json:
+            try:
+                nested = json.dumps({"trakt": json.loads(beacons_json)})
+            except (TypeError, ValueError):
+                logger.info(
+                    "A stored activity beacon could not be read while giving it a "
+                    "source, so it was dropped; the next tracker load fetches a "
+                    "fresh one. Nothing about what was watched lives here."
+                )
+        conn.execute(
+            "INSERT INTO distrakt_watch_state_new (user_id, cursors_json, beacons_json) "
+            "VALUES (?, ?, ?)",
+            (user_id, cursors, nested),
+        )
+    conn.execute("DROP TABLE distrakt_watch_state")
+    conn.execute("ALTER TABLE distrakt_watch_state_new RENAME TO distrakt_watch_state")
+
+    after = (
+        conn.execute("SELECT COUNT(*) FROM distrakt_show_progress").fetchone()[0],
+        conn.execute("SELECT COUNT(*) FROM distrakt_movie_watches").fetchone()[0],
+        conn.execute("SELECT COUNT(*) FROM distrakt_watch_state").fetchone()[0],
+    )
+    if after != (progress, movies, states):
+        raise RuntimeError(
+            "Giving the tracker's cached rows a source did not carry every row "
+            f"across ({progress} -> {after[0]} season progress row(s), "
+            f"{movies} -> {after[1]} film watch(es), {states} -> {after[2]} sync "
+            "state row(s)). Nothing has been changed. This should be impossible; "
+            "please report it rather than working around it."
+        )
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -1797,6 +2005,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (19, MIGRATION_19),
     (20, MIGRATION_20),
     (21, MIGRATION_21),
+    (22, MIGRATION_22),
 ]
 
 
