@@ -1307,6 +1307,18 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
     return True
 
 
+def _moved_ids(source, before: dict | None, sweep) -> int:
+    """How many ids the sweep says moved, BEFORE they are narrowed to the titles
+    this account tracks. Reported beside that narrowed count so the two can be
+    told apart — see the span in _rebaseline_by_id.
+    """
+    if before is None or not sweep.complete:
+        return len(sweep.counts)
+    return len({show_id for show_id, plays in sweep.counts.items()
+                if before.get(str(show_id)) != plays}
+               | {show_id for show_id in before if str(show_id) not in sweep.counts})
+
+
 def _changed_titles(cached: dict, source, before: dict | None, sweep) -> dict:
     """The subset of `cached` a play-count sweep says is worth re-reading.
 
@@ -1368,9 +1380,21 @@ async def _rebaseline_by_id(settings, state: dict, name: str, source, port, span
         # rows left alone. Falling back to asking about every title would be
         # placing a hundred and forty-six calls on a credential that has just
         # refused one.
-        with span("wh.play_counts", source=name):
+        with span("wh.play_counts", source=name) as sp:
             sweep = await port.fetch_play_counts(settings)
-        cached = _changed_titles(cached, source, stored.get(name), sweep)
+            before = stored.get(name)
+            narrowed = _changed_titles(cached, source, before, sweep)
+            # THE THREE NUMBERS THAT TELL THE THREE FAILURES APART, and they are
+            # here because "n=0" on its own cannot: a sweep that saw nothing move,
+            # a sweep that saw things move that this account does not track, and a
+            # sweep whose ids do not line up with the ones the cache files titles
+            # under all read identically without them. `moved` is what the source
+            # says changed; `n` is what survives being intersected with the titles
+            # the tracker actually holds.
+            sp.set(swept=len(sweep.counts), stored=len(before or {}),
+                   moved=_moved_ids(source, before, sweep), n=len(narrowed),
+                   complete=sweep.complete)
+        cached = narrowed
     # SPLIT, because the two halves fail slowly for unrelated reasons and the
     # combined number could not tell them apart: the fetch is one provider call
     # per show, paced by the outbound rate gate, and grows with the roster; the
