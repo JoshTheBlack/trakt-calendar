@@ -17,12 +17,29 @@ from __future__ import annotations
 
 from ...config import Settings
 from ...endpoints import ENDPOINTS
+from datetime import date
+
 from .. import register
-from ..base import Capabilities, Source
-from . import sync
+from ..base import Capabilities, Record, Source
+from . import calendar, sync
 from .transport import TraktError, TraktRateLimitError
 
 __all__ = ["TraktError", "TraktRateLimitError"]
+
+
+class _TraktCalendarPort:
+    """Trakt's answer to "what airs in these days" (app/providers/base.py's
+    CalendarPort).
+
+    Thin, and through the module object for the same reason _TraktSyncPort is:
+    patching app.providers.trakt.calendar.fetch_window has to reach what this
+    calls, and a name bound at class-definition time would be a second reference
+    no test double can get at.
+    """
+
+    async def fetch_window(self, endpoint, settings: Settings,
+                           start: date, days: int) -> list[Record]:
+        return await calendar.fetch_window(endpoint, settings, start, days)
 
 
 class _TraktSyncPort:
@@ -69,10 +86,14 @@ class _TraktSyncPort:
 class _TraktProvider:
     """Trakt as the registry sees it: an id, a label, what it can answer, and
     whether it is configured. Everything this package actually DOES is called
-    directly by the code that needs Trakt specifically — `calendar.fetch_window`
-    from the calendar cache, `detail` from the detail modal, `sync` from the
-    tracker's private reads. The Protocol stays narrow on purpose, and this class
-    is not a facade over the package."""
+    directly by the code that needs Trakt specifically — `detail` from the detail
+    modal, `sync` from the tracker's private reads. The Protocol stays narrow on
+    purpose, and this class is not a facade over the package.
+
+    THE CALENDAR IS REACHED THROUGH THE PORT rather than by importing
+    `calendar.fetch_window`: the cache asks the registry which sources can fill a
+    window and never names Trakt, which is what lets a second source fill the
+    same window rows without the cache learning anything about it."""
 
     source = Source.TRAKT
     label = "Trakt"
@@ -91,6 +112,9 @@ class _TraktProvider:
     # What makes that `private_user_data=True` checkable rather than a claim: the
     # tracker asks the registry for this and never for Trakt by name.
     sync_port = _TraktSyncPort()
+    # And the same for `capabilities.endpoints`: declaring five calendars while
+    # carrying no port would be claiming a calendar this source cannot produce.
+    calendar_port = _TraktCalendarPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured

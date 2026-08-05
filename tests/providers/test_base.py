@@ -1,10 +1,10 @@
 """Unit tests for the calendar-source seam (app/providers).
 
-Covers the four things the seam actually promises: that an Item carries its
+Covers the four things the seam actually promises: that a Record carries its
 provenance as source/ids/detail_url rather than one service's ids hoisted to the
 top level; that a provider forgetting a field fails at construction rather than
 rendering a blank card; that Capabilities answers "can this source do that"; and
-that the registry resolves the configured calendar source without any caller
+that the registry resolves the configured calendar sources without any caller
 naming one.
 
 Also pins the endpoint-key -> provider-path translation, which is the boundary
@@ -65,29 +65,36 @@ class TestCollectIds:
         assert ids == {"trakt": 1}
 
 
-class TestNormalizeProducesAnItem:
+class TestNormalizeProducesARecord:
     def test_provenance_is_source_ids_and_detail_url(self):
-        item = trakt_calendar.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
-        assert item.source == Source.TRAKT
-        assert item.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
-                            "tmdb": 789, "imdb": "tt42"}
-        assert item.detail_url == "https://trakt.tv/shows/a-show"
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.source == Source.TRAKT
+        assert record.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
+                              "tmdb": 789, "imdb": "tt42"}
+        assert record.detail_url == "https://trakt.tv/shows/a-show"
 
     def test_a_movie_gets_the_movies_detail_url(self):
         """The two media types live under different paths on Trakt, and a show
         URL for a movie 404s rather than failing visibly here."""
         entry = {"released": "2026-07-15",
                  "movie": {"title": "A Film", "ids": {"slug": "a-film", "trakt": 9}}}
-        item = trakt_calendar.normalize(entry, MOVIES, ZoneInfo("UTC"))
-        assert item.detail_url == "https://trakt.tv/movies/a-film"
+        record = trakt_calendar.to_record(entry, MOVIES)
+        assert record.detail_url == "https://trakt.tv/movies/a-film"
 
     def test_media_is_the_enum_and_still_equals_its_string(self):
         """Templates, DB columns and the response keys all hold the plain
         string; the enum has to stay interchangeable with it or every one of
         those boundaries grows a conversion."""
-        item = trakt_calendar.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
-        assert item.media is Media.SHOW
-        assert item.media == "show"
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.media is Media.SHOW
+        assert record.media == "show"
+
+    def test_a_record_carries_no_viewer_local_spelling_of_its_air_time(self):
+        """The whole reason the cache can be shared: a record says WHEN in POSIX
+        seconds and nothing else, so one stored copy serves every timezone."""
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.air_ts == 1784145600.0
+        assert not hasattr(record, "air_date")
 
     def test_an_item_missing_a_required_field_raises_at_construction(self):
         """THE REASON THIS IS A DATACLASS. A provider that forgets to say when
@@ -129,12 +136,28 @@ class TestRegistry:
         assert provider.capabilities.endpoints == frozenset(ENDPOINTS)
         assert provider.capabilities.private_user_data
 
-    def test_for_calendar_returns_none_until_a_source_is_configured(self):
-        assert providers.for_calendar(Settings()) is None
+    def test_no_usable_calendar_source_until_one_is_configured(self):
+        assert providers.for_calendar_sources(Settings()) == []
 
-    def test_for_calendar_finds_the_configured_source(self):
+    def test_the_configured_source_is_the_usable_one(self):
         configured = Settings(trakt_client_id="id", trakt_access_token="token")
-        assert providers.for_calendar(configured).source == Source.TRAKT
+        assert [p.source for p in providers.for_calendar_sources(configured)] == [Source.TRAKT]
+
+    def test_a_source_that_could_answer_is_listed_whether_or_not_it_is_set_up(self):
+        """The two questions are different and both are asked. "Who could put
+        something on a calendar" is a property of the SOURCE and decides who the
+        fill asks; "who can we actually use" adds the credentials and is what the
+        page checks before it renders an explanation instead of a month."""
+        assert [p.source for p in providers.calendar_sources()] == [Source.TRAKT]
+
+    def test_a_source_with_no_calendar_is_in_neither_list(self):
+        """Registered for something else entirely. Asking it would render an
+        empty month, which reads as "nothing airs" rather than "nobody was
+        asked"."""
+        both = Settings(trakt_client_id="id", trakt_access_token="token",
+                        simkl_client_id="id", simkl_access_token="token")
+        assert Source.SIMKL not in [p.source for p in providers.calendar_sources()]
+        assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(both)]
 
     def test_registered_hands_back_a_copy(self):
         """A caller iterating the registry must not be able to empty it."""

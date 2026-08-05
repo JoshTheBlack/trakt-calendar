@@ -334,12 +334,12 @@ class Settings:
         This is the question the calendar page, the day fragment and the public
         share pages are actually asking before they try to read a month: not
         "does Trakt work" but "is there anybody to ask". Today the two answers
-        coincide because Trakt is the only registered provider; they diverge the
-        moment a second one is registered, and this is the call site that then
-        needs no edit.
+        coincide because Trakt is the only registered source that publishes a
+        calendar; they diverge the moment a second one does, and this is the call
+        site that then needs no edit.
         """
         from . import providers  # local: providers -> trakt -> config would cycle
-        return providers.for_calendar(self) is not None
+        return bool(providers.for_calendar_sources(self))
 
     @property
     def trakt_login_configured(self) -> bool:

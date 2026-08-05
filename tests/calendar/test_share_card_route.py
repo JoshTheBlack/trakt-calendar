@@ -26,12 +26,13 @@ import anyio
 from PIL import Image
 
 from app import db
+from app.endpoints import get_endpoint
 from app.calendar import (cache as calendar_cache, share_card, share_card_cache,
                           share_code, share_links, share_routes,
                           state as calendar_state)
 from app.config import Settings
 from app.media import posters, user_images
-from tests.support import APP_DIR, AppTestCase, ORIGIN
+from tests.support import APP_DIR, AppTestCase, ORIGIN, calendar_records
 
 # Artwork with the frequency content of a real poster, which is what the encoded
 # size below is a claim about: flat colour compresses to almost nothing and
@@ -92,7 +93,9 @@ class ShareCardTestCase(AppTestCase):
         for entry in entries:
             windows[calendar_cache.window_start(date.fromisoformat(entry["first_aired"][:10]))].append(entry)
         for start, group in windows.items():
-            asyncio.run(calendar_cache.store_window(endpoint, start, group, 600, db.now()))
+            asyncio.run(calendar_cache.store_window(
+                endpoint, start, calendar_records(group, get_endpoint(endpoint)),
+                600, db.now(), sources=["trakt"]))
 
     def write_poster(self, tmdb: int, *, media: str = "show", source: Path | None = None) -> Path:
         """A poster on disk for (media, tmdb), as if it had already resolved.
@@ -172,7 +175,9 @@ class ShareCardRouteTests(ShareCardTestCase):
                  "episode": {"season": 1, "number": 1, "title": "Pilot"},
                  "show": {"title": "No Ids", "year": 2026, "ids": {"trakt": 9}}}
         start = calendar_cache.window_start(date(2026, 9, 15))
-        asyncio.run(calendar_cache.store_window("shows/new", start, [entry], 600, db.now()))
+        asyncio.run(calendar_cache.store_window(
+            "shows/new", start, calendar_records([entry], get_endpoint("shows/new")),
+            600, db.now(), sources=["trakt"]))
 
         first = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=9")
         self.assertEqual(first.status_code, 200)

@@ -1,9 +1,10 @@
 """The shape every calendar source must speak, and nothing about any one source.
 
-This module is the seam. It declares WHAT a source produces (`Item`), WHAT it is
-able to answer (`Capabilities`), and the one method the calendar route calls
-(`Provider`). It imports nothing from the rest of the app at runtime, so a
-provider implementation can depend on it without anything depending back.
+This module is the seam. It declares WHAT a source produces (`Record`), WHAT a
+template renders (`Item`), WHAT a source is able to answer (`Capabilities`), and
+the ports the rest of the app calls a source through (`Provider` and friends). It
+imports nothing from the rest of the app at runtime, so a provider implementation
+can depend on it without anything depending back.
 
 WHY A DATACLASS AND NOT A TypedDict OR A DICT. There is no type checker in this
 project's CI, so a TypedDict would document the contract without enforcing it —
@@ -15,10 +16,12 @@ dot access, which reads identically either way.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from datetime import date, timedelta
+from dataclasses import MISSING as MISSING_DEFAULT
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
     from ..config import Settings
@@ -191,12 +194,27 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
 
 
 @dataclass
-class Item:
-    """One airing on the calendar, as any source must describe it.
+class Record:
+    """One airing as a SOURCE describes it, said in a way that is true for
+    everybody who might look at it.
 
-    NOT FROZEN: the calendar read path annotates items in place (day layout,
-    per-viewer marks) and a frozen record would force a copy at each step for no
-    safety anyone is currently relying on.
+    THIS IS WHAT THE CALENDAR CACHE STORES, and the reason it can be stored at
+    all is that nothing on it depends on who is reading. `air_ts` is POSIX
+    seconds — an absolute instant — and the four viewer-local spellings of that
+    instant live on `Item` below, derived at read time by `render`. A record
+    carrying "21:00" would be one viewer's 21:00 and would be wrong in the shared
+    cache the moment a second timezone read it.
+
+    `genres` ARE THE SOURCE'S RAW SLUGS, lowercase and hyphenated ("game-show"),
+    NOT the title-cased display form. The per-viewer genre filter matches on the
+    slug (app/calendar/filter.py says so), so a record holding "Game Show" would
+    silently break every multi-word genre filter while leaving single-word ones
+    working — which is about the hardest failure of this kind to notice. The
+    title-casing happens in `render`, on the far side of the filter.
+
+    NOT FROZEN: the calendar read path annotates the rendered items in place (day
+    layout, per-viewer marks) and a frozen record would force a copy at each step
+    for no safety anyone is currently relying on.
 
     Provenance is deliberately three fields rather than one provider's ids
     hoisted to the top level:
@@ -215,17 +233,20 @@ class Item:
     id: str
     ids: dict[str, Any]
     detail_url: str
-
-    # When it airs, already converted into the VIEWER's timezone — every one of
-    # these is a rendering of the same moment, precomputed because the template
-    # cannot do timezone arithmetic and the sort needs the timestamp.
-    air_date: str        # YYYY-MM-DD, local
-    air_ts: float        # unix seconds; the sort key
-    air_display: str     # "03 Jul 2026"
-    air_time: str        # "21:00"
-    day_of_week: str     # "Friday"
-
     title: str
+    # The instant this airs, in POSIX seconds. The sort key, and the only time
+    # fact a source has to supply.
+    air_ts: float
+
+    # WHETHER THAT INSTANT IS REALLY AN INSTANT. A movie's release is a calendar
+    # FACT, not a moment: a film released on the 6th is released on the 6th
+    # wherever you are. Trakt's `released` and every Simkl movie entry are plain
+    # dates, and turning one into a UTC-midnight timestamp and then rendering it
+    # in a viewer's timezone moves a UTC-8 viewer's release to the day before.
+    # When this is set, `render` reads the date straight back out of `air_ts` in
+    # UTC and does no conversion at all, so every viewer sees the date the source
+    # published.
+    date_only: bool = False
 
     # Everything below is genuinely optional: a source that does not carry it,
     # or a title that has none, leaves it at the default rather than inventing a
@@ -246,6 +267,98 @@ class Item:
     episode_title: str = ""
     season: int | None = None
     episode_number: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """The JSON-safe form the cache stores.
+
+        A FIELD SITTING AT ITS DEFAULT IS OMITTED, which is what makes
+        `from_dict`'s defaults load-bearing rather than decorative: the common
+        record has no certification, no language and no episode title, so the
+        round trip is exercised on every single window rather than only when a
+        new field is added. The enums are already strings (StrEnum), so they
+        serialize as themselves.
+        """
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            value = getattr(self, f.name)
+            if f.default is not MISSING_DEFAULT and value == f.default:
+                continue
+            if f.name == "genres" and not value:
+                continue
+            out[f.name] = value
+        return out
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Record":
+        """A stored record, with EXPLICIT DEFAULTS FOR EVERY OPTIONAL FIELD.
+
+        Caching normalized data means a normalizer change does not take effect
+        until the window's TTL expires, and across a deploy there will be rows in
+        the old shape sitting beside new ones. The version envelope
+        (app/calendar/cache.py) handles a change big enough to invalidate; a
+        field merely ADDED to this class has to be tolerated as missing, which is
+        what this does. A row written before a field existed reads as a record
+        that simply does not carry it.
+
+        Raises for a row missing one of the fields that has no default — that row
+        is not a record at all, and the caller treats the whole window as a miss.
+        """
+        kwargs: dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name in data:
+                kwargs[f.name] = data[f.name]
+            elif f.default is MISSING_DEFAULT and f.default_factory is MISSING_DEFAULT:
+                raise ValueError(f"A stored record is missing {f.name!r}.")
+        kwargs["source"] = Source(kwargs["source"])
+        kwargs["media"] = Media(kwargs["media"])
+        kwargs["air_ts"] = float(kwargs["air_ts"])
+        return cls(**kwargs)
+
+
+@dataclass
+class Item(Record):
+    """A Record as ONE VIEWER sees it: the same facts, plus the four spellings of
+    its air time in that viewer's timezone.
+
+    A SUBCLASS RATHER THAN A SEPARATE TYPE, so every template, filter and share
+    page that reads `item.title` or `item.genres` today reads it unchanged, and
+    anything that only needs the source's facts can take a Record and be handed
+    an Item. The four fields below are the whole difference, and `render` is the
+    only thing that should ever set them.
+    """
+    air_date: str = ""      # YYYY-MM-DD, local
+    air_display: str = ""   # "03 Jul 2026"
+    air_time: str = ""      # "21:00"
+    day_of_week: str = ""   # "Friday"
+
+
+def render(record: Record, tz: ZoneInfo) -> Item:
+    """The Item one viewer sees for `record`.
+
+    THE ONE PLACE A STORED RECORD BECOMES A RENDERED ONE. Two things happen here
+    and nowhere else, because both are per-viewer or per-display and neither may
+    be baked into the shared cache:
+
+      - the four air-time fields are derived from `air_ts`, in `tz` — unless
+        `date_only` is set, in which case the date is read back in UTC and no
+        conversion happens at all (see Record.date_only for why a release date is
+        not an instant);
+      - the genre slugs become their display form ("game-show" -> "Game Show").
+        This is after every filter has run, which is the entire reason it is here
+        rather than in a normalizer.
+    """
+    moment = datetime.fromtimestamp(record.air_ts, tz=timezone.utc)
+    if not record.date_only:
+        moment = moment.astimezone(tz)
+    values = {f.name: getattr(record, f.name) for f in fields(Record)}
+    values["genres"] = [str(g).replace("-", " ").title() for g in record.genres]
+    return Item(
+        **values,
+        air_date=moment.strftime("%Y-%m-%d"),
+        air_display=moment.strftime("%d %b %Y"),
+        air_time=moment.strftime("%H:%M"),
+        day_of_week=moment.strftime("%A"),
+    )
 
 
 @dataclass(frozen=True)
@@ -574,6 +687,46 @@ class PlayCountPort(Protocol):
 
 
 @runtime_checkable  # see the note on SyncPort above
+class CalendarPort(Protocol):
+    """A source that can say what airs in a stretch of days.
+
+    A FOURTH PROTOCOL, beside SyncPort, LibraryPort and PlayCountPort, and
+    deliberately not folded into any of them: this is the only one that answers a
+    question about the WORLD rather than about one person, which is why it needs
+    no token, why its answers are cached globally, and why a source that has
+    nothing else to offer can still be registered for it.
+
+    THE UNIT IS A WINDOW, NOT A MONTH. A start date and a day count is what the
+    calendar cache stores and therefore what it asks for; a month is the thing a
+    viewer looks at and is assembled from several windows, each shared between
+    every viewer of every month that overlaps it.
+    """
+
+    async def fetch_window(self, endpoint, settings: Settings,
+                           start: date, days: int) -> list["Record"]:
+        """What this source says airs in [start, start + days), as Records.
+
+        NORMALIZING IS THE SOURCE'S JOB AND IS DECLARED HERE SO IT CAN ONLY BE
+        DONE ONCE. The alternative — handing back a payload for somebody else to
+        interpret — means the interpreting side learns every source's field
+        layout, which is exactly what stops a third source being an addition
+        rather than an edit.
+
+        `endpoint` is one of app/endpoints.py's source-neutral calendar keys; a
+        source that cannot answer it says so through `Capabilities.endpoints` and
+        is never asked. Raises SourceUnavailable when the source could not be
+        read at all — the caller degrades one source, or one window, rather than
+        failing a month.
+
+        A SOURCE MAY RETURN MORE THAN IT WAS ASKED FOR and the caller trims:
+        Trakt treats `days` as a floor rather than a ceiling (measured — a 7-day
+        window came back carrying entries two months past its end), so the bound
+        is a request, not a promise.
+        """
+        ...
+
+
+@runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
     """What the registry needs in order to offer a source at all: who it is,
     what it can answer, and whether it is usable right now.
@@ -584,14 +737,13 @@ class Provider(Protocol):
     They become their own protocols when a second source actually needs them —
     which is what `sync_port` below already is.
 
-    THERE IS DELIBERATELY NO CALENDAR VERB HERE, and the gap is load-bearing.
-    There used to be a `fetch_calendar(endpoint, settings, year, month)`, but
-    nothing reached a user through it: the live path is a WINDOW fetch — a start
-    date and a day count — driven by the calendar cache, because a month is not
-    the unit Trakt is asked about and is not the unit the cache stores. A second
-    source should be given the window shape the app actually uses, so an empty
-    slot here is better than a method the first implementer would have to
-    contradict.
+    THE CALENDAR VERB IS A PORT RATHER THAN A METHOD, and the shape it has is
+    the shape the app actually uses. There used to be a
+    `fetch_calendar(endpoint, settings, year, month)` here that nothing reached a
+    user through, because the live path is a WINDOW fetch — a start date and a
+    day count — driven by the calendar cache: a month is not the unit a source is
+    asked about and is not the unit the cache stores. `calendar_port` below is
+    that verb, declared once, in the shape it is really called in.
     """
     source: Source
     label: str
@@ -602,6 +754,12 @@ class Provider(Protocol):
     # `capabilities.private_user_data` while carrying no port would be lying in a
     # way nothing else can catch.
     sync_port: SyncPort | None
+    # What airs, or None for a source that publishes no calendar. Declared beside
+    # `sync_port` for the same reason: the calendar cache asks the registry which
+    # sources can answer and never names one, and a source declaring
+    # `capabilities.endpoints` while carrying no port would be claiming a calendar
+    # it cannot produce.
+    calendar_port: CalendarPort | None
 
     def is_configured(self, settings: Settings) -> bool:
         """Whether this source has the credentials it needs to be asked

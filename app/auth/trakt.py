@@ -76,7 +76,7 @@ from .. import http_pool
 POOL = http_pool.Pool("trakt_auth", max_connections=4, timeout=15)
 
 # Same "app.perf" DEBUG channel the Trakt transport's cached_get and
-# app/calendar/cache.py's fetch_window_raw log their own outbound calls to —
+# app/calendar/cache.py's window fill log their own outbound calls to —
 # one place to watch every Trakt request, OAuth included. Never logs a body:
 # these calls carry client_secret/tokens, so only the path and outcome go out.
 _perf = logging.getLogger("app.perf")

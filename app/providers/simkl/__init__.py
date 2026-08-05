@@ -97,6 +97,11 @@ class _SimklProvider:
         private_user_data=True,
     )
     sync_port = _SimklSyncPort()
+    # None, and paired with the empty endpoint set above for the same reason the
+    # two lines above are paired: this source publishes a calendar and cannot fill
+    # a window yet, so it says both, and the cache asks the registry rather than
+    # discovering the gap by calling something that is not there.
+    calendar_port = None
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured

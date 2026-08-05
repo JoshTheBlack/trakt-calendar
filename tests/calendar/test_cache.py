@@ -4,7 +4,7 @@ app/calendar/filter.py).
 Covers: window alignment is stable across viewers (independent of "today"); the
 viewer-dependent month boundary (an item at 02:00 UTC on the 1st lands in the
 previous month for a UTC-8 viewer and the current month for a UTC+2 viewer); the
-pruner keeps every field the normalizer and the filters read; a window fetch
+stored window's shape and what a payload from an older shape does; a window fetch
 sends no genres/countries and no pagination headers; the instance-wide content
 floor (genres/countries/certifications) excludes a show from the cached window
 itself, not just from a later read; TTL freshness; the size cap evicts
@@ -30,7 +30,7 @@ from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.providers import base
 from app.endpoints import ENDPOINTS, get_endpoint
-from tests.support import FIXTURES, new_db_path
+from tests.support import FIXTURES, calendar_records, new_db_path, window_fetch
 
 
 SHOWS = get_endpoint("shows")
@@ -104,10 +104,10 @@ class WindowAlignmentTests(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# pruning
+# the stored shape
 # ---------------------------------------------------------------------------
 
-class PruneTests(unittest.TestCase):
+class StoredRecordTests(unittest.TestCase):
     RICH = {
         "first_aired": "2026-07-15T20:00:00.000Z",
         "episode": {"season": 2, "number": 5, "title": "The One", "overview": "dropped"},
@@ -124,57 +124,78 @@ class PruneTests(unittest.TestCase):
         },
     }
 
-    def test_pruner_keeps_every_field_the_normalizer_reads(self):
-        """The strongest possible statement of the pruner's contract: a raw entry
-        and its pruned form normalize to the byte-identical Item.
+    def record(self, entry=None, endpoint=SHOWS):
+        return trakt_calendar.to_record(entry or self.RICH, endpoint)
 
-        No permitted gap. A field the normalizer reads but the pruner drops means
-        the same show renders one way on a cache miss and another on a hit, which
-        is a bug that only appears once a window has been stored — so it is
-        caught here instead."""
-        tz = ZoneInfo("America/New_York")
-        pruned = calendar_cache.prune_entry(self.RICH, "show")
-        self.assertEqual(
-            trakt_calendar.normalize(self.RICH, SHOWS, tz),
-            trakt_calendar.normalize(pruned, SHOWS, tz),
-        )
+    def test_a_record_survives_the_round_trip_through_storage_unchanged(self):
+        """The strongest possible statement of the stored shape's contract: what
+        comes back out of a window is the record that went in.
 
-    def test_pruner_keeps_every_id_the_item_can_carry(self):
+        No permitted gap. A field the card reads but the payload drops means the
+        same show renders one way on a cache miss and another on a hit, which is
+        a bug that only appears once a window has been stored — so it is caught
+        here instead."""
+        record = self.record()
+        self.assertEqual(base.Record.from_dict(record.to_dict()), record)
+
+    def test_a_record_carries_every_id_the_source_supplied(self):
         """The invariant behind the test above, stated directly: an id namespace
-        the Item declares and the source supplied must survive into the cache.
-        Anything else is an id present on a miss and missing on a hit."""
-        pruned = calendar_cache.prune_entry(self.RICH, "show")
+        the app declares and the source supplied must survive into the cache.
+        Anything else is an id present on a miss and missing on a hit.
+
+        There is no id whitelist any more, which is the point — the old pruner
+        named the namespaces it kept, so a second service's own id would have
+        been dropped on the way in and the matcher would simply never have
+        matched."""
         supplied = {k for k in self.RICH["show"]["ids"] if k in base.ID_KEYS}
-        self.assertEqual(set(pruned["show"]["ids"]), supplied)
+        self.assertEqual(set(self.record().ids), supplied)
+        self.assertNotIn("unused", self.record().ids)
 
-    def test_a_window_cached_before_an_id_key_existed_still_reads(self):
-        """A stored window predating a new _MEDIA_ID_KEYS entry simply lacks the
-        key. It must normalize rather than raise, and the id must come back
-        ABSENT rather than None — nothing invalidates the cache on a format
-        change, so old rows keep being served until their TTL expires."""
-        legacy = calendar_cache.prune_entry(self.RICH, "show")
-        del legacy["show"]["ids"]["imdb"]
-        item = trakt_calendar.normalize(legacy, SHOWS, ZoneInfo("UTC"))
-        self.assertNotIn("imdb", item.ids)
-        self.assertEqual(item.ids["tmdb"], 789)
+    def test_a_window_stored_before_a_field_existed_still_reads(self):
+        """A stored record predating a newer Record field simply lacks the key.
+        It must read back rather than raise, and the field must come back at its
+        DEFAULT — nothing invalidates the cache when a field is added, so old
+        rows keep being served until their TTL expires."""
+        stored = self.record().to_dict()
+        del stored["certification"]
+        stored.pop("date_only", None)
+        revived = base.Record.from_dict(stored)
+        self.assertEqual(revived.certification, "")
+        self.assertFalse(revived.date_only)
+        self.assertEqual(revived.ids["tmdb"], 789)
 
-    def test_pruner_drops_the_bulky_unused_fields(self):
-        pruned = calendar_cache.prune_entry(self.RICH, "show")
-        self.assertNotIn("fanart", pruned["show"]["images"])
-        self.assertNotIn("logo", pruned["show"]["images"])
-        self.assertNotIn("unused_field", pruned["show"])
-        # An id namespace the Item does not declare is still dropped — the cache
-        # stores what the record can carry, not everything the source sent.
-        self.assertNotIn("unused", pruned["show"]["ids"])
+    def test_a_record_missing_something_it_cannot_do_without_is_refused(self):
+        """A row with no air time is not a record at all. Refusing it is what
+        lets the reader treat the whole window as a miss rather than rendering a
+        card at the epoch."""
+        stored = self.record().to_dict()
+        del stored["air_ts"]
+        with self.assertRaises(ValueError):
+            base.Record.from_dict(stored)
 
-    def test_pruner_keeps_certification(self):
-        """Needed for the per-user and instance-floor certification filters to
-        have anything to read once an entry comes back out of the cache."""
-        pruned = calendar_cache.prune_entry(self.RICH, "show")
-        self.assertEqual(pruned["show"]["certification"], "TV-14")
+    def test_the_stored_form_omits_what_is_at_its_default(self):
+        """Which is what makes the defaults above load-bearing rather than
+        decorative: the ordinary record exercises them on every window."""
+        stored = trakt_calendar.to_record(
+            _entry("plain", "2026-07-06T12:00:00Z"), SHOWS).to_dict()
+        self.assertNotIn("certification", stored)
+        self.assertNotIn("language", stored)
+        self.assertNotIn("genres", stored)
+        self.assertNotIn("date_only", stored)
+        self.assertIn("air_ts", stored)
 
-    def test_pruner_drops_an_entry_with_no_media(self):
-        self.assertIsNone(calendar_cache.prune_entry({"first_aired": "2026-01-01T00:00:00Z"}, "show"))
+    def test_a_record_keeps_certification_and_the_genre_slugs(self):
+        """Both are filter inputs. The genres stay hyphenated and lowercase all
+        the way into storage, because that is what the per-viewer genre spec
+        matches against — a stored "Game Show" breaks every multi-word genre
+        filter and leaves the single-word ones working."""
+        record = self.record()
+        self.assertEqual(record.certification, "TV-14")
+        self.assertEqual(record.genres, ["drama", "game-show"])
+
+    def test_an_entry_with_no_media_is_not_a_record(self):
+        self.assertIsNone(
+            trakt_calendar.to_record({"first_aired": "2026-01-01T00:00:00Z"}, SHOWS))
 
 
 # ---------------------------------------------------------------------------
@@ -183,18 +204,59 @@ class PruneTests(unittest.TestCase):
 
 class FetchShapeTests(CacheTestCase):
     async def test_window_fetch_sends_no_filters_and_no_pagination_headers(self):
-        client = _CaptureClient([PruneTests.RICH])
+        client = _CaptureClient([StoredRecordTests.RICH])
         # The window RICH's 2026-07-15 air date actually belongs to — a fetch now
         # trims what falls outside the window it asked for.
         with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 13))
+            records, answered = await calendar_cache.fetch_window_records(
+                SHOWS, self.settings, date(2026, 7, 13))
         self.assertNotIn("genres", client.url)
         self.assertNotIn("countries", client.url)
         self.assertNotIn("X-Pagination-Page", client.sent_headers)
         self.assertNotIn("X-Pagination-Limit", client.sent_headers)
-        # And what comes back is pruned, not raw.
-        self.assertEqual(len(entries), 1)
-        self.assertNotIn("unused_field", entries[0]["show"])
+        # And what comes back is a normalized record, not the payload.
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].title, "Rich Show")
+        self.assertEqual(answered, ["trakt"])
+
+    async def test_the_fill_names_the_source_that_answered(self):
+        """`sources` is what tells a later read that a source was asked and had
+        nothing, rather than never asked at all."""
+        client = _CaptureClient([])
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
+            _, answered = await calendar_cache.fetch_window_records(
+                SHOWS, self.settings, date(2026, 7, 6))
+        self.assertEqual(answered, ["trakt"])
+
+    async def test_a_source_that_answers_no_endpoint_is_never_asked(self):
+        """The fill asks capabilities, never a name. A source registered for
+        something else entirely must not be called for a calendar it never
+        claimed to have."""
+        asked = []
+
+        class _Silent:
+            source = base.Source.SIMKL
+            label = "Nobody"
+            capabilities = base.Capabilities(
+                endpoints=frozenset({"movies"}), days_before=None, days_after=None,
+                private_user_data=False)
+
+            class calendar_port:
+                @staticmethod
+                async def fetch_window(endpoint, settings, start, days):
+                    asked.append(endpoint.key)
+                    return []
+
+            def is_configured(self, settings):
+                return True
+
+        client = _CaptureClient([])
+        with patch("app.providers.calendar_sources", return_value=[_Silent()]):
+            with patch("app.providers.trakt.transport.shared_client", return_value=client):
+                _, answered = await calendar_cache.fetch_window_records(
+                    SHOWS, self.settings, date(2026, 7, 6))
+        self.assertEqual(asked, [])
+        self.assertEqual(answered, [])
 
     async def test_pagination_header_on_a_calendar_response_is_logged(self):
         """Logged by the SOURCE, not by this module: the cache no longer asks
@@ -203,7 +265,7 @@ class FetchShapeTests(CacheTestCase):
         client = _CaptureClient([], headers={"x-pagination-page-count": "3"})
         with patch("app.providers.trakt.transport.shared_client", return_value=client):
             with self.assertLogs("app.providers.trakt.calendar", level="WARNING") as logged:
-                await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+                await calendar_cache.fetch_window_records(SHOWS, self.settings, date(2026, 7, 6))
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
 
 
@@ -211,19 +273,21 @@ class InstanceFloorTests(CacheTestCase):
     """The content floor (README.md's "Genres / Countries / Networks" section)
     promises a HARD, pre-cache exclusion: a show it excludes should never enter
     api_cache at all, so no per-account filter (or lack of one) can bring it
-    back. Proving that means asserting on fetch_window_raw's OWN return value —
-    what gets stored — not on a post-hoc read_month() filter, which would pass
-    even if fetch_window_raw cached everything unfiltered."""
+    back. Proving that means asserting on fetch_window_records' OWN return value
+    — what gets stored — not on a post-hoc read_month() filter, which would pass
+    even if the fill cached everything unfiltered."""
+
+    async def _fill(self, endpoint, body, start=date(2026, 7, 6)):
+        client = _CaptureClient(body)
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
+            records, _ = await calendar_cache.fetch_window_records(endpoint, self.settings, start)
+        return {r.id for r in records}
 
     async def test_a_genre_excluded_by_settings_never_survives_the_fetch(self):
         self.settings.genres = "-anime"
         kept = _entry("kept-drama", "2026-07-06T12:00:00Z", genres=["drama"])
         excluded = _entry("excluded-anime", "2026-07-06T12:00:00Z", genres=["anime"])
-        client = _CaptureClient([kept, excluded])
-        with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
-        slugs = {e["show"]["ids"]["slug"] for e in entries}
-        self.assertEqual(slugs, {"kept-drama"})
+        self.assertEqual(await self._fill(SHOWS, [kept, excluded]), {"kept-drama"})
 
     async def test_a_certification_excluded_by_settings_never_survives_the_fetch(self):
         self.settings.show_certifications = "-tv-ma"
@@ -231,11 +295,7 @@ class InstanceFloorTests(CacheTestCase):
         kept["show"]["certification"] = "TV-14"
         excluded = _entry("excluded-tvma", "2026-07-06T12:00:00Z")
         excluded["show"]["certification"] = "TV-MA"
-        client = _CaptureClient([kept, excluded])
-        with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
-        slugs = {e["show"]["ids"]["slug"] for e in entries}
-        self.assertEqual(slugs, {"kept-tv14"})
+        self.assertEqual(await self._fill(SHOWS, [kept, excluded]), {"kept-tv14"})
 
     async def test_the_movie_certification_floor_reads_the_movie_field_not_the_show_one(self):
         movies = get_endpoint("movies")
@@ -245,11 +305,7 @@ class InstanceFloorTests(CacheTestCase):
             "title": "Kept", "certification": "PG", "ids": {"slug": "kept-pg", "trakt": 1}}}
         excluded = {"released": "2026-07-06", "movie": {
             "title": "Excluded", "certification": "R", "ids": {"slug": "excluded-r", "trakt": 2}}}
-        client = _CaptureClient([kept, excluded])
-        with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(movies, self.settings, date(2026, 7, 6))
-        slugs = {e["movie"]["ids"]["slug"] for e in entries}
-        self.assertEqual(slugs, {"kept-pg"})
+        self.assertEqual(await self._fill(movies, [kept, excluded]), {"kept-pg"})
 
     async def test_floor_excluded_shows_stay_excluded_once_the_window_is_stored(self):
         """The end-to-end promise: a floor-excluded show is absent from the
@@ -266,8 +322,8 @@ class InstanceFloorTests(CacheTestCase):
         self.assertIn("kept-drama", ids)
         self.assertNotIn("excluded-anime", ids)
 
-        cached, _ = await calendar_cache.read_cached_window(SHOWS.key, date(2026, 7, 6))
-        cached_slugs = {e["show"]["ids"]["slug"] for e in cached}
+        window, _ = await calendar_cache.read_cached_window(SHOWS.key, date(2026, 7, 6))
+        cached_slugs = {g["by_source"]["trakt"]["id"] for g in window.groups}
         self.assertEqual(cached_slugs, {"kept-drama"})
 
 
@@ -281,6 +337,12 @@ class WindowOverrunTests(CacheTestCase):
     — two "House of the Dragon S03E03"s on the 5th, and so on.
     """
 
+    async def _fill(self, endpoint, body, start):
+        client = _CaptureClient(body)
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
+            records, _ = await calendar_cache.fetch_window_records(endpoint, self.settings, start)
+        return records
+
     async def test_a_window_keeps_only_its_own_seven_days(self):
         body = [
             _entry("day-before", "2026-07-05T12:00:00Z"),    # the previous window's
@@ -289,20 +351,15 @@ class WindowOverrunTests(CacheTestCase):
             _entry("day-after", "2026-07-13T00:30:00Z"),     # the next window's
             _entry("months-later", "2026-09-05T12:00:00Z"),  # the real overrun
         ]
-        client = _CaptureClient(body)
-        with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
-        self.assertEqual([e["show"]["ids"]["slug"] for e in entries],
-                         ["first-day", "last-day"])
+        records = await self._fill(SHOWS, body, date(2026, 7, 6))
+        self.assertEqual([r.id for r in records], ["first-day", "last-day"])
 
     async def test_adjacent_windows_no_longer_both_claim_the_same_airing(self):
         """The boundary case the trim exists for: whichever window Trakt hands an
         airing to, exactly one window keeps it."""
         shared = _entry("house-of-the-dragon", "2026-07-06T01:00:00Z", season=3, number=3)
-        client = _CaptureClient([shared])
-        with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            earlier = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 6, 29))
-            owning = await calendar_cache.fetch_window_raw(SHOWS, self.settings, date(2026, 7, 6))
+        earlier = await self._fill(SHOWS, [shared], date(2026, 6, 29))
+        owning = await self._fill(SHOWS, [shared], date(2026, 7, 6))
         self.assertEqual(earlier, [])
         self.assertEqual(len(owning), 1)
 
@@ -310,10 +367,11 @@ class WindowOverrunTests(CacheTestCase):
         """Windows cached BEFORE the trim existed overlap, and would keep drawing
         doubled cards until their TTL ran out. The read path deduplicates too, so
         the fix lands without anyone having to clear the cache."""
-        airing = _entry("house-of-the-dragon", "2026-07-06T01:00:00Z", season=3, number=3)
+        airing = calendar_records(
+            [_entry("house-of-the-dragon", "2026-07-06T01:00:00Z", season=3, number=3)], SHOWS)
         now = 1_800_000_000
         for start in (date(2026, 6, 29), date(2026, 7, 6)):
-            await calendar_cache.store_window(SHOWS.key, start, [airing], 600, now)
+            await calendar_cache.store_window(SHOWS.key, start, airing, 600, now, sources=["trakt"])
 
         items, _ = await calendar_cache.read_month(
             SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7,
@@ -329,7 +387,7 @@ class WindowOverrunTests(CacheTestCase):
             with self.subTest(endpoint=key):
                 client = _CaptureClient([])
                 with patch("app.providers.trakt.transport.shared_client", return_value=client):
-                    await calendar_cache.fetch_window_raw(endpoint, self.settings, date(2026, 7, 6))
+                    await calendar_cache.fetch_window_records(endpoint, self.settings, date(2026, 7, 6))
                 path, _, query = client.url.partition("?")
                 self.assertTrue(
                     path.endswith(f"/calendars/all/{trakt_calendar.calendar_path(endpoint)}/2026-07-06/7"), path)
@@ -344,23 +402,46 @@ class WindowOverrunTests(CacheTestCase):
             {"released": "2026-07-08", "movie": {"title": "In Range", "ids": {"slug": "in-range", "trakt": 1}}},
             {"released": "2026-07-30", "movie": {"title": "Overrun", "ids": {"slug": "overrun", "trakt": 2}}},
         ]
-        client = _CaptureClient(body)
-        with patch("app.providers.trakt.transport.shared_client", return_value=client):
-            entries = await calendar_cache.fetch_window_raw(movies, self.settings, date(2026, 7, 6))
-        self.assertEqual([e["movie"]["title"] for e in entries], ["In Range"])
+        records = await self._fill(movies, body, date(2026, 7, 6))
+        self.assertEqual([r.title for r in records], ["In Range"])
 
     async def test_two_different_episodes_of_one_show_are_not_confused(self):
         """Dedup keys on the airing, not the show — a show legitimately appears
         many times in a month."""
-        entries = [
+        records = calendar_records([
             _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=9, number=7),
             _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=9, number=7),  # repeat
             _entry("rick-and-morty", "2026-07-07T01:00:00Z", season=9, number=8),
             _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=0, number=76),  # a special
-        ]
-        kept = calendar_cache.dedupe_entries(entries, "show")
-        self.assertEqual([(e["episode"]["season"], e["episode"]["number"]) for e in kept],
+        ], SHOWS)
+        kept = calendar_cache.dedupe_records(records)
+        self.assertEqual([(r.season, r.episode_number) for r in kept],
                          [(9, 7), (9, 8), (0, 76)])
+
+    async def test_each_of_those_episodes_gets_its_own_stored_group(self):
+        """The merge unit is (title, season, episode), so one show's different
+        episodes must never collapse into one another — which is the same
+        statement as the test above, made about what actually gets written."""
+        records = calendar_records([
+            _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=9, number=7),
+            _entry("rick-and-morty", "2026-07-07T01:00:00Z", season=9, number=8),
+            _entry("rick-and-morty", "2026-07-06T01:00:00Z", season=0, number=76),
+        ], SHOWS)
+        groups = calendar_cache.group_records(records)
+        self.assertEqual(len(groups), 3)
+        self.assertEqual(len({g["key"] for g in groups}), 3)
+
+    async def test_one_episode_listed_twice_at_different_times_stays_two_cards(self):
+        """A repeated airing is not a duplicate of itself: the calendar has
+        always drawn both, and a group key that overwrote would silently lose
+        one."""
+        records = calendar_records([
+            _entry("repeat", "2026-07-06T01:00:00Z", season=1, number=1),
+            _entry("repeat", "2026-07-06T09:00:00Z", season=1, number=1),
+        ], SHOWS)
+        groups = calendar_cache.group_records(records)
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(len({g["key"] for g in groups}), 2)
 
 
 # ---------------------------------------------------------------------------
@@ -382,57 +463,81 @@ class ReadPathTests(CacheTestCase):
     async def test_ttl_expiry_triggers_a_refetch(self):
         self.settings.calendar_cache_ttl_minutes = 10
         fetch = AsyncMock(side_effect=[
-            [_entry("first", "2026-07-06T12:00:00Z")],
-            [_entry("second", "2026-07-06T12:00:00Z")],
+            (calendar_records([_entry("first", "2026-07-06T12:00:00Z")], SHOWS), ["trakt"]),
+            (calendar_records([_entry("second", "2026-07-06T12:00:00Z")], SHOWS), ["trakt"]),
         ])
-        with patch("app.calendar.cache.fetch_window_raw", fetch):
-            entries, cached_at = await calendar_cache.load_window(
+        with patch("app.calendar.cache.fetch_window_records", fetch):
+            window, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000)
-            self.assertEqual(entries[0]["show"]["ids"]["slug"], "first")
+            self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "first")
             # Within TTL: served from cache, no second fetch.
-            entries, _ = await calendar_cache.load_window(
+            window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000 + 9 * 60)
-            self.assertEqual(entries[0]["show"]["ids"]["slug"], "first")
+            self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "first")
             self.assertEqual(fetch.call_count, 1)
             # Past TTL: refetched.
-            entries, _ = await calendar_cache.load_window(
+            window, _ = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), now=1000 + 11 * 60)
-            self.assertEqual(entries[0]["show"]["ids"]["slug"], "second")
+            self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "second")
             self.assertEqual(fetch.call_count, 2)
 
     async def test_public_read_never_fetches_and_serves_what_is_cached(self):
-        # Nothing cached, fetch disabled -> empty, and Trakt is never asked.
+        # Nothing cached, fetch disabled -> empty, and no source is ever asked.
         fetch = AsyncMock(side_effect=AssertionError("must not fetch"))
-        with patch("app.calendar.cache.fetch_window_raw", fetch):
-            entries, cached_at = await calendar_cache.load_window(
+        with patch("app.calendar.cache.fetch_window_records", fetch):
+            window, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), allow_fetch=False)
-        self.assertEqual(entries, [])
+        self.assertEqual(window.groups, [])
         self.assertIsNone(cached_at)
         fetch.assert_not_awaited()
 
     async def test_public_read_serves_stale_cache_without_refetching(self):
         self.settings.calendar_cache_ttl_minutes = 10
-        first = AsyncMock(return_value=[_entry("cached", "2026-07-06T12:00:00Z")])
-        with patch("app.calendar.cache.fetch_window_raw", first):
+        with patch("app.calendar.cache.fetch_window_records",
+                   window_fetch([_entry("cached", "2026-07-06T12:00:00Z")])):
             await calendar_cache.load_window(SHOWS, self.settings, date(2026, 7, 6), now=1000)
         # Long past the TTL, but a public read must serve the stale copy, not fetch.
         never = AsyncMock(side_effect=AssertionError("must not fetch"))
-        with patch("app.calendar.cache.fetch_window_raw", never):
-            entries, cached_at = await calendar_cache.load_window(
+        with patch("app.calendar.cache.fetch_window_records", never):
+            window, cached_at = await calendar_cache.load_window(
                 SHOWS, self.settings, date(2026, 7, 6), allow_fetch=False, now=10 ** 9)
-        self.assertEqual(entries[0]["show"]["ids"]["slug"], "cached")
+        self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "cached")
         self.assertEqual(cached_at, 1000)
+
+    async def test_a_window_stored_in_an_older_shape_reads_as_a_miss(self):
+        """Every window written before the stored shape changed is a bare list.
+        It must read as a MISS — refetched, not raised over and not handed to the
+        read path as though it were groups. With a ten-minute TTL the whole cache
+        turns over in ten minutes, so there is nothing to migrate."""
+        import json
+        import zlib
+        from app.cache import COMPRESS_LEVEL
+        legacy = zlib.compress(json.dumps(
+            [{"first_aired": "2026-07-06T12:00:00Z",
+              "show": {"title": "Old", "ids": {"slug": "old", "trakt": 1}}}]).encode(),
+            COMPRESS_LEVEL)
+        await db.execute(
+            "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (calendar_cache.cache_key(SHOWS.key, date(2026, 7, 6)), legacy, 1000, 600, len(legacy)),
+        )
+        self.assertIsNone(await calendar_cache.read_cached_window(SHOWS.key, date(2026, 7, 6)))
+        with patch("app.calendar.cache.fetch_window_records",
+                   window_fetch([_entry("fresh", "2026-07-06T12:00:00Z")])):
+            window, _ = await calendar_cache.load_window(
+                SHOWS, self.settings, date(2026, 7, 6), now=1001)
+        self.assertEqual(window.groups[0]["by_source"]["trakt"]["id"], "fresh")
 
     async def _read_boundary(self, tz_name, year, month):
         """read_month for a single item airing 2026-03-01T02:00Z, in tz_name."""
         target_window = calendar_cache.window_start(date(2026, 3, 1))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == target_window:
                 return [_entry("boundary", "2026-03-01T02:00:00Z")]
             return []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             items, _ = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo(tz_name), year=year, month=month)
         return {i.id for i in items}
@@ -446,9 +551,7 @@ class ReadPathTests(CacheTestCase):
         self.assertNotIn("boundary", await self._read_boundary("Europe/Athens", 2026, 2))
 
     async def test_read_month_reports_the_oldest_window_as_of(self):
-        async def fake(endpoint, settings, start):
-            return []
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
             _, as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=555)
         self.assertEqual(as_of, 555)
@@ -469,11 +572,11 @@ class AssembleRangeTests(CacheTestCase):
         the ±1-day pad's neighbour), never all of July's five."""
         seen: list[date] = []
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             seen.append(start)
             return []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 15), end_date=date(2026, 7, 15))
@@ -493,14 +596,14 @@ class AssembleRangeTests(CacheTestCase):
         before = _entry("before-boundary", "2026-07-12T20:00:00Z")   # 13 Jul 10:00 local
         after = _entry("after-boundary", "2026-07-13T05:00:00Z")     # 13 Jul 19:00 local
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == early_window:
                 return [before]
             if start == late_window:
                 return [after]
             return []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=tz,
                 start_date=date(2026, 7, 13), end_date=date(2026, 7, 13))
@@ -521,8 +624,7 @@ class AssembleRangeTests(CacheTestCase):
             entries.append(entry)
 
         async def read(networks):
-            with patch("app.calendar.cache.fetch_window_raw",
-                       AsyncMock(return_value=entries)):
+            with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
                 grouped, _ = await calendar_cache.assemble_range(
                     SHOWS, self.settings, tz=ZoneInfo("UTC"),
                     start_date=date(2026, 7, 15), end_date=date(2026, 7, 15),
@@ -547,14 +649,14 @@ class AssembleRangeTests(CacheTestCase):
         from_w2 = _entry("dup", "2026-07-15T20:00:00Z", season=3, number=3)
         from_w2["show"]["title"] = "from the later window"
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == w1:
                 return [from_w1]
             if start == w2:
                 return [from_w2]
             return []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
@@ -570,12 +672,12 @@ class AssembleRangeTests(CacheTestCase):
         boom_window = calendar_cache.window_start(date(2026, 7, 20))
         self.assertNotEqual(good_window, boom_window)
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == boom_window:
                 raise TraktError("Trakt unreachable", 503)
             return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31))
@@ -586,10 +688,10 @@ class AssembleRangeTests(CacheTestCase):
     async def test_every_window_failing_raises(self):
         """A span where nothing loaded and nothing was cached has nothing to
         show, so it surfaces as a hard error rather than a silent empty month."""
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             with self.assertRaises(TraktError):
                 await calendar_cache.assemble_range(
                     SHOWS, self.settings, tz=ZoneInfo("UTC"),
@@ -600,10 +702,10 @@ class AssembleRangeTests(CacheTestCase):
         b = _entry("b", "2026-07-09T12:00:00Z")
         target = calendar_cache.window_start(date(2026, 7, 8))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             return [a, b] if start == target else []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 1), end_date=date(2026, 7, 31),
@@ -621,12 +723,12 @@ class AssembleRangeTests(CacheTestCase):
         good_window = calendar_cache.window_start(date(2026, 7, 8))
         boom_window = calendar_cache.window_start(date(2026, 7, 20))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == boom_window:
                 raise TraktError("Trakt unreachable", 503)
             return [_entry("good", "2026-07-08T12:00:00Z")] if start == good_window else []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             items, _as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7)
         self.assertEqual({i.id for i in items}, {"good"})
@@ -758,10 +860,40 @@ class GoldenFilterTests(unittest.TestCase):
     def setUpClass(cls):
         cls.fixture = json.loads((FIXTURES / "calendar_filter_golden.json").read_text(encoding="utf-8"))
 
+    @staticmethod
+    def _as_records(entries, media_key):
+        """The fixture's captured payloads as the records the filter now reads.
+
+        THE FIXTURE IS UNCHANGED AND STILL THE SUBJECT — it is a real Trakt
+        response trimmed to the three fields the predicate reads, and each field
+        arrives on a Record spelled exactly as the normalizer spells it, so this
+        is the same live-checked data reaching the same rule by the route the app
+        now takes. `country` is upper-cased here for the same reason the
+        normalizer upper-cases it: that is the display form, and a spec matching
+        it only because it was left lower would be a test that passes for the
+        wrong reason.
+        """
+        records = []
+        for entry in entries:
+            media = entry[media_key]
+            records.append(SimpleNamespace(
+                slug=media["ids"]["slug"],
+                genres=list(media.get("genres") or []),
+                country=(media.get("country") or "").upper(),
+                certification=(media.get("certification") or "").upper(),
+            ))
+        return records
+
     def _kept_slugs(self, spec):
-        kept = calendar_filter.filter_entries(
-            self.fixture["entries"], self.fixture["media_key"], spec["genres"], spec["countries"])
-        return {e["show"]["ids"]["slug"] for e in kept}
+        kept = calendar_filter.filter_records(
+            self._as_records(self.fixture["entries"], self.fixture["media_key"]),
+            spec["genres"], spec["countries"])
+        return {r.slug for r in kept}
+
+    def _kept_cert_slugs(self, key, media_key, spec_key):
+        kept = calendar_filter.filter_records(
+            self._as_records(self.fixture[key], media_key), "", "", self.fixture[spec_key])
+        return {r.slug for r in kept}
 
     def test_reproduces_trakt_exclude_style_filtering(self):
         self.assertEqual(
@@ -776,67 +908,76 @@ class GoldenFilterTests(unittest.TestCase):
         )
 
     def test_show_certification_exclude(self):
-        kept = calendar_filter.filter_entries(
-            self.fixture["cert_entries"], "show", "", "", self.fixture["cert_exclude_spec"])
         self.assertEqual(
-            {e["show"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_cert_exclude"]))
+            self._kept_cert_slugs("cert_entries", "show", "cert_exclude_spec"),
+            set(self.fixture["expected_cert_exclude"]))
 
     def test_show_certification_include(self):
-        kept = calendar_filter.filter_entries(
-            self.fixture["cert_entries"], "show", "", "", self.fixture["cert_include_spec"])
         self.assertEqual(
-            {e["show"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_cert_include"]))
+            self._kept_cert_slugs("cert_entries", "show", "cert_include_spec"),
+            set(self.fixture["expected_cert_include"]))
 
     def test_movie_certification_exclude(self):
         """Movies use the MPA vocabulary, a different set of tokens from the
         shows' TV-* one, but read from the same `certification` key."""
-        kept = calendar_filter.filter_entries(
-            self.fixture["movie_cert_entries"], self.fixture["movie_media_key"], "", "",
-            self.fixture["movie_cert_exclude_spec"])
         self.assertEqual(
-            {e["movie"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_movie_cert_exclude"]))
+            self._kept_cert_slugs("movie_cert_entries", self.fixture["movie_media_key"],
+                                  "movie_cert_exclude_spec"),
+            set(self.fixture["expected_movie_cert_exclude"]))
 
     def test_movie_certification_include(self):
-        kept = calendar_filter.filter_entries(
-            self.fixture["movie_cert_entries"], self.fixture["movie_media_key"], "", "",
-            self.fixture["movie_cert_include_spec"])
         self.assertEqual(
-            {e["movie"]["ids"]["slug"] for e in kept}, set(self.fixture["expected_movie_cert_include"]))
+            self._kept_cert_slugs("movie_cert_entries", self.fixture["movie_media_key"],
+                                  "movie_cert_include_spec"),
+            set(self.fixture["expected_movie_cert_include"]))
 
 
 class FilterEdgeCaseTests(unittest.TestCase):
     """The live sample barely covered empty genres / empty country, so pin them
     down explicitly against the predicate."""
     def test_empty_genres_kept_by_exclude_only_dropped_by_include(self):
-        no_genres = {"genres": [], "country": "us"}
         g_inc, g_exc = calendar_filter.parse_spec("-anime,-music")
-        self.assertTrue(calendar_filter.keep_media(no_genres, g_inc, g_exc, set(), set(), set(), set()))
+        self.assertTrue(calendar_filter.keep_values(
+            [], "us", "", g_inc, g_exc, set(), set(), set(), set()))
         # A genre INCLUDE spec has something to be a member of; an item with no
         # genres is a member of nothing, so it drops.
         gi_inc, gi_exc = calendar_filter.parse_spec("drama,comedy")
-        self.assertFalse(calendar_filter.keep_media(no_genres, gi_inc, gi_exc, set(), set(), set(), set()))
+        self.assertFalse(calendar_filter.keep_values(
+            [], "us", "", gi_inc, gi_exc, set(), set(), set(), set()))
 
     def test_missing_country_kept_by_exclude_dropped_by_allowlist(self):
-        no_country = {"genres": ["drama"], "country": ""}
         c_inc, c_exc = calendar_filter.parse_spec("-kr")
-        self.assertTrue(calendar_filter.keep_media(no_country, set(), set(), c_inc, c_exc, set(), set()))
+        self.assertTrue(calendar_filter.keep_values(
+            ["drama"], "", "", set(), set(), c_inc, c_exc, set(), set()))
         ai_inc, ai_exc = calendar_filter.parse_spec("us,gb,jp")
-        self.assertFalse(calendar_filter.keep_media(no_country, set(), set(), ai_inc, ai_exc, set(), set()))
+        self.assertFalse(calendar_filter.keep_values(
+            ["drama"], "", "", set(), set(), ai_inc, ai_exc, set(), set()))
 
     def test_missing_certification_kept_by_exclude_dropped_by_allowlist(self):
         """Certification follows the country precedent, not the genre one: it is
         a single scalar, so a missing value is membership in nothing."""
-        no_cert = {"genres": ["drama"], "country": "us"}
         cert_inc, cert_exc = calendar_filter.parse_spec("-tv-ma")
-        self.assertTrue(
-            calendar_filter.keep_media(no_cert, set(), set(), set(), set(), cert_inc, cert_exc))
+        self.assertTrue(calendar_filter.keep_values(
+            ["drama"], "us", "", set(), set(), set(), set(), cert_inc, cert_exc))
         ci_inc, ci_exc = calendar_filter.parse_spec("tv-pg,tv-14")
-        self.assertFalse(
-            calendar_filter.keep_media(no_cert, set(), set(), set(), set(), ci_inc, ci_exc))
+        self.assertFalse(calendar_filter.keep_values(
+            ["drama"], "us", "", set(), set(), set(), set(), ci_inc, ci_exc))
+
+    def test_the_display_case_of_a_value_does_not_decide_the_match(self):
+        """A Record carries the country and the certification in their DISPLAY
+        form (upper), and a spec is written lower. The predicate lowercases both
+        sides, and the whole per-viewer country filter silently stops matching if
+        that ever changes."""
+        _, c_exc = calendar_filter.parse_spec("-kr")
+        self.assertFalse(calendar_filter.keep_values(
+            ["drama"], "KR", "", set(), set(), set(), c_exc, set(), set()))
+        _, cert_exc = calendar_filter.parse_spec("-tv-ma")
+        self.assertFalse(calendar_filter.keep_values(
+            ["drama"], "US", "TV-MA", set(), set(), set(), set(), set(), cert_exc))
 
     def test_no_spec_is_a_pass_through(self):
-        entries = [{"show": {"genres": ["anime"], "country": "kr"}}]
-        self.assertEqual(calendar_filter.filter_entries(entries, "show", "", ""), entries)
+        records = [SimpleNamespace(genres=["anime"], country="KR", certification="")]
+        self.assertEqual(calendar_filter.filter_records(records, "", ""), records)
 
 
 class NetworkFilterTests(unittest.TestCase):

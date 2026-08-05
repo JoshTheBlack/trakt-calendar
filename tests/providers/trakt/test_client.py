@@ -21,6 +21,7 @@ import httpx
 import pytest
 
 from app.endpoints import get_endpoint
+from app.providers.base import Source
 from app.providers.trakt import TraktError
 from app.providers.trakt import calendar as trakt_calendar
 from app.providers.trakt import sync as trakt_sync
@@ -440,11 +441,31 @@ class TestFetchWindow:
         assert "X-Pagination-Page" not in client.sent_headers
         assert "X-Pagination-Limit" not in client.sent_headers
 
-    def test_the_entries_come_back_untouched(self):
-        """Raw, unfiltered and unnormalized: the two callers filter differently
-        and one of them stores the result, so deciding here would make one wrong."""
-        entries = [{"show": {"title": "A"}}, {"show": {"title": "B"}}]
-        assert self._fetch(_CaptureClient(body=entries)) == entries
+    def test_the_entries_come_back_as_records_and_unfiltered(self):
+        """NORMALIZED but not filtered. Normalizing here is what lets the cache
+        store a second source's window in the same rows without learning either
+        payload's field layout; filtering is still the caller's, because the
+        instance floor and one viewer's own spec are different questions asked at
+        different moments."""
+        entries = [
+            {"first_aired": "2026-07-06T20:00:00Z",
+             "show": {"title": "A", "ids": {"slug": "a", "trakt": 1}}},
+            {"first_aired": "2026-07-07T20:00:00Z",
+             "show": {"title": "B", "ids": {"slug": "b", "trakt": 2}}},
+        ]
+        records = self._fetch(_CaptureClient(body=entries))
+        assert [r.title for r in records] == ["A", "B"]
+        assert {r.source for r in records} == {Source.TRAKT}
+
+    def test_an_entry_the_normalizer_cannot_read_is_dropped_not_raised_over(self):
+        """A window is a list somebody else assembled, and one unusable row in it
+        is not a reason to lose the other four hundred."""
+        entries = [
+            {"show": {"title": "No air date", "ids": {"slug": "a", "trakt": 1}}},
+            {"first_aired": "2026-07-07T20:00:00Z",
+             "show": {"title": "Fine", "ids": {"slug": "b", "trakt": 2}}},
+        ]
+        assert [r.title for r in self._fetch(_CaptureClient(body=entries))] == ["Fine"]
 
     def test_a_401_names_the_credentials_to_check(self):
         with pytest.raises(TraktError) as exc:

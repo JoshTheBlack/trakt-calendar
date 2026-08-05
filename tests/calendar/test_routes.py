@@ -30,7 +30,7 @@ from app.calendar import state as calendar_state
 from app.providers.trakt import TraktError
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import ORIGIN, migrated_db
+from tests.support import ORIGIN, migrated_db, window_fetch
 
 
 def _configured_settings() -> Settings:
@@ -86,8 +86,7 @@ class SharedCalendarIndependentOverlayTests(CalendarRouteTestCase):
             _entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
             _entry("show-b", "Show B", "2026-07-16T20:00:00Z"),
         ]
-        fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -201,8 +200,7 @@ class ViewPrefsPersistenceTests(CalendarRouteTestCase):
         super().setUp()
         self.user_id = self._make_user("plain_viewer", is_admin=False)
         self.sign_in_as(self.user_id)
-        fetch = AsyncMock(return_value=[])
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -257,8 +255,8 @@ class ViewerFilterTests(CalendarRouteTestCase):
         comedy["show"]["genres"] = ["comedy"]
         comedy["show"]["network"] = "Netflix"
         comedy["show"]["certification"] = "TV-MA"
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=[drama, comedy]))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([drama, comedy]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -371,12 +369,12 @@ class TimezonePickerTests(CalendarRouteTestCase):
         self.sign_in_as(self.user_id)
         target_window = calendar_cache.window_start(date(2026, 3, 1))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == target_window:
                 return [_entry("boundary", "Boundary Show", "2026-03-01T02:00:00Z")]
             return []
 
-        patcher = patch("app.calendar.cache.fetch_window_raw", side_effect=fake)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(fake))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -423,14 +421,14 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         good_window = calendar_cache.window_start(date(2026, 7, 8))
         boom_window = calendar_cache.window_start(date(2026, 7, 20))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == boom_window:
                 raise TraktError("Trakt unreachable", 503)
             if start == good_window:
                 return [_entry("show-good", "Good Show", "2026-07-08T20:00:00Z")]
             return []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get("/?year=2026&month=7")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Good Show", resp.text)
@@ -441,10 +439,10 @@ class PartialDataBannerTests(CalendarRouteTestCase):
     def test_every_window_failing_shows_the_error_banner_not_the_warning(self):
         """No window loaded and nothing cached: there is nothing to show, so the
         month falls to the hard error banner, not the partial warning."""
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get("/?year=2026&month=7")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("error-banner", resp.text)
@@ -494,8 +492,8 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
             _entry("show-a", "Show A", "2026-07-17T20:00:00Z"),
             _entry("show-c", "Show C", "2026-07-20T20:00:00Z"),
         ]
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -565,10 +563,10 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         month look new the next time it loads properly."""
         self._seed_baseline(last_show_ids=["show-a", "show-b", "show-c"], last_count=4)
 
-        async def boom(endpoint, settings, start):
+        def boom(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=boom):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(boom)):
             resp = self.client.get(self.PAGE)
         self.assertIn("error-banner", resp.text)
         stored = self._stored_baseline()
@@ -600,8 +598,8 @@ class CalendarMarkupTests(CalendarRouteTestCase):
             _entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
             _entry("show-b", "Show B", "2026-07-16T20:00:00Z"),
         ]
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -726,8 +724,8 @@ class DayLayoutTests(CalendarRouteTestCase):
         self.sign_in_as(self.user_id)
         entries = [_entry(f"show-{n}", f"Show {n}", "2026-07-15T20:00:00Z") for n in range(3)]
         entries.append(_entry("solo", "Solo", "2026-07-16T20:00:00Z"))
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -791,7 +789,7 @@ class RouteSplitTests(CalendarRouteTestCase):
         self.assertEqual(resp.headers["location"], "/calendar?month=7&year=2026&endpoint=shows")
 
     def test_the_calendar_lives_at_its_own_path(self):
-        with patch("app.calendar.cache.fetch_window_raw", AsyncMock(return_value=[])):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
             page = self.client.get("/calendar?year=2026&month=7")
         self.assertEqual(page.status_code, 200)
         self.assertIn('id="statsBar"', page.text)
@@ -809,8 +807,8 @@ class CalendarShellTests(CalendarRouteTestCase):
         # renders inline, so the split is actually exercised.
         entries = [_entry(f"show-{day}", f"Show {day}", f"2026-07-{day:02d}T20:00:00Z")
                    for day in range(1, 11)]
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -847,8 +845,8 @@ class CalendarShellTests(CalendarRouteTestCase):
         self.assertIn('href="#day-2026-07-10"', html)
 
     def test_a_month_that_fits_asks_for_nothing(self):
-        with patch("app.calendar.cache.fetch_window_raw",
-                   AsyncMock(return_value=[_entry("solo", "Solo Show", "2026-07-04T20:00:00Z")])):
+        with patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([_entry("solo", "Solo Show", "2026-07-04T20:00:00Z")])):
             html = self.client.get("/calendar?year=2026&month=7").text
         self.assertEqual(_day_sections(html), ["2026-07-04"])
         self.assertEqual(_day_urls(html), [])
@@ -870,8 +868,8 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         # Outside the requested span, so a route that read the whole month and
         # forgot to trim would be caught.
         self.early = _entry("the-early", "The Early", "2026-07-02T20:00:00Z")
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=[self.early, self.drama, self.comedy]))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([self.early, self.drama, self.comedy]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -959,10 +957,10 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         """The rest of the month is already on screen and correct, so one day that
         couldn't be loaded is a gap, not a broken page — and it must not sit there
         looking like it is still loading."""
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get(self.DAY)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("warning-banner", resp.text)
@@ -982,12 +980,12 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         boom = calendar_cache.window_start(date(2026, 7, 6))
         self.assertNotEqual(calendar_cache.window_start(straddling), boom)
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == boom:
                 raise TraktError("Trakt unreachable", 503)
             return [_entry("the-late", "The Late", "2026-07-13T20:00:00Z")]
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get(
                 "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-13")
         self.assertEqual(resp.status_code, 200)
@@ -1011,7 +1009,7 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         super().setUp()
         self.user_id = self._make_user("header_viewer")
         self.sign_in_as(self.user_id)
-        patcher = patch("app.calendar.cache.fetch_window_raw", AsyncMock(return_value=[]))
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([]))
         patcher.start()
         self.addCleanup(patcher.stop)
 

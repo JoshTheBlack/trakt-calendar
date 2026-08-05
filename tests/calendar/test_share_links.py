@@ -26,7 +26,7 @@ from app.calendar import cache as calendar_cache, state as calendar_state, share
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.main import app
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, ORIGIN, calendar_records
 
 BASE_URL = ORIGIN
 
@@ -65,7 +65,9 @@ class ShareTestCase(AppTestCase):
 
     def _seed_window(self, endpoint_key: str, day: date, entries: list[dict], ttl: int = 600) -> None:
         start = calendar_cache.window_start(day)
-        asyncio.run(calendar_cache.store_window(endpoint_key, start, entries, ttl, db.now()))
+        asyncio.run(calendar_cache.store_window(
+            endpoint_key, start, calendar_records(entries, get_endpoint(endpoint_key)),
+            ttl, db.now(), sources=["trakt"]))
 
     def _enable_all_and_set_slug(self, user_id: int, slug: str) -> dict:
         """Drive the whole panel through the real routes, as the owner would."""
@@ -90,7 +92,7 @@ class ThreeShapesResolveTheSameUserTests(ShareTestCase):
         self.client.cookies.clear()  # every request below is anonymous
         # Seeded directly into the cache rather than via a patched fetch: a
         # share read never fetches (allow_fetch=False), so a mocked
-        # fetch_window_raw would simply never be called.
+        # patched fill would simply never be called.
         self._seed_window("shows/new", date(2026, 7, 15), [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")])
 
     def test_token_username_and_slug_all_render_the_same_calendar(self):
@@ -176,7 +178,7 @@ class NeverFetchTests(ShareTestCase):
         async def _raise(*args, **kwargs):
             raise AssertionError("a public share request must never fetch from Trakt")
 
-        patcher = patch("app.calendar.cache.fetch_window_raw", side_effect=_raise)
+        patcher = patch("app.calendar.cache.fetch_window_records", side_effect=_raise)
         patcher.start()
         self.addCleanup(patcher.stop)
 

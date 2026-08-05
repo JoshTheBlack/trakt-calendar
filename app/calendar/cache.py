@@ -8,37 +8,47 @@ locked by live measurement against the real Trakt API:
     viewers looking at the same month hit the same cache rows. A month view is
     five or six window reads, each cached and TTL'd independently.
 
-  - STORE RAW, PRUNED, UTC. Trakt's entries are kept verbatim (raw ISO-UTC
-    timestamps, no timezone conversion and no normalization), pruned to only the
-    fields the normalizer and the filters read. `extended=full,images` returns a
-    great deal the app never touches; pruning is the single biggest size lever
-    and also stops the cache growing when Trakt adds fields.
+  - STORE EACH SOURCE'S NORMALIZED RECORD, GROUPED BY TITLE, VERSIONED. A stored
+    window is `{"v": 2, "sources": [...], "entries": [{key, ids, by_source}]}`.
+    Normalizing on the way IN is what lets a second source fill these same rows:
+    a payload stored raw would have to be interpreted at read time by something
+    that knows every source's field layout, and that something is exactly what a
+    third source would then have to be added to. Nothing viewer-dependent may go
+    in — the four local spellings of an air time are derived at READ, from
+    `air_ts`, by app/providers/base.py's `render`.
 
-  - `genres`/`countries`/`show_certifications`/`movie_certifications` ARE NO
-    LONGER SENT TO TRAKT AS QUERY PARAMS, but they DO apply once, at fetch
-    time, as the instance-wide content floor: an item any of those four
-    Settings fields excludes is filtered out of the raw response before it is
-    ever pruned and stored, so it never reaches api_cache at all (see
-    app/calendar/filter.py). Every OTHER filter dimension — a signed-in
-    viewer's own genre/country/certification/network choices — is a separate,
-    read-time layer applied per viewer against that same floored cache.
+    `sources` NAMES WHO ANSWERED THIS FILL, and its absence from that list means
+    UNKNOWN rather than "had nothing": a window stored while one source was
+    failing must not be served for a whole TTL as though that source had been
+    asked and was empty. A payload without `"v": 2` reads as a MISS and is
+    refetched, so there is nothing to migrate — with a ten-minute TTL the whole
+    cache turns over in ten minutes.
 
-  - NO PAGINATION HEADERS. Trakt's calendar endpoints ignore them and return the
-    whole window in one response (verified live); a warning is logged if a
-    pagination header ever appears, in case that changes.
+  - `genres`/`countries`/`show_certifications`/`movie_certifications` ARE NOT
+    SENT TO A SOURCE AS QUERY PARAMS, but they DO apply once, at fetch time, as
+    the instance-wide content floor: an item any of those four Settings fields
+    excludes is filtered out before the window is stored, so it never reaches
+    api_cache at all (see app/calendar/filter.py). Every OTHER filter dimension —
+    a signed-in viewer's own genre/country/certification/network choices — is a
+    separate, read-time layer applied per viewer against that same floored cache.
 
   - TRIM EACH WINDOW TO ITS OWN 7 DAYS. The request is the documented shape
     (/calendars/{target}/{path}/{start_date}/{days}), but Trakt treats `days` as
     a floor, not a ceiling — measured live, a 7-day window came back carrying
     entries two months past its end — so neighbouring windows overlap heavily.
     Without the trim a month read concatenates those overlaps and renders the
-    same episode two or three times (see in_window / dedupe_entries).
+    same episode two or three times (see in_window / dedupe_records).
 
 The cache blob and the detail-lookup cache share one table (api_cache); this
 module owns the calendar keys and the per-window TTL. THE READ PATH — read_month
 plus the window helpers below — is what the authenticated calendar route and the
 public share pages both call: pass allow_fetch=False on a share page and it
-serves whatever is cached (even stale, even empty) and never touches Trakt.
+serves whatever is cached (even stale, even empty) and never asks a source.
+
+THIS MODULE NAMES NO SOURCE. It asks the registry which sources can fill a window
+and calls them through their `calendar_port`; which service that is, and how it
+spells its own payload, is that provider package's business and nothing here
+depends on it.
 """
 from __future__ import annotations
 
@@ -49,19 +59,20 @@ import logging
 import zlib
 from datetime import date, datetime, timedelta, timezone
 from itertools import groupby
+from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
 from . import filter as calendar_filter
+from . import resolve as calendar_resolve
 from .. import db
+from .. import providers
 # The kernel's app/cache.py, not this package's sibling — inside app/calendar/
 # `cache` is this very module, so the blob store has to be named the long way.
 from ..cache import COMPRESS_LEVEL
 from ..media import artwork
 from ..perftrace import span
 from ..endpoints import ENDPOINTS, Endpoint
-from ..providers.base import Item
-from ..providers.trakt import TraktError
-from ..providers.trakt import calendar as trakt_calendar
+from ..providers.base import Item, Record, SourceUnavailable, render, resolve_key
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -95,18 +106,15 @@ def aligned_windows(range_start: date, range_end: date) -> list[date]:
     return out
 
 
-def _entry_utc_date(entry: dict) -> str:
-    """The YYYY-MM-DD an entry airs on, in UTC, straight off the stored string.
-
-    Sliced rather than parsed: the cache stores Trakt's raw ISO-UTC timestamp
-    verbatim, so the first ten characters already are the UTC date, and the
-    windows this feeds are UTC-aligned.
-    """
-    return str(entry.get("first_aired") or entry.get("released") or "")[:10]
+def record_utc_date(record: Record) -> date:
+    """The UTC calendar day a record airs on. The windows are UTC-aligned, so
+    this is the only date that decides which window owns it — a viewer's local
+    day is a read-time question and is asked much later."""
+    return datetime.fromtimestamp(record.air_ts, tz=timezone.utc).date()
 
 
-def in_window(entry: dict, start: date) -> bool:
-    """Whether an entry belongs to the 7-day window beginning `start`.
+def in_window(record: Record, start: date) -> bool:
+    """Whether a record belongs to the 7-day window beginning `start`.
 
     NEEDED BECAUSE TRAKT OVERRUNS THE `days` IT IS GIVEN. The request shape is
     exactly the documented one — /calendars/{target}/{path}/{start_date}/{days} —
@@ -133,44 +141,44 @@ def in_window(entry: dict, start: date) -> bool:
     returns. Without this trim a month read concatenates those overlaps and
     renders the same episode two or three times.
 
-    Trimmed on the entry's top-level `first_aired` (or `released` for movies),
-    which is also what the normalizer renders the card from. Checked live across
-    every endpoint: it never disagrees with `episode.first_aired`.
+    Trimmed on the record's own instant, which is also what the card is drawn
+    from. Checked live across every endpoint: the top-level `first_aired` never
+    disagrees with `episode.first_aired`.
     """
-    day = _entry_utc_date(entry)
-    if not day:
-        return False
-    return start.isoformat() <= day < (start + timedelta(days=WINDOW_DAYS)).isoformat()
+    day = record_utc_date(record)
+    return start <= day < start + timedelta(days=WINDOW_DAYS)
 
 
-def entry_identity(entry: dict, media_key: str) -> tuple:
-    """What makes two calendar entries the same airing.
+def record_identity(record: Record) -> tuple:
+    """What makes two records the same airing FROM THE SAME SOURCE.
 
-    The immutable Trakt id rather than the slug (a slug is user-changeable), plus
-    the episode coordinates and the air time — a show legitimately appears many
-    times in a month, and only the same episode at the same moment is a repeat.
+    The immutable source id rather than the slug (a slug is user-changeable),
+    plus the episode coordinates and the air time — a show legitimately appears
+    many times in a month, and only the same episode at the same moment is a
+    repeat. The SOURCE is part of it because two services describing one airing
+    are two records that must both survive to be merged; collapsing them here
+    would throw one away before anything could compare them.
     """
-    media = entry.get(media_key) or {}
-    ids = media.get("ids") or {}
-    episode = entry.get("episode") or {}
+    ids = record.ids or {}
     return (
-        ids.get("trakt") or ids.get("slug"),
-        episode.get("season"),
-        episode.get("number"),
-        entry.get("first_aired") or entry.get("released"),
+        str(record.source),
+        ids.get("trakt") or ids.get("simkl") or ids.get("slug") or record.id,
+        record.season,
+        record.episode_number,
+        record.air_ts,
     )
 
 
-def dedupe_entries(entries: list[dict], media_key: str) -> list[dict]:
+def dedupe_records(records: list[Record]) -> list[Record]:
     """First occurrence of each airing, order preserved."""
     seen: set[tuple] = set()
-    out: list[dict] = []
-    for entry in entries:
-        identity = entry_identity(entry, media_key)
+    out: list[Record] = []
+    for record in records:
+        identity = record_identity(record)
         if identity in seen:
             continue
         seen.add(identity)
-        out.append(entry)
+        out.append(record)
     return out
 
 
@@ -182,136 +190,215 @@ def cache_key(endpoint_key: str, start: date) -> str:
 
 
 # ---------------------------------------------------------------------------
-# pruning — keep only what the normalizer and the filters read
+# grouping — one entry per real title, each source's record kept whole
 # ---------------------------------------------------------------------------
-
-# The immutable ids the normalizer emits. This tuple must stay a superset of
-# what a normalized Item can carry, or the SAME show comes out of a cache hit
-# differently from a cache miss — which is why imdb is here despite nothing
-# reading it yet: the Item carries it, so the cache has to.
 #
-# imdb earns its bytes as a MATCHING id rather than a display one. Measured
-# 2026-07-29: Trakt supplies it on 80.6% of show/movie records, and it is the
-# second chance at recognizing the same title across services when tmdb is
-# absent on one side of the comparison.
-#
-# `mal` and `plex` are deliberately NOT here. Trakt emits mal zero times across
-# 15,701 id blocks, so the key would be permanently empty; plex is a nested
-# object rather than a scalar id and nothing downstream could match on it.
-_MEDIA_ID_KEYS = ("slug", "trakt", "tvdb", "tmdb", "imdb")
-# Every scalar the normalizer or the genre/country/certification filter reads
-# off the media object. `genres`, `country`, and `certification` feed the
-# filter; the rest are display fields.
-_MEDIA_KEYS = (
-    "title", "year", "network", "country", "language", "runtime",
-    "status", "rating", "genres", "overview", "certification",
-)
-_EPISODE_KEYS = ("season", "number", "title")
+# THERE IS NO PRUNING ANY MORE, and its disappearance is the point rather than a
+# side effect. Pruning existed to whitelist which of a raw payload's fields were
+# worth storing; a Record already IS that whitelist, per source, by construction.
+# The whitelist also carried a trap a second source would have walked straight
+# into: it named the id keys it kept, so any id namespace it had not been taught
+# about — a second service's own id, an anime title's `mal` — would have been
+# silently dropped on the way in, and the symptom would have been a matcher that
+# never matched.
+
+PAYLOAD_VERSION = 2
 
 
-def _prune_media(media: dict) -> dict:
-    out = {k: media.get(k) for k in _MEDIA_KEYS if k in media}
-    ids = media.get("ids") or {}
-    out["ids"] = {k: ids.get(k) for k in _MEDIA_ID_KEYS if k in ids}
-    # The normalizer's poster picker reads only images.poster; fanart, logos and
-    # the rest of the extended image set are dropped, which is most of the bytes.
-    poster = (media.get("images") or {}).get("poster")
-    if poster:
-        out["images"] = {"poster": poster}
+def group_key(record: Record) -> str:
+    """The key that decides which records are the SAME AIRING OF THE SAME TITLE.
+
+    (shared identity, season, episode) for an episodic and (shared identity) for
+    a film, exactly as two services listing the same S02E05 have to become one
+    card while one show's different episodes must never collapse. The identity is
+    the cross-source waterfall (app/providers/base.py's resolve_key), never a
+    service's own id — keying on one of those would make the same title arriving
+    from two services two rows for ever.
+
+    A TITLE THE WATERFALL CANNOT KEY GETS A PER-SOURCE KEY and so can never merge
+    with anything. That is deliberate: a visible duplicate is safer than a wrong
+    merge, and a title nobody can name in a shared id space is one there is no
+    honest way to recognize.
+    """
+    identity = resolve_key(record.media, record.ids)
+    base = str(identity) if identity is not None else f"{record.source}:{record.id}"
+    if record.season is not None and record.episode_number is not None:
+        return f"{base}|{record.season}|{record.episode_number}"
+    return base
+
+
+def group_records(records: list[Record]) -> list[dict]:
+    """The stored `entries` list: one group per airing, each source's record kept
+    whole under its own name.
+
+    PROVENANCE IS RECORDED FOR EVERY FIELD, not only for the ones that disagree,
+    because "both sources agreed" and "only one source had it" must be able to
+    render differently and the second is not recoverable from a de-duplicated
+    blob. Storage cost is not a concern here and must not be optimized against —
+    windows measure a few kilobytes compressed, and de-duplicating equal values
+    would destroy the agreement signal to save nothing.
+
+    `ids` IS HOISTED onto the group because it is the MATCH RESULT rather than
+    any one source's value, and it is what the arr/Seerr buttons, the tracker and
+    the ranker read. First writer wins per namespace, which with sources visited
+    in declared order means the earlier source's spelling of an id is the one
+    kept.
+
+    A KEY COLLIDING WITH ITSELF FOR ONE SOURCE is a repeated airing — the same
+    episode listed twice at different times — and gets a distinct key rather than
+    overwriting, because the calendar has always drawn both and this is not the
+    place to decide it should stop. Two records from DIFFERENT sources under one
+    key is the ordinary case and is exactly what the group is for.
+    """
+    index: dict[str, dict] = {}
+    out: list[dict] = []
+    for record in records:
+        base = group_key(record)
+        name = str(record.source)
+        key, bump = base, 1
+        while key in index and name in index[key]["by_source"]:
+            bump += 1
+            key = f"{base}#{bump}"
+        group = index.get(key)
+        if group is None:
+            group = {"key": key, "ids": {}, "by_source": {}}
+            index[key] = group
+            out.append(group)
+        group["by_source"][name] = record.to_dict()
+        for namespace, value in (record.ids or {}).items():
+            if value not in (None, ""):
+                group["ids"].setdefault(namespace, value)
     return out
 
 
-def _poster_sighting(media: dict, media_key: str):
-    """(media_key, tmdb, 'trakt', url) for one pruned media object, or None when
-    it lacks either id — the pair the ranker's poster registry is keyed on."""
-    tmdb_id = (media.get("ids") or {}).get("tmdb")
-    poster = trakt_calendar.poster(media)
-    if not tmdb_id or not poster:
-        return None
-    return (media_key, int(tmdb_id), "trakt", poster)
+class CachedWindow(NamedTuple):
+    """One stored window: its groups, and which sources answered the fill that
+    produced them. A source missing from `sources` was not asked or could not be
+    read, which is a different thing from a source that answered with nothing."""
+    groups: list[dict]
+    sources: tuple[str, ...]
 
 
-def prune_entry(entry: dict, media_key: str) -> dict | None:
-    """Reduce one raw Trakt calendar entry to the fields the read path consumes,
-    or None when it carries no media object (which the normalizer would drop)."""
-    media = entry.get(media_key)
-    if not isinstance(media, dict):
+def _poster_sighting(record: Record):
+    """(media, tmdb, source, url) for one record, or None when it lacks either
+    id — the tuple the ranker's poster registry is keyed on."""
+    tmdb_id = (record.ids or {}).get("tmdb")
+    if not tmdb_id or not record.poster:
         return None
-    out: dict = {media_key: _prune_media(media)}
-    # Both timestamps are kept verbatim — no conversion — because the normalizer
-    # takes whichever is present and converts it into the viewer's tz at read
-    # time. (`released` is a plain date on movies; `first_aired` an ISO UTC ts.)
-    if entry.get("first_aired") is not None:
-        out["first_aired"] = entry["first_aired"]
-    if entry.get("released") is not None:
-        out["released"] = entry["released"]
-    episode = entry.get("episode")
-    if isinstance(episode, dict):
-        out["episode"] = {k: episode.get(k) for k in _EPISODE_KEYS if k in episode}
-    return out
+    try:
+        return (str(record.media), int(tmdb_id), str(record.source), record.poster)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
 # fetch + store + read of one window
 # ---------------------------------------------------------------------------
 
-def _compress(entries) -> bytes:
-    return zlib.compress(json.dumps(entries, separators=(",", ":")).encode("utf-8"), COMPRESS_LEVEL)
+def _compress(payload) -> bytes:
+    return zlib.compress(json.dumps(payload, separators=(",", ":")).encode("utf-8"), COMPRESS_LEVEL)
 
 
-def _decompress(blob) -> list[dict]:
+def _decompress(blob) -> CachedWindow | None:
+    """The stored window, or None for anything this version cannot read.
+
+    A PAYLOAD THAT IS NOT THIS VERSION IS A MISS, NOT AN ERROR. Every row written
+    before the shape changed is a bare list; reading one as a window would either
+    raise on the read path or, worse, hand back groups that are not groups. With
+    a ten-minute TTL the whole cache turns over in ten minutes, so a miss costs
+    one refetch and there is nothing to migrate.
+    """
     data = json.loads(zlib.decompress(blob).decode("utf-8"))
-    return data if isinstance(data, list) else []
+    if not isinstance(data, dict) or data.get("v") != PAYLOAD_VERSION:
+        return None
+    groups = data.get("entries")
+    sources = data.get("sources")
+    if not isinstance(groups, list) or not isinstance(sources, list):
+        return None
+    return CachedWindow([g for g in groups if isinstance(g, dict)],
+                        tuple(str(s) for s in sources))
 
 
-async def fetch_window_raw(endpoint: Endpoint, settings, start: date) -> list[dict]:
-    """Fetch one 7-day window from the source, floor-filtered, PRUNED, and
-    TRIMMED to the window's own 7 days.
+def _covers(provider, start: date) -> bool:
+    """Whether a source's declared reach overlaps this window at all.
 
-    The fetch itself belongs to the source, not to the cache: this module knows
-    what a cached window has to LOOK like, and nothing about how to ask for one.
-    That is what lets a second source reuse this cache instead of the cache
+    ASKED, NEVER ASSUMED. A source whose calendar only publishes a rolling window
+    cannot answer for a month three years ago, and `Capabilities.covers` is where
+    that fact is declared — so no route and nothing here learns a date range
+    belonging to a particular service.
+    """
+    capabilities = provider.capabilities
+    return (capabilities.covers(start)
+            or capabilities.covers(start + timedelta(days=WINDOW_DAYS - 1)))
+
+
+async def fetch_window_records(endpoint: Endpoint, settings, start: date,
+                               *, prefs=None, linked=None) -> tuple[list[Record], list[str]]:
+    """Ask every admitted source what airs in this window, and return
+    (records, the sources that ANSWERED), floor-filtered, trimmed and de-duped.
+
+    THE FETCH BELONGS TO THE SOURCE AND THE SHAPE BELONGS HERE: this module knows
+    what a cached window has to look like and nothing about how to ask for one,
+    which is what lets a second source reuse this cache instead of the cache
     growing a branch per source.
 
-    The trim is not tidiness. Trakt does not honour the `days` bound it is given
-    (see in_window), so consecutive windows overlap by days or weeks; storing
-    what arrived would mean caching the same airings several times over and
-    handing the page duplicate cards for every one of them.
+    A SOURCE THAT REFUSES IS LEFT OUT OF THE ANSWER RATHER THAN FAKED AS EMPTY.
+    Storing a window that claims a source contributed nothing would serve that
+    lie for the whole TTL; leaving it out of `sources` says "unknown", which the
+    read path can mark partial. Only when every source that was asked refused
+    does this raise — there is genuinely nothing to store, and the caller then
+    falls back to the stale copy it may already have.
+
+    The trim is not tidiness. A source may treat the `days` bound as a floor
+    rather than a ceiling (see in_window), so consecutive windows overlap by days
+    or weeks; storing what arrived would mean caching the same airings several
+    times over and handing the page duplicate cards for every one of them.
     """
-    raw = await trakt_calendar.fetch_window(endpoint, settings, start, WINDOW_DAYS)
-    # The instance-wide content floor: an operator who excludes a genre,
-    # country, or certification here means it never enters the shared cache for
-    # ANY viewer, not just their own — applied on the raw entries, before
-    # pruning, the same way the Trakt client's uncached fetch path already reproduces
-    # Trakt's old server-side genre/country filtering (see filter.py).
+    records: list[Record] = []
+    answered: list[str] = []
+    refusal: SourceUnavailable | None = None
+    asked = 0
+    for provider in providers.calendar_sources(prefs=prefs, linked=linked):
+        if not provider.capabilities.answers(endpoint.key) or not _covers(provider, start):
+            continue
+        asked += 1
+        try:
+            got = await provider.calendar_port.fetch_window(endpoint, settings, start, WINDOW_DAYS)
+        except SourceUnavailable as exc:
+            refusal = refusal or exc
+            logger.debug("%s could not answer the %s window starting %s: %s",
+                         provider.source, endpoint.key, start, exc)
+            continue
+        answered.append(str(provider.source))
+        records.extend(got)
+    if asked and not answered:
+        raise refusal
+
+    # The instance-wide content floor: an operator who excludes a genre, country,
+    # or certification here means it never enters the shared cache for ANY
+    # viewer, not just their own. It is the ONE filter applied before storage,
+    # and it is applied to every source's records alike — every other dimension
+    # is a signed-in viewer's own choice and is a read-time layer over these same
+    # shared rows (see filter.py).
     certifications = (
         settings.show_certifications if endpoint.media == "show" else settings.movie_certifications
     )
-    raw = calendar_filter.filter_entries(
-        raw, endpoint.media, settings.genres, settings.countries, certifications,
-    )
-    pruned: list[dict] = []
-    overrun = 0
-    for entry in raw:
-        if not isinstance(entry, dict):
-            continue
-        item = prune_entry(entry, endpoint.media)
-        if item is None:
-            continue
-        if not in_window(item, start):
-            overrun += 1
-            continue
-        pruned.append(item)
+    kept = calendar_filter.filter_records(
+        records, settings.genres, settings.countries, certifications)
+
+    trimmed = [r for r in kept if in_window(r, start)]
+    overrun = len(kept) - len(trimmed)
     if overrun:
         logger.debug(
-            "Trakt returned %d entr(ies) outside the %s window starting %s; trimmed.",
+            "%d entr(ies) fell outside the %s window starting %s; trimmed.",
             overrun, endpoint.key, start,
         )
-    return dedupe_entries(pruned, endpoint.media)
+    return dedupe_records(trimmed), answered
 
 
-async def read_cached_window(endpoint_key: str, start: date) -> tuple[list[dict], int] | None:
-    """The cached (entries, cached_at) for one window, or None when absent."""
+async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWindow, int] | None:
+    """The cached (window, cached_at) for one window, or None when absent or
+    stored in a shape this version does not read."""
     row = await db.fetch_one(
         "SELECT payload, cached_at FROM api_cache WHERE cache_key = ?",
         (cache_key(endpoint_key, start),),
@@ -326,14 +413,31 @@ async def read_cached_window(endpoint_key: str, start: date) -> tuple[list[dict]
     # look; the byte count is on the line to say how much there was to expand.
     with span("calcache.inflate", bytes=len(row["payload"] or b"")):
         try:
-            return _decompress(row["payload"]), int(row["cached_at"])
+            window = _decompress(row["payload"])
         except (zlib.error, ValueError):
             return None
+    if window is None:
+        return None
+    return window, int(row["cached_at"])
 
 
-async def store_window(endpoint_key: str, start: date, entries: list[dict],
-                       ttl_seconds: int, now: int) -> None:
-    blob = _compress(entries)
+async def store_window(endpoint_key: str, start: date, records: list[Record],
+                       ttl_seconds: int, now: int, *, sources=()) -> list[dict]:
+    """Store one window's records, grouped, under the versioned envelope, and
+    hand back the groups it stored so a caller that is about to serve the same
+    window does not group them a second time."""
+    groups = group_records(records)
+    await store_groups(endpoint_key, start, groups, ttl_seconds, now, sources=sources)
+    return groups
+
+
+async def store_groups(endpoint_key: str, start: date, groups: list[dict],
+                       ttl_seconds: int, now: int, *, sources=()) -> None:
+    blob = _compress({
+        "v": PAYLOAD_VERSION,
+        "sources": [str(s) for s in sources],
+        "entries": groups,
+    })
     await db.execute(
         "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
         "VALUES (?, ?, ?, ?, ?) "
@@ -352,42 +456,40 @@ def _ttl_seconds(settings) -> int:
 
 
 async def load_window(endpoint: Endpoint, settings, start: date, *,
-                      allow_fetch: bool = True, now: int | None = None) -> tuple[list[dict], int | None]:
-    """Return (entries, cached_at) for one window.
+                      allow_fetch: bool = True, now: int | None = None,
+                      prefs=None, linked=None) -> tuple[CachedWindow, int | None]:
+    """Return (window, cached_at) for one window.
 
     Fetches and caches when the window is missing or past its TTL and allow_fetch
     is set. A public share page passes allow_fetch=False: it serves whatever is
-    cached — even stale, even nothing (returning [], None) — and never calls
-    Trakt, so an unauthenticated visitor can never spend the instance's rate
-    limit. cached_at is None only when nothing was cached and nothing was fetched.
+    cached — even stale, even nothing (returning an empty window, None) — and
+    never asks a source, so an unauthenticated visitor can never spend the
+    instance's rate limit. cached_at is None only when nothing was cached and
+    nothing was fetched.
     """
     ts = db.now() if now is None else now
     ttl = _ttl_seconds(settings)
     cached = await read_cached_window(endpoint.key, start)
     if cached is not None:
-        entries, cached_at = cached
+        window, cached_at = cached
         if not allow_fetch or (ts - cached_at) <= ttl:
-            return entries, cached_at
+            return window, cached_at
     elif not allow_fetch:
-        return [], None
+        return CachedWindow([], ()), None
     try:
-        entries = await fetch_window_raw(endpoint, settings, start)
-    except TraktError:
+        records, answered = await fetch_window_records(
+            endpoint, settings, start, prefs=prefs, linked=linked)
+    except SourceUnavailable:
         if cached is not None:  # serve the stale copy rather than nothing
             return cached
         raise
-    await store_window(endpoint.key, start, entries, ttl, ts)
+    groups = await store_window(endpoint.key, start, records, ttl, ts, sources=answered)
     # Recorded only on a genuine fetch, not on every cache-hit read: the URL
     # arrived here already, so this is the point a lookup is "paid for" rather
     # than a per-view cost added to the hot render path.
-    sightings = (
-        s for s in (
-            _poster_sighting(entry.get(endpoint.media) or {}, endpoint.media)
-            for entry in entries
-        ) if s is not None
-    )
+    sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
     await artwork.record_poster_urls(sightings)
-    return entries, ts
+    return CachedWindow(groups, tuple(answered)), ts
 
 
 # ---------------------------------------------------------------------------
@@ -421,12 +523,35 @@ def _local_span_utc_range(tz: ZoneInfo, start_date: date, end_date: date) -> tup
     return utc_start, utc_end
 
 
+def dedupe_groups(groups: list[dict]) -> list[dict]:
+    """First occurrence of each airing across the windows a span covers, order
+    preserved.
+
+    Keyed on the group key AND the primary source's instant, which is the same
+    identity the per-source dedupe uses one layer down: two adjacent windows both
+    handed the same airing are one card, while a title genuinely listed twice at
+    different times stays two, exactly as it has always rendered.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for group in groups:
+        order = calendar_resolve.source_order(group)
+        primary = (group.get("by_source") or {}).get(order[0], {}) if order else {}
+        identity = (group.get("key"), primary.get("air_ts"))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        out.append(group)
+    return out
+
+
 async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          start_date: date, end_date: date,
                          genres: str = "", countries: str = "",
                          show_certifications: str = "", movie_certifications: str = "",
                          network_filter=None, not_watching_ids: set[str] | None = None,
                          allow_fetch: bool = True, now: int | None = None,
+                         prefs=None, linked=None,
                          ) -> tuple[list[dict], dict]:
     """Assemble one viewer's calendar for the local day span [start_date, end_date].
 
@@ -439,18 +564,27 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 
     The read path in order: figure the UTC window range covering the span ±1 day
     (a viewer-local day can straddle two UTC windows, so the padding matters);
-    load every covering window CONCURRENTLY; apply the per-user
-    genre/country/certification filter to the RAW entries (before normalization,
-    on the raw slugs); normalize the survivors into the viewer's tz; trim to the
-    LOCAL span; apply the network filter; sort by air time; group by local day.
+    load every covering window CONCURRENTLY; RESOLVE each group to the one record
+    this viewer sees; apply the per-user genre/country/certification filter to
+    those records (before rendering, on the raw genre slugs); render the
+    survivors into the viewer's tz; trim to the LOCAL span; apply the network
+    filter; sort by air time; group by local day.
 
-    RESILIENT BUT LOUD on a window Trakt can't supply. The windows load through a
-    single asyncio.gather; a window that raised (nothing cached AND the fetch
+    RESOLUTION BEFORE FILTERING, RENDERING AFTER, and the order is not
+    interchangeable. A filter has to run against the values the viewer will
+    actually be shown, so it comes after resolution; and it matches genres on
+    their hyphenated slugs, so it comes before rendering, which is what
+    title-cases them.
+
+    RESILIENT BUT LOUD on a window no source can supply. The windows load through
+    a single asyncio.gather; a window that raised (nothing cached AND the fetch
     failed) is skipped so the rest of the span still renders, and meta['partial']
-    is set so the caller can say the data is incomplete. Only a span where EVERY
-    window failed raises TraktError — there is genuinely nothing to show. (A
-    public share read passes allow_fetch=False, where a missing window returns
-    empty rather than raising, so it never trips the partial path.)
+    is set so the caller can say the data is incomplete. A window stored while one
+    source could not be read sets it too — that source's absence from the stored
+    `sources` means UNKNOWN, not "had nothing". Only a span where EVERY window
+    failed raises — there is genuinely nothing to show. (A public share read
+    passes allow_fetch=False, where a missing window returns empty rather than
+    raising, so it never trips the partial path.)
 
     `show_certifications`/`movie_certifications` are two separate specs (the two
     vocabularies don't overlap); the one matching `endpoint.media` applies here.
@@ -468,8 +602,8 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     windows = aligned_windows(utc_start, utc_end)
 
     # gather preserves argument order, so `results` stays in ascending window
-    # order and extending `entries` in that order keeps the windows ordered —
-    # which dedupe_entries below relies on to keep the SAME copy of an
+    # order and extending `groups` in that order keeps the windows ordered —
+    # which dedupe_groups below relies on to keep the SAME copy of an
     # overlapping airing the old sequential loop did (first window wins).
     # return_exceptions=True both lets a single window fail without aborting the
     # span and stops a still-running sibling fetch from surfacing as an
@@ -480,59 +614,71 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # that is slow below was blocking every other request while it worked.
     with span("calcache.load_windows", n=len(windows), fetch=allow_fetch):
         results = await asyncio.gather(
-            *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
+            *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now,
+                          prefs=prefs, linked=linked)
               for start in windows),
             return_exceptions=True,
         )
 
-    entries: list[dict] = []
+    # Which sources a window SHOULD have been able to record an answer from. A
+    # stored window that names fewer than these was filled while one of them
+    # could not be read, and the read below says so rather than serving the gap
+    # as though nothing airs.
+    expected = {str(p.source) for p in providers.calendar_sources(prefs=prefs, linked=linked)
+                if p.capabilities.answers(endpoint.key)}
+    groups: list[dict] = []
     as_of: int | None = None
     errored = 0
-    first_error: TraktError | None = None
+    incomplete = False
+    first_error: SourceUnavailable | None = None
     for result in results:
-        if isinstance(result, TraktError):
+        if isinstance(result, SourceUnavailable):
             # load_window already served a stale copy when it had one, so getting
             # here means this window had nothing cached AND its fetch failed.
             errored += 1
             first_error = first_error or result
             continue
         if isinstance(result, BaseException):
-            # An unexpected failure (not a Trakt reachability problem) is a real
+            # An unexpected failure (not a source reachability problem) is a real
             # bug, not a degraded window — surface it instead of hiding it behind
             # the partial flag.
             raise result
-        window_entries, cached_at = result
-        entries.extend(window_entries)
+        window, cached_at = result
+        groups.extend(window.groups)
         if cached_at is not None:
             as_of = cached_at if as_of is None else min(as_of, cached_at)
+            # Only a window that really was read is asked about its sources, so
+            # an uncached window on a public page stays quiet rather than
+            # reporting every source as missing from a window nobody filled.
+            if expected - set(window.sources):
+                incomplete = True
 
     if errored and errored == len(windows):
         # Every window failed and none had a cached copy: there is no degraded
         # span to render, so surface it as the caller's hard error.
         raise first_error
-    partial = errored > 0
+    partial = errored > 0 or incomplete
 
-    # Belt and braces over the trim in fetch_window_raw. That one keeps NEW
-    # windows disjoint; this one also covers windows cached BEFORE the trim
-    # existed, which overlap and would otherwise keep rendering doubled cards
-    # until their TTL expired. It is a no-op once every window has been refetched.
+    # The dedupe is belt and braces over the trim in fetch_window_records. That
+    # one keeps NEW windows disjoint; this one also covers windows cached BEFORE
+    # the trim existed, which overlap and would otherwise keep rendering doubled
+    # cards until their TTL expired.
     # THE THREE PHASES BELOW ARE PURE CPU ON THE EVENT LOOP, and they are timed
     # separately because they scale with different things and are fixed in
-    # different places. The filter is per-viewer work over RAW entries; the
-    # normalize is per-entry object building and timezone arithmetic, and is the
-    # one that grows with a busy month; the grouping is a sort plus a walk.
-    with span("calcache.filter", entries=len(entries)) as sp:
-        entries = dedupe_entries(entries, endpoint.media)
+    # different places. The filter is per-viewer work over resolved records; the
+    # render is per-entry object building and timezone arithmetic, and is the one
+    # that grows with a busy month; the grouping is a sort plus a walk.
+    with span("calcache.filter", entries=len(groups)) as sp:
+        records = [r for r in (calendar_resolve.resolve(group, prefs)
+                               for group in dedupe_groups(groups)) if r is not None]
         certifications = show_certifications if endpoint.media == "show" else movie_certifications
-        kept = calendar_filter.filter_entries(entries, endpoint.media, genres, countries, certifications)
+        kept = calendar_filter.filter_records(records, genres, countries, certifications)
         sp.set(kept=len(kept))
 
     with span("calcache.normalize", entries=len(kept)) as sp:
         items: list[Item] = []
-        for entry in kept:
-            item = trakt_calendar.normalize(entry, endpoint, tz)
-            if item is None:
-                continue
+        for record in kept:
+            item = render(record, tz)
             air_day = date.fromisoformat(item.air_date)  # already in the viewer's tz
             if start_date <= air_day <= end_date:
                 items.append(item)
@@ -540,7 +686,12 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 
     with span("calcache.group", items=len(items)):
         items = calendar_filter.filter_by_network(items, network_filter)
-        items.sort(key=lambda i: i.air_ts)
+        # Sorted on the LOCAL DAY first and the instant second. The two agree for
+        # anything converted through one timezone, but a date-only release is
+        # pinned to its own calendar date rather than to an offset from an
+        # instant — and groupby below needs each day's items contiguous, or one
+        # day arrives in two pieces and draws two headings for itself.
+        items.sort(key=lambda i: (i.air_date, i.air_ts))
 
         grouped = [
             {"date": day,

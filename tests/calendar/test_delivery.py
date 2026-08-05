@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app import auth, db
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import ORIGIN, migrated_db
+from tests.support import ORIGIN, migrated_db, window_fetch
 
 
 def _configured_settings() -> Settings:
@@ -54,8 +54,7 @@ class GzipResponseTests(unittest.TestCase):
             _entry(f"show-{i}", f"Show {i}", f"2026-07-{(i % 27) + 1:02d}T20:00:00Z")
             for i in range(120)
         ]
-        fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -138,8 +137,7 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
 
         entries = [_entry("show-a", "Show A", "2026-07-10T20:00:00Z")]
-        fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 

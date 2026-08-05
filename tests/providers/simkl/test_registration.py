@@ -28,11 +28,11 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(self.simkl.label, "Simkl")
 
     def test_registering_it_did_not_displace_trakt_as_the_calendar_source(self):
-        """`for_calendar` is first-match-wins over a dict, so a second source
-        arriving is exactly the moment that could start answering differently
-        for an instance that changed nothing."""
+        """A second source arriving is exactly the moment the calendar could
+        start answering differently for an instance that changed nothing."""
         configured = Settings(trakt_client_id="id", trakt_access_token="token")
-        self.assertEqual(providers.for_calendar(configured).source, Source.TRAKT)
+        self.assertEqual([p.source for p in providers.for_calendar_sources(configured)],
+                         [Source.TRAKT])
 
     def test_simkl_credentials_alone_are_not_a_calendar_source(self):
         """It has no calendar module yet, so it answers no endpoint — and a
@@ -41,7 +41,7 @@ class RegistrationTests(unittest.TestCase):
         "nothing airs then" instead of "nobody was asked"."""
         simkl_only = Settings(simkl_client_id="id", simkl_access_token="token")
         self.assertTrue(self.simkl.is_configured(simkl_only))
-        self.assertIsNone(providers.for_calendar(simkl_only))
+        self.assertEqual(providers.for_calendar_sources(simkl_only), [])
         self.assertFalse(simkl_only.calendar_source_configured)
 
     def test_it_is_configured_only_with_both_halves_of_the_credential(self):

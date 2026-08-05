@@ -28,7 +28,8 @@ import inspect
 import unittest
 
 from app import providers
-from app.providers.base import LibraryPort, PlayCountPort, Provider, SyncPort
+from app.providers.base import (CalendarPort, LibraryPort, PlayCountPort, Provider,
+                                SyncPort)
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -76,6 +77,38 @@ class RegisteredProvidersConformTests(unittest.TestCase):
                 continue
             with self.subTest(source=source):
                 self.assertIsInstance(port, SyncPort)
+
+
+class CalendarPortIsDeclaredAlongsideTheEndpointsTests(unittest.TestCase):
+    """`capabilities.endpoints` is how the cache decides a source has a calendar;
+    `calendar_port` is what it then calls. The pairing is the same claim
+    `private_user_data`/`sync_port` makes about the tracker, and it goes wrong the
+    same way: a source declaring endpoints with None in the port is found usable
+    and then has nothing to ask.
+    """
+
+    def test_a_source_declaring_calendar_endpoints_carries_a_calendar_port(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                if provider.capabilities.endpoints:
+                    self.assertIsNotNone(
+                        provider.calendar_port,
+                        f"{source} declares calendar endpoints but carries no calendar port")
+
+    def test_every_calendar_port_present_satisfies_calendarport(self):
+        for source, provider in providers.registered().items():
+            port = provider.calendar_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                self.assertIsInstance(port, CalendarPort)
+
+    def test_at_least_one_registered_source_can_fill_a_window(self):
+        """Or the whole calendar is unreachable and every test of it is
+        vacuous."""
+        self.assertTrue(
+            [p for p in providers.registered().values() if p.calendar_port is not None],
+            "no source implements the window fetch; the calendar cannot be filled")
 
 
 class LibraryPortIsOptionalTests(unittest.TestCase):
@@ -174,7 +207,8 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
         # derive the member list from the Protocol, so they would still pass if
         # somebody deleted a member outright. These four are read by
         # app/providers/__init__.py itself.
-        for name in ("source", "label", "capabilities", "sync_port", "is_configured"):
+        for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
+                     "is_configured"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 

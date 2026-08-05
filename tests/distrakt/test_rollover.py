@@ -109,11 +109,11 @@ def _cal_item(tid, season, title, network="Net"):
 
 
 def _raw_entry(tid, season, title, *, first_aired, certification=None, network="Net"):
-    """A calendar entry in the shape calendar_cache.fetch_window_raw returns:
-    pruned, un-normalized, still carrying whatever real filter_entries reads
-    (certification included) so mocking at this layer exercises the real
-    per-user filter inside calendar_cache.read_month rather than a test double
-    standing in for it."""
+    """A calendar entry in the shape a SOURCE returns it: un-normalized, still
+    carrying everything the real filter reads (certification included), so
+    mocking at this layer exercises the whole fill and the real per-user filter
+    inside calendar_cache.read_month rather than a test double standing in for
+    them."""
     return {
         "show": {
             "title": title, "network": network, "certification": certification,
@@ -410,7 +410,7 @@ class RolloverTests(RolloverTestCase):
 
 
 class _Resp:
-    """A minimal stand-in for the httpx response fetch_window_raw reads."""
+    """A minimal stand-in for the httpx response the window fetch reads."""
     def __init__(self, data):
         self._data = data
         self.status_code = 200
@@ -422,7 +422,7 @@ class _Resp:
 
 class _FixedClient:
     """Replies with the same canned window body to every request, regardless of
-    the window's date range — fetch_window_raw's own in_window trim (see
+    the window's date range — the fill's own in_window trim (see
     app/calendar/cache.py) is what actually decides which entries survive for
     which window, so this only needs to hand back the full candidate set."""
     def __init__(self, entries):

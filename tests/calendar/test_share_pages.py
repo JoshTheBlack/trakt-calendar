@@ -20,13 +20,14 @@ from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
 from app import auth, cache, db
+from app.endpoints import get_endpoint
 from app.calendar import (cache as calendar_cache, share_card, share_code,
                           share_links, share_routes)
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
 from app.media import posters
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, ORIGIN, calendar_records
 
 
 async def _no_poster_warm(settings, refs) -> int:
@@ -332,7 +333,8 @@ class SharePageDetailsModalTests(SharePageTestCase):
         }
         start = calendar_cache.window_start(date(2026, 7, 15))
         asyncio.run(calendar_cache.store_window(
-            "shows/new", start, [entry], 600, db.now()))
+            "shows/new", start, calendar_records([entry], get_endpoint("shows/new")),
+            600, db.now(), sources=["trakt"]))
 
     def _seed_detail_cache(self):
         """Write the raw Trakt payloads the OWNER's own detail view would have

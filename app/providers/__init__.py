@@ -16,21 +16,24 @@ from __future__ import annotations
 
 from .base import (
     ID_KEYS,
+    CalendarPort,
     Capabilities,
     Item,
     Media,
     Provider,
+    Record,
     Source,
     SyncPort,
     collect_ids,
     parse_media,
+    render,
 )
 
 __all__ = [
-    "Capabilities", "ID_KEYS", "Item", "Media", "Provider", "Source", "SyncPort",
-    "collect_ids", "parse_media",
-    "register", "get", "registered", "for_calendar", "for_tracker_ports",
-    "tracker_sources",
+    "CalendarPort", "Capabilities", "ID_KEYS", "Item", "Media", "Provider",
+    "Record", "Source", "SyncPort", "collect_ids", "parse_media", "render",
+    "register", "get", "registered", "calendar_sources", "for_calendar_sources",
+    "for_tracker_ports", "tracker_sources",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -91,31 +94,60 @@ def registered() -> dict[Source, Provider]:
     return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
-def for_calendar(settings) -> Provider | None:
-    """The provider this instance reads its calendar from, or None when none of
-    them has usable credentials.
+def calendar_sources(*, prefs=None, linked=None) -> list[Provider]:
+    """Every source that could put something on this account's calendar, in
+    declared order. THE SET THE CACHE FILL ASKS.
 
-    Returns None rather than raising: an instance whose credentials have not
-    been filled in yet is an ordinary state the calendar page has always had to
-    render an explanation for, not an error.
+    Two conditions, and a third that is the account's:
+      - the source publishes a calendar at all (`capabilities.endpoints`) — a
+        source usable for something else and with no calendar to give would
+        otherwise be asked and answer nothing, which reads as "nothing airs";
+      - it carries a `calendar_port` to be asked THROUGH, so declaring endpoints
+        without one is caught here rather than as an AttributeError on whichever
+        source an instance happens to have;
+      - the account's `calendar_source` preference admits it, given what it has
+        LINKED. `prefs=None` means "no account is asking" — the pre-warm and the
+        instance-wide question below — and admits every source.
 
-    BEING CONFIGURED IS NOT ENOUGH — the source also has to answer at least one
-    calendar endpoint. A source can be perfectly usable for something else and
-    still have no calendar to give: returning it here would report the instance
-    as having a calendar source and then render an empty month, which reads as
-    "nothing airs" rather than "nobody was asked". The check is
-    `capabilities.endpoints` rather than a name, so no route learns which source
-    is in that state.
+    IT DELIBERATELY DOES NOT ASK `is_configured`, and the pairing with
+    `for_calendar_sources` below is the whole point. Whether a calendar can be
+    read is a question about the SOURCE's own public endpoints, not about whose
+    token an instance holds: Trakt's calendar authenticates with the instance's
+    client id, and a second source's may need no credential at all. Making the
+    fill skip a source over a credential its calendar never uses would take a
+    working calendar away from an instance that has one, silently. The window
+    fetch itself refuses when it genuinely cannot be made, and that refusal
+    degrades one source rather than a month.
 
-    FIRST MATCH WINS OVER A DICT, which means registration order decides the
-    answer once more than one source qualifies. That is tolerable only while the
-    answer is "there is exactly one calendar source"; a per-account preference is
-    what it has to become.
+    `linked` is passed in for the same reason app/sources/prefs.py takes it: who
+    is linked is auth's fact. Note this is where the calendar and the tracker
+    genuinely differ — the tracker can read "linked" off the per-request Settings
+    because every source it asks needs that account's token, and a calendar
+    source needing no token would never appear there.
     """
-    for provider in registered().values():
-        if provider.capabilities.endpoints and provider.is_configured(settings):
-            return provider
-    return None
+    out: list[Provider] = []
+    for source, provider in registered().items():
+        if not provider.capabilities.endpoints or provider.calendar_port is None:
+            continue
+        if prefs is not None and not prefs.admits_calendar(source, linked or ()):
+            continue
+        out.append(provider)
+    return out
+
+
+def for_calendar_sources(settings, *, prefs=None, linked=None) -> list[Provider]:
+    """The calendar sources this instance can actually USE right now — the same
+    set as `calendar_sources`, narrowed to the ones whose credentials are filled
+    in.
+
+    THE QUESTION BEHIND `Settings.calendar_source_configured`: is there anybody
+    to ask. An empty list is an ordinary state — an instance whose credentials
+    have not been filled in yet is one the calendar page has always had to render
+    an explanation for, not an error — and it is the state the page explains
+    rather than rendering an empty month.
+    """
+    return [p for p in calendar_sources(prefs=prefs, linked=linked)
+            if p.is_configured(settings)]
 
 
 def tracker_sources() -> frozenset[str]:
