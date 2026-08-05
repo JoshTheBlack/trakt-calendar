@@ -22,10 +22,12 @@ cheaply:
     A REMOVAL THAT MOVES NO SUCH BEACON IS INFERRED INSTEAD, because at least one
     service does not move one for it — see _watched_changed, and _sync_one for
     what the inference costs and which sources need it at all.
-    WHICH TITLES THAT RE-BASELINE ACTUALLY READS is the source's own answer where
-    it has one: a per-title play count for the whole library, swept in a handful
-    of calls, names the titles whose counts have moved and nothing else has to be
-    asked about. See _rebaseline_by_id and PlayCountPort.
+    A SOURCE THAT CAN SWEEP ITS PER-TITLE PLAY COUNTS IS SWEPT ON EVERY PASS THAT
+    GETS PAST THE GATE, because that sweep is a handful of calls for the whole
+    library and names the titles whose counts moved in EITHER direction — so a
+    removal is found without being inferred, including on an evening that also
+    contained ordinary viewing. Only the titles it names are read properly. See
+    _rebaseline_by_id and PlayCountPort.
 
 WHICH SOURCES ANSWER is not this module's business: it asks the registry for
 every port that can read one person's own viewing and that this account's
@@ -579,16 +581,19 @@ def _watched_changed(old: dict | None, new: dict) -> bool:
     something was taken away, and that is the removal _removed_changed was
     supposed to report and did not.
 
-    IT IS A GATE, NOT THE ANSWER, AND IT STAYS ONE NOW THAT THERE IS AN ANSWER.
-    Since a source's play-count sweep can name the titles that moved, this could
-    look redundant — but the two decide different things and neither can do the
-    other's job. This decides whether to LOOK at all, and it is free: the beacon
-    and the events are both already in hand. The sweep decides WHAT to re-read,
-    and it costs a handful of calls, which is worth spending only once something
-    has said there is a reason to. Running the sweep on every load instead would
-    pay that on every ordinary evening's viewing, which is the case this predicate
-    exists to leave alone. The sweep is authoritative about what changed; this is
-    only the thing that asks it.
+    IT IS THE FALLBACK, NOT THE MECHANISM, AND ONLY FOR A SOURCE THAT HAS NEITHER
+    BETTER READ. Where a source can sweep its play counts (PlayCountPort) that
+    sweep runs on every pass that got past the gate and answers the question
+    directly, and this predicate is not consulted at all — see _sync_one.
+
+    AND IT IS NOT SOUND ENOUGH TO GATE ONE. "The history came back empty" is not
+    the same as "the history explains the movement": an evening in which somebody
+    watches one episode and un-marks a season yields events for the first and
+    silence for the second, so the feed is non-empty and the inference never
+    fires while a removal has just happened. That is not a corner case; it is what
+    an ordinary session looks like when somebody is tidying up. This is kept
+    because for a source with no sweep and no library read it is still better than
+    nothing, and its limits are written here so nobody mistakes it for a detector.
     """
     if not old:
         return False
@@ -1239,38 +1244,49 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
             events = await port.fetch_history(settings, start_at=start_at)
             sp.set(events=len(events))
         # THE REMOVAL THIS SOURCE WOULD NOT ADMIT TO. Its watch record moved and
-        # the feed of things ADDED to that record accounts for none of the
-        # movement, so what changed was taken away — see _watched_changed for the
-        # inference and _removed_changed for the measurement that made it
-        # necessary. Without this the stored count keeps the pre-removal number
-        # for ever: the sync runs (the beacon moved), the history finds nothing (a
-        # removal is not an event), and nothing re-reads the progress.
+        # the feed of plays cannot say that anything was taken away — a removal is
+        # not an event — so without something here the stored count keeps the
+        # pre-removal number for ever: the sync runs (the beacon moved), the
+        # history finds nothing to explain it, and nothing re-reads the progress.
         #
-        # ONLY A SOURCE WHOSE INCREMENTAL READ IS AN APPEND-ONLY FEED NEEDS IT,
-        # which is why this sits on this branch alone rather than above the split.
-        # A source that hands over its LIBRARY re-states what it currently holds
-        # for every title it names, and folding that in replaces those slots
-        # outright — so a removal inside a list it re-reads corrects itself with no
-        # inference at all, and a whole title dropped from the library moves the
-        # removed beacon that path already gates on. A feed of plays can only ever
-        # be folded forward and never subtracts, and that is the defect.
+        # ONLY A SOURCE WHOSE INCREMENTAL READ IS AN APPEND-ONLY FEED NEEDS THIS,
+        # which is why it sits on this branch alone rather than above the split. A
+        # source that hands over its LIBRARY re-states what it currently holds for
+        # every title it names, and folding that in replaces those slots outright —
+        # so a removal inside a list it re-reads corrects itself, and a whole title
+        # dropped from the library moves the removed beacon that path already gates
+        # on. A feed of plays can only ever be folded forward and never subtracts,
+        # and that is the defect.
         #
-        # WHAT IT COSTS, AND WHY IT IS EVERY TITLE. The signal says something was
-        # removed and cannot say WHAT — there is nothing in it to narrow the search
-        # with — so the answer is the same full per-title re-read a forced refresh
-        # makes, one provider call per tracked title (146 of them on the account
-        # this was found on). It is paid only when the beacon moved AND the history
-        # explained none of the movement, which is a removal or a back-dated play
-        # and never an evening's viewing: the ordinary case brings events back with
-        # it and stops one line above this.
+        # A SOURCE THAT CAN SWEEP ITS PLAY COUNTS IS ASKED EVERY PASS, and this is
+        # the whole reason the sweep was worth building. It is a handful of calls
+        # for the entire library, so it is cheap enough to run whenever anything
+        # moved at all — and it answers the question directly rather than inferring
+        # it, naming the titles whose counts went up OR down and leaving everything
+        # else untouched.
         #
-        # A BACK-DATED PLAY IS THE ONE FALSE POSITIVE, and it costs rather than
-        # misleads. Recorded with a watched_at before the window this pull covers,
-        # it moves the beacon and appears in no event — and what follows is exactly
-        # the read that finds it. The answer is right either way.
-        if not rebaseline and not events and _watched_changed(stored, beacons):
-            await _rebaseline_by_id(settings, state, name, source, port, span,
-                                    reason="unwatch-implied")
+        # WHAT THIS REPLACED, AND WHY IT HAD TO. The gate here used to be "the
+        # beacon moved AND the history came back EMPTY", on the reasoning that new
+        # plays ACCOUNT for the movement and leave nothing to infer. They do not.
+        # An evening in which somebody watches one episode and un-marks a season
+        # produces events for the first and nothing at all for the second, so the
+        # history is non-empty, the branch is skipped, and the removal is missed —
+        # observed exactly that way, on a load whose history returned two events
+        # while a season's plays had just been taken away. That reasoning was only
+        # ever tolerable because the answer cost one call per tracked title; with a
+        # sweep it buys nothing and hides the case it was written for.
+        #
+        # A SOURCE WITH NEITHER READ still falls back to the inference, which is the
+        # best that can be done for one: see _watched_changed for what it can and
+        # cannot say, and _removed_changed for the measurement that made it
+        # necessary.
+        if not rebaseline:
+            if isinstance(port, PlayCountPort):
+                await _rebaseline_by_id(settings, state, name, source, port, span,
+                                        reason="changed")
+            elif not events and _watched_changed(stored, beacons):
+                await _rebaseline_by_id(settings, state, name, source, port, span,
+                                        reason="unwatch-implied")
 
     for event in events:
         _apply_event(state, event, name)

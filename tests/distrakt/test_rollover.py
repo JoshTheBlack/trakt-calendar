@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, patch
 from app import auth, db, distrakt
 from app.distrakt import rollover, watch_history
 from app.calendar import state as calendar_state
-from app.providers.base import Item, ItemKey, Media, Source
+from app.providers.base import Item, ItemKey, Media, PlayCounts, Source
 from tests.support import new_db_path
 
 # The two credential flags the tracker's source selection reads. A fake
@@ -757,6 +757,8 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
                    return_value=progress), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar.cache.read_month", side_effect=no_premieres), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
@@ -977,6 +979,8 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
             payload, status = await distrakt_routes._distrakt_month_payload(
@@ -1097,6 +1101,8 @@ class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
         with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar.cache.read_month", side_effect=no_premieres), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):

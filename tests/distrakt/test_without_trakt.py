@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, patch
 from app import db, distrakt as distrakt_store
 from app.config import Settings
 from app.distrakt import live
+from app.providers.base import PlayCounts
 from app.providers.trakt import TraktError
 from app.providers.trakt import transport
 from tests.support import AppTestCase, ORIGIN, new_db_path
@@ -247,7 +248,8 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    new=AsyncMock(return_value=[])), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   new=AsyncMock(return_value={})), \
+                   new=AsyncMock(return_value={})),              patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.trakt.detail.fetch_season_detail", _boom):
             body = self.client.get(
                 f"/api/distrakt/month?year={today.year}&month={today.month}").json()
@@ -271,7 +273,8 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    new=AsyncMock(return_value=[])), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   new=AsyncMock(return_value={})), \
+                   new=AsyncMock(return_value={})),              patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.trakt.detail.fetch_season_detail", _season):
             body = self.client.get(
                 f"/api/distrakt/month?year={today.year}&month={today.month}").json()

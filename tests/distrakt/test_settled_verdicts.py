@@ -32,7 +32,8 @@ from app.clock import today
 from app.config import Settings
 from app.distrakt import counts, lifecycle, routes as distrakt_routes, store
 from app.distrakt import watch_history as wh
-from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, SourceUnavailable,
+from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
+                                SourceUnavailable,
                                 UnlistedSeasons)
 from app.providers.trakt import transport
 from tests.support import AppTestCase, ORIGIN, new_db_path
@@ -525,7 +526,8 @@ class TheMonthActuallyRaisesItTests(AppTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    new=AsyncMock(return_value=[])), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   new=AsyncMock(return_value={})), \
+                   new=AsyncMock(return_value={})),              patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.simkl.sync.fetch_last_activities",
                    new=AsyncMock(return_value=BEACON)), \
              patch("app.providers.simkl.sync.fetch_library",
@@ -696,6 +698,12 @@ class ReAddDecidesFromAFreshReadTests(AppTestCase):
                               {1: _episodes(1)}, "trakt")
         wh._set_show_baseline(state, "show:tmdb:2", {"trakt": 8, "simkl": 6, "tmdb": 2},
                               {1: _episodes(1)}, "simkl")
+        # A stored play-count sweep agreeing with what the service reports, so the
+        # month this request re-renders afterwards finds that nothing has moved and
+        # asks about no title of its own. Without it the render's own sweep has
+        # nothing to compare against and re-reads the roster once, which is correct
+        # behaviour and would drown out what these tests are counting.
+        state["play_counts"] = {"trakt": {"7": TOTAL, "8": 1}}
         asyncio.run(wh._save(self.user_id, state))
 
     def _readd(self, *, trakt_progress=None, simkl_progress=None,
@@ -720,6 +728,8 @@ class ReAddDecidesFromAFreshReadTests(AppTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    new=AsyncMock(return_value=[])), \
              patch("app.providers.trakt.sync.fetch_progress_details", new=trakt), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({"7": TOTAL, "8": 1}, True))), \
              patch("app.providers.simkl.sync.fetch_last_activities",
                    new=AsyncMock(return_value=BEACON)), \
              patch("app.providers.simkl.sync.fetch_library",
@@ -767,8 +777,13 @@ class ReAddDecidesFromAFreshReadTests(AppTestCase):
         incremental gate exists."""
         self._settle()
         _resp, trakt, simkl = self._readd()
-        self.assertEqual([list(call.args[1]) for call in trakt.await_args_list], [[7]])
-        self.assertEqual([list(call.args[1]) for call in simkl.await_args_list], [[5]])
+        # The TITLES asked about. A call carrying no ids at all is the month this
+        # request re-renders afterwards, whose own sweep found that nothing had
+        # moved — which is the property being claimed here, not noise against it.
+        self.assertEqual([list(c.args[1]) for c in trakt.await_args_list if c.args[1]],
+                         [[7]])
+        self.assertEqual([list(c.args[1]) for c in simkl.await_args_list if c.args[1]],
+                         [[5]])
 
     def test_a_service_with_no_id_for_the_title_is_not_asked(self):
         """Asking Simkl with Trakt's id would either 404 or, far worse, answer
@@ -777,8 +792,12 @@ class ReAddDecidesFromAFreshReadTests(AppTestCase):
         record["ids"] = {"trakt": 7, "tmdb": 1, "slug": "the-agency"}
         self._settle(record)
         _resp, trakt, simkl = self._readd()
-        trakt.assert_awaited_once()
-        simkl.assert_not_awaited()
+        # Titles again, not calls: Trakt is asked about the one the viewer named,
+        # and the service with no id for it is asked about none.
+        self.assertEqual([list(c.args[1]) for c in trakt.await_args_list if c.args[1]],
+                         [[7]])
+        self.assertEqual([list(c.args[1]) for c in simkl.await_args_list if c.args[1]],
+                         [])
 
     def test_a_service_that_cannot_be_read_leaves_its_slot_alone(self):
         """One service being down must not sink the re-add, and must not be read as

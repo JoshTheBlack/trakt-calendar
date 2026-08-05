@@ -359,7 +359,7 @@ class SyncTests(WatchStateTestCase):
         # First sync establishes the beacon + last_synced.
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[_ep_event(101, 1, 1)]) as hist, \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             # Seed a baselined show so the episode event is applied.
             st = await wh._load(self.user_id)
             st["shows"][SHOW(101)] = _show(101, {"1": []})
@@ -370,33 +370,44 @@ class SyncTests(WatchStateTestCase):
         # Second sync with the SAME beacon -> no history pull.
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist2, \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
             hist2.assert_not_called()
 
     async def _seed_for_whole_month(self, la: dict) -> None:
         """A settled cache: two titles baselined, the beacon matching, the cursor
-        part-way through the month. A plain sync would be gated here."""
+        part-way through the month, and a stored play-count sweep agreeing with
+        what the service is about to report. A plain sync would be gated here, and
+        a pass that gets past the gate for some other reason finds nothing moved.
+        """
         await wh._save(self.user_id, {
             "shows": {SHOW(101): _show(101, {"1": {"1": ""}}),
                       SHOW(102): _show(102, {"1": {"1": ""}})},
             "movies": {}, "cursors": {"trakt": "2026-07-20"},
+            "play_counts": {"trakt": {"101": 1, "102": 1}},
             "beacons": {"trakt": wh._beacons(la)}})
 
     async def test_a_named_month_is_read_without_re_asking_every_title(self):
         """The half of a forced sync a freeze actually needs: read that month
         again, don't re-fetch the progress of every title ever tracked. A settled
-        record already holds the counts it settled on."""
+        record already holds the counts it settled on.
+
+        WHAT ANSWERS THAT NOW IS THE SWEEP rather than the branch being skipped: a
+        pass that reaches this asks the service which titles have moved, is told
+        none have, and names none of them. The property is unchanged and is now
+        arrived at from the service's own answer instead of from an inference."""
         la = {"episodes": {"watched_at": "T1", "removed_at": None},
               "movies": {"watched_at": "T1", "removed_at": None}}
         await self._seed_for_whole_month(la)
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   return_value={}) as progress:
+                   return_value={}) as progress, \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({"101": 1, "102": 1}, True)):
             await wh.sync(SETTINGS, self.user_id, since_month="2026-07",
                           today=date(2026, 7, 20))
-        progress.assert_not_called()
+        self.assertEqual([sorted(call.args[1]) for call in progress.await_args_list], [[]])
         self.assertEqual(hist.call_args.kwargs["start_at"], "2026-07-01")
 
     async def test_the_month_read_is_the_one_named_not_the_one_today_is_in(self):
@@ -409,7 +420,7 @@ class SyncTests(WatchStateTestCase):
         await self._seed_for_whole_month(la)
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             await wh.sync(SETTINGS, self.user_id, since_month="2026-10",
                           today=date(2026, 11, 1))
         self.assertEqual(hist.call_args.kwargs["start_at"], "2026-10-01")
@@ -420,7 +431,7 @@ class SyncTests(WatchStateTestCase):
         await self._seed_for_whole_month(la)
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             with self.assertRaises(ValueError):
                 await wh.sync(SETTINGS, self.user_id, since_month="2026-7",
                               today=date(2026, 11, 1))
@@ -450,7 +461,7 @@ class SyncTests(WatchStateTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    return_value=[_ep_event(101, 1, 2),
                                  _mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")]), \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
         self.assertEqual(sorted(_slot(state["shows"][SHOW(101)], "1")), ["1", "2"])
         self.assertIn(MOVIE(9), state["movies"])
@@ -470,7 +481,7 @@ class SyncTests(WatchStateTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    return_value=[_ep_event(101, 1, 2), _ep_event(777, 3, 1),
                                  _mv_event(9, "M", 2026, "2026-07-05T00:00:00Z")]), \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
         self.assertEqual([(str(p.key), p.season, p.number) for p in wh.episode_plays(state)],
                          [(SHOW(101), 1, 2), (SHOW(777), 3, 1)])
@@ -483,11 +494,11 @@ class SyncTests(WatchStateTestCase):
               "movies": {"watched_at": "T1", "removed_at": None}}
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[_ep_event(101, 1, 1)]), \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
         hist.assert_not_called()
         self.assertEqual(wh.episode_plays(state), [])
@@ -504,7 +515,7 @@ class SyncTests(WatchStateTestCase):
               "movies": {"watched_at": "NEW", "removed_at": None}}
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[_ep_event(101, 1, 7)]), \
-             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+             patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
             await wh.sync(SETTINGS, other, today=date(2026, 7, 20))
         self.assertEqual(
             list(_slot((await wh._load(other))["shows"][SHOW(101)], "1")), ["7"])
@@ -546,12 +557,17 @@ class SyncTests(WatchStateTestCase):
                          "the cache went on reporting a season nobody watched")
         self.assertEqual(wh.watched_map(await wh._load(self.user_id)), {})
 
-    async def test_an_ordinary_evenings_viewing_re_reads_nothing(self):
-        """The whole reason the inference is not simply "any beacon moved": the
-        watched stamp moves every time anybody watches anything, and re-reading
-        every tracked title on each of those is one provider call per title on the
-        commonest event there is. New events ACCOUNT for the movement, so there is
-        nothing left to infer and nothing to pay for."""
+    async def test_an_ordinary_evenings_viewing_re_reads_no_other_title(self):
+        """The commonest event there is, and what it may cost. The watched stamp
+        moves every time anybody watches anything, so re-reading every tracked
+        title on each of those is one provider call per title on every ordinary
+        evening — which is the cost this whole mechanism exists to remove.
+
+        WHAT KEEPS IT CHEAP IS THE SWEEP, NOT A SKIPPED BRANCH. The old reasoning
+        was that new events ACCOUNT for the movement and leave nothing to infer,
+        and that reasoning is unsound: an evening containing both viewing and an
+        un-marking produces events for one and silence for the other. So the sweep
+        is asked, it names the one title that moved, and nothing else is read."""
         await self._seed_a_finished_season()
         la = {"episodes": {"watched_at": "NEW", "removed_at": None},
               "movies": {"watched_at": "OLD", "removed_at": None}}
@@ -559,14 +575,21 @@ class SyncTests(WatchStateTestCase):
              patch("app.providers.trakt.sync.fetch_history",
                    return_value=[_ep_event(101, 1, 10)]), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   return_value={101: {}}) as progress:
+                   return_value={101: {1: {n: "" for n in range(1, 11)}}}) as progress, \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({"101": 9}, True)):
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
-        progress.assert_not_called()
+        # Nothing stored to compare against on this first sweep, so the one cached
+        # title is read once — and never a title the sweep did not name.
+        self.assertEqual([sorted(call.args[1]) for call in progress.await_args_list], [[101]])
         self.assertEqual(wh.watched_map(state), {(SHOW(101), 1): {"trakt": 10}})
 
-    async def test_a_first_pass_with_nothing_stored_infers_nothing(self):
-        """There is no previous beacon to have moved, so an empty history is just
-        an account with nothing watched this month — not a removal."""
+    async def test_a_first_pass_with_nothing_stored_asks_once_and_remembers(self):
+        """A first pass has no previous sweep to compare against, so it can
+        conclude nothing about what moved and asks about every cached title — once.
+        What it must NOT do is leave itself in that state: the sweep it just made
+        is stored, so the next pass has something to compare against and costs
+        nothing."""
         await wh._save(self.user_id, {
             "shows": {SHOW(101): _show(101, {"1": {"1": ""}})}, "movies": {},
             "cursors": {}, "beacons": {}})
@@ -575,9 +598,13 @@ class SyncTests(WatchStateTestCase):
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   return_value={}) as progress:
+                   return_value={101: {1: {1: ""}}}) as progress, \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({"101": 1}, True)):
             await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
-        progress.assert_not_called()
+        self.assertEqual([sorted(call.args[1]) for call in progress.await_args_list], [[101]])
+        self.assertEqual((await wh._load(self.user_id))["play_counts"],
+                         {"trakt": {"101": 1}})
 
     async def test_a_beacon_that_did_not_move_at_all_is_still_gated(self):
         """The inference reads a beacon that MOVED. An unchanged one never reaches
@@ -638,6 +665,75 @@ class ThePlaysSweepTests(WatchStateTestCase):
             "shows": {SHOW(101): _show(101, {"1": {"1": "", "2": ""}}),
                       SHOW(102): _show(102, {"1": {"1": ""}})},
             "movies": {}})
+
+    async def _load(self, counts, progress, events=(), beacon="T2"):
+        """One ORDINARY load — no force — with the beacon moved, the history
+        answering `events`, and the sweep scripted."""
+        details = AsyncMock(return_value=progress)
+        with patch("app.providers.trakt.sync.fetch_last_activities",
+                   return_value={"episodes": {"watched_at": beacon},
+                                 "movies": {"watched_at": "T1"}}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=list(events)), \
+             patch("app.providers.trakt.sync.fetch_progress_details", new=details), \
+             self._sweep(counts):
+            await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        return details
+
+    async def test_a_removal_is_found_on_an_evening_that_also_had_viewing(self):
+        """THE DEFECT THIS PHASE WAS BUILT FOR, AND THE ONE THE FIRST ATTEMPT
+        MISSED. Somebody watches an episode of one show and un-marks a season of
+        another in the same sitting. The history reports the first and CANNOT
+        report the second — a removal is not an event — so the feed comes back
+        non-empty, and a re-read gated on "the history was empty" concludes there
+        is nothing to explain and skips the removal entirely. Observed exactly
+        that way against a live account: two events on the load, and a season's
+        plays gone with the stored count still reading the old number.
+
+        The sweep answers the question instead of inferring it, so it runs on any
+        pass that got past the beacon gate: 101 went down, 102 went up, and both
+        are read."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        details = await self._load(
+            {"101": 1, "102": 2}, {101: {1: {1: ""}}, 102: {1: {1: "", 2: ""}}},
+            events=[_ep_event(102, 1, 2)])
+        self.assertEqual(self._asked_about(details), [[101, 102]])
+        counts = wh.watched_map(await wh._load(self.user_id))
+        self.assertEqual(counts[(SHOW(101), 1)], {"trakt": 1},
+                         "the removal was missed because the evening had viewing in it")
+        self.assertEqual(counts[(SHOW(102), 1)], {"trakt": 2})
+
+    async def test_an_ordinary_evening_costs_the_sweep_and_the_one_title(self):
+        """The cost of asking every pass, pinned so it cannot grow back. One
+        episode watched means one sweep and ONE title read — not the roster, which
+        is what the whole phase exists to stop."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        details = await self._load({"101": 3, "102": 1},
+                                   {101: {1: {1: "", 2: "", 3: ""}}},
+                                   events=[_ep_event(101, 1, 3)])
+        self.assertEqual(self._asked_about(details), [[101]])
+
+    async def test_an_unchanged_beacon_still_reaches_no_sweep_at_all(self):
+        """The cheapest path there is stays the cheapest path there is: nothing
+        moved, so the sync is gated before any of this and the sweep is never
+        placed."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        sweep = AsyncMock()
+        with patch("app.providers.trakt.sync.fetch_last_activities",
+                   return_value={"episodes": {"watched_at": "T1"},
+                                 "movies": {"watched_at": "T1"}}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={})), \
+             patch("app.providers.trakt.sync.fetch_play_counts", new=sweep):
+            await self._load({"101": 2, "102": 1}, {}, beacon="T1")
+            await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        sweep.assert_not_awaited()
 
     async def _force(self, counts, progress, complete=True):
         """One forced re-baseline with the sweep and the progress read scripted.
@@ -843,7 +939,7 @@ class CursorTests(WatchStateTestCase):
         with patch("app.distrakt.watch_history.datetime", _PinnedClock(utc_now)):
             with patch("app.providers.trakt.sync.fetch_last_activities", return_value=first), \
                  patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
-                 patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+                 patch("app.providers.trakt.sync.fetch_progress_details", return_value={}),              _no_sweep():
                 await wh.sync(SETTINGS, self.user_id, today=today)
             with patch("app.providers.trakt.sync.fetch_last_activities", return_value=moved), \
                  patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \

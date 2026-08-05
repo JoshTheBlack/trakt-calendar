@@ -34,7 +34,8 @@ from unittest.mock import AsyncMock, patch
 from app import assets, db, distrakt
 from app.distrakt import (counts, discord_fmt, lifecycle, live,
                           routes as distrakt_routes, store, watch_history as wh)
-from app.providers.base import ItemKey, LibraryEntry, LibraryRead, UnlistedSeasons
+from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
+                                UnlistedSeasons)
 from app.providers.simkl import SimklError
 from app.providers.trakt import TraktError
 from tests.support import AppTestCase, ORIGIN, new_db_path
@@ -80,6 +81,10 @@ def _episodes(*numbers) -> dict:
 # cannot is asked per title with its own id. Both paths are exercised here
 # precisely because the two live services differ in this.
 LIBRARY_SOURCES = ("simkl",)
+# The other half of the same split: a source with no whole-library read answers
+# instead with a per-title PLAY COUNT for the library, which is what names the
+# titles worth re-reading. The two are different protocols and no source has both.
+SWEEP_SOURCES = ("trakt",)
 
 
 def _library_read(progress, *, complete=True, events=None,
@@ -126,6 +131,18 @@ def _patch(source: str, *, progress=None, history=None, activities=BEACON,
         patches.append(patch(f"{module}.fetch_library",
                              new=AsyncMock(return_value=_library_read(
                                  progress, unlisted=unlisted))))
+    if source in SWEEP_SOURCES:
+        # THE PLAY-COUNT SWEEP, ANSWERING THAT IT COVERED NOTHING. A source that
+        # can sweep is asked on every pass that gets past the beacon gate, so this
+        # call has to be scripted here or it goes to the network — but these tests
+        # are about what the services SAY they have watched, not about which of
+        # them the sweep narrows to. An INCOMPLETE sweep decides nothing and is
+        # never stored, so every pass falls back to asking about every cached
+        # title, which is exactly what these fixtures were written against. The
+        # tests that are about the sweep script it properly
+        # (test_watch_history.py's ThePlaysSweepTests).
+        patches.append(patch(f"{module}.fetch_play_counts",
+                             new=AsyncMock(return_value=PlayCounts({}, False))))
     return tuple(patches)
 
 
@@ -401,15 +418,19 @@ class OneServiceIsUnchangedTests(TwoSourceTestCase):
     it takes no code path of its own to do it."""
 
     async def test_the_other_service_is_never_called(self):
-        patches = [*_patch("trakt", progress={101: {1: _episodes(1, 2, 3)}}),
-                   *_patch("simkl")]
-        for p in patches:
+        # The two groups are kept apart rather than indexed out of one flat list:
+        # how many calls a source's fixture patches is that source's business and
+        # has changed twice now, and a positional index into the concatenation
+        # silently starts asserting about the wrong service when it does.
+        trakt_patches = _patch("trakt", progress={101: {1: _episodes(1, 2, 3)}})
+        simkl_patches = _patch("simkl")
+        for p in (*trakt_patches, *simkl_patches):
             p.start()
         try:
             state = await wh.sync_and_baseline(TRAKT_ONLY, self.user_id, [_record(101)])
-            simkl_beacon = patches[3].get_original()[0]
+            simkl_beacon = simkl_patches[0].get_original()[0]
         finally:
-            for p in patches:
+            for p in (*trakt_patches, *simkl_patches):
                 p.stop()
         simkl_beacon.assert_not_awaited()
         self.assertEqual(wh.watched_map(state), {(KEY(101), 1): {"trakt": 3}})
@@ -514,6 +535,10 @@ class BaseliningEachSourceTests(TwoSourceTestCase):
                   new=AsyncMock(return_value=BEACON)),
             patch("app.providers.trakt.sync.fetch_history", new=AsyncMock(return_value=[])),
             patch("app.providers.trakt.sync.fetch_progress_details", new=trakt_details),
+            # Incomplete, so the sweep narrows nothing and every cached title is
+            # still asked about — see _patch, where the same default is explained.
+            patch("app.providers.trakt.sync.fetch_play_counts",
+                  new=AsyncMock(return_value=PlayCounts({}, False))),
             patch("app.providers.simkl.sync.fetch_last_activities",
                   new=AsyncMock(return_value=simkl_beacon)),
             patch("app.providers.simkl.sync.fetch_history", new=AsyncMock(return_value=[])),
@@ -1228,6 +1253,8 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
                    new=AsyncMock(return_value={7: {3: {1: "2026-07-01",
                                                        2: "2026-07-02"}}})), \
              patch("app.providers.trakt.detail.fetch_season_detail", _season), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.simkl.transport.cached_get", new=self._refused):
             return self.client.get(
                 f"/api/distrakt/month?year={today.year}&month={today.month}")
