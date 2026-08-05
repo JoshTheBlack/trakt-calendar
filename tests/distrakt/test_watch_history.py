@@ -213,6 +213,17 @@ class PureStateTests(unittest.TestCase):
         self.assertTrue(wh._removed_changed(old, {"ep_removed": "z", "mv_removed": "b"}))
         self.assertFalse(wh._removed_changed(None, {"ep_removed": "z"}))  # first run, not a removal
 
+    def test_watched_changed(self):
+        """The other half of the pair, and on its own it says nothing about a
+        removal — it moves every time anybody watches anything. What it is FOR is
+        the combination the sync reads: this moved, and the history explained
+        none of it."""
+        old = {"ep_watched": "a", "mv_watched": "b"}
+        self.assertFalse(wh._watched_changed(old, {"ep_watched": "a", "mv_watched": "b"}))
+        self.assertTrue(wh._watched_changed(old, {"ep_watched": "z", "mv_watched": "b"}))
+        self.assertTrue(wh._watched_changed(old, {"ep_watched": "a", "mv_watched": "z"}))
+        self.assertFalse(wh._watched_changed(None, {"ep_watched": "z"}))  # nothing to compare
+
 
 class WatchStateTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -480,6 +491,88 @@ class SyncTests(WatchStateTestCase):
             list(_slot((await wh._load(other))["shows"][SHOW(101)], "1")), ["7"])
         self.assertEqual(
             list(_slot((await wh._load(self.user_id))["shows"][SHOW(101)], "1")), ["1"])
+
+    async def _seed_a_finished_season(self) -> None:
+        """One title with a whole season stored, the cursor part-way through the
+        month and a beacon to move. This is what the cache looks like the moment
+        before somebody removes those plays at the service."""
+        await wh._save(self.user_id, {
+            "shows": {SHOW(101): _show(101, {"1": {str(n): "2026-07-0%d" % n
+                                                   for n in range(1, 10)}})},
+            "movies": {}, "cursors": {"trakt": "2026-07-20"},
+            "beacons": {"trakt": {"ep_watched": "OLD", "ep_removed": None,
+                                  "mv_watched": "OLD", "mv_removed": None}}})
+
+    async def test_a_removal_the_beacon_will_not_admit_to_is_still_corrected(self):
+        """The measured case, reduced to its beacons: every play of a season was
+        removed at the service, which moved `episodes.watched_at` and left
+        `episodes.removed_at` null. So the sync is not gated, the history pull
+        finds nothing (a removal is not an event), and nothing said an unwatch had
+        happened — the stored count kept the pre-removal number across restarts and
+        only an explicit refresh ever corrected it.
+
+        A moved watched stamp that no new event accounts for IS that removal, and
+        the counts have to come out right without anybody pressing anything.
+        """
+        await self._seed_a_finished_season()
+        la = {"episodes": {"watched_at": "NEW", "removed_at": None},
+              "movies": {"watched_at": "OLD", "removed_at": None}}
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={101: {}}) as progress:
+            state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        progress.assert_called_once()
+        self.assertEqual(wh.watched_map(state), {},
+                         "the cache went on reporting a season nobody watched")
+        self.assertEqual(wh.watched_map(await wh._load(self.user_id)), {})
+
+    async def test_an_ordinary_evenings_viewing_re_reads_nothing(self):
+        """The whole reason the inference is not simply "any beacon moved": the
+        watched stamp moves every time anybody watches anything, and re-reading
+        every tracked title on each of those is one provider call per title on the
+        commonest event there is. New events ACCOUNT for the movement, so there is
+        nothing left to infer and nothing to pay for."""
+        await self._seed_a_finished_season()
+        la = {"episodes": {"watched_at": "NEW", "removed_at": None},
+              "movies": {"watched_at": "OLD", "removed_at": None}}
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history",
+                   return_value=[_ep_event(101, 1, 10)]), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={101: {}}) as progress:
+            state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        progress.assert_not_called()
+        self.assertEqual(wh.watched_map(state), {(SHOW(101), 1): {"trakt": 10}})
+
+    async def test_a_first_pass_with_nothing_stored_infers_nothing(self):
+        """There is no previous beacon to have moved, so an empty history is just
+        an account with nothing watched this month — not a removal."""
+        await wh._save(self.user_id, {
+            "shows": {SHOW(101): _show(101, {"1": {"1": ""}})}, "movies": {},
+            "cursors": {}, "beacons": {}})
+        la = {"episodes": {"watched_at": "NEW", "removed_at": None},
+              "movies": {"watched_at": "NEW", "removed_at": None}}
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={}) as progress:
+            await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        progress.assert_not_called()
+
+    async def test_a_beacon_that_did_not_move_at_all_is_still_gated(self):
+        """The inference reads a beacon that MOVED. An unchanged one never reaches
+        it, so the cheapest path there is stays the cheapest path there is."""
+        la = {"episodes": {"watched_at": "OLD", "removed_at": None},
+              "movies": {"watched_at": "OLD", "removed_at": None}}
+        await self._seed_a_finished_season()
+        with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   return_value={}) as progress:
+            await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
+        hist.assert_not_called()
+        progress.assert_not_called()
 
     async def test_baseline_show_lands_on_the_named_user(self):
         other = await _make_user("other")

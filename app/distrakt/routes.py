@@ -1765,6 +1765,29 @@ async def api_distrakt_verdict_readd(request: Request):
     is not merely tidy: find_shown_season composes a search that walks back over
     every month that ever settled anything, so without it a key naming a season
     finished three years ago would take that year's record apart.
+
+    THE SERVICES ARE ASKED ABOUT THIS TITLE BEFORE ANYTHING IS DECIDED, and that
+    is the difference between the button working and appearing to undo itself.
+    Withdrawing the verdict puts the season back on the viewer's list, where the
+    very next thing that happens is the month re-deriving it from the CACHED watch
+    state — so a cache still holding the pre-removal counts settles it straight
+    back to completed and the row never visibly moves. Observed exactly that way,
+    and confirmed by the counts coming out right when a full refresh was pressed
+    first.
+
+    A CACHED NUMBER IS NOT GOOD ENOUGH HERE WHATEVER ELSE IS FIXED. This is the
+    viewer disputing what the app has just said about one season, so it is the
+    control where being wrong is most visible — and a cache can go stale for
+    reasons nobody has thought of yet. The reconsideration is therefore decided
+    from a fresh read on principle, rather than as a workaround for any one way of
+    going stale.
+
+    ONE TITLE, ONE CALL PER SERVICE THAT CAN NAME IT. watch_history.baseline_show
+    asks each admitted source about this record alone; a service with no id for it
+    is not asked, and a service that cannot be read leaves its slot exactly as it
+    was rather than sinking the re-add. The whole-roster re-baseline is
+    deliberately not reached for — the viewer asked about one season, and asking
+    about everything is what the Refresh button is.
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
@@ -1779,6 +1802,7 @@ async def api_distrakt_verdict_readd(request: Request):
             or placed.record["kind"] != distrakt_store.RecordKind.COMPLETED):
         return authz.error("That season isn't recorded as finished this month.", 404)
     settings = await _distrakt_settings(user_id)
+    await watch_history.baseline_show(settings, user_id, placed.record)
     await lifecycle.reopen(user_id, placed, look_up=_season_lookup(settings))
     # The month the VIEWER is looking at is what comes back, which need not be the
     # month the verdict sat on — the same split every other row control makes.

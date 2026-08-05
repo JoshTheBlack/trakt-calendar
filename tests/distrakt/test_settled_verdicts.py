@@ -32,7 +32,8 @@ from app.clock import today
 from app.config import Settings
 from app.distrakt import counts, lifecycle, routes as distrakt_routes, store
 from app.distrakt import watch_history as wh
-from app.providers.base import ItemKey, LibraryEntry, LibraryRead, UnlistedSeasons
+from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, SourceUnavailable,
+                                UnlistedSeasons)
 from app.providers.trakt import transport
 from tests.support import AppTestCase, ORIGIN, new_db_path
 
@@ -646,6 +647,146 @@ class TheRouteStillRefusesADirectAbandonTests(AppTestCase):
             self.user_id, self.month, distrakt_store.SETTLED_KINDS))
         self.assertEqual([r["kind"] for r in records],
                          [distrakt_store.RecordKind.COMPLETED])
+
+
+class ReAddDecidesFromAFreshReadTests(AppTestCase):
+    """Withdrawing a verdict is decided from what the services say NOW, not from
+    the cache.
+
+    THE OBSERVED FAILURE, and it is what these are modelled on: the viewer accepts
+    the question, the verdict is withdrawn, the season goes back on their list —
+    and the very next thing the same request does is re-derive that list from the
+    CACHED watch state, which still held the counts the verdict was reached on. So
+    the season was settled straight back to completed and the button appeared to
+    do nothing. Pressing the full refresh first made it work, which is exactly the
+    diagnosis.
+
+    THE CACHE BEING STALE IS NOT THE POINT AND MUST NOT BE FIXED HERE. A re-derive
+    from storage is wrong however storage went stale, and this is the control where
+    being wrong is most visible, because it is the viewer disputing what the app
+    has just said. So it asks, every time.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="simkl-cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "trakt-token")
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self.sign_in_as(self.user_id)
+        self.month = _month_back(0)
+
+    def _settle(self, record: dict | None = None) -> None:
+        """The verdict on the month under way, with the STALE cache behind it: both
+        services still holding the whole season, which is the state the row was
+        settled from and the state a re-derive would reach for."""
+        asyncio.run(distrakt_store.add_month_record(
+            self.user_id, self.month, record or _verdict({"trakt": 10, "simkl": 10})))
+        state = asyncio.run(wh.load_state(self.user_id))
+        whole = {SEASON: _episodes(*range(1, TOTAL + 1))}
+        wh._set_show_baseline(state, KEY, {"trakt": 7, "tmdb": 1}, whole, "trakt")
+        wh._set_show_baseline(state, KEY, {"simkl": 5, "tmdb": 1}, whole, "simkl")
+        # A second tracked title, so a whole-roster re-baseline would be visible as
+        # a second id in the call the re-add places.
+        wh._set_show_baseline(state, "show:tmdb:2", {"trakt": 8, "simkl": 6, "tmdb": 2},
+                              {1: _episodes(1)}, "trakt")
+        wh._set_show_baseline(state, "show:tmdb:2", {"trakt": 8, "simkl": 6, "tmdb": 2},
+                              {1: _episodes(1)}, "simkl")
+        asyncio.run(wh._save(self.user_id, state))
+
+    def _readd(self, *, trakt_progress=None, simkl_progress=None,
+               simkl_error: Exception | None = None):
+        """Press Re-add with each service scripted. The empty progress record is
+        the real answer for a season whose plays were removed: the service lists
+        what it has watches in, and it has none."""
+        trakt = AsyncMock(return_value=trakt_progress if trakt_progress is not None else {})
+        simkl = (AsyncMock(side_effect=simkl_error) if simkl_error is not None
+                 else AsyncMock(return_value=simkl_progress
+                                if simkl_progress is not None else {}))
+        library = LibraryRead(entries={}, events=[], complete=True)
+        with patch.object(transport, "shared_client", return_value=_CatalogueClient()), \
+             patch("app.calendar.cache.read_month",
+                   new=AsyncMock(return_value=([], None))), \
+             patch("app.providers.trakt.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)), \
+             patch("app.providers.trakt.sync.fetch_history",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.providers.trakt.sync.fetch_progress_details", new=trakt), \
+             patch("app.providers.simkl.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)), \
+             patch("app.providers.simkl.sync.fetch_library",
+                   new=AsyncMock(return_value=library)), \
+             patch("app.providers.simkl.sync.fetch_progress_details", new=simkl):
+            resp = self.client.post("/api/distrakt/verdict-readd",
+                                    json={"key": KEY, "season": SEASON},
+                                    headers={"Origin": ORIGIN})
+        return resp, trakt, simkl
+
+    def _now(self) -> dict:
+        return wh.season_counts(asyncio.run(wh.load_state(self.user_id)),
+                                KEY, SEASON, ORDER)
+
+    def _listed(self) -> list[dict]:
+        return asyncio.run(distrakt_store.user_records(self.user_id))
+
+    def _settled(self) -> list[dict]:
+        return asyncio.run(distrakt_store.month_records(
+            self.user_id, self.month, distrakt_store.SETTLED_KINDS))
+
+    def test_the_season_does_not_settle_itself_straight_back(self):
+        """The regression, as the viewer met it. Both services now report none of
+        the season; the row must come back onto the list and STAY there."""
+        self._settle()
+        resp, _trakt, _simkl = self._readd()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._settled(), [],
+                         "the withdrawn verdict was written straight back")
+        listed, = self._listed()
+        self.assertEqual(int(listed["season"]), SEASON)
+        self.assertTrue(listed["came_back"])
+
+    def test_the_stored_counts_are_what_the_services_say_now(self):
+        """Not merely "the row survived": the numbers it survived ON are the fresh
+        ones. A cache left at 10 would settle the row again on the next load."""
+        self._settle()
+        self._readd()
+        self.assertEqual(self._now(), {"trakt": 0, "simkl": 0})
+
+    def test_it_asks_about_the_one_title_and_not_the_roster(self):
+        """The viewer asked about one season. Asking about everything is what the
+        Refresh button is, and it is one provider call per tracked title — counted
+        here rather than described, because that cost is the whole reason the
+        incremental gate exists."""
+        self._settle()
+        _resp, trakt, simkl = self._readd()
+        self.assertEqual([list(call.args[1]) for call in trakt.await_args_list], [[7]])
+        self.assertEqual([list(call.args[1]) for call in simkl.await_args_list], [[5]])
+
+    def test_a_service_with_no_id_for_the_title_is_not_asked(self):
+        """Asking Simkl with Trakt's id would either 404 or, far worse, answer
+        about a different title."""
+        record = _verdict({"trakt": 10, "simkl": 10})
+        record["ids"] = {"trakt": 7, "tmdb": 1, "slug": "the-agency"}
+        self._settle(record)
+        _resp, trakt, simkl = self._readd()
+        trakt.assert_awaited_once()
+        simkl.assert_not_awaited()
+
+    def test_a_service_that_cannot_be_read_leaves_its_slot_alone(self):
+        """One service being down must not sink the re-add, and must not be read as
+        having retracted anything: its stored number is left exactly as it was and
+        the other service's fresh answer still lands. What the row then BECOMES is
+        the ordinary rule about a service nobody could read, and is not this
+        control's to decide differently."""
+        self._settle()
+        resp, _trakt, _simkl = self._readd(
+            simkl_error=SourceUnavailable("simkl is down"))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._now(), {"trakt": 0, "simkl": 10})
 
 
 if __name__ == "__main__":  # pragma: no cover

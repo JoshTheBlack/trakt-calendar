@@ -439,6 +439,43 @@ class OneServiceIsUnchangedTests(TwoSourceTestCase):
         self.assertEqual(record["watched_by_source"], {})
 
 
+class ARemovalNeitherBeaconAdmitsToTests(TwoSourceTestCase):
+    """The two services need different amounts of help to notice an unwatch, and
+    the difference is what their incremental read IS.
+
+    A service read through an append-only feed of PLAYS can only ever be folded
+    forward: nothing in the feed subtracts, so a removal leaves the stored count
+    standing for ever unless something re-reads the progress. A service that hands
+    over its LIBRARY re-states what it currently holds every time it is read, so
+    folding that in replaces the slots outright and the removal corrects itself —
+    which is why the inference the first one needs must not be spent on the
+    second.
+    """
+
+    async def test_a_library_read_corrects_a_removal_with_no_extra_call(self):
+        """The library says the season is empty now, and that is the whole
+        correction. The per-title re-read the other service needs is never
+        reached for — asserted by counting the calls, because paying for it here
+        would be one provider call per tracked title for an answer already in
+        hand."""
+        state = await self._baseline(SIMKL_ONLY, [_record(101)],
+                                     simkl={101: {1: _episodes(1, 2, 3)}})
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"simkl": 3})
+        # The plays are removed at the service: the library no longer holds the
+        # season, and only the watched stamp moved.
+        patches = _patch("simkl", progress={101: {}}, activities=MOVED)
+        for p in patches:
+            p.start()
+        try:
+            state = await wh.sync(SIMKL_ONLY, self.user_id)
+            progress = patches[2].get_original()[0]
+        finally:
+            for p in patches:
+                p.stop()
+        self.assertEqual(wh.watched_map(state), {})
+        progress.assert_not_awaited()
+
+
 class BaseliningEachSourceTests(TwoSourceTestCase):
     """WHO HAS BEEN ASKED ABOUT A TITLE IS A FACT PER (title, service).
 

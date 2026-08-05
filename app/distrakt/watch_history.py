@@ -19,6 +19,9 @@ cheaply:
     **Movies** section).
   - UNWATCH / FORCE: if the removed_at beacon changes (or the Refresh button
     forces it) we re-baseline every cached title from progress and re-seed movies.
+    A REMOVAL THAT MOVES NO SUCH BEACON IS INFERRED INSTEAD, because at least one
+    service does not move one for it — see _watched_changed, and _sync_one for
+    what the inference costs and which sources need it at all.
 
 WHICH SOURCES ANSWER is not this module's business: it asks the registry for
 every port that can read one person's own viewing and that this account's
@@ -526,10 +529,40 @@ def _beacons(la: dict) -> dict:
 
 def _removed_changed(old: dict | None, new: dict) -> bool:
     """True if an unwatch happened (a *_removed_at beacon moved) — triggers a
-    re-baseline since removals don't appear as new history events."""
+    re-baseline since removals don't appear as new history events.
+
+    IT IS THE HONEST SIGNAL AND IT IS NOT ALWAYS SENT. Measured against a live
+    Trakt account: removing every play of a season moved `episodes.watched_at`
+    and left `episodes.removed_at` null. So this stays the FIRST thing asked —
+    a service that says outright that something was removed is believed without
+    any inference — and _watched_changed is what covers the service that will
+    not say it.
+    """
     if not old:
         return False
     return old.get("ep_removed") != new.get("ep_removed") or old.get("mv_removed") != new.get("mv_removed")
+
+
+def _watched_changed(old: dict | None, new: dict) -> bool:
+    """True if a *_watched_at beacon moved since the last pass.
+
+    ON ITS OWN THIS IS NOT A REMOVAL AND MUST NEVER BE READ AS ONE. The watched
+    beacon moves every time anybody watches anything, which is the ordinary case
+    and precisely the case the gate above it exists to keep cheap. It becomes
+    evidence only in combination with a history pull that came back EMPTY, and
+    _sync_one is the one place that combination is read — see the comment there
+    for what it costs and why it is worth paying.
+
+    THE INFERENCE, STATED ONCE: two things move a service's watch record, plays
+    added and plays taken away. The history feed reports the first. So a record
+    that moved while the feed accounts for none of the movement moved because
+    something was taken away, and that is the removal _removed_changed was
+    supposed to report and did not.
+    """
+    if not old:
+        return False
+    return (old.get("ep_watched") != new.get("ep_watched")
+            or old.get("mv_watched") != new.get("mv_watched"))
 
 
 def _event_key(payload: dict, media: Media) -> ItemKey | None:
@@ -1003,15 +1036,28 @@ async def tracker_sources(settings, user_id: int) -> list:
 
 
 async def baseline_show(settings, user_id: int, record: dict) -> None:
-    """Baseline one title from every admitted source's progress record (called
-    when it enters the roster). Takes the whole record rather than an id, because
-    it needs both halves: each source's id to place its call, and the shared
-    identity to file the answers under.
+    """Baseline one title from every admitted source's progress record. Takes the
+    whole record rather than an id, because it needs both halves: each source's id
+    to place its call, and the shared identity to file the answers under.
 
     A source that has no id for this title is skipped rather than asked with
     another service's, and a source that could not be read leaves its slot as it
     was — one service being down must not stop a title being baselined from the
     other.
+
+    TWO CALLERS, ONE QUESTION. A title entering the roster has never been asked
+    about at all; a settled verdict the viewer has just asked the app to reconsider
+    has been asked about, but not recently enough to decide anything from — see
+    routes.api_distrakt_verdict_readd, where a re-derive from the cache sent the
+    row it had withdrawn straight back to completed. Both want the same thing:
+    this service's current, complete answer about ONE title, at one call each. So
+    both come here rather than the second inventing its own version of it, and
+    neither reaches for the whole-roster re-baseline — that is the cost the
+    incremental gate exists to avoid and neither caller is asking about the roster.
+
+    THE UNIT IS THE TITLE BECAUSE THAT IS WHAT A SERVICE ANSWERS ABOUT. A progress
+    record covers every season at once and there is no cheaper call for one of
+    them, so a caller that cares about a single season pays exactly the same.
     """
     ports = await tracker_ports(settings, user_id)
     state = await _load(user_id)
@@ -1156,6 +1202,39 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
         with span("wh.history", start_at=start_at, source=name) as sp:
             events = await port.fetch_history(settings, start_at=start_at)
             sp.set(events=len(events))
+        # THE REMOVAL THIS SOURCE WOULD NOT ADMIT TO. Its watch record moved and
+        # the feed of things ADDED to that record accounts for none of the
+        # movement, so what changed was taken away — see _watched_changed for the
+        # inference and _removed_changed for the measurement that made it
+        # necessary. Without this the stored count keeps the pre-removal number
+        # for ever: the sync runs (the beacon moved), the history finds nothing (a
+        # removal is not an event), and nothing re-reads the progress.
+        #
+        # ONLY A SOURCE WHOSE INCREMENTAL READ IS AN APPEND-ONLY FEED NEEDS IT,
+        # which is why this sits on this branch alone rather than above the split.
+        # A source that hands over its LIBRARY re-states what it currently holds
+        # for every title it names, and folding that in replaces those slots
+        # outright — so a removal inside a list it re-reads corrects itself with no
+        # inference at all, and a whole title dropped from the library moves the
+        # removed beacon that path already gates on. A feed of plays can only ever
+        # be folded forward and never subtracts, and that is the defect.
+        #
+        # WHAT IT COSTS, AND WHY IT IS EVERY TITLE. The signal says something was
+        # removed and cannot say WHAT — there is nothing in it to narrow the search
+        # with — so the answer is the same full per-title re-read a forced refresh
+        # makes, one provider call per tracked title (146 of them on the account
+        # this was found on). It is paid only when the beacon moved AND the history
+        # explained none of the movement, which is a removal or a back-dated play
+        # and never an evening's viewing: the ordinary case brings events back with
+        # it and stops one line above this.
+        #
+        # A BACK-DATED PLAY IS THE ONE FALSE POSITIVE, and it costs rather than
+        # misleads. Recorded with a watched_at before the window this pull covers,
+        # it moves the beacon and appears in no event — and what follows is exactly
+        # the read that finds it. The answer is right either way.
+        if not rebaseline and not events and _watched_changed(stored, beacons):
+            await _rebaseline_by_id(settings, state, name, source, port, span,
+                                    reason="unwatch-implied")
 
     for event in events:
         _apply_event(state, event, name)
