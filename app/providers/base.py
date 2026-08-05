@@ -347,6 +347,22 @@ class SyncPort(Protocol):
         A batch call rather than one-per-show because pooling the connections is
         the source's business, not its caller's — the tracker baselines a whole
         roster at a time and should not have to hold a client to do it.
+
+        AN ID THAT WAS ANSWERED ABOUT IS PRESENT; AN ID THAT COULD NOT BE READ IS
+        ABSENT. That is the one thing this shape has to say beyond the counts, and
+        it has to be said here because every implementation has to uphold it. An
+        empty map against an id is a real answer — this person has seen none of
+        that show — and the caller acts on it by retiring the seasons it had
+        stored. A show whose own request failed has said nothing at all, and
+        flattening the two into one empty map deletes watch history over a
+        transient failure, one show at a time, with nothing on the page to say so.
+        Absence therefore means "I have nothing to tell you about this one" and
+        the caller leaves what it already knew alone.
+
+        A REFUSED CREDENTIAL IS NOT ONE SHOW FAILING and must raise rather than
+        emptying the answer, for the reason SourceUnavailable exists: it is true of
+        every request that token will make, so tolerating it per show composes a
+        whole roster of refusals into a library nobody has watched.
         """
         ...
 

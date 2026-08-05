@@ -1043,7 +1043,10 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
     A source that has no id for this title is skipped rather than asked with
     another service's, and a source that could not be read leaves its slot as it
     was — one service being down must not stop a title being baselined from the
-    other.
+    other. THAT INCLUDES A SOURCE THAT ANSWERED ABOUT NOTHING: an id missing from
+    what came back means the service had nothing to say about this title (see
+    SyncPort.fetch_progress_details), which is not the same as it saying the title
+    has been watched by nobody, and only the second may overwrite a stored count.
 
     TWO CALLERS, ONE QUESTION. A title entering the roster has never been asked
     about at all; a settled verdict the viewer has just asked the app to reconsider
@@ -1071,8 +1074,10 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
         except SourceUnavailable as exc:
             logger.warning("baseline_show: %s could not be read: %s", source, exc)
             continue
+        if int(source_id) not in details:
+            continue
         _set_show_baseline(state, record_key(record), record.get("ids") or {},
-                           details.get(int(source_id)) or {}, str(source))
+                           details[int(source_id)], str(source))
         touched = True
     if touched:
         await _save(user_id, state)
@@ -1278,9 +1283,17 @@ async def _rebaseline_by_id(settings, state: dict, name: str, source, port, span
                 settings, [_source_id(entry, source) for entry in cached.values()])
         with span("wh.rebaseline.apply", n=len(cached)):
             for key, entry in cached.items():
+                # A TITLE THE ANSWER DID NOT NAME IS LEFT EXACTLY AS IT WAS. Its
+                # id is missing from what came back, which means this service had
+                # nothing to say about it (see SyncPort.fetch_progress_details) —
+                # a call that failed, not a person who has watched none of it.
+                # Read as the second, one flaky request retires a season's stored
+                # episodes and nothing anywhere says why.
+                source_id = int(_source_id(entry, source))
+                if source_id not in details:
+                    continue
                 _set_show_baseline(
-                    state, key, entry.get("ids") or {},
-                    details.get(int(_source_id(entry, source))) or {}, name)
+                    state, key, entry.get("ids") or {}, details[source_id], name)
 
 
 def _titles_with_evidence(shows: dict, source: str) -> set[str]:
@@ -1529,9 +1542,15 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
                 state[_UNREADABLE].append(str(source))
             continue
         for key, record in missing.items():
+            # A TITLE THE ANSWER DID NOT NAME IS LEFT ALONE, not baselined at zero
+            # — the service could not be read about it, which says nothing (see
+            # SyncPort.fetch_progress_details). It stays un-baselined for this
+            # service and is asked about again on the next load.
+            source_id = int(_source_id(record, source))
+            if source_id not in details:
+                continue
             _set_show_baseline(state, key, record.get("ids") or {},
-                               details.get(int(_source_id(record, source))) or {},
-                               str(source))
+                               details[source_id], str(source))
         saved = True
     if saved:
         await _save(user_id, state)

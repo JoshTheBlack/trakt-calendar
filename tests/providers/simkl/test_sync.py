@@ -521,13 +521,28 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             got = await sync.fetch_progress_details(SETTINGS, [91])
         self.assertEqual(got, {91: {2: {4: ""}}})
 
-    async def test_a_season_with_no_breakdown_contributes_nothing(self):
+    async def test_a_season_with_no_breakdown_contributes_no_episodes(self):
         """Turning a watched COUNT into "episodes 1..n" would invent both the
-        numbers and the dates."""
+        numbers and the dates.
+
+        THE TITLE IS STILL PRESENT IN THE ANSWER, holding nothing. Simkl answered
+        about it, and an id that was answered about is present however empty the
+        answer — absence is reserved for an id that could not be read at all, which
+        is what stops a failed request being read as a viewer who has watched
+        nothing (see SyncPort.fetch_progress_details).
+        """
         send = AsyncMock(return_value=_Response(
             [{"ids": {"simkl": 5}, "seasons": [{"number": 1, "total_episodes_watched": 4}]}]))
         with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {5: {}})
+
+    async def test_a_batch_that_failed_names_none_of_its_ids(self):
+        """The other half of the same rule, and the one that protects stored
+        counts: a POST that came back refused says nothing about any title in it,
+        so every id stays absent and the caller leaves what it had alone."""
+        send = AsyncMock(return_value=_Response(None, status_code=500, text="boom"))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5, 6]), {})
 
     async def test_nothing_to_ask_about_costs_no_request(self):
         send = AsyncMock()

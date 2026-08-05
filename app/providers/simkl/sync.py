@@ -603,6 +603,12 @@ async def fetch_progress_details(settings: Settings,
     asked about by POSITION. An entry that names its own id is believed over the
     position, because a service that starts filtering its answers would otherwise
     shift every row silently.
+
+    AN ID THIS ANSWERED ABOUT IS PRESENT EVEN WHEN THE ANSWER IS "none of it", and
+    an id it could NOT answer about is absent — see SyncPort.fetch_progress_details,
+    where that distinction is declared. A batch whose request failed leaves every
+    id in it absent, which is what stops one refused POST being read as a whole
+    chunk of the roster having been watched by nobody.
     """
     unique = []
     for value in show_ids or []:
@@ -649,9 +655,7 @@ async def fetch_progress_details(settings: Settings,
                     stated = batch[position]
                 if stated in (None, ""):
                     continue
-                progress = _progress_from_seasons(entry)
-                if progress:
-                    out[int(stated)] = progress
+                out[int(stated)] = _progress_from_seasons(entry)
     return out
 
 

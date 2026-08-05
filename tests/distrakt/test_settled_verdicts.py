@@ -700,13 +700,17 @@ class ReAddDecidesFromAFreshReadTests(AppTestCase):
 
     def _readd(self, *, trakt_progress=None, simkl_progress=None,
                simkl_error: Exception | None = None):
-        """Press Re-add with each service scripted. The empty progress record is
-        the real answer for a season whose plays were removed: the service lists
-        what it has watches in, and it has none."""
-        trakt = AsyncMock(return_value=trakt_progress if trakt_progress is not None else {})
+        """Press Re-add with each service scripted. The default answer is the real
+        one for a season whose plays were removed: the id IS in the answer, holding
+        nothing. That distinction is the protocol's (see
+        SyncPort.fetch_progress_details) — an id present with an empty map is "this
+        person has watched none of it", and an id absent altogether is "I could not
+        read this one", which retracts nothing and leaves the stored count alone."""
+        trakt = AsyncMock(return_value=trakt_progress if trakt_progress is not None
+                          else {7: {}})
         simkl = (AsyncMock(side_effect=simkl_error) if simkl_error is not None
                  else AsyncMock(return_value=simkl_progress
-                                if simkl_progress is not None else {}))
+                                if simkl_progress is not None else {5: {}}))
         library = LibraryRead(entries={}, events=[], complete=True)
         with patch.object(transport, "shared_client", return_value=_CatalogueClient()), \
              patch("app.calendar.cache.read_month",

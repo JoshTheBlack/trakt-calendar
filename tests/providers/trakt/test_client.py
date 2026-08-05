@@ -23,6 +23,7 @@ import pytest
 from app.endpoints import get_endpoint
 from app.providers.trakt import TraktError
 from app.providers.trakt import calendar as trakt_calendar
+from app.providers.trakt import sync as trakt_sync
 from app.providers.trakt import transport
 from app.providers.trakt.detail import _cast_from, _episodes_from
 
@@ -162,6 +163,112 @@ class TestCachedGetStoresOnlyRealAnswers:
         result, writes = self._run(_Client(_response(200, body='{"seasons": []}')), private=True)
         assert result == {"seasons": []}
         assert writes == []
+
+
+def _cached_get(*answers):
+    """A stand-in for transport.cached_get that serves `answers` in order.
+
+    AN ANSWER THAT IS AN EXCEPTION IS SERVED THE WAY THE REAL FUNCTION SERVES A
+    FAILURE: raised when the caller passed `raise_errors=True`, and handed back as
+    None otherwise. That flag is the whole mechanism under test — a double that
+    raised regardless would pass just as happily against the swallowing code these
+    tests exist to forbid, which would make every one of them worthless.
+    """
+    served = list(answers)
+    calls: list[dict] = []
+
+    async def _get(_client, _settings, path, params=None, **kwargs):
+        calls.append({"path": path, "params": params, **kwargs})
+        answer = served.pop(0) if len(served) > 1 else served[0]
+        if isinstance(answer, Exception):
+            if kwargs.get("raise_errors"):
+                raise answer
+            return None
+        return answer
+
+    _get.calls = calls
+    return _get
+
+
+class TestThePrivateReadsRefuseToLookEmpty:
+    """A FAILURE IS NEVER NORMALIZED INTO AN EMPTY ANSWER, asked of the three
+    reads a person's own viewing comes through.
+
+    Each of these was a swallowed refusal, and each swallowed one differently:
+    the beacon reported "nothing has changed", the history reported "nothing was
+    watched", and the progress fan-out reported "this show has been watched by
+    nobody" once per show. All three read as ordinary answers, all three are
+    acted on, and the third overwrites stored counts — so with one refused
+    credential the page rendered healthy on a reload and unavailable on a
+    refresh, with nothing anywhere naming the service that had stopped
+    answering.
+    """
+
+    def test_a_refused_beacon_raises_rather_than_answering_empty(self):
+        """An empty beacon is not a missing one. It claims all four stamps are
+        absent, which compares EQUAL to a stored empty one and gates the next
+        sync as unchanged — so a refused token has the source report itself up to
+        date for as long as it stays refused."""
+        get = _cached_get(TraktError("nope", 401))
+        with patch.object(transport, "cached_get", get):
+            with pytest.raises(TraktError):
+                asyncio.run(trakt_sync.fetch_last_activities(SETTINGS))
+        assert get.calls[0]["raise_errors"] is True
+
+    def test_a_beacon_that_answered_with_nothing_is_still_an_empty_blob(self):
+        """The distinction the fix rests on: Trakt answering with a body that
+        held nothing is a real, successful, empty answer."""
+        with patch.object(transport, "cached_get", _cached_get(None)):
+            assert asyncio.run(trakt_sync.fetch_last_activities(SETTINGS)) == {}
+
+    def test_a_show_that_could_not_be_read_is_absent_rather_than_empty(self):
+        """The one that overwrites data. An empty map against an id means "this
+        person has watched none of it" and retires the stored seasons; a show
+        whose own call failed has said nothing, so its id is left out entirely
+        and the caller keeps what it had."""
+        with patch.object(transport, "cached_get", _cached_get(TraktError("gone", 404))), \
+             patch.object(transport, "shared_client", lambda: None):
+            assert asyncio.run(trakt_sync.fetch_progress_details(SETTINGS, [7])) == {}
+
+    def test_a_show_with_nothing_watched_is_present_and_empty(self):
+        """The other side of the same rule, and the reason absence had to be
+        reserved: a real "none of it" still has to reach the caller."""
+        with patch.object(transport, "cached_get", _cached_get({"seasons": []})), \
+             patch.object(transport, "shared_client", lambda: None):
+            assert asyncio.run(trakt_sync.fetch_progress_details(SETTINGS, [7])) == {7: {}}
+
+    def test_a_refused_credential_is_not_one_show_failing(self):
+        """It is true of every request this token will make, so tolerating it per
+        show composes a whole roster of refusals into a library nobody watched."""
+        with patch.object(transport, "cached_get", _cached_get(TraktError("nope", 401))), \
+             patch.object(transport, "shared_client", lambda: None):
+            with pytest.raises(TraktError):
+                asyncio.run(trakt_sync.fetch_progress_details(SETTINGS, [7, 8]))
+
+    def test_a_403_is_a_credential_failure_too(self):
+        """Both say the request was refused over WHO asked rather than WHAT was
+        asked for, so the same token on any other path gets the same answer."""
+        assert transport.is_credential_failure(TraktError("x", 403))
+        assert not transport.is_credential_failure(TraktError("x", 404))
+
+    def _history(self, response):
+        async def _send(_client, _method, _url, **_kwargs):
+            return response
+        with patch.object(transport, "send", _send), \
+             patch.object(transport, "shared_client", lambda: None):
+            return asyncio.run(trakt_sync.fetch_history(SETTINGS))
+
+    def test_a_refused_history_page_raises_rather_than_ending_the_sweep(self):
+        """It used to log, stop, and return what had arrived — so a refused read
+        was reported as "0 event(s) over 1 page(s)", and the caller advanced its
+        cursor past a window nothing had read."""
+        with pytest.raises(TraktError):
+            self._history(_response(401))
+
+    def test_a_page_that_answered_with_no_events_ends_the_sweep_normally(self):
+        """Trakt saying there is nothing more, which is the ordinary answer for
+        an account that has watched nothing since the cursor."""
+        assert self._history(_response(200, body="[]")) == []
 
 
 class TestFetchWindow:

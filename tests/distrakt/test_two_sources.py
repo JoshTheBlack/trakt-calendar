@@ -36,6 +36,7 @@ from app.distrakt import (counts, discord_fmt, lifecycle, live,
                           routes as distrakt_routes, store, watch_history as wh)
 from app.providers.base import ItemKey, LibraryEntry, LibraryRead, UnlistedSeasons
 from app.providers.simkl import SimklError
+from app.providers.trakt import TraktError
 from tests.support import AppTestCase, ORIGIN, new_db_path
 
 # What each account's request-scoped Settings looks like. A source is "linked"
@@ -1244,6 +1245,148 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
         row, = self._month().json()["shows"]
         self.assertEqual(row["watched"], 2)
         self.assertEqual(row["total"], 8)
+
+
+class TheOtherServiceSaysSoTooTests(AppTestCase):
+    """THE SAME THREE PROPERTIES, ASKED OF TRAKT, and until now it kept none of
+    them.
+
+    WHAT A VIEWER SAW WITH A DEAD TRAKT CREDENTIAL, measured on a real account:
+    two contradictory pages depending on which control they pressed. A plain
+    RELOAD swallowed the beacon's 401, fell through the gate, swallowed the
+    history's 401 as "0 events", ran no re-baseline and rendered every stored
+    number — a page that looked perfectly healthy. A REFRESH made a hundred and
+    forty-six progress calls, every one refused, and rendered the whole month as
+    "unavailable". Neither page said which service was broken or that anything
+    needed re-linking, so there was nothing for the viewer to act on either way.
+    The other service's identical failure has said so, by name, since its own port
+    was fixed; this is the asymmetry closing.
+
+    THE REAL PROVIDER MODULE RUNS HERE, with only the HTTP layer doubled, for the
+    reason the other service's version of this gives: what failed was the
+    composition of swallowed refusals into one confident answer, and a mocked port
+    cannot reproduce that.
+    """
+
+    def make_settings(self):
+        from app.config import Settings
+
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="simkl-cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "trakt-token")
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        asyncio.run(store.add_user_record(self.user_id, {
+            "ids": {"trakt": 7, "simkl": 5, "tmdb": 1, "slug": "silo"}, "season": 3,
+            "title": "Silo", "network": "Apple TV", "media": "show",
+            "kind": store.RecordKind.KEEPUP,
+        }))
+        self.sign_in_as(self.user_id)
+        # THE MONTH ALREADY EXISTS, because this is about loading one rather than
+        # building one. A month that has never been opened is created from the
+        # calendar and a history sweep, and a service failing THERE degrades the
+        # whole month by design and has done since long before a second service
+        # existed. What is under test is the load after that.
+        asyncio.run(store.add_month_record(
+            self.user_id, store.month_key(date.today().year, date.today().month),
+            {"ids": {"trakt": 7, "simkl": 5, "tmdb": 1}, "season": 3, "title": "Silo",
+             "network": "Apple TV", "media": "show",
+             "kind": store.RecordKind.SEASON_PREMIERE}))
+        asyncio.run(self._seed())
+
+    async def _seed(self):
+        """A stored season with real episodes in it from each service — the thing
+        a swallowed refusal would quietly report as watched by nobody."""
+        state = await wh.load_state(self.user_id)
+        wh._set_show_baseline(state, "show:tmdb:1", {"trakt": 7, "tmdb": 1},
+                              {3: _episodes(1, 2)}, "trakt")
+        wh._set_show_baseline(state, "show:tmdb:1", {"simkl": 5, "tmdb": 1},
+                              {3: _episodes(1, 2, 3)}, "simkl")
+        await wh._save(self.user_id, state)
+
+    async def _refused(self, _client, _settings, _path, _params=None, *,
+                       raise_errors=False, **_kwargs):
+        """Trakt refusing every cached GET with the 401 a revoked token produces.
+
+        IT HONOURS `raise_errors` THE WAY THE REAL TRANSPORT DOES — raised only
+        when the caller asked to hear about it, None otherwise — because that flag
+        is the whole mechanism. A double that raised regardless would pass just as
+        happily against the swallowing code this test exists to forbid.
+        """
+        if not raise_errors:
+            return None
+        raise TraktError("Trakt rejected the credentials (401).", 401)
+
+    async def _refused_send(self, _client, _method, _url, **_kwargs):
+        """The history sweep does not go through the cached GET, so its refusal
+        has to arrive as the response Trakt really sends."""
+        return SimpleNamespace(status_code=401, text="unauthorized", headers={},
+                               json=lambda: {})
+
+    def _month(self, force: bool = False):
+        """One load of the month under way with Trakt refusing everything and the
+        other service answering normally."""
+        async def _season(settings, source_id, season, fresh=False, client=None):
+            return {"total": 8, "cadence": "Tue", "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+
+        today = date.today()
+        library = LibraryRead(entries={}, events=[], complete=False)
+        with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))), \
+             patch("app.providers.trakt.detail.fetch_season_detail", _season), \
+             patch("app.providers.simkl.detail.fetch_season_detail", _season), \
+             patch("app.providers.simkl.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)), \
+             patch("app.providers.simkl.sync.fetch_library",
+                   new=AsyncMock(return_value=library)), \
+             patch("app.providers.simkl.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={})), \
+             patch("app.providers.trakt.transport.cached_get", new=self._refused), \
+             patch("app.providers.trakt.transport.send", new=self._refused_send):
+            if force:
+                return self.client.post("/api/distrakt/refresh",
+                                        json={"year": today.year, "month": today.month},
+                                        headers={"Origin": ORIGIN})
+            return self.client.get(
+                f"/api/distrakt/month?year={today.year}&month={today.month}")
+
+    def test_the_month_renders_and_names_the_service_that_was_refused(self):
+        """HTTP 200 with the service NAMED, which is the combination that was
+        missing: the page came back complete and silent."""
+        resp = self._month()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["sources_unreadable"], ["Trakt"])
+
+    def test_the_other_services_counts_still_render(self):
+        """Degrading is not failing. The row shows what the service that answered
+        reported, and the notice above it is what says the number is one
+        service's alone."""
+        row, = self._month().json()["shows"]
+        self.assertEqual(row["counts"], "2/8 (Trakt) · 3/8 (Simkl)")
+        self.assertFalse(row["unavailable"])
+
+    def test_the_stored_counts_are_left_exactly_as_they_were(self):
+        """Degrading is not forgetting. Nothing this pass could not read may
+        retire a row, on a plain load or on a forced one — and the forced one is
+        the half that used to make a hundred and forty-six refused calls and write
+        the result down."""
+        before = asyncio.run(self._rows())
+        self._month()
+        self._month(force=True)
+        self.assertEqual(asyncio.run(self._rows()), before)
+
+    async def _rows(self):
+        rows = await db.fetch_all(
+            "SELECT source, season, watched_episodes_json FROM distrakt_show_progress "
+            "WHERE user_id = ? ORDER BY source, season", (self.user_id,))
+        return [(row["source"], row["season"], row["watched_episodes_json"])
+                for row in rows]
 
 
 class ACompletedRowShowsWhatEachServiceSawTests(TwoSourceTestCase):

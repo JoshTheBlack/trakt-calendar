@@ -48,14 +48,55 @@ class TraktRateLimitError(TraktError):
     correctly degrades to its stale cached window)."""
 
 
+# The statuses that are about WHO ASKED rather than about WHAT WAS ASKED FOR.
+# Trakt answers 401 for a token it will not accept and 403 for one it accepts but
+# will not honour, and neither is a property of the path that happened to be
+# called first: the same token on any other path gets the same answer. A caller
+# that tolerates ONE call failing — the per-show progress fan-out does, so that a
+# single missing show does not sink a whole re-baseline — must NOT tolerate one of
+# these, because "this show could not be read" and "nothing this token asks for
+# can be read" are different facts with opposite consequences. Tolerating the
+# second once per show tolerates it a hundred and forty-six times and calls the
+# result a read of an empty library, which is how a viewer's stored counts get
+# replaced with "watched nothing".
+CREDENTIAL_STATUSES = (401, 403)
+
+
+def is_credential_failure(error: TraktError) -> bool:
+    """True when this failure says the CREDENTIAL is not usable.
+
+    Lives here because the statuses are Trakt's, and reading them is what this
+    module is for; a caller asks the question rather than comparing numbers of
+    its own, so the answer has one place to change.
+    """
+    return error.status in CREDENTIAL_STATUSES
+
+
 def api_headers(settings: Settings, paginate: bool = True) -> dict:
     """Trakt request headers. `paginate=False` OMITS the X-Pagination-* headers.
 
-    This matters for /sync/watched/shows: sending pagination headers switches it
-    into a PAGINATED, show-level response (100/page) that DROPS the nested
-    seasons[]/episodes[] breakdown we count — which manifested as every watched
-    count coming back 0. Non-paginated, it returns the full watched library WITH
-    seasons in one call."""
+    THERE IS NO CHEAP WHOLE-LIBRARY READ BEHIND `paginate=False`, and this
+    docstring used to claim there was. It said that omitting the pagination
+    headers made /sync/watched/shows return "the full watched library WITH
+    seasons in one call". Measured against the live API, that is false in every
+    variant that could plausibly matter: with the headers and without them, with
+    `extended=full`, with `extended=noseasons`, with `limit=2000` and with
+    `page=1&limit=2000`, the response is the same 250 show-level rows carrying
+    `plays`, `last_watched_at`, `last_updated_at`, `reset_at` and the show — and
+    `seasons[]` on not one of them. The endpoint paginates unconditionally and
+    caps a page at 250. `extended=noseasons` behaving identically to the default
+    is the control that says the seasons are already absent rather than being
+    stripped by something sent here.
+
+    So per-season completion comes from one /shows/{id}/progress/watched call per
+    show and from nothing else (see sync.fetch_watched_map, whose docstring has
+    always been the accurate one, and sync.fetch_play_counts, which is what the
+    show-level rows are actually good for: learning WHICH shows changed).
+
+    What `paginate=False` still does is what its name says — leave the
+    X-Pagination-* request headers off, for the calls that page through query
+    parameters instead or that want the whole response in one piece.
+    """
     headers = {
         "trakt-api-version": "2",
         "trakt-api-key": settings.trakt_client_id,
