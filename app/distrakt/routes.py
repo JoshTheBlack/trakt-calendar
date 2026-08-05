@@ -429,11 +429,19 @@ def _closed_month_payload(doc: dict, month_key: str, emojis: dict, default_emoji
 
 async def _sync_watch_history(settings, user_id: int, records: list[dict],
                               month_key: str, force_fresh: bool,
-                              today: date) -> tuple[dict, dict, list[dict], list, list[str]]:
+                              today: date) -> tuple[dict, dict, dict, list[dict], list, list[str]]:
     """Bring this user's incremental watch-history cache up to date ONCE, and take
     the four answers the month needs out of it: how much of each season they have
     watched, when each season was finished, which films they watched in the month,
     and which episode plays the pull actually reported.
+
+    THE STATE ITSELF COMES BACK BESIDE THEM, because one reader asks a question the
+    four cannot answer. A settled verdict names a season nothing on the page is
+    asking about any more, and watched_map is deliberately bounded to the seasons
+    that ARE being asked about — so "what does each service say about that season
+    now" has to be put to the state directly (watch_history.season_counts). It is
+    the same object all four were derived from, already in memory, so handing it
+    back costs nothing and re-reading it would be a second load of the same rows.
 
     One sync for all four because they all read the same history: doing it per
     answer would re-baseline the whole history four times. `force_fresh` is a full
@@ -460,7 +468,7 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         # one service's alone rather than presenting it as what everybody agrees.
         unreadable = watch_history.unreadable_sources(state)
         sp.set(watched_keys=len(watched_lookup), movies=len(movies), plays=len(plays))
-    return watched_lookup, completed_lookup, movies, plays, unreadable
+    return state, watched_lookup, completed_lookup, movies, plays, unreadable
 
 
 def _season_lookup(settings) -> lifecycle.SeasonLookup:
@@ -503,6 +511,51 @@ def _unknown_episode_rows(plays) -> list[dict]:
     """
     return [{"key": str(play.key), "season": play.season, "number": play.number,
              "title": play.title, "ids": dict(play.ids or {})} for play in plays]
+
+
+def _unbacked_note(question: lifecycle.UnbackedVerdict) -> str:
+    """The sentence a settled row whose services have withdrawn is offered with.
+
+    IT SAYS BOTH NUMBERS, not just that something changed. "This no longer adds
+    up" leaves the viewer to open the row, remember what it used to say and work
+    out which service moved; the whole cost of the question is theirs to pay
+    otherwise. Both sides are written through counts.counts_label — the same
+    function the row itself is drawn with — so the two can never disagree about
+    how a per-service reading is spelled.
+
+    Written here for the reason MONTH_AWAITS_IMPORT is: it is a sentence this page
+    says about its own state, and the page's states are this module's.
+    """
+    labels, order = live.source_labels(), live.source_order()
+    total = question.record.get("total")
+    # Named in the registry's declared order, which is the order every other
+    # per-service reading on the page is written in (counts.counts_label takes the
+    # same one). The rule that produced them answers alphabetically because a set
+    # has to be ordered somehow; that is not an order anybody chose.
+    withdrew = ([name for name in order if name in question.sources]
+                + [name for name in question.sources if name not in order])
+    named = " and ".join(labels.get(name, name) for name in withdrew)
+    verb = "no longer reports" if len(question.sources) == 1 else "no longer report"
+    was = counts.counts_label(question.record.get("watched_by_source") or {},
+                              total, labels, order)
+    now = counts.counts_label(question.now, total, labels, order)
+    return (f"{named} {verb} finishing this. "
+            f"{question.month} recorded it as {was}, and it now reads {now}.")
+
+
+def _unbacked_rows(questions: list[lifecycle.UnbackedVerdict]) -> list[dict]:
+    """The settled verdicts nothing backs any more, in the flat shape the page's
+    question row reads.
+
+    NO IDS TRAVEL, unlike an unmatched play's row, and the difference is that this
+    question is about a record that EXISTS. Saying yes re-derives a season the
+    tracker is already holding, so the ids it needs to look one up are on the
+    stored record where they have always been; a caller handing its own in could
+    only point the answer at a different title.
+    """
+    return [{"key": question.record["key"], "season": int(question.record["season"]),
+             "title": question.record.get("title") or "",
+             "note": _unbacked_note(question)} for question in questions]
 
 
 async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
@@ -567,13 +620,14 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     #                   normal loads rely on the last_activities gate + deltas.
     season_fresh = force_fresh
 
+    state: dict = {}
     watched_lookup: dict = {}
     completed_lookup: dict = {}
     movies: list[dict] = []
     questions = lifecycle.HistoryQuestions([], [])
     unreadable: list[str] = []
     if ports:
-        watched_lookup, completed_lookup, movies, plays, unreadable = await _sync_watch_history(
+        state, watched_lookup, completed_lookup, movies, plays, unreadable = await _sync_watch_history(
             settings, user_id, everything, month_key, force_fresh, today)
         if under_way and plays:
             # The history has moved, so what it reported is folded back into the
@@ -628,6 +682,32 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         else:
             shape = await lifecycle.announce(user_id, month_key, live_premieres)
 
+    # WHETHER WHAT THIS MONTH SETTLED IS STILL BACKED BY THE SERVICES. A verdict is
+    # never recomputed — it keeps the numbers it was reached on, which is why the
+    # settled records are kept out of the live pass above — but it can come to
+    # assert something no service says any more, and then the row silently claims a
+    # viewing nobody reports. So the record is left exactly as it is and the
+    # DIFFERENCE is offered to the viewer instead.
+    #
+    # ONLY THE MONTH UNDER WAY. A month that is over is history and answers "what
+    # did that month decide", which today's watch state cannot make wrong; a month
+    # that has not begun has settled nothing. `under_way` is the same test the
+    # viewer's own list is read under, a few lines up, for the same reason.
+    #
+    # AND ONLY THE SERVICES THAT ANSWERED THIS PASS. One that could not be read
+    # said nothing, and silence is not a retraction — see counts.no_longer_finished.
+    unbacked: list[lifecycle.UnbackedVerdict] = []
+    if under_way and ports:
+        answered = [str(source) for source, _port in ports
+                    if str(source) not in unreadable]
+        unbacked = await lifecycle.unbacked_verdicts(
+            user_id, month_key, shape.settled,
+            # The record's own flat identity, which is the key the watch state
+            # files everything under — not re-resolved from its ids, which would
+            # be a second answer to a question the record already carries.
+            lambda record, season: watch_history.season_counts(
+                state, record["key"], season, answered))
+
     shows = _rows_for(shape, standing)
     if premieres and season_fresh:
         await distrakt_store.stamp_refreshed(user_id, month_key)
@@ -664,6 +744,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # history pull produced them.
         "unknown_episodes": _unknown_episode_rows(questions.unknown),
         "given_up_episodes": _unknown_episode_rows(questions.given_up),
+        # The third thing only the viewer can settle, and the only one of the
+        # three that is about a row already on the page: a verdict this month
+        # reached that the services have stopped backing. Present only on the
+        # month under way, and only until it is answered either way.
+        "unbacked_verdicts": _unbacked_rows(unbacked),
         # The services that could not be read on this pass, under the names they
         # are shown by. Present so a season showing one number says WHY that is
         # all there is, instead of reading as two services agreeing.
@@ -1656,6 +1741,53 @@ async def api_distrakt_unknown_resume(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
+@guard.post("/api/distrakt/verdict-readd", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_verdict_readd(request: Request):
+    """Work a season out again from what the services say now, withdrawing the
+    completed verdict this month had reached.
+
+    THE SAME MOVE A SEASON THAT GREW MAKES, and deliberately the same code:
+    lifecycle.reopen withdraws the month's verdict, puts the season back on the
+    viewer's list and marks it as having come back, all in one transaction so
+    there is never a moment when nothing remembers it was ever finished. A second
+    withdrawal path written beside that one would be a second answer to "what
+    happens to a completed record that turned out not to be true", and the two
+    would drift where nobody could see them side by side.
+
+    IT IS THE ONLY WAY A SETTLED RECORD EVER RE-DERIVES ITSELF, which is the point
+    of the button existing at all. The page can see that the services no longer
+    back a verdict; it may not act on that, because the verdict is a record of
+    what somebody watched and only they can say it was wrong.
+
+    THE MONTH UNDER WAY AND NO OTHER. A verdict an earlier month reached is
+    history — it says what that month decided, and today's watch state is no
+    evidence about it — so this refuses one rather than reaching back. That refusal
+    is not merely tidy: find_shown_season composes a search that walks back over
+    every month that ever settled anything, so without it a key naming a season
+    finished three years ago would take that year's record apart.
+    """
+    user_id = await _distrakt_user_id(request)
+    data = await authz.json_body(request)
+    try:
+        key, season = _row_target(data)
+    except RequestError as exc:
+        return authz.error(str(exc))
+    today = clock.today()
+    month_key = distrakt_store.month_key(today.year, today.month)
+    placed = await lifecycle.find_shown_season(user_id, key, season, month=month_key)
+    if (placed is None or placed.month != month_key
+            or placed.record["kind"] != distrakt_store.RecordKind.COMPLETED):
+        return authz.error("That season isn't recorded as finished this month.", 404)
+    settings = await _distrakt_settings(user_id)
+    await lifecycle.reopen(user_id, placed, look_up=_season_lookup(settings))
+    # The month the VIEWER is looking at is what comes back, which need not be the
+    # month the verdict sat on — the same split every other row control makes.
+    year = route_params.valid_year(data.get("year"), today.year)
+    month = route_params.valid_month(data.get("month"), today.month)
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
+    return JSONResponse(payload, status_code=status)
+
+
 @guard.post("/api/distrakt/unknown-dismiss", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_unknown_dismiss(request: Request):
     """Say no to an episode nothing knew about, and mean it next time too.
@@ -1664,10 +1796,13 @@ async def api_distrakt_unknown_dismiss(request: Request):
     season is the same question, and a refusal that only covered the one play
     would ask again on the very next sitting.
 
-    ONE REFUSAL FOR BOTH QUESTIONS the page can ask. "Nothing here knows about
-    this" and "you gave this up and have gone back to it" are asked for different
-    reasons, but the answer no means the same thing to both — do not put this on
-    my list, stop asking — so it is written down once and read once.
+    ONE REFUSAL FOR ALL THREE QUESTIONS the page can ask. "Nothing here knows
+    about this", "you gave this up and have gone back to it" and "your services
+    have stopped backing the month's verdict that you finished this" are asked for
+    different reasons, but the answer no means the same thing to all three — do not
+    put this season on my list, stop asking — so it is written down once and read
+    once. A separate store per question would let one of them go on asking about a
+    season somebody has already refused, in the same words, from a second table.
 
     THE REFUSAL HAS TO BE STORED OR IT IS NOT A REFUSAL. The row is derived from
     the watch history every time the history is read, so with nothing written down

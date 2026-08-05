@@ -21,7 +21,8 @@ function applyMonthResponse(d) {
     applyReadonlyState(monthClosed, d.closed ? 'frozen' : (d.readonly ? 'untracked' : ''));
     renderNotice(d);
     renderShowList(d.shows || [], d.movies || [], d.empty_note || '',
-                   d.unknown_episodes || [], d.given_up_episodes || []);
+                   d.unknown_episodes || [], d.given_up_episodes || [],
+                   d.unbacked_verdicts || []);
     renderCopyBlocks(d.post1 || '', d.post2 || '');
     if (emojiEntries.length) renderEmojiRows();  // refresh emoji-row logos now we have tmdb
 }

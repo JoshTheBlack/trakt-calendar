@@ -25,6 +25,11 @@ rule itself is short and the reasoning behind it is the part worth keeping:
   A SERVICE THAT SAID "ALL OF IT" WITHOUT SAYING HOW MANY becomes a number here,
   because here is where the season's total is in hand — see ALL_EPISODES.
 
+  A NUMBER MOVING IS NOT THE SAME AS A VERDICT BEING WITHDRAWN. Only crossing the
+  season's total either way changes whether a service says the season is
+  finished, which is the one thing a completed record actually claims — see
+  finished_by and no_longer_finished.
+
 Everything here is PURE and takes the per-source dicts the watch state already
 carries, so the rule can be tested without a database, a request or a provider.
 """
@@ -109,6 +114,60 @@ def agreed(per_source: Mapping[str, int] | None) -> bool:
     if not isinstance(per_source, Mapping) or not per_source:
         return True
     return len(set(int(v or 0) for v in per_source.values())) == 1
+
+
+def finished_by(per_source: Mapping[str, int] | int | None, total) -> set[str]:
+    """The services whose count says the WHOLE season has been seen.
+
+    Its own reader because "how far through is this" and "does this service say it
+    is done" are different questions, and only the second one can make a completed
+    verdict true or false. A count that moves without crossing the total — three
+    episodes becoming seven — says the viewer is getting on with it and says
+    nothing at all about a verdict.
+
+    A TOTAL OF ZERO NAMES NOBODY, for the reason lifecycle.is_finished refuses one:
+    zero means the lookup could not say how long the season is, not that the season
+    is empty, and reading it as "everything" would have every service claim to have
+    finished every title a provider was briefly unable to answer about.
+    """
+    y = int(total or 0)
+    if y <= 0:
+        return set()
+    return {name for name, count in resolve(per_source, y).items() if count >= y}
+
+
+def no_longer_finished(recorded: Mapping[str, int] | int | None,
+                       now: Mapping[str, int] | int | None, total) -> list[str]:
+    """The services a settled verdict credits with FINISHING a season and which do
+    not say so any more, in name order.
+
+    THIS IS NOT "ANYTHING MOVED", and that is the whole design of it. A verdict is
+    a claim that the season was finished; a number that changes without changing
+    whether it was finished — a service catching up from three to seven, a second
+    service arriving at a total the record never credited it with — leaves the
+    claim standing exactly as it was. A question raised on every such move would be
+    dismissed reflexively, and a prompt that is always dismissed protects nobody.
+    What DOES falsify the claim is a service that the record says finished the
+    season now reporting that it did not, which is the shape of somebody setting a
+    season back to unwatched at the service.
+
+    A SERVICE THAT SAID NOTHING THIS PASS WITHDRAWS NOTHING. Absence from `now` is
+    not a zero — it is a service that was not read, or was read and had no answer —
+    and treating it as a retraction would raise the question every time a service
+    went quiet. It has to be present and it has to have stopped saying so.
+
+    A RECORD THAT NEVER WROTE DOWN WHICH SERVICE SAID WHAT cannot be checked at
+    all, and answers empty. Its `watched` is one number with no service attached
+    to it, so there is nothing to test against a per-service reading; guessing at
+    which service it came from would be inventing the very attribution the record
+    is missing.
+    """
+    if not isinstance(now, Mapping):
+        return []
+    y = int(total or 0)
+    still = finished_by(now, y)
+    return sorted(name for name in finished_by(recorded, y)
+                  if name in now and name not in still)
 
 
 def counts_label(per_source: Mapping[str, int] | int | None, total,

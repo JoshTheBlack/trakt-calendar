@@ -35,6 +35,13 @@ THE LIFE OF A SEASON, and the verb that carries each step:
                           plays the watch-history pull has already reported, so
                           there is no detection step and no sweep of its own.
 
+A COMPLETED VERDICT CAN BE QUESTIONED FROM THE OTHER DIRECTION TOO, and that one
+is asked rather than acted on. A season is completed on what the services said at
+the time, and a verdict never recomputes itself — that is what settling means. But
+a service can later stop saying it: somebody sets a season back to unwatched, and
+the record goes on asserting a number nobody reports any more. unbacked_verdicts()
+notices, reopen() is what the viewer's yes runs, and nothing happens without one.
+
 GIVING UP IS ALSO SOMETHING THE MAIN CALENDAR CAN SAY, and that is a transition
 too rather than something a route assembles — reconcile_turn_aways() is give_up
 and take_back again, driven by a set of turn-away marks instead of by a button.
@@ -65,7 +72,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import NamedTuple
 
-from . import calendar_import, live, store, watch_history
+from . import calendar_import, counts, live, store, watch_history
 from .store import RecordKind
 from ..calendar import state as calendar_state
 from ..providers.base import ItemKey
@@ -84,6 +91,15 @@ CATALOGUE_FIELDS = ("total", "cadence", "premiere", "finale",
 # for nothing and the number of lookups a reopening costs is countable from
 # outside it.
 SeasonLookup = Callable[[dict, int], Awaitable[Mapping]]
+
+# How a settled verdict is asked what its services say about that season NOW:
+# given the stored record and the season number, the per-source counts the watch
+# state currently holds. A parameter for the same reason SeasonLookup is one —
+# this module reaches for nothing itself — and it is deliberately NOT awaitable,
+# because everything it can answer from is already in hand by the time a month is
+# rendered. A version of it that could fetch would turn drawing a page into a
+# provider call per settled row.
+LiveCounts = Callable[[dict, int], Mapping[str, int]]
 
 
 class MonthShape(NamedTuple):
@@ -135,6 +151,25 @@ class HistoryQuestions(NamedTuple):
     """
     unknown: list[watch_history.EpisodePlay]
     given_up: list[watch_history.EpisodePlay]
+
+
+class UnbackedVerdict(NamedTuple):
+    """A settled COMPLETED record whose services no longer stand behind it, and
+    everything the viewer needs to be shown to decide what to do about it.
+
+    `sources` NAMES ONLY THE SERVICES THAT WITHDREW, not every service that
+    answered, because that is the sentence the viewer is owed: this one said you
+    had finished it and now says you have not. `now` is the whole current reading
+    beside it, so the two numbers can be shown side by side rather than the viewer
+    being told something changed and left to work out what.
+
+    THE RECORD ITSELF TRAVELS UNTOUCHED. Nothing here is a decision — a verdict is
+    only ever withdrawn by reopen(), and only ever because somebody said so.
+    """
+    record: dict
+    month: str
+    sources: list[str]
+    now: dict[str, int]
 
 
 def listed_kind(show: Mapping) -> RecordKind:
@@ -572,6 +607,65 @@ async def reconcile_history(user_id: int,
         elif placed.record["kind"] == RecordKind.COMPLETED:
             await reopen(user_id, placed, look_up=look_up)
     return HistoryQuestions(unknown, given_up)
+
+
+async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
+                            live_counts: LiveCounts) -> list[UnbackedVerdict]:
+    """The COMPLETED verdicts among `settled` that the services no longer back.
+
+    THE RECORD IS NOT TOUCHED AND MUST NOT BE. A settled record does not recompute
+    itself; that is the whole meaning of settling, and it is why a month that
+    froze while two services disagreed can still render the disagreement years
+    later. What this notices is that the record has come to assert something no
+    service says any more — the case it was written for is a season completed at
+    10/10 by both services and then set back to unwatched at both, after which the
+    row goes on reading 10/10 while every service reports nothing. The answer is
+    not to quietly re-derive it: somebody deliberately finished that season and the
+    record of it is theirs. The answer is to SAY so and offer the two moves,
+    reopen() and a refusal, which is the same pair the page already offers for a
+    season the viewer gave up on and went back to.
+
+    ONLY COMPLETED. An abandoned verdict is a decision about the VIEWER rather than
+    a claim about the show, so no number can falsify it — reconcile_history says
+    the same thing at more length, and a play arriving for one is already asked
+    about there.
+
+    THE MONTH IS THE CALLER'S AND IS ALWAYS THE ONE UNDER WAY. A frozen month is
+    history and is governed by what it recorded: its numbers are the answer to
+    "what did that month decide", not a live claim about what the services hold
+    today, and offering to redo one would let this year's viewing rewrite an
+    earlier year's record. The caller is what keeps that true — see
+    routes._live_month_payload, which asks only for the month in progress.
+
+    NOTHING IS FETCHED. `live_counts` reads the watch state the month's render has
+    already loaded, so a month with no unbacked verdict costs one dictionary
+    lookup per settled row and a month with one costs the same.
+
+    A SEASON THE VIEWER HAS ALREADY REFUSED IS NOT RAISED AGAIN, through the very
+    refusal the page's other two questions are refused through
+    (store.dismiss_prompt). The three questions differ in what they say and agree
+    exactly in what NO means: do not put this season back on my list, stop asking.
+    Reading the refusal only once something is actually going to be asked keeps an
+    ordinary load — every verdict still backed — from querying for a set nothing
+    would be tested against.
+    """
+    questions: list[UnbackedVerdict] = []
+    declined: set[tuple[str, int]] | None = None
+    for record in settled:
+        if record["kind"] != RecordKind.COMPLETED:
+            continue
+        season = int(record["season"])
+        now = dict(live_counts(record, season) or {})
+        withdrawn = counts.no_longer_finished(
+            record.get("watched_by_source") or {}, now, record.get("total"))
+        if not withdrawn:
+            continue
+        if declined is None:
+            declined = await store.dismissed_prompts(user_id)
+        if (record["key"], season) in declined:
+            continue
+        questions.append(UnbackedVerdict(record, month, withdrawn, now))
+    return questions
 
 
 def shape_of(records: list[dict], listed: list[dict] | None = None) -> MonthShape:

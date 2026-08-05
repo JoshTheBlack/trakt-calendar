@@ -768,6 +768,61 @@ def watched_map(state: dict) -> dict[tuple[str, int], dict[str, int]]:
     return out
 
 
+def season_counts(state: dict, key, season: int, sources=()) -> dict[str, int]:
+    """What each of `sources` says RIGHT NOW about one season of one title, ZERO
+    included.
+
+    A SECOND READER RATHER THAN A WIDER watched_map, because the two answer
+    opposite questions about a season the state holds nothing for. watched_map is
+    deliberately bounded to the seasons somebody is asking about: it feeds the
+    rows of a month, and inventing a season nobody is watching would render
+    nowhere and cost a lookup to find that out. This one is asked ABOUT a named
+    season — one a settled verdict already named — and for that season "no slot"
+    is a real answer, not an absence, provided the service has answered about the
+    title at all. That distinction is the whole point: a season set back to
+    unwatched at both services leaves no slot anywhere (the last source's slot
+    going empty retires the season, see _set_show_baseline), so a reader that
+    treated a missing season as "nothing known" could never see the retraction it
+    was asked to look for.
+
+    A SERVICE THAT HAS NOT ANSWERED ABOUT THE TITLE IS ABSENT rather than zero,
+    and _baselined_sources is what says which have — asked and answered, whether
+    or not they had anything to report. Zero and never-asked are the two answers
+    that must never be confused here: one of them retracts a verdict and the other
+    says nothing whatsoever.
+
+    A WHOLE-TITLE CLAIM ANSWERS counts.ALL_EPISODES, exactly as watched_map has
+    it, because how many episodes that comes to needs the season's total and the
+    total is not in this state (see app/distrakt/counts.py).
+
+    A SEASON WITH NO STORED SLOTS AT ALL IS READ AS NO SLOTS, which is why
+    _season_slots is not asked about one. That helper exists to read a season the
+    state HOLDS, in either of the shapes it has been stored in, and it resolves an
+    empty one to the legacy service's empty set — a sound reading of "this season
+    is here and that service has seen none of it", and a wrong one here, where the
+    season is not here at all. Taken literally it would report a flat zero for a
+    service that had claimed the WHOLE TITLE watched without itemizing a season of
+    it, which is a retraction that never happened.
+    """
+    entry = (state.get("shows") or {}).get(str(key))
+    if entry is None:
+        return {}
+    answered = _baselined_sources(entry)
+    whole = _watched_all_sources(entry)
+    stored = (entry.get("seasons") or {}).get(str(int(season)))
+    slots = _season_slots(stored) if stored else {}
+    out: dict[str, int] = {}
+    for source in (sources or sorted(answered)):
+        name = str(source)
+        if name not in answered:
+            continue
+        if name in slots:
+            out[name] = len(slots[name] or {})
+        else:
+            out[name] = counts.ALL_EPISODES if name in whole else 0
+    return out
+
+
 def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
     watched, which is the day it was finished.
