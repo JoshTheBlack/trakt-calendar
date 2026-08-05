@@ -41,8 +41,25 @@ class _Response:
 
 def _cached_get(*answers):
     """A stand-in for transport.cached_get that serves `answers` in order and
-    records every call, so what was asked and how is inspectable."""
-    return AsyncMock(side_effect=list(answers))
+    records every call, so what was asked and how is inspectable.
+
+    AN ANSWER THAT IS AN EXCEPTION IS SERVED THE WAY THE REAL FUNCTION SERVES A
+    FAILURE: raised when the caller passed `raise_errors=True`, and handed back as
+    None otherwise. That flag is the whole mechanism under test — a double that
+    raised whatever it was asked would pass just as happily against the code that
+    swallowed every refusal into an empty document.
+    """
+    served = list(answers)
+
+    async def _answer(*_args, raise_errors=False, **_kwargs):
+        value = served.pop(0)
+        if isinstance(value, Exception):
+            if raise_errors:
+                raise value
+            return None
+        return value
+
+    return AsyncMock(side_effect=_answer)
 
 
 class PrivacyTests(unittest.IsolatedAsyncioTestCase):
@@ -131,11 +148,31 @@ class BeaconTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(beacon["lists"]["anime"], {"watching": "A1"})
         self.assertNotIn("movies", beacon["lists"])
 
-    async def test_an_unreadable_beacon_is_an_empty_blob(self):
-        """No beacon costs one history pull, which is the cheap failure. Refusing
-        the sync over it would cost the whole tracker."""
+    async def test_a_beacon_that_could_not_be_read_raises(self):
+        """IT IS NOT AN UNCHANGED BEACON, and answering an empty blob said it was.
+        The caller compares this against what it stored last time; an empty answer
+        claims all four stamps are absent, which compares equal to a stored empty
+        one and gates the sync as "nothing has moved". A service that was down
+        would report itself up to date for as long as it stayed down, and every
+        conclusion drawn afterwards would rest on that."""
+        with patch("app.providers.simkl.transport.cached_get",
+                   new=_cached_get(transport.SimklError("Simkl rejected it", 401))):
+            with self.assertRaises(transport.SimklError):
+                await sync.fetch_last_activities(SETTINGS)
+
+    async def test_a_body_with_nothing_in_it_is_still_an_empty_blob(self):
+        """Which is a different thing entirely: the call SUCCEEDED and Simkl had
+        nothing to say. A refusal has already raised by the time this returns."""
         with patch("app.providers.simkl.transport.cached_get", new=_cached_get(None)):
             self.assertEqual(await sync.fetch_last_activities(SETTINGS), {})
+
+    async def test_the_beacon_asks_for_a_refusal_to_be_raised(self):
+        """The flag is the mechanism, and it is asserted by name because without
+        it every failure above comes back as an empty blob again."""
+        spy = _cached_get({"tv_shows": {"all": "T"}})
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            await sync.fetch_last_activities(SETTINGS)
+        self.assertIs(spy.await_args.kwargs["raise_errors"], True)
 
 
 class HistoryTests(unittest.IsolatedAsyncioTestCase):
@@ -200,8 +237,29 @@ class HistoryTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_bucket_that_cannot_be_read_does_not_sink_the_sweep(self):
         """Somebody whose "dropped" list fails should still have their "watching"
         list counted."""
-        events = await self._sweep({"shows": self._library(), "anime": None})
+        events = await self._sweep({"shows": self._library(),
+                                    "anime": transport.SimklError("that list 500ed", 500)})
         self.assertTrue(events)
+
+    async def test_a_sweep_that_read_no_bucket_at_all_is_not_an_empty_history(self):
+        """"Nothing could be read" and "you watched nothing" are the same shape
+        once every bucket is swallowed, and the second is the answer the tracker
+        acts on. One bucket failing is tolerated; all of them failing is a fact
+        about the connection, the service or the token, and it is not this
+        module's to turn into a result."""
+        with patch("app.providers.simkl.transport.cached_get",
+                   new=_cached_get(*[transport.SimklError("gone", 500)] * 12)):
+            with self.assertRaises(transport.SimklError):
+                await sync.fetch_history(SETTINGS)
+
+    async def test_a_refused_credential_stops_the_sweep_at_the_first_bucket(self):
+        """It is not a property of one list. Tolerating it per bucket would
+        tolerate it twelve times over and call the result a history."""
+        spy = _cached_get(*[transport.SimklError("user_token_failed", 401)] * 12)
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            with self.assertRaises(transport.SimklError):
+                await sync.fetch_history(SETTINGS)
+        self.assertEqual(spy.await_count, 1)
 
 
 class LibraryTests(unittest.IsolatedAsyncioTestCase):
@@ -384,6 +442,55 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
                                      since={"lists": {}})
         self.assertEqual(spy.await_count, 12)
         self.assertTrue(read.complete)
+
+    async def test_a_bucket_that_was_asked_for_and_refused_makes_the_read_partial(self):
+        """`complete` MEANS "EVERY BUCKET I MEANT TO READ, I READ", never "I
+        finished looping". The caller retires a title absent from a complete read,
+        so a read that downgraded a refusal to an absence would have it delete
+        watch history it merely failed to fetch."""
+        answers = [{"shows": [self._item()]},
+                   transport.SimklError("that list 500ed", 500)] + [{}] * 10
+        read, spy = await self._read(answers)
+        self.assertEqual(spy.await_count, 12)
+        self.assertFalse(read.complete)
+        # And what it DID read is still there — a lost bucket costs that bucket.
+        self.assertEqual(list(read.entries), ["show:tmdb:900"])
+
+    async def test_a_read_in_which_no_bucket_could_be_read_raises(self):
+        """THE REGRESSION, at the level it starts. Twelve refused buckets used to
+        compose into a library that reported itself complete and held zero titles
+        — a read in which nothing could be read, claiming to have read
+        everything."""
+        with self.assertRaises(transport.SimklError):
+            await self._read([transport.SimklError("gone", 500)] * 12)
+
+    async def test_a_refused_credential_stops_the_library_read_at_once(self):
+        """An authentication failure is not a bucket-level failure and must never
+        be treated as one: the same token on the next list gets the same answer,
+        so there is nothing to be learned by asking eleven more times."""
+        spy = _cached_get(*[transport.SimklError("user_token_failed", 401)] * 12)
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            with self.assertRaises(transport.SimklError):
+                await sync.fetch_library(SETTINGS)
+        self.assertEqual(spy.await_count, 1)
+
+    async def test_a_read_that_asked_for_no_bucket_is_not_a_failure(self):
+        """Nothing wanted is not nothing read. Every list unchanged since last
+        time is an ordinary, successful, empty pass — and it is already partial,
+        so it says nothing about any title."""
+        read, spy = await self._read([], activities=self._activities(),
+                                     since=self._activities())
+        spy.assert_not_awaited()
+        self.assertEqual(read.entries, {})
+        self.assertFalse(read.complete)
+
+    async def test_every_bucket_asks_for_a_refusal_to_be_raised(self):
+        """The flag is what makes all of the above reachable: without it a 401
+        comes back as None and reads as an empty list."""
+        _read, spy = await self._read([{}] * 12)
+        for call in spy.await_args_list:
+            with self.subTest(path=call.args[2]):
+                self.assertIs(call.kwargs["raise_errors"], True)
 
 
 class ProgressTests(unittest.IsolatedAsyncioTestCase):

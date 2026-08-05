@@ -31,6 +31,15 @@ Simkl's payload shapes:
   id and how the lists are spelled; the rule about what makes two titles the same
   title lives in one place and this is not it.
 
+A FAILURE IS NEVER NORMALIZED INTO AN EMPTY ANSWER. Everything here reads one
+person's library, and an empty library is a DESTRUCTIVE answer — the caller
+retires the rows a source no longer holds — so "I could not read this" and "there
+is nothing here" must not arrive in the same shape. A refused call raises, a
+refused CREDENTIAL raises immediately and everywhere (it is a statement about
+every request that token will make, not about the list that happened to be asked
+for first), and a read that lost some of its buckets says so by coming back
+incomplete rather than by coming back smaller.
+
 NOTHING HERE WRITES TO SIMKL. `POST /sync/history` exists and is deliberately
 never called: this app reads a person's viewing and never edits it.
 """
@@ -131,13 +140,21 @@ async def fetch_last_activities(settings: Settings) -> dict:
     """Simkl's per-list last-modified timestamps, in the beacon shape.
 
     THE CHEAPEST CALL IN THE API and the gate every sync opens with: a fixed-size
-    blob whatever the size of the library behind it. An unreadable or empty
-    answer comes back as an empty dict, which reads downstream as "no beacon" and
-    costs one history pull rather than a refusal.
+    blob whatever the size of the library behind it.
+
+    A BEACON THAT COULD NOT BE READ RAISES, and is never answered with an empty
+    blob. The caller compares this against what it stored last time to decide
+    whether anything has moved, so an empty answer is not "no beacon" — it is the
+    claim that every one of the four stamps is absent, which compares EQUAL to a
+    stored empty one and gates the sync as unchanged. A source that cannot be
+    reached would then report itself up to date for as long as it stayed down,
+    and the whole pass would be built on that. The tracker degrades a source that
+    raises (it is named in the page's notice and its stored rows are left alone),
+    which is the honest version of the same outcome.
     """
     data = await transport.cached_get(
         transport.sync_client(), settings, "sync/activities", {},
-        pool=transport.SYNC_POOL, private=True)
+        pool=transport.SYNC_POOL, private=True, raise_errors=True)
     if not isinstance(data, dict):
         return {}
     shows = data.get("tv_shows") or {}
@@ -235,20 +252,65 @@ def _movie_event(item: dict, start_at: str | None) -> dict | None:
 
 
 async def _all_items(settings: Settings, media: str, status: str,
-                     start_at: str | None) -> dict:
-    """One /sync/all-items bucket, or an empty document.
+                     start_at: str | None) -> dict | None:
+    """One /sync/all-items bucket, or None when it could not be read.
 
-    A bucket that cannot be read is empty rather than fatal: a person whose
-    "dropped" list 500s should still have their "watching" list counted, and the
-    tracker's contract for an unreadable source is to serve what it has.
+    A BUCKET THAT FAILED IS NOT AN EMPTY BUCKET, and the difference between None
+    and {} here is the whole reason this function has two ways of answering. A
+    person whose "dropped" list 500s should still have their "watching" list
+    counted — that much has always been right — but an empty document says
+    something far stronger than "this call did not work": it says this person has
+    nothing in that list. Composed across every bucket, twelve of those became a
+    complete library holding no titles, and the caller concluded, correctly from
+    what it was told, that Simkl holds nothing at all and overwrote a viewer's
+    entire stored Simkl history with "asked, and it had nothing". So the failure
+    travels rather than being flattened, and the caller decides what a partial
+    read means.
+
+    A CREDENTIAL FAILURE IS NOT A BUCKET-LEVEL FAILURE AT ALL and is re-raised
+    unchanged. It is not a statement about this list; it is a statement about
+    every request that will ever be made with this token, so tolerating it once
+    per bucket would tolerate it twelve times and call the result a read. See
+    transport.is_credential_failure.
     """
     params = {"episode_watched_at": "yes", "extended": "full"}
     if start_at:
         params["date_from"] = start_at
-    data = await transport.cached_get(
-        transport.sync_client(), settings, f"sync/all-items/{media}/{status}", params,
-        pool=transport.SYNC_POOL, private=True)
+    try:
+        data = await transport.cached_get(
+            transport.sync_client(), settings, f"sync/all-items/{media}/{status}",
+            params, pool=transport.SYNC_POOL, private=True, raise_errors=True)
+    except transport.SimklError as exc:
+        if transport.is_credential_failure(exc):
+            raise
+        logger.warning("simkl all-items/%s/%s could not be read: %s", media, status, exc)
+        return None
+    # None here is not a failure: `raise_errors=True` means a refusal has already
+    # raised, so this is Simkl answering with a body that held nothing to read.
     return data if isinstance(data, dict) else {}
+
+
+def _refuse_a_read_that_read_nothing(wanted: int, failed: int, what: str) -> None:
+    """Raise when every bucket a read meant to fetch failed.
+
+    ONE BUCKET FAILING AND ALL OF THEM FAILING ARE NOT DEGREES OF ONE THING. One
+    list refusing leaves the rest of the library readable and the person's other
+    counts intact, which is why _all_items tolerates it. Every list refusing at
+    once is not a fact about any list — it is a fact about the connection, the
+    service, or the credential — and answering it with an empty library would
+    hand the caller a destructive conclusion ("this person holds nothing")
+    dressed as a successful read. That is precisely what happened: twelve refused
+    buckets composed into a read that logged itself complete, holding zero
+    titles, and a viewer's stored Simkl seasons were replaced with marks saying
+    the service had been asked and had nothing.
+
+    NOTHING WANTED IS NOT NOTHING READ. A read with no buckets to fetch (every
+    list unchanged since last time) asked for nothing and got nothing, which is
+    an ordinary, successful, empty pass.
+    """
+    if wanted and failed >= wanted:
+        raise transport.SimklError(
+            f"Simkl answered none of the {wanted} list(s) {what} asked for.")
 
 
 async def fetch_history(settings: Settings, start_at: str | None = None) -> list[dict]:
@@ -262,21 +324,38 @@ async def fetch_history(settings: Settings, start_at: str | None = None) -> list
 
     Re-seeing an event already applied is harmless by contract, which is what
     lets `start_at` stay at day granularity.
+
+    A SWEEP IN WHICH NO BUCKET COULD BE READ RAISES rather than answering "you
+    watched nothing" — see _refuse_a_read_that_read_nothing. A sweep that lost
+    SOME of its buckets still answers, because a play the tracker does not see
+    this pass is one it sees on the next: the fold is idempotent and the cursor
+    only moves forward a day at a time.
     """
     events: list[dict] = []
+    wanted = failed = 0
     with span("simkl.history", start_at=start_at or ""):
         for media in EPISODE_TYPES:
             for status in WATCHED_STATUSES:
+                wanted += 1
                 document = await _all_items(settings, media, status, start_at)
+                if document is None:
+                    failed += 1
+                    continue
                 for item in document.get(media) or document.get("shows") or []:
                     events.extend(_episode_events(item, start_at))
         for status in WATCHED_STATUSES:
+            wanted += 1
             document = await _all_items(settings, "movies", status, start_at)
+            if document is None:
+                failed += 1
+                continue
             for item in document.get("movies") or []:
                 event = _movie_event(item, start_at)
                 if event is not None:
                     events.append(event)
-    logger.info("simkl fetch_history(start_at=%s): %d event(s)", start_at, len(events))
+    _refuse_a_read_that_read_nothing(wanted, failed, "fetch_history")
+    logger.info("simkl fetch_history(start_at=%s): %d event(s), %d bucket(s) unread",
+                start_at, len(events), failed)
     return events
 
 
@@ -447,13 +526,28 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
     have. The events are bounded in this process instead, exactly as they already
     are for the episodes inside an item. What buys the cost back is
     `_wanted_buckets`: an unchanged list is not read at all.
+
+    `complete` MEANS "EVERY BUCKET I MEANT TO READ, I READ" — never "I finished
+    looping". A bucket deliberately skipped because its list has not moved makes
+    the read partial, which is what `_wanted_buckets` already decided; a bucket
+    that was asked for and REFUSED makes it partial for the same reason and with
+    more force. The caller retires a title absent from a COMPLETE read, so a read
+    that quietly downgraded a failure to an absence would have it delete watch
+    history it merely failed to fetch — which is the defect this rule exists to
+    make unreachable. A read in which NOTHING could be read is not a read at all
+    and raises (_refuse_a_read_that_read_nothing).
     """
     wanted, complete = _wanted_buckets(activities, since)
     entries: dict[str, LibraryEntry] = {}
     events: list[dict] = []
-    with span("simkl.library", buckets=len(wanted), complete=complete):
+    failed = 0
+    with span("simkl.library", buckets=len(wanted)) as sp:
         for media, status in wanted:
             document = await _all_items(settings, media, status, None)
+            if document is None:
+                failed += 1
+                complete = False
+                continue
             if media == "movies":
                 for item in document.get("movies") or []:
                     event = _movie_event(item, start_at)
@@ -463,9 +557,11 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
             for item in document.get(media) or document.get("shows") or []:
                 events.extend(_episode_events(item, start_at))
                 _fold_library_item(entries, item, status)
-    logger.info("simkl fetch_library(start_at=%s): %d bucket(s), %d title(s), "
+        sp.set(unread=failed, complete=complete)
+    _refuse_a_read_that_read_nothing(len(wanted), failed, "fetch_library")
+    logger.info("simkl fetch_library(start_at=%s): %d bucket(s), %d unread, %d title(s), "
                 "%d event(s), complete=%s",
-                start_at, len(wanted), len(entries), len(events), complete)
+                start_at, len(wanted), failed, len(entries), len(events), complete)
     return LibraryRead(entries=entries, events=events, complete=complete)
 
 

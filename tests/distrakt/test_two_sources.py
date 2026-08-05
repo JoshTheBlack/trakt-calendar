@@ -10,13 +10,24 @@ THE REGRESSION THAT MATTERS MOST IS AT THE BOTTOM OF THIS FILE: an account with
 one linked service behaves exactly as it did before there could be two. It is
 last because everything above it is what could break it.
 
+THE OTHER REGRESSION IS THE LAST TWO CLASSES, and it is about what a service
+being unreadable must NOT cost: an unreadable Simkl once erased every stored
+Simkl season on the account and said nothing about it. Those two go deeper than
+the rest of the file — through the real provider module, and over HTTP — because
+what failed there was the composition of a dozen swallowed refusals into one
+confident answer, which nothing shallower can reproduce.
+
 No network. Both providers' sync modules are patched at the module object, which
 is why the app calls across a package through the module rather than binding the
 name at import — a name bound at import is a second reference no double reaches.
+Where a test needs the real provider logic it patches one level lower, at the
+transport's cached GET, and honours that function's contract exactly.
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -24,7 +35,7 @@ from app import db, distrakt
 from app.distrakt import counts, lifecycle, live, store, watch_history as wh
 from app.providers.base import ItemKey, LibraryEntry, LibraryRead, UnlistedSeasons
 from app.providers.simkl import SimklError
-from tests.support import new_db_path
+from tests.support import AppTestCase, ORIGIN, new_db_path
 
 # What each account's request-scoped Settings looks like. A source is "linked"
 # for the tracker exactly when this object carries a usable credential for it —
@@ -908,6 +919,293 @@ class AFinishedTitleTests(TwoSourceTestCase):
             counts.counts_label(record["watched_by_source"], record["total"],
                                 LABELS, ORDER, ORDER),
             "0/8 (Trakt) · 8/8 (Simkl)")
+
+
+class AnUnreadableServiceKeepsItsHistoryTests(TwoSourceTestCase):
+    """THE MOST DAMAGING THING THIS MODULE CAN DO, AND WHAT STOPS IT.
+
+    WHAT HAPPENED, on a real account, from nothing more exotic than an invalid
+    token. Every one of the twelve library calls was refused, and every refusal
+    was swallowed into an empty document; the twelve empty documents composed
+    into a library read that reported itself COMPLETE and held zero titles. The
+    tracker then did exactly what a complete, empty library means: it retired
+    every stored Simkl season and wrote "asked, and it had nothing" over all 146
+    titles. 241 rows carrying 168 seasons of episode data became 146 rows
+    carrying none. The other service's rows were untouched, so the page went on
+    looking healthy, and no notice appeared either — the same swallowing that
+    destroyed the history suppressed the warning that would have revealed it.
+
+    Watch history is not re-derivable from anything this app holds. So this is
+    tested at three depths on purpose, and the third is the one that matters
+    most: the refusals are raised (the provider's half), an incomplete read
+    retires nothing (the fold's half), and a read that claims to have covered the
+    whole library while naming NOT ONE of the titles the service holds is refused
+    outright — which is the floor, and which would have caught this defect with
+    the other two absent. It is meant to be redundant.
+
+    The Simkl half runs the REAL provider module here, with only the HTTP call
+    doubled, because the composition of twelve swallowed failures into one
+    confident answer is exactly what a mocked port cannot reproduce.
+    """
+
+    # A raw /sync/activities payload, in Simkl's own spelling rather than the
+    # normalized beacon shape — it has to travel through the real reader for the
+    # per-list stamps to reach the real bucket chooser. Every list carries a
+    # stamp, so all twelve buckets are wanted.
+    RAW_ACTIVITIES = {
+        "all": "T9",
+        **{listed: {"all": "T9", **{status: "S9" for status in ("watching", "completed",
+                                                                "hold", "dropped")}}
+           for listed in ("tv_shows", "anime", "movies")},
+    }
+
+    def _refusing(self, status: int, *, beacon_answers: bool):
+        """A Simkl transport that answers the beacon (or does not) and refuses
+        every library bucket with `status`.
+
+        IT HONOURS `raise_errors` THE WAY THE REAL TRANSPORT DOES — a refusal is
+        raised only when the caller asked to hear about it, and comes back as None
+        otherwise — because that flag is exactly what was missing. A double that
+        raised regardless would pass against the swallowing code these tests exist
+        to forbid, which would make every one of them worthless.
+        """
+        async def _get(_client, _settings, path, _params=None, *,
+                       raise_errors=False, **_kwargs):
+            if path == "sync/activities" and beacon_answers:
+                return dict(self.RAW_ACTIVITIES)
+            if not raise_errors:
+                return None
+            raise SimklError("Simkl rejected the credentials", status)
+        return _get
+
+    async def _stored_rows(self) -> list[tuple]:
+        rows = await db.fetch_all(
+            "SELECT source, season, watched_episodes_json FROM distrakt_show_progress "
+            "WHERE user_id = ? ORDER BY source, season", (self.user_id,))
+        return [(row["source"], row["season"], row["watched_episodes_json"])
+                for row in rows]
+
+    async def _history(self):
+        """A state holding real Simkl seasons for two titles, which is the thing
+        with something to lose."""
+        await self._baseline(BOTH, [_record(101), _record(102)],
+                             trakt={101: {1: _episodes(1, 2)},
+                                    102: {1: _episodes(1)}},
+                             simkl={101: {1: _episodes(1, 2, 3, 4)},
+                                    102: {1: _episodes(1, 2, 3)}})
+        return await self._stored_rows()
+
+    async def _pass_with_simkl_refusing(self, status=401, *, beacon_answers=True):
+        """One ordinary tracker load with Trakt answering and Simkl refusing every
+        call, through Simkl's real sync module."""
+        patches = [*_patch("trakt", progress={101: {1: _episodes(1, 2)},
+                                              102: {1: _episodes(1)}}),
+                   patch("app.providers.simkl.transport.cached_get",
+                         new=self._refusing(status, beacon_answers=beacon_answers))]
+        for p in patches:
+            p.start()
+        try:
+            return await wh.sync_and_baseline(BOTH, self.user_id,
+                                              [_record(101), _record(102)])
+        finally:
+            for p in patches:
+                p.stop()
+
+    async def test_every_call_being_refused_leaves_every_stored_row_untouched(self):
+        """THE REGRESSION, written as what was actually measured: the rows before
+        and the rows after are the same rows."""
+        before = await self._history()
+        await self._pass_with_simkl_refusing()
+        self.assertEqual(await self._stored_rows(), before)
+
+    async def test_the_seasons_are_still_there_and_still_carry_their_episodes(self):
+        """The destroyed state was not merely a different row count — every
+        surviving row was the season = -1 "asked, and it had nothing" mark, with
+        no episode data anywhere. So the counts are asserted, not just the rows."""
+        await self._history()
+        state = await self._pass_with_simkl_refusing()
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2, "simkl": 4})
+        self.assertEqual(wh.watched_map(state)[(KEY(102), 1)], {"trakt": 1, "simkl": 3})
+
+    async def test_the_service_that_could_not_be_read_is_named(self):
+        """The other half of the same defect: `unreadable` stayed empty, so the
+        notice that would have shown the viewer what had happened never
+        appeared."""
+        await self._history()
+        state = await self._pass_with_simkl_refusing()
+        self.assertEqual(wh.unreadable_sources(state), ["simkl"])
+
+    async def test_the_other_services_counts_are_unaffected(self):
+        """One service being unreadable degrades that service and nothing else —
+        which is also why the page looked healthy while half its evidence was
+        being destroyed."""
+        await self._history()
+        state = await self._pass_with_simkl_refusing()
+        rows = await db.fetch_all(
+            "SELECT COUNT(*) AS n FROM distrakt_show_progress WHERE user_id = ? "
+            "AND source = 'trakt'", (self.user_id,))
+        self.assertEqual(rows[0]["n"], 2)
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)]["trakt"], 2)
+
+    async def test_a_refused_beacon_is_not_an_unchanged_beacon(self):
+        """It was refused too, on the same pass. Answering an empty blob would
+        have compared equal to a stored empty one and gated the sync as up to
+        date — a source reporting itself unchanged for as long as it stayed
+        down."""
+        before = await self._history()
+        state = await self._pass_with_simkl_refusing(beacon_answers=False)
+        self.assertEqual(await self._stored_rows(), before)
+        self.assertEqual(wh.unreadable_sources(state), ["simkl"])
+
+    async def test_a_lost_bucket_retires_nothing_while_the_rest_still_folds_in(self):
+        """THE PARTIAL CASE, decided rather than inherited: a read that lost any
+        bucket it meant to make is not complete, so it may say what it FOUND and
+        may not say what is absent. A title it did not name keeps the count it
+        had, and a title it did name is updated."""
+        await self._history()
+        partial = LibraryRead(
+            entries={KEY(101): LibraryEntry(ids={"simkl": 101, "tmdb": 101},
+                                            seasons={1: {1: "2026-07-01",
+                                                         2: "2026-07-02"}},
+                                            unlisted_seasons=UnlistedSeasons.ZERO)},
+            events=[], complete=False)
+        state = await self._pass_with_library(AsyncMock(return_value=partial))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2, "simkl": 2})
+        self.assertEqual(wh.watched_map(state)[(KEY(102), 1)], {"trakt": 1, "simkl": 3})
+
+    async def _pass_with_library(self, library):
+        """A pass in which Simkl's beacon has moved and its library read is
+        scripted — the seam the floor sits behind."""
+        patches = [*_patch("trakt", progress={101: {1: _episodes(1, 2)},
+                                              102: {1: _episodes(1)}}),
+                   *_patch("simkl", activities=MOVED)[:3],
+                   patch("app.providers.simkl.sync.fetch_library", new=library)]
+        for p in patches:
+            p.start()
+        try:
+            return await wh.sync_and_baseline(BOTH, self.user_id,
+                                              [_record(101), _record(102)])
+        finally:
+            for p in patches:
+                p.stop()
+
+    async def test_the_floor_refuses_a_complete_read_that_names_nothing(self):
+        """THE FLOOR, AND IT IS DELIBERATELY REDUNDANT. This is the exact answer
+        the broken provider produced — complete, successful, zero titles — handed
+        straight to the fold with every one of the fixes above bypassed. Replacing
+        all of a service's rows with "holds nothing" is not a conclusion any
+        single read may reach, however it came by its answer."""
+        before = await self._history()
+        state = await self._pass_with_library(AsyncMock(return_value=LibraryRead(
+            entries={}, events=[], complete=True)))
+        self.assertEqual(await self._stored_rows(), before)
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2, "simkl": 4})
+
+    async def test_the_floor_stands_down_the_moment_the_read_names_one_held_title(self):
+        """IT IS A SHAPE AND NOT A THRESHOLD, which is what makes it right for a
+        viewer with two titles as well as one with three hundred. A read that
+        speaks to any title the service holds has demonstrated it really read the
+        library, and the titles it left out are then retired exactly as before."""
+        await self._history()
+        state = await self._pass_with_library(AsyncMock(return_value=LibraryRead(
+            entries={KEY(101): LibraryEntry(ids={"simkl": 101, "tmdb": 101},
+                                            seasons={1: {1: "2026-07-01"}},
+                                            unlisted_seasons=UnlistedSeasons.ZERO)},
+            events=[], complete=True)))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2, "simkl": 1})
+        # 102 was absent from a read that really did cover the library, so Simkl
+        # genuinely no longer holds it and its slot is retired.
+        self.assertEqual(wh.watched_map(state)[(KEY(102), 1)], {"trakt": 1})
+
+    async def test_the_floor_does_not_hold_a_service_that_had_nothing_to_lose(self):
+        """A service whose only trace is the "asked, and it had nothing" mark has
+        no evidence to protect, so nothing is being defended and the ordinary path
+        runs — otherwise the floor would jam shut for the accounts that need it
+        least."""
+        await self._baseline(BOTH, [_record(101)],
+                             trakt={101: {1: _episodes(1, 2)}}, simkl={})
+        state = await self._pass_with_library(AsyncMock(return_value=LibraryRead(
+            entries={}, events=[], complete=True)))
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2})
+
+
+class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
+    """End to end over HTTP, because the notice has been looked for three times
+    in a browser and never once seen.
+
+    Everything above works on the watch state; this asks the question a viewer
+    actually asks — load the month with one service refusing every call and see
+    what the page is told. It has to be HTTP 200 with the other service's counts
+    rendered and the quiet one NAMED, because that combination is precisely what
+    was missing: the page came back healthy, complete and silent while a service's
+    history was being destroyed behind it.
+    """
+
+    RAW_ACTIVITIES = AnUnreadableServiceKeepsItsHistoryTests.RAW_ACTIVITIES
+
+    def make_settings(self):
+        from app.config import Settings
+
+        # Both sources configured at the instance level. Each account's own token
+        # is what makes a source readable FOR THEM, and it comes off the linked
+        # identity below — see app/distrakt/routes.py's _distrakt_settings.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="simkl-cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "trakt-token")
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        asyncio.run(store.add_user_record(self.user_id, {
+            "ids": {"trakt": 7, "tmdb": 1, "slug": "silo"}, "season": 3,
+            "title": "Silo", "network": "Apple TV", "media": "show",
+            "kind": store.RecordKind.KEEPUP,
+        }))
+        self.sign_in_as(self.user_id)
+
+    async def _refused(self, _client, _settings, path, _params=None, *,
+                       raise_errors=False, **_kwargs):
+        """Simkl refusing every call with the 401 a revoked or expired grant
+        produces — the ordinary expected state, since Simkl issues no refresh
+        token and the documented answer to a 401 is to link again."""
+        if not raise_errors:
+            return None
+        raise SimklError("Simkl rejected the credentials (401).", 401)
+
+    def _month(self):
+        async def _season(settings, source_id, season, fresh=False, client=None):
+            return {"total": 8, "cadence": "Tue", "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+
+        today = date.today()
+        with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))), \
+             patch("app.providers.trakt.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)), \
+             patch("app.providers.trakt.sync.fetch_history",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={7: {3: {1: "2026-07-01",
+                                                       2: "2026-07-02"}}})), \
+             patch("app.providers.trakt.detail.fetch_season_detail", _season), \
+             patch("app.providers.simkl.transport.cached_get", new=self._refused):
+            return self.client.get(
+                f"/api/distrakt/month?year={today.year}&month={today.month}")
+
+    def test_the_month_renders_and_names_the_service_that_was_refused(self):
+        resp = self._month()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["sources_unreadable"], ["Simkl"])
+
+    def test_the_other_services_counts_still_render(self):
+        """Degrading is not failing. The row shows what Trakt reported, and the
+        notice above it is what says the number is one service's alone."""
+        row, = self._month().json()["shows"]
+        self.assertEqual(row["watched"], 2)
+        self.assertEqual(row["total"], 8)
 
 
 class SourceNamesTests(unittest.TestCase):

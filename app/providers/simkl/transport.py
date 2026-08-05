@@ -74,6 +74,28 @@ class SimklBlockedError(SimklError):
     """
 
 
+# The statuses that are about WHO ASKED rather than about WHAT WAS ASKED FOR.
+# Simkl answers 401 `user_token_failed` for a token it will not accept and 403
+# for one it accepts but will not honour, and neither is a property of the path
+# that happened to be called first: the same token on any other path gets the
+# same answer. A caller that tolerates one call failing must NOT tolerate one of
+# these, because "this list could not be read" and "nothing this token asks for
+# can be read" are different facts with opposite consequences — and Simkl issues
+# no refresh token (a grant is revoked, a password is reset, a token expires), so
+# this is an ordinary expected state rather than an exotic one.
+CREDENTIAL_STATUSES = (401, 403)
+
+
+def is_credential_failure(error: SimklError) -> bool:
+    """True when this failure says the CREDENTIAL is not usable.
+
+    Lives here because the statuses are Simkl's, and reading them is what this
+    module is for; a caller asks the question rather than comparing numbers of
+    its own, so the answer has one place to change.
+    """
+    return error.status in CREDENTIAL_STATUSES
+
+
 def api_headers(settings: Settings) -> dict:
     """Simkl request headers.
 

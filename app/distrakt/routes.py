@@ -43,7 +43,8 @@ from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
-from ..providers.base import ID_KEYS, ItemKey, Media, collect_ids, parse_item_key
+from ..providers.base import (ID_KEYS, ItemKey, Media, SourceUnavailable, collect_ids,
+                              parse_item_key)
 from ..providers.trakt import TraktError, TraktRateLimitError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
@@ -1447,8 +1448,15 @@ async def api_distrakt_backfill_survey(request: Request):
             status_code=400)
     try:
         plan = await backfill.survey(user_id, settings, start, end)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
+    except SourceUnavailable as exc:
+        # WHICHEVER SOURCE THE SURVEY ASKED, not Trakt by name. A backfill reads
+        # the account's primary source (see backfill.survey), which for an
+        # account that has not linked Trakt is not Trakt at all — and a survey
+        # that cannot read the history has to SAY so rather than come back with
+        # an empty plan the viewer would confirm as "there was nothing there".
+        return JSONResponse(
+            {"ok": False, "error": f"Your watch history could not be read: {exc}"},
+            status_code=502)
     return JSONResponse({"ok": True, **backfill.summarize(plan)})
 
 

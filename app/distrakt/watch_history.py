@@ -1149,8 +1149,73 @@ async def _rebaseline_by_id(settings, state: dict, name: str, source, port, span
                     details.get(int(_source_id(entry, source))) or {}, name)
 
 
-def _fold_library(state: dict, name: str, read) -> None:
-    """Re-baseline the cached titles a library read speaks to.
+def _titles_with_evidence(shows: dict, source: str) -> set[str]:
+    """The titles `source` currently has WATCH EVIDENCE for: a season slot of its
+    own holding at least one episode, or a whole-title claim.
+
+    THE "ASKED, AND IT HAD NOTHING" MARK IS DELIBERATELY NOT EVIDENCE, and neither
+    is a recorded zero. Both already say the service has seen nothing of the
+    title, so replacing them with the same statement destroys nothing — and
+    counting them would make a roster of untouched titles look like a library
+    worth protecting, which would jam the floor below permanently shut for the
+    accounts that need it least.
+    """
+    held: set[str] = set()
+    for key, entry in (shows or {}).items():
+        if str(source) in _watched_all_sources(entry):
+            held.add(str(key))
+            continue
+        for stored in (entry.get("seasons") or {}).values():
+            if _season_slots(stored).get(str(source)):
+                held.add(str(key))
+                break
+    return held
+
+
+def _may_retire_rows(shows: dict, source: str, read) -> bool:
+    """Whether a COMPLETE library read may be allowed to retire what it does not
+    name. False refuses the destructive half of the fold.
+
+    THIS IS A FLOOR UNDER THE DESTRUCTIVE WRITE, AND IT IS DELIBERATELY
+    REDUNDANT. Do not remove it because the paths above it look correct — being
+    redundant is its entire job. Retiring every one of a service's rows and
+    replacing them with "asked, and it had nothing" is the single most damaging
+    thing this module can do: watch history is not re-derivable from anything the
+    app holds, the page goes on looking healthy because the OTHER service's rows
+    are untouched, and nobody is told. It has already happened once, from a read
+    that reported itself complete and successful while every underlying call was
+    being refused. The provider-level fixes close that particular route; this
+    exists to be standing there whatever the next one turns out to be.
+
+    THE RULE IS A SHAPE, NOT A THRESHOLD, and that is what makes it right for a
+    viewer with three titles as well as one with three hundred. What made the
+    observed case obviously wrong was not the number of rows: it was that a
+    source went from holding a great deal to holding NOTHING on the strength of
+    one read. So a complete read that names not one of the titles this source has
+    evidence for is not believed — it has demonstrated nothing about the library
+    it claims to have read entirely — and it is treated as partial: what it did
+    name is folded in, and nothing is retired.
+
+    THE PRICE IS PAID KNOWINGLY. A viewer who genuinely empties their whole
+    library at the service keeps stale counts until they watch one thing, because
+    a read that names a single held title clears this and retires the rest
+    correctly. That is a wrong answer the viewer caused and can see; the
+    alternative is a wrong answer nobody caused and nobody can see, which costs
+    them their history.
+    """
+    held = _titles_with_evidence(shows, source)
+    if not held or held & set(read.entries):
+        return True
+    logger.error(
+        "wh: refusing to retire %s's stored watch history for %d title(s) — a read "
+        "claiming to cover the whole library named none of them. Their rows are "
+        "left as they were and the read is treated as partial.", source, len(held))
+    return False
+
+
+def _fold_library(state: dict, name: str, read) -> bool:
+    """Re-baseline the cached titles a library read speaks to, and say whether the
+    read was treated as COMPLETE.
 
     A COMPLETE READ SPEAKS TO EVERY CACHED TITLE, including by silence: a title
     the whole library does not hold is a title this service has seen none of, and
@@ -1167,8 +1232,16 @@ def _fold_library(state: dict, name: str, read) -> None:
     author's Simkl library overlaps their roster only incidentally today, and an
     import that fills it in must not leave the tracker reporting an empty answer
     from before it.
+
+    AND A COMPLETE READ IS ONLY BELIEVED THIS FAR IF IT CLEARS THE FLOOR — see
+    _may_retire_rows, which is where the reason lives.
     """
     shows = state.get("shows") or {}
+    if read.complete and not _may_retire_rows(shows, name, read):
+        # Treated exactly as a partial read from here on: what it named is folded
+        # in, nothing is retired, and the caller is told it was not complete so it
+        # does not reuse this read to answer "does this service hold this title".
+        read = read._replace(complete=False)
     if read.complete:
         for key, entry in list(shows.items()):
             found = read.entries.get(str(key))
@@ -1182,11 +1255,12 @@ def _fold_library(state: dict, name: str, read) -> None:
                                found.seasons if found else {}, name,
                                unlisted=(found.unlisted_seasons if found
                                          else UnlistedSeasons.SILENT))
-        return
+        return True
     for key, found in read.entries.items():
         if str(key) in shows:
             _set_show_baseline(state, key, found.ids, found.seasons, name,
                                unlisted=found.unlisted_seasons)
+    return False
 
 
 async def _sync_from_library(settings, state: dict, name: str, library, span, *,
@@ -1203,8 +1277,11 @@ async def _sync_from_library(settings, state: dict, name: str, library, span, *,
                                            activities=activities, since=since)
         sp.set(titles=len(read.entries), events=len(read.events),
                complete=read.complete)
-    _fold_library(state, name, read)
-    if read.complete:
+    # THE FOLD DECIDES WHETHER THE READ COUNTS AS COMPLETE, not the read itself:
+    # a complete read that fails the floor is downgraded there, and stashing it
+    # here on its own say-so would hand the baseline that follows a read the fold
+    # has just refused to believe.
+    if _fold_library(state, name, read):
         state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
     return read.events
 
