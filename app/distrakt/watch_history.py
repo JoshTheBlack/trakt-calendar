@@ -59,19 +59,31 @@ distrakt_show_progress, distrakt_movie_watches). In memory:
      beacons: {source: {...}},
      shows:   {key: {ids: {...},
                      seasons: {season: {source: {episode: watched_at}}},
+                     watched_all: [source, ...],
                      baselined: [source, ...]}},
      movies:  {key: {ids: {...}, title, year, watched_at, source}}}
 
+`watched_all` NAMES THE SERVICES THAT REPORTED THE WHOLE TITLE WATCHED WITHOUT
+ITEMIZING ANY OF IT. A service can file a finished show under a "completed" list
+that carries counts instead of episodes — no episode numbers, no dates — and that
+is a real answer, not an empty one. Read as "nothing watched" it inverts every
+show somebody has finished, which is a silent wrong answer and worse than no
+answer at all. It is held per TITLE because that is exactly what the service said,
+and what it comes to per season is settled where the season totals are (see
+watched_map and app/distrakt/counts.py); manufacturing episode numbers here to fit
+the storage would be inventing a viewing history nobody reported.
+
 WHETHER A TITLE HAS BEEN BASELINED IS A FACT PER (title, source), which is what
 `baselined` is for. A service that has watches to report says so by having a slot
-in `seasons`; a service that was asked and had NOTHING to report leaves no slot at
-all, and without a mark of its own that is indistinguishable from a service that
-was never asked. Both mistakes are expensive in opposite directions: read as
-"never asked" the whole roster is re-fetched from that service on every load, and
-read as "asked" a service linked later is never baselined at all and its counts
-come out of the month-bounded history sweep, which is a fraction of what it
-knows. So `baselined` carries exactly the services with no slot to speak for
-them, and _baselined_sources is the one place the two halves are added up.
+in `seasons`, or by being named in `watched_all`; a service that was asked and had
+NOTHING to report leaves neither, and without a mark of its own that is
+indistinguishable from a service that was never asked. Both mistakes are
+expensive in opposite directions: read as "never asked" the whole roster is
+re-fetched from that service on every load, and read as "asked" a service linked
+later is never baselined at all and its counts come out of the month-bounded
+history sweep, which is a fraction of what it knows. So `baselined` carries
+exactly the services with nothing else to speak for them, and _baselined_sources
+is the one place the three are added up.
 
 A SEASON IS PER SOURCE AND A FILM IS NOT, and the asymmetry is deliberate. A
 season is a count out of a total, so two services counting differently is a
@@ -101,11 +113,11 @@ import logging
 from datetime import date, datetime, timezone
 from typing import NamedTuple
 
-from . import store
+from . import counts, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
-from ..providers.base import (ItemKey, LibraryPort, Media, SourceUnavailable, collect_ids,
-                              item_key, resolve_key)
+from ..providers.base import (ItemKey, LibraryPort, Media, SourceUnavailable,
+                              UnlistedSeasons, collect_ids, item_key, resolve_key)
 from ..sources import prefs as source_prefs
 
 logger = logging.getLogger(__name__)
@@ -131,6 +143,25 @@ _PLAYS = "plays"
 # provider. Negative because season 0 is a real season (specials) and a negative
 # one cannot be, so nothing can collide with it.
 NO_SEASONS = -1
+
+# The season number a title is filed under when a service reports the WHOLE TITLE
+# watched without itemizing any of it. A service that files a finished show as
+# "completed" and hands over counts instead of episodes has told the truth in a
+# shape this table cannot hold: there are no episode numbers to write and no dates
+# to write beside them, only the claim. So the claim gets a row of its own, the
+# same way "asked, and had nothing" does, and how many episodes it comes to is
+# worked out where the season's total is known (app/distrakt/counts.py).
+#
+# NEGATIVE FOR THE SAME REASON NO_SEASONS IS, and a different number because the
+# two are different answers: one says this service has seen NONE of the title and
+# the other says it has seen ALL of it, and a reader that confused them would
+# invert every finished show.
+ALL_SEASONS = -2
+
+# Where an entry records the services that made that claim. A list of source
+# names, held per title rather than per season, because that is exactly what the
+# service said: it spoke about the title and named no seasons at all.
+_WATCHED_ALL = "watched_all"
 
 
 # Where a sync leaves the sources it could not read this pass, on the state dict
@@ -199,18 +230,31 @@ def _seasons_by_source(entry: dict) -> dict[str, dict[str, dict[str, str]]]:
             for season, stored in (entry.get("seasons") or {}).items()}
 
 
+def _watched_all_sources(entry: dict) -> set[str]:
+    """The services claiming every episode of this title is watched.
+
+    One accessor because the claim is read in four places — the baseline that
+    records it, the save that writes it, the load that reads it back and the map
+    that renders it — and a second spelling of "which services claimed this" is
+    exactly how one of them would come to disagree with the rest.
+    """
+    return {str(source) for source in (entry.get(_WATCHED_ALL) or [])}
+
+
 def _baselined_sources(entry: dict) -> set[str]:
     """Which services have ANSWERED about this title — asked, and replied, whether
     or not they had anything watched to report.
 
-    Two halves, because a baseline leaves two different traces. A service with
-    watches is named in the season slots it filled; a service with none is named
-    in `baselined`, which exists for precisely that case (see the module
-    docstring). Adding them up in one accessor is what keeps every caller asking
-    the same question — "has THIS service been asked about THIS title" — rather
-    than each inventing its own approximation of it.
+    Three halves, because a baseline leaves three different traces. A service with
+    watches is named in the season slots it filled; one claiming the whole title
+    watched is named in `watched_all`; a service with nothing at all is named in
+    `baselined`, which exists for precisely that case (see the module docstring).
+    Adding them up in one accessor is what keeps every caller asking the same
+    question — "has THIS service been asked about THIS title" — rather than each
+    inventing its own approximation of it.
     """
     sources = {str(source) for source in (entry.get("baselined") or [])}
+    sources |= _watched_all_sources(entry)
     for stored in (entry.get("seasons") or {}).values():
         sources.update(_season_slots(stored))
     return sources
@@ -218,13 +262,14 @@ def _baselined_sources(entry: dict) -> set[str]:
 
 def _mark_baselined(entry: dict, source: str) -> None:
     """Record that `source` has answered about this title, and keep the mark
-    MINIMAL: a service with a season slot is already accounted for by the slot, so
-    listing it here as well would be the same fact stored twice and the two copies
-    could then disagree. A title the service turns out to have watches for
-    therefore loses its mark on the next baseline, which is correct — the slots
-    now say what the mark was standing in for.
+    MINIMAL: a service with a season slot, or with a whole-title claim, is already
+    accounted for by that, so listing it here as well would be the same fact stored
+    twice and the two copies could then disagree. A title the service turns out to
+    have watches for therefore loses its mark on the next baseline, which is
+    correct — the slots now say what the mark was standing in for.
     """
     marks = {str(s) for s in (entry.get("baselined") or [])} | {str(source)}
+    marks -= _watched_all_sources(entry)
     marks -= {slot_source
               for stored in (entry.get("seasons") or {}).values()
               for slot_source in _season_slots(stored)}
@@ -293,6 +338,14 @@ async def _load(user_id: int) -> dict:
         # exist.
         if int(row["season"]) == NO_SEASONS:
             _mark_baselined(entry, str(row["source"] or _LEGACY_SOURCE))
+            continue
+        # The ALL_SEASONS row is not a season either: it is one service's claim
+        # that the whole title has been watched, made without any episode to write
+        # down. It becomes a count only where the season totals are (see
+        # watched_map and app/distrakt/counts.py).
+        if int(row["season"]) == ALL_SEASONS:
+            entry[_WATCHED_ALL] = sorted(
+                _watched_all_sources(entry) | {str(row["source"] or _LEGACY_SOURCE)})
             continue
         by_source = entry["seasons"].setdefault(str(int(row["season"])), {})
         by_source[str(row["source"] or _LEGACY_SOURCE)] = episode_watches(
@@ -387,6 +440,12 @@ async def _save(user_id: int, state: dict) -> None:
             rows = [(season_s, source, eps)
                     for season_s, by_source in seasons.items()
                     for source, eps in by_source.items()]
+            # THE WHOLE-TITLE CLAIM GETS ITS OWN ROW, for the same reason the mark
+            # does: it is an answer with no season to hang on, and a service that
+            # made it would otherwise read back on the next load as one that was
+            # never asked.
+            whole = sorted(_watched_all_sources(entry))
+            rows += [(ALL_SEASONS, source, {}) for source in whole]
             answered = {source for _season_s, source, _eps in rows}
             marks = [(NO_SEASONS, source, {})
                      for source in sorted(_baselined_sources(entry) - answered)]
@@ -482,7 +541,7 @@ def _event_key(payload: dict, media: Media) -> ItemKey | None:
 
 def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
                        source: str = _LEGACY_SOURCE, *,
-                       unlisted_is_zero: bool = False) -> None:
+                       unlisted: UnlistedSeasons = UnlistedSeasons.SILENT) -> None:
     """Replace ONE SOURCE's cached progress for one title with a fresh baseline.
     `season_to_eps` is what that port's progress read returns,
     {season: {episode: watched_at}}; a bare list of episode numbers is still
@@ -494,22 +553,30 @@ def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
     all about the other. The ids MERGE for the same reason: each service names the
     title with its own id and both are needed to keep asking.
 
-    `unlisted_is_zero` SAYS THIS SERVICE'S SILENCE ABOUT A SEASON OF THIS TITLE IS
-    A ZERO RATHER THAN A SHRUG — see LibraryEntry in app/providers/base.py, which
-    is where a source declares it, and which is the only thing that knows whether
-    it is true of its own payload. A service can list only the seasons it has
-    watches in, and then a season it did not mention is one it has seen NONE of;
-    recording nothing for it leaves the other service's zero standing alone, and a
-    season both services agree is at zero renders as a claim only one of them made.
-    Agreement at zero is still agreement and has to look like it.
+    `unlisted` SAYS WHAT THIS SERVICE'S SILENCE ABOUT A SEASON OF THIS TITLE MEANS
+    — see UnlistedSeasons in app/providers/base.py, which is where a source
+    declares it and the only place that knows whether it is true of its own
+    payload. A service that lists only the seasons it has watches in is saying
+    ZERO about the ones it left out; one that reports a finished title without
+    itemizing it is saying every episode of it was WATCHED. Recording nothing for
+    either leaves the other service's number standing alone, and a season the two
+    of them agree about renders as a claim only one of them made.
 
-    THE CLAIM IS ONLY MADE ABOUT A SEASON THE TRACKER IS ALREADY ASKING ABOUT —
+    A ZERO IS ONLY RECORDED FOR A SEASON THE TRACKER IS ALREADY ASKING ABOUT —
     one that already has a slot from somebody. A library read cannot say how many
     seasons a title has and must not be made to guess: filling in every season of
     every held title would write rows for seasons nobody is watching and nothing
     would ever render. A season whose only slot was this service's, and which it
     now says nothing about, is still retired rather than zeroed; that is an
     unwatch, and it is the one case where silence means the season has gone.
+
+    A WHOLE-TITLE CLAIM IS RECORDED AS ITSELF AND NOT AS A SET OF EPISODES. The
+    service that made it handed over no episode numbers and no dates, so writing
+    any would be inventing a viewing history to fit this table's shape. It is
+    filed against the title, and how many episodes it comes to per season is
+    settled where the totals are (see watched_map and app/distrakt/counts.py). It
+    is bounded the same way a zero is, for the same reason: only a season somebody
+    is already asking about can render at all.
     """
     shows = state.setdefault("shows", {})
     entry = shows.setdefault(str(key), {"ids": {}, "seasons": {}})
@@ -519,7 +586,18 @@ def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
         slots.pop(str(source), None)
     for season, eps in (season_to_eps or {}).items():
         seasons.setdefault(str(int(season)), {})[str(source)] = episode_watches(eps)
-    if unlisted_is_zero:
+    # THIS BASELINE REPLACES EVERYTHING THIS SERVICE PREVIOUSLY SAID, the claim
+    # included: a title it called finished last time and itemizes today must not
+    # keep both answers, or the itemized count would render against a claim
+    # nothing renewed.
+    claimed = _watched_all_sources(entry) - {str(source)}
+    if unlisted == UnlistedSeasons.WATCHED:
+        claimed.add(str(source))
+    if claimed:
+        entry[_WATCHED_ALL] = sorted(claimed)
+    else:
+        entry.pop(_WATCHED_ALL, None)
+    if unlisted == UnlistedSeasons.ZERO:
         for slots in seasons.values():
             if slots:  # somebody else is still asking about this season
                 slots.setdefault(str(source), {})
@@ -667,12 +745,26 @@ def watched_map(state: dict) -> dict[tuple[str, int], dict[str, int]]:
     owns what to do with them. An account reading one service gets a
     single-entry dict and every reader collapses it to the one number, which is
     why this needed no second code path for the overwhelmingly common case.
+
+    A SERVICE THAT REPORTED THE WHOLE TITLE WATCHED ANSWERS counts.ALL_EPISODES
+    FOR EVERY SEASON, because that is the honest translation of what it said and
+    the number it comes to is not knowable here — the season's total is catalogue
+    data this state does not hold. A season this service DID itemize keeps its
+    real count: an itemized answer is more specific than a claim about the title,
+    and a play folded in since the claim was made is the newer fact.
+
+    IT IS BOUNDED TO THE SEASONS ALREADY IN THE STATE, exactly as a recorded zero
+    is: the service named no seasons, so there is no list of them to expand
+    against, and a season nobody else is asking about would render nowhere anyway.
     """
     out: dict[tuple[str, int], dict[str, int]] = {}
     for key, entry in (state.get("shows") or {}).items():
+        whole = _watched_all_sources(entry)
         for season_s, slots in _seasons_by_source(entry).items():
-            out[(key, int(season_s))] = {
-                source: len(eps or {}) for source, eps in slots.items()}
+            season = {source: len(eps or {}) for source, eps in slots.items()}
+            for source in whole:
+                season.setdefault(source, counts.ALL_EPISODES)
+            out[(key, int(season_s))] = season
     return out
 
 
@@ -721,8 +813,29 @@ def month_bounds(month_key: str) -> tuple[str, str]:
     return f"{year:04d}-{month:02d}-01", f"{year:04d}-{month:02d}-{last:02d}"
 
 
-def _now_date_iso() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+def _sweep_cursor(today: date) -> str:
+    """The day the NEXT sweep may resume from, having swept up to now.
+
+    TWO CLOCKS ARE IN PLAY AND NEITHER ONE IS SAFE ALONE. A play's `watched_at`
+    comes back from every service in UTC, and the cursor is compared against it —
+    so a cursor taken from the viewer's local date is ahead of the data wherever
+    local time runs ahead of UTC (a morning in Tokyo is still yesterday in UTC).
+    But the months this tracker files plays into are the viewer's local months and
+    `today` is their local date, so a cursor taken from UTC is ahead of the day the
+    viewer is living in wherever UTC runs ahead of local — through the last four
+    or five hours of every US evening, which is when somebody is most likely to be
+    watching something. Either way round, a cursor in the future means the next
+    sweep asks for plays after the ones it is looking for, and those plays are
+    never seen again until something forces a wider read.
+
+    SO IT IS THE EARLIER OF THE TWO, AND THE ASYMMETRY IS THE WHOLE REASON. Being
+    early costs one extra day of history on one call, and re-seeing a play already
+    applied is harmless BY CONTRACT — both SyncPort.fetch_history and the library
+    read say so, and the fold is idempotent. Being late loses a play silently and
+    permanently. A future reader tempted to tighten this back to one clock is
+    trading a free cost for an unrecoverable one.
+    """
+    return min(datetime.now(timezone.utc).date(), today).isoformat()
 
 
 def _month_start_of(today: date) -> str:
@@ -1000,7 +1113,7 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
         if play is not None:
             plays.append(play)
 
-    cursors[name] = _now_date_iso()
+    cursors[name] = _sweep_cursor(today)
     # THE WHOLE BLOB, not the four values the gate compares. A source may carry
     # its own detail alongside them and be handed it back on the next pull; what
     # the gate needs is derived from it either way (see _beacons).
@@ -1067,12 +1180,13 @@ def _fold_library(state: dict, name: str, read) -> None:
             # second.
             _set_show_baseline(state, key, found.ids if found else (entry.get("ids") or {}),
                                found.seasons if found else {}, name,
-                               unlisted_is_zero=bool(found and found.unlisted_seasons_are_zero))
+                               unlisted=(found.unlisted_seasons if found
+                                         else UnlistedSeasons.SILENT))
         return
     for key, found in read.entries.items():
         if str(key) in shows:
             _set_show_baseline(state, key, found.ids, found.seasons, name,
-                               unlisted_is_zero=found.unlisted_seasons_are_zero)
+                               unlisted=found.unlisted_seasons)
 
 
 async def _sync_from_library(settings, state: dict, name: str, library, span, *,
@@ -1132,7 +1246,8 @@ async def _baseline_from_library(settings, state: dict, name: str, library,
         _set_show_baseline(state, key,
                            {**(record.get("ids") or {}), **(found.ids if found else {})},
                            found.seasons if found else {}, name,
-                           unlisted_is_zero=bool(found and found.unlisted_seasons_are_zero))
+                           unlisted=(found.unlisted_seasons if found
+                                     else UnlistedSeasons.SILENT))
     return True
 
 

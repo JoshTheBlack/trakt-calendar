@@ -229,8 +229,13 @@ async def _record_completions(user_id: int, settings) -> None:
         # ONE NUMBER, THE PRIMARY SOURCE'S. Deciding whether a season is finished
         # is a verdict that gets written onto a month, and a verdict cannot be
         # two numbers — see app/distrakt/counts.py, which owns which one it is.
+        # The total goes with it because a service can report a title finished
+        # without itemizing it, and that answer only becomes a number against the
+        # season's total — see counts.ALL_EPISODES. The record's own total is the
+        # one this verdict is being measured against anyway.
         row = {**record, "watched": counts.primary_count(
-            watched.get(live.live_key(record)), live.source_order())}
+            watched.get(live.live_key(record)), live.source_order(),
+            int(record.get("total") or 0))}
         settled += await lifecycle.finish_if_done(user_id, row, completed_on)
     if settled:
         logger.info(

@@ -8,7 +8,7 @@ the three Trakt calls mocked, against a throwaway SQLite file. No network.
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, datetime as real_datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -492,6 +492,103 @@ class SyncTests(WatchStateTestCase):
         self.assertEqual(wh.watched_map(await wh._load(self.user_id)),
                          {(SHOW(404), 1): {"trakt": 3}})
         self.assertEqual(wh.watched_map(await wh._load(other)), {})
+
+
+class _PinnedClock:
+    """`datetime` with `now()` pinned, so a test can put the wall clock at an hour
+    where the UTC date and the viewer's local date are not the same day.
+
+    Only `now` is pinned; everything else is the real class, because the module
+    parses timestamps with it as well.
+    """
+
+    def __init__(self, moment):
+        self._moment = moment
+
+    def now(self, tz=None):
+        return self._moment
+
+    def __getattr__(self, name):
+        return getattr(real_datetime, name)
+
+
+class CursorTests(WatchStateTestCase):
+    """A SWEEP'S CURSOR MUST NEVER BE AHEAD OF THE DATA IT WILL SWEEP.
+
+    Two clocks meet here. Plays come back stamped in UTC and the cursor is
+    compared against those stamps; the months this tracker files them into are the
+    VIEWER'S months and are named from their local date. So there are two ways for
+    the cursor to end up in the future, and they happen in opposite halves of the
+    world: taken from UTC it runs ahead through the last hours of a US evening,
+    and taken from the local date it runs ahead through a morning in Tokyo. Either
+    way the next sweep asks for plays AFTER the ones it is looking for, and they
+    are missed until something forces a wider read.
+
+    The pinned clock is the whole point of these: without it they would pass or
+    fail depending on what time the suite happened to be run at and in which zone.
+    """
+
+    def _at(self, utc_now, today):
+        with patch("app.distrakt.watch_history.datetime", _PinnedClock(utc_now)):
+            return wh._sweep_cursor(today)
+
+    def test_a_us_evening_does_not_put_the_cursor_on_tomorrow(self):
+        """23:04 in New York is already the 5th in UTC, and this is the case that
+        was observed: a start date in the future, sweeping nothing."""
+        self.assertEqual(
+            self._at(real_datetime(2026, 8, 5, 3, 4, tzinfo=timezone.utc),
+                     date(2026, 8, 4)),
+            "2026-08-04")
+
+    def test_a_tokyo_morning_does_not_put_the_cursor_on_tomorrow_either(self):
+        """The same defect with the clocks the other way round, which is what the
+        obvious fix — swap UTC for the local date — would have produced."""
+        self.assertEqual(
+            self._at(real_datetime(2026, 8, 4, 23, 0, tzinfo=timezone.utc),
+                     date(2026, 8, 5)),
+            "2026-08-04")
+
+    def test_the_two_agreeing_is_that_day(self):
+        """Most of the day, and it must not cost anything."""
+        self.assertEqual(
+            self._at(real_datetime(2026, 8, 4, 15, 0, tzinfo=timezone.utc),
+                     date(2026, 8, 4)),
+            "2026-08-04")
+
+    async def _sweep_from(self, utc_now, today):
+        """Sync once at that wall-clock moment, then again with the beacon moved,
+        and answer with the `start_at` the second sweep asked for."""
+        first = {"episodes": {"watched_at": "T1", "removed_at": None},
+                 "movies": {"watched_at": "T1", "removed_at": None}}
+        moved = {"episodes": {"watched_at": "T2", "removed_at": None},
+                 "movies": {"watched_at": "T1", "removed_at": None}}
+        with patch("app.distrakt.watch_history.datetime", _PinnedClock(utc_now)):
+            with patch("app.providers.trakt.sync.fetch_last_activities", return_value=first), \
+                 patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+                 patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+                await wh.sync(SETTINGS, self.user_id, today=today)
+            with patch("app.providers.trakt.sync.fetch_last_activities", return_value=moved), \
+                 patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
+                 patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+                await wh.sync(SETTINGS, self.user_id, today=today)
+        return hist.call_args.kwargs["start_at"]
+
+    async def test_a_play_made_that_evening_is_still_swept_afterwards(self):
+        """THE REGRESSION, end to end. A play at 18:00 in New York is stamped the
+        4th in UTC; a cursor written from the UTC clock that same evening says the
+        5th, and `watched_at < start_at` then drops it for ever."""
+        play_day = "2026-08-04"  # 2026-08-04T22:00:00Z — the same evening
+        start_at = await self._sweep_from(
+            real_datetime(2026, 8, 5, 3, 4, tzinfo=timezone.utc), date(2026, 8, 4))
+        self.assertLessEqual(start_at, play_day)
+
+    async def test_a_play_made_that_morning_is_still_swept_afterwards(self):
+        """And with the clocks the other way round, where the LOCAL date is the
+        one running ahead."""
+        play_day = "2026-08-04"  # 2026-08-04T23:00:00Z — that Tokyo morning
+        start_at = await self._sweep_from(
+            real_datetime(2026, 8, 4, 23, 0, tzinfo=timezone.utc), date(2026, 8, 5))
+        self.assertLessEqual(start_at, play_day)
 
 
 if __name__ == "__main__":

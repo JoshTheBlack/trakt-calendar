@@ -18,6 +18,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from app.providers.base import UnlistedSeasons
 from app.providers.simkl import sync, transport
 
 SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="tok",
@@ -253,19 +254,75 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_season_the_library_does_not_list_is_a_zero_and_says_so(self):
         """/sync/all-items carries only the seasons a title has WATCHED EPISODES
-        in, so a season missing from a held title is one the viewer has seen none
-        of — not one nobody asked about. The entry says which of those two it
-        means, because only this module knows the payload well enough to answer.
+        in, so a season missing from a title in the `watching` list is one the
+        viewer has seen none of — not one nobody asked about. The entry says which
+        of those it means, because only this module knows the payload well enough
+        to answer.
 
         Without it a season both services have seen none of renders as a claim
         only the other one made, and a badge appears on an agreement.
         """
         read, _ = await self._read([{"shows": [self._item()]}] + [{}] * 11)
         entry = read.entries["show:tmdb:900"]
-        self.assertTrue(entry.unlisted_seasons_are_zero)
+        self.assertEqual(entry.unlisted_seasons, UnlistedSeasons.ZERO)
         # And season 1 is the only one it named, so the claim is about every OTHER
         # season of a title it holds rather than about a list it hands over.
         self.assertEqual(list(entry.seasons), [1])
+
+    async def _completed(self, item):
+        """One item in the `completed` bucket, which is the SECOND status asked
+        for in the first catalogue — the buckets are read in a declared order and
+        which one an item came out of is what its silence means."""
+        return await self._read([{}, {"shows": [item]}] + [{}] * 10)
+
+    async def test_a_finished_title_carries_no_seasons_and_means_the_opposite(self):
+        """THE REGRESSION. Measured on a live account: 492 titles in `completed`,
+        not one of them carrying a `seasons[]` key, every one of them reporting
+        watched_episodes_count equal to total_episodes_count. Read the way the
+        `watching` list is read, the app would report none of a show Simkl reports
+        as finished — a silent wrong answer, and worse than the badge the zero
+        rule was written to remove."""
+        item = {"show": {"title": "Done", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                "status": "completed", "total_episodes_count": 91,
+                "watched_episodes_count": 91, "not_aired_episodes_count": 0,
+                "last_watched_at": "2026-07-04T00:00:00Z"}
+        read, _ = await self._completed(item)
+        entry = read.entries["show:tmdb:900"]
+        self.assertEqual(entry.unlisted_seasons, UnlistedSeasons.WATCHED)
+        # No episode is invented for it: the payload named none, and a fabricated
+        # set would be a viewing history nobody reported.
+        self.assertEqual(entry.seasons, {})
+        self.assertEqual(entry.ids, {"simkl": 55, "tmdb": "900"})
+
+    async def test_a_finished_title_with_episodes_still_to_come_claims_nothing(self):
+        """"Completed" means every episode that has AIRED. The totals this app
+        renders against are the season's PLANNED episode counts, so claiming
+        everything watched against one would report episodes that do not exist
+        yet. The title is still held — its ids and any plays still arrive — it
+        simply contributes no count until it really is finished."""
+        item = {"show": {"title": "Airing", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                "status": "completed", "total_episodes_count": 12,
+                "watched_episodes_count": 8, "not_aired_episodes_count": 4}
+        read, _ = await self._completed(item)
+        self.assertEqual(read.entries["show:tmdb:900"].unlisted_seasons,
+                         UnlistedSeasons.SILENT)
+
+    async def test_two_items_of_one_title_making_different_claims_say_nothing(self):
+        """Simkl files a title under exactly one status, so this is a payload
+        nothing here can explain — an anime title also filed as television, say.
+        Believing either one would be picking, and the two ways of being wrong are
+        "reported none of a finished show" and "reported a show finished that is
+        not"; silence is the only answer that cannot be confidently wrong."""
+        watching = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                    "seasons": [{"number": 1, "episodes": [
+                        {"number": 1, "watched_at": "2026-07-01"}]}]}
+        done = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                "status": "completed", "not_aired_episodes_count": 0}
+        read, _ = await self._read([{"shows": [watching]}, {"shows": [done]}] + [{}] * 10)
+        entry = read.entries["show:tmdb:900"]
+        self.assertEqual(entry.unlisted_seasons, UnlistedSeasons.SILENT)
+        # And the episodes only one of them carried are still kept.
+        self.assertEqual(entry.seasons, {1: {1: "2026-07-01"}})
 
     async def test_the_same_read_carries_the_plays_inside_it(self):
         """One pull answers both questions. Asking for the library and then for

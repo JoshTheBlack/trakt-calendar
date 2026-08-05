@@ -22,6 +22,9 @@ rule itself is short and the reasoning behind it is the part worth keeping:
   nothing about what it holds, so the numbers shown are labelled as the ones that
   answered rather than presented as the whole picture.
 
+  A SERVICE THAT SAID "ALL OF IT" WITHOUT SAYING HOW MANY becomes a number here,
+  because here is where the season's total is in hand — see ALL_EPISODES.
+
 Everything here is PURE and takes the per-source dicts the watch state already
 carries, so the rule can be tested without a database, a request or a provider.
 """
@@ -34,8 +37,38 @@ from collections.abc import Mapping
 # left and a comma reads as a list of episodes.
 SEPARATOR = " · "
 
+# WHAT A SERVICE'S COUNT HOLDS WHEN IT SAID "ALL OF IT" WITHOUT SAYING HOW MANY.
+# A service can report a title as finished — every episode watched — while
+# itemizing nothing, and then there are no episode numbers to count and no dates
+# to keep; there is only the claim. Turning that into a number needs the season's
+# TOTAL, which arrives here and nowhere earlier: the watch state holds what each
+# service reported, and the total is catalogue data fetched beside it.
+#
+# SO THE CLAIM TRAVELS AS A COUNT AND IS RESOLVED WHERE "x/y" IS WRITTEN. It rides
+# inside the same per-source map every reader already carries rather than in a
+# second lookup threaded beside it, because a reader that forgot the second lookup
+# would silently drop that service's answer and render a false single-source
+# claim — which is the exact defect this exists to remove. Negative because a
+# watched count cannot be, so nothing real can collide with it.
+ALL_EPISODES = -1
 
-def primary_count(per_source: Mapping[str, int] | int | None, order=()) -> int:
+
+def resolve(per_source: Mapping[str, int] | int | None, total) -> dict[str, int]:
+    """Per-source counts with every "all of it" claim turned into a number.
+
+    ONE PLACE, called by everything here, so a claim can never reach a template, a
+    frozen month or an announcement post still wearing its sentinel. A caller that
+    hands in numbers gets its numbers back unchanged, which is what keeps the
+    common path — two services that both itemize — on exactly the code it was on.
+    """
+    if not isinstance(per_source, Mapping):
+        return {}
+    y = int(total or 0)
+    return {str(source): (y if int(count or 0) == ALL_EPISODES else int(count or 0))
+            for source, count in per_source.items()}
+
+
+def primary_count(per_source: Mapping[str, int] | int | None, order=(), total=0) -> int:
     """The ONE number for callers that can only carry one — a frozen month's
     `watched` column, the announcement post, a bucket comparison.
 
@@ -50,11 +83,17 @@ def primary_count(per_source: Mapping[str, int] | int | None, order=()) -> int:
 
     A bare number is accepted and returned unchanged, so a caller holding a count
     from somewhere other than the watch state does not have to wrap it.
+
+    `total` is what an "all of it" claim resolves to (see ALL_EPISODES). It
+    defaults to nothing rather than being required, because most callers hold
+    plain counts — but a caller that has the season's total should pass it, or a
+    service that only claimed completeness contributes a zero here.
     """
     if per_source is None:
         return 0
     if not isinstance(per_source, Mapping):
         return int(per_source or 0)
+    per_source = resolve(per_source, total)
     for source in order:
         if str(source) in per_source:
             return int(per_source[str(source)] or 0)
@@ -91,6 +130,11 @@ def counts_label(per_source: Mapping[str, int] | int | None, total,
     y = int(total or 0)
     if not isinstance(per_source, Mapping) or not per_source:
         return f"{int(per_source or 0)}/{y}"
+    # Resolved HERE as well as at every other reader, because this is the one
+    # function that is handed both halves of "x/y" by every caller in the app —
+    # so a claim that reached a row through some path nobody updated still renders
+    # as the number the service meant rather than as a negative one.
+    per_source = resolve(per_source, y)
     complete = len(asked) <= 1 or {str(source) for source in asked} <= set(per_source)
     if agreed(per_source) and complete:
         return f"{primary_count(per_source, order)}/{y}"

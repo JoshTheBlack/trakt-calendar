@@ -369,6 +369,38 @@ class SyncPort(Protocol):
         ...
 
 
+class UnlistedSeasons(StrEnum):
+    """WHAT A SOURCE'S SILENCE ABOUT A SEASON OF A TITLE IT HOLDS MEANS.
+
+    Three answers, because a library payload can be making any of three different
+    statements with the same absent season, and they are not degrees of one
+    another:
+
+      SILENT   the payload says nothing about seasons it did not list. Reading
+               anything into the gap would be inventing an answer.
+      ZERO     the payload lists only the seasons with watches in them, so a
+               season it did not list is one the viewer has seen NONE of. A
+               season both services have seen none of is an agreement at zero,
+               and recording nothing for it renders that agreement as a claim
+               only one service made.
+      WATCHED  the payload says the whole title is finished and itemizes nothing,
+               so every season of it has been seen in full. Reading THAT as a
+               zero is the same mistake with the sign flipped, and it is the
+               worse of the two: it claims a service reported none of a title
+               that service reports as complete.
+
+    A SOURCE DECIDES THIS PER ENTRY AND NOTHING ELSE MAY. Which of the three is
+    true is a fact about one payload — often about one list within it, since a
+    service can itemize the titles in progress and count the finished ones — so
+    it is stated where the payload is read and travels on the entry. SILENT is
+    the default because a source that has not thought about the question must
+    come out too cautious rather than confidently wrong.
+    """
+    SILENT = "silent"
+    ZERO = "zero"
+    WATCHED = "watched"
+
+
 class LibraryEntry(NamedTuple):
     """What one source holds about ONE title in somebody's library.
 
@@ -382,26 +414,25 @@ class LibraryEntry(NamedTuple):
     empty map is a real answer: the source holds the title and has seen none of
     it.
 
-    `unlisted_seasons_are_zero` IS THE DIFFERENCE BETWEEN TWO ANSWERS THAT LOOK
-    IDENTICAL IN `seasons` AND ARE NOT. A source may list only the seasons it has
-    watches in, so a season missing from the map means "none of it watched"; or it
-    may list every season it knows of, so a season missing means "no idea". Set it
-    where the FORMER is true of the payload, and the caller may then record a
-    ZERO for a season it is already asking about rather than recording nothing at
-    all. Recording nothing is what made a title both services hold, and both say
-    the viewer has seen none of, render as a claim only one of them made — the two
-    services agree at zero, and agreement at zero is still agreement.
+    `unlisted_seasons` SAYS WHAT THE SEASONS NOT IN THAT MAP MEAN — see
+    UnlistedSeasons above, which is where the three answers and the reason for
+    each are written.
 
     IT IS A PROPERTY OF THE PAYLOAD, WHICH IS WHY IT RIDES ON THE ENTRY AND NOT ON
     THE READ. The claim is only ever about a title this source HOLDS; a title
-    absent from the read has no entry, so there is no flag to consult and no way
-    for a caller to extend the claim to one. It defaults to False so a source that
-    has not thought about the question is read as saying nothing, which is the
-    answer that can only ever be too cautious.
+    absent from the read has no entry, so there is nothing to consult and no way
+    for a caller to extend the claim to one.
+
+    A SOURCE THAT CLAIMS `WATCHED` STATES A FACT AND NOT A COUNT, deliberately. A
+    service that reports a title as finished without itemizing it has no episode
+    numbers and no per-episode dates to hand over, and a provider that
+    manufactured them would be inventing a viewing history to fit a shape. How
+    many episodes that is, is the CALLER's question — it is the side holding the
+    season's total, because it is the side that renders "watched out of total".
     """
     ids: dict[str, Any]
     seasons: dict[int, dict[int, str]]
-    unlisted_seasons_are_zero: bool = False
+    unlisted_seasons: UnlistedSeasons = UnlistedSeasons.SILENT
 
 
 class LibraryRead(NamedTuple):

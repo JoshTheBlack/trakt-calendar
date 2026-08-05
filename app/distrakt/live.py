@@ -178,9 +178,18 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], asked=()) -> N
     it is one answer for the whole pass, not one per row.
     """
     order = source_order()
-    per_source = watched if isinstance(watched, dict) else {}
     total = int(show.get("total") or 0)
-    show["watched"] = counts.primary_count(watched, order)
+    # RESOLVED ONCE, HERE, BEFORE ANY OF THE THREE FORMS IS WRITTEN. A service can
+    # report a title finished without itemizing it, and that answer travels as a
+    # claim rather than a number because only this side holds the season's total
+    # (counts.ALL_EPISODES). This is the point where the total arrives, so it is
+    # the point where the claim becomes a count — and everything downstream, the
+    # bucket rule and a frozen month's stored breakdown included, sees plain
+    # numbers it can compare and store.
+    per_source = counts.resolve(watched, total)
+    # `per_source or watched` so a caller holding one bare number instead of a
+    # per-source map still gets it back, exactly as before.
+    show["watched"] = counts.primary_count(per_source or watched, order, total)
     show["watched_by_source"] = dict(per_source)
     # The catalogue half, per source too, so a month frozen today can still say
     # which service's episode count it was measured against. One entry: a

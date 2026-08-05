@@ -42,7 +42,8 @@ from urllib.parse import urlencode
 
 from ...config import Settings
 from ...perftrace import span
-from ..base import LibraryEntry, LibraryRead, Media, collect_ids, resolve_key
+from ..base import (LibraryEntry, LibraryRead, Media, UnlistedSeasons, collect_ids,
+                    resolve_key)
 from . import transport
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,16 @@ logger = logging.getLogger(__name__)
 # would lose every season in progress, which is most of what the tracker counts.
 # `plantowatch` is excluded because nothing in it has been watched.
 WATCHED_STATUSES = ("watching", "completed", "hold", "dropped")
+
+# The one bucket whose items are NOT itemized, measured against a live account:
+# every title in `watching` carries a `seasons[]` block with an entry per episode
+# watched, and not one title in `completed` carries the key at all. A completed
+# item states itself in counts instead — total_episodes_count,
+# watched_episodes_count and a `not_aired_episodes_count`. So the two buckets make
+# opposite statements with the same missing block, and reading them the same way
+# turns a finished show into a show with nothing watched. See UnlistedSeasons in
+# app/providers/base.py, which is how that difference leaves this module.
+COMPLETED_STATUS = "completed"
 
 # The catalogues an episode can come from. Simkl keeps anime apart from
 # television at every endpoint, and a person's anime is watch history exactly as
@@ -322,7 +333,61 @@ def _wanted_buckets(activities: dict | None,
     return wanted, not skipped
 
 
-def _fold_library_item(entries: dict[str, LibraryEntry], item: dict) -> None:
+def _unlisted_claim(item: dict, status: str) -> UnlistedSeasons:
+    """What this item's silence about a season means, decided by the LIST it came
+    out of. Measured against a live account, 2026-08-04.
+
+    `watching`, `hold` and `dropped` itemize: every one of those items carries a
+    `seasons[]` block holding the episodes watched, so a season missing from it is
+    a season the viewer has seen NONE of.
+
+    `completed` does not itemize at all — 492 items, not one `seasons[]` key
+    between them — and says instead that every AIRED episode of the title has been
+    watched, with `watched_episodes_count` equal to `total_episodes_count`. So its
+    silence means the OPPOSITE, and reading it as a zero would have the app report
+    none of a title the service reports as finished.
+
+    THE STATUS COMES FROM THE BUCKET THAT WAS ASKED FOR rather than from the
+    item's own `status` field: the request named the list, so that answer cannot be
+    wrong about which list this came out of, and a payload whose status field
+    drifts or is absent cannot silently flip the meaning of every season it left
+    out.
+
+    AN UNFINISHED SEASON IS NOT CLAIMED AT ALL. "Completed" means every episode
+    that has AIRED, and `not_aired_episodes_count` is the service saying more are
+    coming — while the totals the app renders against are the season's PLANNED
+    episode counts (see app/providers/trakt/detail.py, which deliberately reads
+    `episode_count` and not `aired_episodes`). Claiming everything watched against
+    a planned total would say the viewer has seen episodes that do not exist yet,
+    which is the same class of silent wrong answer in the other direction. Such a
+    title stays SILENT: its ids and its plays still arrive, and it simply
+    contributes no per-season count until it really is finished.
+    """
+    if status != COMPLETED_STATUS:
+        return UnlistedSeasons.ZERO
+    try:
+        unaired = int(item.get("not_aired_episodes_count") or 0)
+    except (TypeError, ValueError):  # a shape we do not understand is not a claim
+        return UnlistedSeasons.SILENT
+    return UnlistedSeasons.SILENT if unaired > 0 else UnlistedSeasons.WATCHED
+
+
+def _merged_claim(first: UnlistedSeasons, second: UnlistedSeasons) -> UnlistedSeasons:
+    """The claim two items resolving to ONE identity leave behind.
+
+    Agreement keeps the claim; a contradiction drops to SILENT. Simkl files a
+    title under exactly one status, so two items making DIFFERENT claims about the
+    same title is a payload nothing here can explain — an anime title also filed as
+    television, say, with the two halves in different lists. Believing either one
+    would be picking, and the two possible mistakes are "reported none of a
+    finished show" and "reported a show finished that is not": saying nothing is
+    the only answer that cannot be confidently wrong.
+    """
+    return first if first == second else UnlistedSeasons.SILENT
+
+
+def _fold_library_item(entries: dict[str, LibraryEntry], item: dict,
+                       status: str) -> None:
     """One library item filed under the SHARED identity of its title.
 
     The identity waterfall is app/providers/base.py's and is not restated here;
@@ -337,14 +402,10 @@ def _fold_library_item(entries: dict[str, LibraryEntry], item: dict) -> None:
     television) dropping one of them would silently lose the episodes only it
     carried.
 
-    A SEASON ABSENT FROM `seasons[]` IS SIMKL SAYING ZERO, WHICH IS WHY EVERY
-    ENTRY THIS BUILDS SETS `unlisted_seasons_are_zero`. /sync/all-items lists only
-    the seasons a title has WATCHED EPISODES in — a title in the library whose
-    season 2 the viewer has seen none of produces no season-2 block at all. Only a
-    title absent from the LIBRARY is Simkl saying nothing. The two are different
-    answers and a caller that cannot tell them apart renders the first as a claim
-    only the other service made, which is a false single-source label on a season
-    both services agree is at zero.
+    WHAT A SEASON ABSENT FROM `seasons[]` MEANS IS SCOPED BY THE BUCKET, and
+    _unlisted_claim is where that is decided. Only a title absent from the LIBRARY
+    ENTIRELY is Simkl saying nothing at all; a title it holds always says
+    something, and which something depends on the list it is filed under.
     """
     show = item.get("show") or {}
     ids = _entry_ids(show)
@@ -352,16 +413,18 @@ def _fold_library_item(entries: dict[str, LibraryEntry], item: dict) -> None:
     if key is None:
         return
     seasons = _progress_from_seasons(item)
+    claim = _unlisted_claim(item, status)
     previous = entries.get(str(key))
     if previous is None:
         entries[str(key)] = LibraryEntry(ids=dict(ids), seasons=seasons,
-                                         unlisted_seasons_are_zero=True)
+                                         unlisted_seasons=claim)
         return
     merged = {season: dict(episodes) for season, episodes in previous.seasons.items()}
     for season, episodes in seasons.items():
         merged[season] = {**merged.get(season, {}), **episodes}
-    entries[str(key)] = LibraryEntry(ids={**previous.ids, **ids}, seasons=merged,
-                                     unlisted_seasons_are_zero=True)
+    entries[str(key)] = LibraryEntry(
+        ids={**previous.ids, **ids}, seasons=merged,
+        unlisted_seasons=_merged_claim(previous.unlisted_seasons, claim))
 
 
 async def fetch_library(settings: Settings, *, start_at: str | None = None,
@@ -399,7 +462,7 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
                 continue
             for item in document.get(media) or document.get("shows") or []:
                 events.extend(_episode_events(item, start_at))
-                _fold_library_item(entries, item)
+                _fold_library_item(entries, item, status)
     logger.info("simkl fetch_library(start_at=%s): %d bucket(s), %d title(s), "
                 "%d event(s), complete=%s",
                 start_at, len(wanted), len(entries), len(events), complete)

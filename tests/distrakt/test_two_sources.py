@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import db, distrakt
 from app.distrakt import counts, lifecycle, live, store, watch_history as wh
-from app.providers.base import ItemKey, LibraryEntry, LibraryRead
+from app.providers.base import ItemKey, LibraryEntry, LibraryRead, UnlistedSeasons
 from app.providers.simkl import SimklError
 from tests.support import new_db_path
 
@@ -69,7 +69,8 @@ def _episodes(*numbers) -> dict:
 LIBRARY_SOURCES = ("simkl",)
 
 
-def _library_read(progress, *, complete=True, events=None) -> LibraryRead:
+def _library_read(progress, *, complete=True, events=None,
+                  unlisted=UnlistedSeasons.ZERO) -> LibraryRead:
     """The same scripted progress, as the whole-library answer a source that can
     hand one over gives.
 
@@ -77,22 +78,25 @@ def _library_read(progress, *, complete=True, events=None) -> LibraryRead:
     entire difference: a roster record that names only Trakt still matches, and
     the service's own id comes back on the entry rather than being needed to ask.
 
-    EVERY ENTRY CARRIES `unlisted_seasons_are_zero`, because the live service this
-    stands in for does: its library lists only the seasons a title has watches in,
-    so a title present here with a season missing has been seen none of rather
-    than not been asked about. A fixture that dropped the flag would test a
-    service that does not exist.
+    EVERY ENTRY SAYS ITS UNLISTED SEASONS ARE ZEROS, because that is what the live
+    service says about the list most of a roster sits in: the titles in progress
+    are itemized season by season, so a title present here with a season missing
+    has been seen none of rather than not been asked about. A fixture that left
+    the claim off would test a service that does not exist. `unlisted` is a
+    parameter because the same service says something ELSE about its finished
+    titles, which it does not itemize at all.
     """
     return LibraryRead(
         entries={KEY(tid): LibraryEntry(ids={"simkl": tid, "tmdb": tid},
                                         seasons={int(season): dict(episodes)
                                                  for season, episodes in seasons.items()},
-                                        unlisted_seasons_are_zero=True)
+                                        unlisted_seasons=unlisted)
                  for tid, seasons in (progress or {}).items()},
         events=list(events or []), complete=complete)
 
 
-def _patch(source: str, *, progress=None, history=None, activities=BEACON):
+def _patch(source: str, *, progress=None, history=None, activities=BEACON,
+           unlisted=UnlistedSeasons.ZERO):
     """Patch one provider's sync entry points — and its library read as well
     where it has one, since that is the call the tracker actually places for such
     a source."""
@@ -107,7 +111,8 @@ def _patch(source: str, *, progress=None, history=None, activities=BEACON):
     ]
     if source in LIBRARY_SOURCES:
         patches.append(patch(f"{module}.fetch_library",
-                             new=AsyncMock(return_value=_library_read(progress))))
+                             new=AsyncMock(return_value=_library_read(
+                                 progress, unlisted=unlisted))))
     return tuple(patches)
 
 
@@ -131,11 +136,13 @@ class TwoSourceTestCase(unittest.IsolatedAsyncioTestCase):
         db.close_thread_connection()
 
     async def _baseline(self, settings, records, *, trakt=None, simkl=None,
-                        simkl_activities=BEACON):
+                        simkl_activities=BEACON,
+                        simkl_unlisted=UnlistedSeasons.ZERO):
         """Sync both services with a scripted progress record each, and return the
         watch state that came out of it."""
         patches = [*_patch("trakt", progress=trakt),
-                   *_patch("simkl", progress=simkl, activities=simkl_activities)]
+                   *_patch("simkl", progress=simkl, activities=simkl_activities,
+                           unlisted=simkl_unlisted)]
         for p in patches:
             p.start()
         try:
@@ -753,6 +760,154 @@ class AgreementAtZeroTests(TwoSourceTestCase):
                                      simkl={101: {}}, simkl_activities=MOVED)
         self.assertEqual(state["shows"][KEY(101)]["seasons"], {})
         self.assertNotIn((KEY(101), 4), wh.watched_map(state))
+
+
+class AFinishedTitleTests(TwoSourceTestCase):
+    """A TITLE ONE SERVICE REPORTS AS FINISHED, ITEMIZING NONE OF IT.
+
+    THE FAILURE THIS IS WRITTEN AGAINST is the zero rule above applied to a list
+    it is not true of. A service that lists only the seasons it has watches in is
+    saying zero about the rest — but only for the titles it ITEMIZES. Its finished
+    titles carry no seasons at all and a pair of counts instead, and reading THAT
+    silence as a zero has the app report none of a title the service reports as
+    complete. Measured on a live account, that is 492 titles, every one of them
+    inverted, and nothing on the page to notice it by.
+
+    The claim carries no episode numbers and no dates, because the service handed
+    over none, so what it comes to is settled against the season's total where the
+    row is drawn.
+    """
+
+    async def _rows(self, watched_lookup, sources_read=ORDER, total=8):
+        async def _season(settings, trakt_id, season, fresh=False, client=None):
+            return {"total": total, "cadence": "Tue", "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+        with patch("app.providers.trakt.detail.fetch_season_detail", _season):
+            return await live.compute_live_shows(
+                self.user_id, [_record(101)], BOTH, watched_lookup=watched_lookup,
+                sources_read=sources_read)
+
+    async def _finished(self, *, trakt=None, unlisted=UnlistedSeasons.WATCHED):
+        """Trakt itemizes season 1; the other service holds the title, itemizes
+        nothing, and says the whole thing is watched."""
+        return await self._baseline(
+            BOTH, [_record(101)], trakt=trakt if trakt is not None else {101: {1: {}}},
+            simkl={101: {}}, simkl_unlisted=unlisted)
+
+    async def test_a_finished_title_reads_as_fully_watched_and_not_as_zero(self):
+        """THE REGRESSION. Read as a zero this row said `0/8 (Trakt) · 0/8 (Simkl)`
+        about a season one of the two calls complete."""
+        state = await self._finished()
+        row, = await self._rows(wh.watched_map(state))
+        self.assertEqual(row["watched_by_source"], {"trakt": 0, "simkl": 8})
+        self.assertEqual(row["counts"], "0/8 (Trakt) · 8/8 (Simkl)")
+
+    async def test_both_services_agreeing_a_season_is_finished_render_one_number(self):
+        """The ordinary case for a finished show: the row is one bare number, with
+        no badge and nothing to reconcile."""
+        state = await self._finished(trakt={101: {1: _episodes(*range(1, 9))}})
+        row, = await self._rows(wh.watched_map(state))
+        self.assertEqual(row["counts"], "8/8")
+        self.assertEqual(row["watched"], 8)
+
+    async def test_the_claim_is_measured_against_each_seasons_own_total(self):
+        """It is a statement about the TITLE, so it answers for every season of it
+        — and each of those seasons has its own length, which is why the claim
+        cannot become a number until the total is in hand."""
+        state = await self._finished(trakt={101: {1: {}}})
+        row, = await self._rows(wh.watched_map(state), total=13)
+        self.assertEqual(row["watched_by_source"], {"trakt": 0, "simkl": 13})
+
+    async def test_a_title_still_airing_is_not_claimed_finished(self):
+        """A service saying "everything AIRED is watched" is not saying the season
+        is complete: the totals this app renders against are the PLANNED episode
+        counts, so a title with episodes still to come would be reported as
+        watched past the end of what exists."""
+        state = await self._finished(unlisted=UnlistedSeasons.SILENT)
+        per_source = wh.watched_map(state)[(KEY(101), 1)]
+        self.assertEqual(per_source, {"trakt": 0})
+        row, = await self._rows(wh.watched_map(state))
+        self.assertEqual(row["counts"], "0/8 (Trakt)")
+
+    async def test_a_title_absent_from_the_library_keeps_its_single_source_badge(self):
+        """The guard on the other side. This service has never heard of the title,
+        so it has claimed nothing about it and the one number on the row belongs
+        to whoever offered it."""
+        state = await self._baseline(BOTH, [_record(101)], trakt={101: {1: {}}},
+                                     simkl={})
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 0})
+        row, = await self._rows(wh.watched_map(state))
+        self.assertEqual(row["counts"], "0/8 (Trakt)")
+
+    async def test_an_itemized_season_of_a_claimed_title_keeps_its_own_count(self):
+        """A season the service DID describe is the more specific answer, and a
+        play folded in since the claim was made is the newer one."""
+        state = await self._baseline(
+            BOTH, [_record(101)], trakt={101: {1: {}, 2: {}}},
+            simkl={101: {2: _episodes(1, 2)}}, simkl_unlisted=UnlistedSeasons.WATCHED)
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 2)], {"trakt": 0, "simkl": 2})
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)],
+                         {"trakt": 0, "simkl": counts.ALL_EPISODES})
+
+    async def test_the_claim_survives_a_save_and_a_load(self):
+        """It has no episode to be written down as, so it needs a row of its own —
+        without one the next load reads the service as never asked and re-fetches
+        the whole roster from it for ever."""
+        await self._finished()
+        state = await wh.load_state(self.user_id)
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)],
+                         {"trakt": 0, "simkl": counts.ALL_EPISODES})
+        row = await db.fetch_one(
+            "SELECT season FROM distrakt_show_progress WHERE user_id = ? "
+            "AND source = 'simkl'", (self.user_id,))
+        self.assertEqual(row["season"], wh.ALL_SEASONS)
+
+    async def test_a_service_that_claimed_a_title_is_not_asked_about_it_again(self):
+        """The claim is an answer, so it counts as one: a title it has spoken
+        about must not be re-fetched on every page load."""
+        await self._finished()
+        patches = [*_patch("trakt", progress={101: {1: {}}}),
+                   *_patch("simkl", progress={101: {}},
+                           unlisted=UnlistedSeasons.WATCHED)]
+        for p in patches:
+            p.start()
+        try:
+            await wh.sync_and_baseline(BOTH, self.user_id, [_record(101)])
+            simkl_library = patches[6].get_original()[0]
+        finally:
+            for p in patches:
+                p.stop()
+        simkl_library.assert_not_awaited()
+
+    async def test_a_service_that_itemizes_the_title_later_drops_its_claim(self):
+        """The newest answer replaces the last one whole. Keeping both would leave
+        an itemized count rendering against a claim nothing renewed."""
+        await self._finished()
+        state = await self._baseline(
+            BOTH, [_record(101)], trakt={101: {1: {}}},
+            simkl={101: {1: _episodes(1, 2)}}, simkl_activities=MOVED)
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 0, "simkl": 2})
+        self.assertNotIn("watched_all", state["shows"][KEY(101)])
+
+    async def test_a_frozen_month_keeps_the_number_and_never_the_claim(self):
+        """A month has to keep meaning the same thing years later, so what is
+        written down is the count the claim came to against the total it was
+        measured against — never a sentinel a later reader would have to
+        re-resolve, against a total that may by then have changed."""
+        state = await self._finished()
+        row, = await self._rows(wh.watched_map(state))
+        await store.add_user_record(self.user_id, {
+            **_record(101), "kind": store.RecordKind.KEEPUP, "total": 8,
+            "network": "Net", "started_airing": True, "finished_airing": True,
+            "watched": row["watched"], "watched_by_source": row["watched_by_source"]})
+        await lifecycle.finish(self.user_id, ItemKey("show", "tmdb", "101"), 1,
+                               month="2026-07", by_source=lifecycle.by_source_of(row))
+        record, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual(record["watched_by_source"], {"trakt": 0, "simkl": 8})
+        self.assertEqual(
+            counts.counts_label(record["watched_by_source"], record["total"],
+                                LABELS, ORDER, ORDER),
+            "0/8 (Trakt) · 8/8 (Simkl)")
 
 
 class SourceNamesTests(unittest.TestCase):
