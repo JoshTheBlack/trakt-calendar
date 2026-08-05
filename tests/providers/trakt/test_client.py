@@ -271,6 +271,91 @@ class TestThePrivateReadsRefuseToLookEmpty:
         assert self._history(_response(200, body="[]")) == []
 
 
+class _PagedClient:
+    """A send() stand-in that serves canned pages in order and records the URLs.
+
+    The sweep pages by query parameter and follows the page-count header, so what
+    it ASKED for is half of what is under test.
+    """
+
+    def __init__(self, *pages):
+        self._pages = list(pages)
+        self.urls: list[str] = []
+
+    async def __call__(self, _client, _method, url, **_kwargs):
+        self.urls.append(url)
+        return self._pages.pop(0) if len(self._pages) > 1 else self._pages[0]
+
+
+def _page(body, status: int = 200, page_count: int = 1):
+    page = _WindowResponse(body, status, {"x-pagination-page-count": str(page_count)})
+    page.text = ""  # what the sweep logs a refusal with
+    return page
+
+
+class TestThePlayCountSweep:
+    """WHAT /sync/watched/shows IS ACTUALLY FOR.
+
+    It carries no seasons and no episodes in any variant, so it cannot say what
+    anybody has watched — the docstring that claimed otherwise is what made a
+    whole plan out of it. What each row DOES carry is `plays`, and measured live,
+    `plays` moved in both directions with the watched set while the
+    `last_updated_at` beside it moved only on the addition. So this is a change
+    detector for the whole library at a handful of calls, and the field it must
+    NOT be keyed on is the obvious one.
+    """
+
+    def _sweep(self, send):
+        with patch.object(transport, "send", send), \
+             patch.object(transport, "shared_client", lambda: None):
+            return asyncio.run(trakt_sync.fetch_play_counts(SETTINGS, limit=2))
+
+    def test_a_row_becomes_its_show_id_and_its_play_count(self):
+        send = _PagedClient(_page([{"plays": 20, "show": {"ids": {"trakt": 202341}}}]))
+        counts = self._sweep(send)
+        assert counts == ({"202341": 20}, True)
+
+    def test_it_follows_the_page_count_header(self):
+        send = _PagedClient(
+            _page([{"plays": 3, "show": {"ids": {"trakt": 1}}}], page_count=2),
+            _page([{"plays": 5, "show": {"ids": {"trakt": 2}}}], page_count=2))
+        counts, complete = self._sweep(send)
+        assert counts == {"1": 3, "2": 5}
+        assert complete
+        assert len(send.urls) == 2
+        assert "page=2" in send.urls[1]
+
+    def test_a_row_with_no_id_is_skipped_rather_than_keyed_on_nothing(self):
+        send = _PagedClient(_page([{"plays": 1, "show": {"ids": {}}}, "not a dict"]))
+        assert self._sweep(send).counts == {}
+
+    def test_the_first_page_failing_raises(self):
+        """A sweep that read nothing is not a library that holds nothing — and an
+        empty map here means every title has lost its plays."""
+        send = _PagedClient(_page(None, status=500))
+        with pytest.raises(TraktError):
+            self._sweep(send)
+
+    def test_a_later_page_failing_makes_the_sweep_incomplete(self):
+        """Survivable, and the flag is what keeps it survivable: the caller may
+        read an incomplete sweep for what it FOUND and never for what is missing,
+        because a title on a page nobody fetched looks exactly like a title with
+        no plays left."""
+        send = _PagedClient(
+            _page([{"plays": 3, "show": {"ids": {"trakt": 1}}}], page_count=3),
+            _page(None, status=502, page_count=3))
+        counts, complete = self._sweep(send)
+        assert counts == {"1": 3}
+        assert not complete
+
+    def test_a_refused_credential_raises_on_any_page(self):
+        send = _PagedClient(
+            _page([{"plays": 3, "show": {"ids": {"trakt": 1}}}], page_count=3),
+            _page(None, status=401, page_count=3))
+        with pytest.raises(TraktError):
+            self._sweep(send)
+
+
 class TestFetchWindow:
     """The one place the app asks Trakt what airs.
 

@@ -18,10 +18,14 @@ cheaply:
     watched_at so a month can list the movies watched during it (POST 2's
     **Movies** section).
   - UNWATCH / FORCE: if the removed_at beacon changes (or the Refresh button
-    forces it) we re-baseline every cached title from progress and re-seed movies.
+    forces it) we re-baseline from progress and re-seed movies.
     A REMOVAL THAT MOVES NO SUCH BEACON IS INFERRED INSTEAD, because at least one
     service does not move one for it — see _watched_changed, and _sync_one for
     what the inference costs and which sources need it at all.
+    WHICH TITLES THAT RE-BASELINE ACTUALLY READS is the source's own answer where
+    it has one: a per-title play count for the whole library, swept in a handful
+    of calls, names the titles whose counts have moved and nothing else has to be
+    asked about. See _rebaseline_by_id and PlayCountPort.
 
 WHICH SOURCES ANSWER is not this module's business: it asks the registry for
 every port that can read one person's own viewing and that this account's
@@ -60,6 +64,7 @@ distrakt_show_progress, distrakt_movie_watches). In memory:
 
     {cursors: {source: 'YYYY-MM-DD'},
      beacons: {source: {...}},
+     play_counts: {source: {source's own show id: plays}},
      shows:   {key: {ids: {...},
                      seasons: {season: {source: {episode: watched_at}}},
                      watched_all: [source, ...],
@@ -119,8 +124,9 @@ from typing import NamedTuple
 from . import counts, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
-from ..providers.base import (ItemKey, LibraryPort, Media, SourceUnavailable,
-                              UnlistedSeasons, collect_ids, item_key, resolve_key)
+from ..providers.base import (ItemKey, LibraryPort, Media, PlayCountPort,
+                              SourceUnavailable, UnlistedSeasons, collect_ids,
+                              item_key, resolve_key)
 from ..sources import prefs as source_prefs
 
 logger = logging.getLogger(__name__)
@@ -190,8 +196,16 @@ _LIBRARY = "library"
 _LEGACY_SOURCE = "trakt"
 
 
+# Where a source's last play-count sweep sits on the state, {source: {source's
+# own show id: plays}}. STORED, unlike the plays and the unreadable list, because
+# its whole job is to be compared against the NEXT pass — a copy that did not
+# survive the request would answer "everything changed" every time and cost
+# exactly what it exists to save.
+_PLAY_COUNTS = "play_counts"
+
+
 def _default_state() -> dict:
-    return {"cursors": {}, "beacons": {}, "shows": {}, "movies": {}}
+    return {"cursors": {}, "beacons": {}, _PLAY_COUNTS: {}, "shows": {}, "movies": {}}
 
 
 def _stored_document(document: str | None) -> dict:
@@ -318,12 +332,14 @@ async def _load(user_id: int) -> dict:
     """
     state = _default_state()
     ws = await db.fetch_one(
-        "SELECT cursors_json, beacons_json FROM distrakt_watch_state WHERE user_id = ?",
+        "SELECT cursors_json, beacons_json, play_counts_json "
+        "FROM distrakt_watch_state WHERE user_id = ?",
         (user_id,),
     )
     if ws is not None:
         state["cursors"] = _stored_document(ws["cursors_json"])
         state["beacons"] = _stored_document(ws["beacons_json"])
+        state[_PLAY_COUNTS] = _stored_document(ws["play_counts_json"])
     prog = await db.fetch_all(
         "SELECT * FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
     shows: dict = {}
@@ -399,6 +415,8 @@ async def _save(user_id: int, state: dict) -> None:
     beacons_json = json.dumps(beacons) if beacons else None
     cursors = state.get("cursors") or {}
     cursors_json = json.dumps(cursors) if cursors else None
+    play_counts = state.get(_PLAY_COUNTS) or {}
+    play_counts_json = json.dumps(play_counts) if play_counts else None
     shows = state.get("shows") or {}
     movies = state.get("movies") or {}
     progress_sql = _insert_sql("distrakt_show_progress",
@@ -411,11 +429,13 @@ async def _save(user_id: int, state: dict) -> None:
 
     def _work(conn: db.Connection) -> None:
         conn.execute(
-            "INSERT INTO distrakt_watch_state (user_id, cursors_json, beacons_json) "
-            "VALUES (?, ?, ?) "
+            "INSERT INTO distrakt_watch_state "
+            "(user_id, cursors_json, beacons_json, play_counts_json) "
+            "VALUES (?, ?, ?, ?) "
             "ON CONFLICT(user_id) DO UPDATE SET "
-            "cursors_json = excluded.cursors_json, beacons_json = excluded.beacons_json",
-            (user_id, cursors_json, beacons_json),
+            "cursors_json = excluded.cursors_json, beacons_json = excluded.beacons_json, "
+            "play_counts_json = excluded.play_counts_json",
+            (user_id, cursors_json, beacons_json, play_counts_json),
         )
         conn.execute("DELETE FROM distrakt_show_progress WHERE user_id = ?", (user_id,))
         for key, entry in shows.items():
@@ -558,6 +578,17 @@ def _watched_changed(old: dict | None, new: dict) -> bool:
     that moved while the feed accounts for none of the movement moved because
     something was taken away, and that is the removal _removed_changed was
     supposed to report and did not.
+
+    IT IS A GATE, NOT THE ANSWER, AND IT STAYS ONE NOW THAT THERE IS AN ANSWER.
+    Since a source's play-count sweep can name the titles that moved, this could
+    look redundant — but the two decide different things and neither can do the
+    other's job. This decides whether to LOOK at all, and it is free: the beacon
+    and the events are both already in hand. The sweep decides WHAT to re-read,
+    and it costs a handful of calls, which is worth spending only once something
+    has said there is a reason to. Running the sweep on every load instead would
+    pay that on every ordinary evening's viewing, which is the case this predicate
+    exists to leave alone. The sweep is authoritative about what changed; this is
+    only the thing that asks it.
     """
     if not old:
         return False
@@ -1260,17 +1291,70 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
     return True
 
 
+def _changed_titles(cached: dict, source, before: dict | None, sweep) -> dict:
+    """The subset of `cached` a play-count sweep says is worth re-reading.
+
+    TWO WAYS A TITLE QUALIFIES, and the second is the one a naive comparison
+    misses. Its count MOVED — in either direction, because a count that only ever
+    rose would be blind to exactly the removals this is here to catch. Or it has
+    VANISHED from the listing while the store still holds a count for it, which is
+    what a title losing its last play looks like: the source stops listing it at
+    all rather than listing it at zero, so an absence is a removal and not merely
+    a title nobody has watched.
+
+    NOTHING AT ALL STORED MEANS EVERYTHING QUALIFIES. There is no previous sweep
+    to have moved against, so this can say nothing, and saying nothing has to mean
+    "ask about all of them" — the alternative reads a first sweep as proof that
+    nothing has changed, which is the one answer it cannot support. That is the
+    first pass after this ships, and it costs exactly what every pass used to.
+
+    ONE KNOWN FALSE POSITIVE, and it is a cost rather than a wrong answer: a
+    RE-WATCH raises the count without changing the watched set, so it buys one
+    needless re-read of a title the viewer has just been watching. Suppressing it
+    would need the per-episode data this sweep does not carry, which is the whole
+    reason the sweep is cheap.
+    """
+    if before is None or not sweep.complete:
+        return cached
+    moved = {show_id for show_id, plays in sweep.counts.items()
+             if before.get(str(show_id)) != plays}
+    moved |= {show_id for show_id in before if str(show_id) not in sweep.counts}
+    return {key: entry for key, entry in cached.items()
+            if str(_source_id(entry, source)) in moved}
+
+
 async def _rebaseline_by_id(settings, state: dict, name: str, source, port, span, *,
                             reason: str) -> None:
-    """Re-read every cached title's progress from a source that answers per title.
+    """Re-read cached titles' progress from a source that answers per title.
 
     Only titles this source has its OWN id for can be asked about at all, which is
     the limit this path has always had; a source that can hand over its whole
     library is not on it (see _sync_from_library), because for that one the
     question "which titles may I ask about" does not arise.
+
+    WHICH OF THEM ARE ASKED ABOUT IS THE SOURCE'S OWN ANSWER WHERE IT HAS ONE.
+    Asking about every cached title is one provider call each and grows with
+    everything ever tracked — measured at 146 sequential calls and six and a half
+    seconds on one real account, for a page that took eight and a half. A source
+    that can sweep its per-title play counts for the whole library in a handful of
+    calls (app/providers/base.py's PlayCountPort) is asked that first, and only
+    the titles whose counts actually moved are read properly. A source with no
+    such sweep is still asked about all of them, which is what this always did.
     """
     cached = {key: entry for key, entry in (state.get("shows") or {}).items()
               if _source_id(entry, source) is not None}
+    stored = state.setdefault(_PLAY_COUNTS, {})
+    unread: set[str] = set()
+    sweep = None
+    if isinstance(port, PlayCountPort):
+        # NOT CAUGHT HERE. A sweep that could not be read raises, and this whole
+        # source's pass is then degraded by the caller — named on the page, stored
+        # rows left alone. Falling back to asking about every title would be
+        # placing a hundred and forty-six calls on a credential that has just
+        # refused one.
+        with span("wh.play_counts", source=name):
+            sweep = await port.fetch_play_counts(settings)
+        cached = _changed_titles(cached, source, stored.get(name), sweep)
     # SPLIT, because the two halves fail slowly for unrelated reasons and the
     # combined number could not tell them apart: the fetch is one provider call
     # per show, paced by the outbound rate gate, and grows with the roster; the
@@ -1291,9 +1375,24 @@ async def _rebaseline_by_id(settings, state: dict, name: str, source, port, span
                 # episodes and nothing anywhere says why.
                 source_id = int(_source_id(entry, source))
                 if source_id not in details:
+                    unread.add(str(source_id))
                     continue
                 _set_show_baseline(
                     state, key, entry.get("ids") or {}, details[source_id], name)
+    if sweep is not None and sweep.complete:
+        # STORED ONLY NOW, AND WITHOUT THE TITLES THIS PASS FAILED TO READ. The
+        # stored map is a claim that the app's counts are up to date with these
+        # numbers, so recording a count for a title whose progress read failed
+        # would say the next sweep has nothing to do about it — and the wrong
+        # number would stand until something else happened to that title. Leaving
+        # those ids out makes the next sweep see them as changed and try again.
+        #
+        # AN INCOMPLETE SWEEP IS NOT STORED AT ALL, for the reason PlayCounts
+        # gives: it may say what it found and never what is missing, and a stored
+        # partial map would have the next comparison read every title on a page it
+        # never fetched as having lost its plays.
+        stored[name] = {show_id: plays for show_id, plays in sweep.counts.items()
+                        if show_id not in unread}
 
 
 def _titles_with_evidence(shows: dict, source: str) -> set[str]:

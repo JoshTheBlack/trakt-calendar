@@ -459,6 +459,58 @@ class MigrationTests(DbTestCase):
                                  (user_id,)), 0)
 
 
+    async def test_migration_23_adds_a_place_for_the_play_count_sweep(self):
+        """The column is additive and NULLABLE, and NULL is what every existing
+        row gets — which reads as "no sweep has been stored", falls back to asking
+        about every title once, and fills itself in on that pass. Nothing about
+        what was watched lives here: it is a cache of one service's per-title play
+        counts, kept only to work out which of them have moved."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-23-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 22]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO distrakt_watch_state (user_id, cursors_json, beacons_json) "
+                "VALUES (1, '{\"trakt\": \"2026-08-01\"}', '{\"trakt\": {}}')")
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            row = conn.execute("SELECT * FROM distrakt_watch_state").fetchone()
+            self.assertEqual(row["cursors_json"], '{"trakt": "2026-08-01"}')
+            self.assertIsNone(row["play_counts_json"],
+                              "an existing row must read as having no stored sweep")
+            conn.execute("UPDATE distrakt_watch_state SET play_counts_json = ? "
+                         "WHERE user_id = 1", (json.dumps({"trakt": {"202341": 20}}),))
+            self.assertEqual(
+                json.loads(conn.execute(
+                    "SELECT play_counts_json FROM distrakt_watch_state").fetchone()[0]),
+                {"trakt": {"202341": 20}})
+        finally:
+            conn.close()
+
+    async def test_migration_23_leaves_the_tracker_s_export_alone(self):
+        """The sweep is deliberately NOT exported. It costs one sweep to rebuild,
+        and a map restored beside older progress rows could only claim that
+        nothing had changed when everything might have — so a restore starts with
+        no stored sweep and asks about every title once, which is correct."""
+        from app.distrakt import backup
+
+        columns = dict(backup._EXPORT_TABLES)["distrakt_watch_state"]
+        self.assertNotIn("play_counts_json", columns)
+
+
 class PragmaTests(DbTestCase):
     async def test_foreign_keys_are_actually_on(self):
         """Asserted, not assumed: the setting is per-connection and defaults off,

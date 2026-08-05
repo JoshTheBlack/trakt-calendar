@@ -28,7 +28,7 @@ import inspect
 import unittest
 
 from app import providers
-from app.providers.base import LibraryPort, Provider, SyncPort
+from app.providers.base import LibraryPort, PlayCountPort, Provider, SyncPort
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -106,6 +106,37 @@ class LibraryPortIsOptionalTests(unittest.TestCase):
                 continue
             with self.subTest(source=source):
                 self.assertNotIsInstance(port, LibraryPort)
+
+
+class PlayCountPortIsOptionalTooTests(unittest.TestCase):
+    """The third port protocol, and the same rule: optional, branched on by
+    isinstance, and dead the moment no registered source satisfies it.
+
+    IT IS NOT A SMALLER LibraryPort. A source that hands over its whole library
+    re-states what it holds per episode, so nothing needs telling which titles
+    moved — re-reading the list corrects a removal on its own. This exists for the
+    source whose whole-library read carries no episodes at all, where the only
+    other way to learn what changed is to ask about every title in turn.
+    """
+
+    def test_at_least_one_registered_source_can_sweep_its_play_counts(self):
+        ports = [provider.sync_port for provider in providers.registered().values()
+                 if provider.sync_port is not None]
+        self.assertTrue([port for port in ports if isinstance(port, PlayCountPort)],
+                        "no source implements the play-count sweep; the tracker's "
+                        "targeted re-baseline is unreachable")
+
+    def test_the_two_optional_ports_are_not_the_same_claim(self):
+        """A source is free to satisfy both, neither, or one — but a source that
+        satisfies the library read and nothing else must not be swept, and one
+        that can only be swept must not be asked for a library."""
+        for source, provider in providers.registered().items():
+            port = provider.sync_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                self.assertEqual(isinstance(port, PlayCountPort),
+                                 hasattr(port, "fetch_play_counts"))
 
 
 class TheCheckWouldActuallyFailTests(unittest.TestCase):

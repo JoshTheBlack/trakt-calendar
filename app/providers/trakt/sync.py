@@ -46,7 +46,7 @@ import httpx
 
 from ...config import Settings
 from ...perftrace import span
-from ..base import collect_ids
+from ..base import PlayCounts, collect_ids
 from . import transport
 from .transport import TraktError
 
@@ -219,6 +219,92 @@ async def fetch_progress_details(settings: Settings,
             fetch_show_progress_detail(settings, tid, client=client) for tid in unique
         ))
     return {tid: seasons for tid, seasons in zip(unique, details) if seasons is not None}
+
+
+async def fetch_play_counts(settings: Settings, limit: int = 250,
+                            max_pages: int = 40) -> PlayCounts:
+    """/sync/watched/shows -> {trakt id: plays}, and whether the whole listing was
+    read (app/providers/base.py's PlayCounts).
+
+    WHAT THIS ENDPOINT IS ACTUALLY GOOD FOR. It carries no seasons[] and no
+    episodes[] in any variant — see api_headers, where the measurement that
+    settled that is written out — so it cannot answer what anyone has watched.
+    What each row DOES carry is `plays`, and `plays` tracks the watched set in
+    BOTH directions: measured live, removing a season's plays took a show from 20
+    to 10 and re-marking them took it back to 20. So a sweep of this is a change
+    detector for the whole library at five calls, against one call per title for
+    asking properly.
+
+    `last_updated_at` IS ON EVERY ROW AND MUST NOT BE USED FOR THIS. In the same
+    measurement it stayed put through the removal and moved only on the addition,
+    so a detector keyed on it misses every unwatch — which is the defect this is
+    here to catch, one layer down and harder to see.
+
+    A SHOW WITH NO PLAYS LEFT VANISHES FROM THE LISTING ENTIRELY rather than
+    appearing with zero, which is why the caller compares against what it stored
+    rather than reading this map alone.
+
+    Paginated by query parameter, following x-pagination-page-count. A page that
+    could not be read raises if it is the first — a sweep that read nothing is not
+    a library that holds nothing — and otherwise makes the sweep incomplete, which
+    the caller reads as "may not conclude anything from an absence".
+    """
+    counts: dict[str, int] = {}
+    page = 1
+    complete = True
+    client = transport.shared_client()
+    with span("trakt.play_counts"):
+        while page <= max_pages:
+            params = {"limit": str(limit), "page": str(page)}
+            url = f"{transport.API_BASE}/sync/watched/shows?{urlencode(params)}"
+            t0 = _time.perf_counter()
+            try:
+                resp = await transport.send(
+                    client, "GET", url, headers=transport.api_headers(settings, paginate=False))
+            except httpx.HTTPError as exc:
+                logger.warning("fetch_play_counts: request failed: %s", exc)
+                raise TraktError(f"Could not reach Trakt: {exc}") from exc
+            _perf.debug("netGET    sync/watched/shows?page=%s -> %s  %.0fms", page,
+                        resp.status_code, (_time.perf_counter() - t0) * 1000.0)
+            if resp.status_code != 200:
+                logger.warning("fetch_play_counts: HTTP %s: %s", resp.status_code, resp.text[:200])
+                if page == 1 or resp.status_code in transport.CREDENTIAL_STATUSES:
+                    raise TraktError(
+                        f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+                # A LATER PAGE IS SURVIVABLE AND THE FIRST ONE IS NOT. Losing a
+                # page costs the titles on it a needless re-read next time, which
+                # is a cost; losing the whole listing would say every title has
+                # lost its plays, which is a wrong answer.
+                complete = False
+                break
+            try:
+                batch = resp.json()
+            except ValueError:
+                raise TraktError("Trakt API returned an unreadable response.") from None
+            if not isinstance(batch, list) or not batch:
+                break
+            for entry in batch:
+                if not isinstance(entry, dict):
+                    continue
+                trakt_id = ((entry.get("show") or {}).get("ids") or {}).get("trakt")
+                if trakt_id is None:
+                    continue
+                counts[str(trakt_id)] = int(entry.get("plays") or 0)
+            try:
+                page_count = int(resp.headers.get("x-pagination-page-count") or 1)
+            except (TypeError, ValueError):
+                page_count = 1
+            if page >= page_count:
+                break
+            page += 1
+        else:
+            # Ran out of pages to fetch rather than out of pages to read. Saying so
+            # is what keeps the cap from quietly becoming "the rest of the library
+            # has no plays".
+            complete = False
+    logger.info("fetch_play_counts: %d show(s) over %d page(s), complete=%s",
+                len(counts), page, complete)
+    return PlayCounts(counts=counts, complete=complete)
 
 
 async def fetch_history(settings: Settings, start_at: str | None = None,

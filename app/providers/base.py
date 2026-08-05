@@ -514,6 +514,65 @@ class LibraryPort(Protocol):
         ...
 
 
+class PlayCounts(NamedTuple):
+    """How many plays a source has recorded against each title it holds for one
+    person, keyed by THAT SOURCE'S OWN ID as a string.
+
+    A COUNTER, NOT A WATCH RECORD, and the difference is the whole point. It says
+    nothing about which episodes were seen — it cannot, and a source offering this
+    typically has no cheap read that could. What it is for is telling a caller
+    WHICH titles to ask about properly, so a re-baseline costs one call per title
+    that actually moved rather than one per title ever tracked.
+
+    IT HAS TO MOVE IN BOTH DIRECTIONS OR IT IS USELESS HERE. Measured against a
+    live account by removing a season's plays and then re-marking them: the count
+    fell and rose with the watched set, while the "last updated" stamp beside it
+    moved only on the addition. A change detector keyed on a stamp like that
+    silently misses every removal, which is the exact defect this exists to catch,
+    reintroduced one layer down.
+
+    The id is a STRING because it is a dict key that gets stored as JSON, where a
+    number could not be one, and because the caller compares it against ids that
+    arrive from storage in either form.
+
+    `complete` says whether the sweep covered the whole listing. A partial sweep
+    may say what it FOUND and may never be read for what is missing: a title
+    absent from a page that was never fetched is indistinguishable from a title
+    with no plays left, and only the second is a removal.
+    """
+    counts: dict[str, int]
+    complete: bool
+
+
+@runtime_checkable  # see the note on SyncPort above
+class PlayCountPort(Protocol):
+    """A source that can say, cheaply and for the whole library at once, which
+    titles a person's watch record has MOVED for.
+
+    A THIRD OPTIONAL PROTOCOL, beside SyncPort and LibraryPort, because it is a
+    third question rather than a smaller version of either. LibraryPort answers
+    "what does this person's library say", per episode, and a source that can do
+    that needs nothing here — re-reading a list it holds re-states what it holds,
+    so a removal inside one corrects itself. This answers only "what changed", and
+    it exists for the source whose whole-library read carries no episodes at all:
+    without it, the only way to find out what moved is to ask about every title,
+    which is one call each and grows with everything ever tracked.
+
+    A source that can answer neither is asked per title exactly as before.
+    """
+
+    async def fetch_play_counts(self, settings: Settings) -> PlayCounts:
+        """Every title this person has plays against, and how many.
+
+        Must be cheap relative to asking per title — that is the only reason to
+        implement it. A sweep that could read nothing at all raises rather than
+        answering with an empty map, for the reason every read here does: an empty
+        map means "every title you had plays for has lost them", which is a
+        removal of the entire library.
+        """
+        ...
+
+
 @runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
     """What the registry needs in order to offer a source at all: who it is,

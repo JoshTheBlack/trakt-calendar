@@ -44,6 +44,17 @@ class _TraktSyncPort:
     async def fetch_progress_details(self, settings: Settings, show_ids) -> dict:
         return await sync.fetch_progress_details(settings, show_ids)
 
+    async def fetch_play_counts(self, settings: Settings):
+        """app/providers/base.py's PlayCountPort, which this port also satisfies.
+
+        Trakt does NOT implement LibraryPort and should not be made to: that
+        protocol carries per-episode watch data and the endpoint behind this one
+        has none. They are different questions — the other source's port answers
+        "here is the whole library", this answers "here is what changed" — and the
+        second is the only one Trakt can answer.
+        """
+        return await sync.fetch_play_counts(settings)
+
     async def fetch_watched_progress(self, settings: Settings,
                                      since_days: int | None = None) -> list[dict]:
         return await sync.fetch_watched_progress(settings, since_days=since_days)

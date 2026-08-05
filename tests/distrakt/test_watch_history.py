@@ -10,10 +10,11 @@ from __future__ import annotations
 import unittest
 from datetime import date, datetime as real_datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app import db
 from app.distrakt import watch_history as wh
+from app.providers.base import PlayCounts
 from tests.support import new_db_path
 
 # One linked service and nothing else, which is what almost every account has.
@@ -43,6 +44,20 @@ async def _make_user(username: str) -> int:
         (username, now, now),
     )
     return result.lastrowid
+
+
+def _no_sweep():
+    """The play-count sweep answering that it holds nothing.
+
+    A re-baseline asks a source that can sweep its play counts WHICH titles moved,
+    so every test that reaches one has to script that call or it goes to the
+    network. Answering with an empty, complete sweep and no stored map to compare
+    it against means "nothing can be concluded", which is what makes these tests
+    still assert the behaviour they were written for: every cached title is asked
+    about. The tests that are about the sweep itself script it properly.
+    """
+    return patch("app.providers.trakt.sync.fetch_play_counts",
+                 return_value=PlayCounts({}, True))
 
 
 def _show(tid, seasons, baselined=None) -> dict:
@@ -247,6 +262,10 @@ class StorageRoundTripTests(WatchStateTestCase):
             "cursors": {"trakt": "2026-07-20"},
             "beacons": {"trakt": {"ep_watched": "T1", "ep_removed": None,
                                   "mv_watched": "T1", "mv_removed": None}},
+            # The stored play-count sweep, empty here because nothing has swept.
+            # It round-trips like the other two documents and is what lets a
+            # re-baseline ask about the titles that moved rather than all of them.
+            "play_counts": {},
             "shows": {SHOW(101): _show(101, {
                 "1": {"trakt": {"1": "2026-07-01T00:00:00Z", "2": "", "3": ""}},
                 "2": {"trakt": {"1": ""}}})},
@@ -286,7 +305,7 @@ class StorageRoundTripTests(WatchStateTestCase):
         The marker NAMES the service that answered, because being asked is a fact
         per service: a title one of them has nothing to say about is not a title
         the other has been asked about."""
-        state = {"cursors": {}, "beacons": {},
+        state = {"cursors": {}, "beacons": {}, "play_counts": {},
                  "shows": {SHOW(77): _show(77, {}, baselined=["trakt"])}, "movies": {}}
         await wh._save(self.user_id, state)
         back = await wh._load(self.user_id)
@@ -416,7 +435,7 @@ class SyncTests(WatchStateTestCase):
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   return_value={}) as progress:
+                   return_value={}) as progress, _no_sweep():
             await wh.sync(SETTINGS, self.user_id, force=True, today=date(2026, 7, 20))
         progress.assert_called_once()
 
@@ -520,7 +539,7 @@ class SyncTests(WatchStateTestCase):
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value=la), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
              patch("app.providers.trakt.sync.fetch_progress_details",
-                   return_value={101: {}}) as progress:
+                   return_value={101: {}}) as progress, _no_sweep():
             state = await wh.sync(SETTINGS, self.user_id, today=date(2026, 7, 20))
         progress.assert_called_once()
         self.assertEqual(wh.watched_map(state), {},
@@ -585,6 +604,172 @@ class SyncTests(WatchStateTestCase):
         self.assertEqual(wh.watched_map(await wh._load(self.user_id)),
                          {(SHOW(404), 1): {"trakt": 3}})
         self.assertEqual(wh.watched_map(await wh._load(other)), {})
+
+
+class ThePlaysSweepTests(WatchStateTestCase):
+    """RE-READING A ROSTER USED TO COST ONE CALL PER TITLE EVER TRACKED, and the
+    number was measured rather than feared: 146 sequential progress calls, six and
+    a half seconds, inside a page that took eight and a half. Every one of them
+    asked "what has changed about this title", and almost every answer was
+    "nothing".
+
+    THE SOURCE CAN ANSWER THAT FOR THE WHOLE LIBRARY IN A HANDFUL OF CALLS, in a
+    per-title PLAY COUNT — no episodes, no seasons, just a number that moves with
+    the watched set in both directions. So the re-baseline sweeps that, compares
+    it against what it stored last time, and asks properly about the titles that
+    actually moved.
+
+    WHAT MUST NOT BE LOST, and each of these has its own test below: a shrinking
+    count is a removal and has to bring the stored numbers DOWN; a title that
+    vanishes from the listing has lost its last play and is a removal too, not an
+    absence to ignore; and nothing about what a single-service account sees may
+    change at all, because this is meant to be cheaper and not different.
+    """
+
+    def _sweep(self, counts, complete=True):
+        return patch("app.providers.trakt.sync.fetch_play_counts",
+                     return_value=PlayCounts(dict(counts), complete))
+
+    async def _seed(self):
+        """Two tracked titles, each with a season the service has reported. This
+        is the roster a re-baseline would otherwise ask about in full."""
+        await wh._save(self.user_id, {
+            "cursors": {"trakt": "2026-07-20"}, "beacons": {}, "play_counts": {},
+            "shows": {SHOW(101): _show(101, {"1": {"1": "", "2": ""}}),
+                      SHOW(102): _show(102, {"1": {"1": ""}})},
+            "movies": {}})
+
+    async def _force(self, counts, progress, complete=True):
+        """One forced re-baseline with the sweep and the progress read scripted.
+        Answers with the mock, so what was ASKED ABOUT is what gets asserted."""
+        details = AsyncMock(return_value=progress)
+        with patch("app.providers.trakt.sync.fetch_last_activities",
+                   return_value={"episodes": {"watched_at": "T1"}}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_progress_details", new=details), \
+             self._sweep(counts, complete):
+            await wh.sync(SETTINGS, self.user_id, force=True, today=date(2026, 7, 20))
+        return details
+
+    def _asked_about(self, details) -> list[list]:
+        return [sorted(call.args[1]) for call in details.await_args_list]
+
+    async def test_the_first_sweep_has_nothing_to_compare_and_asks_about_everything(self):
+        """There is no stored map, so the sweep can say nothing about what moved —
+        and saying nothing has to mean "ask about all of them". Reading a first
+        sweep as proof that nothing has changed is the one answer it cannot
+        support."""
+        await self._seed()
+        details = await self._force({"101": 2, "102": 1},
+                                    {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        self.assertEqual(self._asked_about(details), [[101, 102]])
+
+    async def test_a_play_on_one_show_re_reads_that_show_and_no_other(self):
+        """THE DELIVERABLE, asserted by counting calls. One title's count moved,
+        so one title is asked about — the other is not touched however long the
+        roster is."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        details = await self._force({"101": 3, "102": 1},
+                                    {101: {1: {1: "", 2: "", 3: ""}}})
+        self.assertEqual(self._asked_about(details), [[101]])
+        self.assertEqual(wh.watched_map(await wh._load(self.user_id)),
+                         {(SHOW(101), 1): {"trakt": 3}, (SHOW(102), 1): {"trakt": 1}})
+
+    async def test_nothing_moving_asks_about_no_title(self):
+        """The common case, and the whole saving: a forced refresh over an
+        unchanged library names not one title.
+
+        The batch call is still placed, holding nothing — every source's
+        implementation returns immediately for an empty list without a request,
+        so what matters is the ids and there are none."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        details = await self._force({"101": 2, "102": 1}, {})
+        self.assertEqual(self._asked_about(details), [[]])
+
+    async def test_a_count_that_shrank_brings_the_stored_numbers_down(self):
+        """THE REGRESSION §4.8k's inference could only ever guess at. A count only
+        ever compared for growth would read a removal as nothing at all, which is
+        the defect being fixed reintroduced one layer down."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        details = await self._force({"101": 1, "102": 1}, {101: {1: {1: ""}}})
+        self.assertEqual(self._asked_about(details), [[101]])
+        self.assertEqual(wh.watched_map(await wh._load(self.user_id))[(SHOW(101), 1)],
+                         {"trakt": 1})
+
+    async def test_a_show_that_vanished_is_a_removal_and_not_an_absence(self):
+        """A title whose last play is removed stops being listed at all rather than
+        being listed at zero. Read as "it simply is not in this sweep" it would
+        keep its stored count for ever."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        details = await self._force({"102": 1}, {101: {}})
+        self.assertEqual(self._asked_about(details), [[101]])
+        self.assertNotIn((SHOW(101), 1), wh.watched_map(await wh._load(self.user_id)))
+
+    async def test_a_re_watch_costs_one_read_and_changes_no_count(self):
+        """The known false positive, pinned as BOUNDED rather than suppressed:
+        watching something again raises the count without changing the watched
+        set. Suppressing it would need the per-episode data this sweep does not
+        carry, which is the whole reason the sweep is cheap."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}})
+        before = wh.watched_map(await wh._load(self.user_id))
+        details = await self._force({"101": 4, "102": 1},
+                                    {101: {1: {1: "", 2: ""}}})
+        self.assertEqual(self._asked_about(details), [[101]])
+        self.assertEqual(wh.watched_map(await wh._load(self.user_id)), before)
+
+    async def test_an_incomplete_sweep_asks_about_everything_and_is_not_stored(self):
+        """A sweep that lost a page may say what it FOUND and never what is
+        missing: a title on a page nobody fetched looks exactly like a title with
+        no plays left. So it decides nothing, and it must not be stored either —
+        stored, the NEXT comparison would read that whole page as removals."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1},
+                          {101: {1: {1: "", 2: ""}}, 102: {1: {1: ""}}},
+                          complete=False)
+        self.assertEqual((await wh._load(self.user_id))["play_counts"], {})
+        details = await self._force({"101": 2, "102": 1}, {}, complete=False)
+        self.assertEqual(self._asked_about(details), [[101, 102]])
+
+    async def test_a_title_whose_read_failed_is_asked_again_next_time(self):
+        """The stored map claims the app's counts are up to date with those
+        numbers. Recording one for a title whose progress read came back with
+        nothing to say would tell the next sweep there was nothing to do, and the
+        wrong number would stand until something else happened to that title."""
+        await self._seed()
+        await self._force({"101": 2, "102": 1}, {102: {1: {1: ""}}})
+        details = await self._force({"101": 2, "102": 1}, {101: {1: {1: "", 2: ""}}})
+        self.assertEqual(self._asked_about(details), [[101]])
+
+    async def test_a_source_that_cannot_sweep_is_still_asked_about_everything(self):
+        """The path any source without such an endpoint still takes, unchanged."""
+        await self._seed()
+        details = AsyncMock(return_value={101: {1: {1: ""}}, 102: {1: {1: ""}}})
+        port = SimpleNamespace(
+            fetch_last_activities=AsyncMock(return_value={"episodes": {"watched_at": "T1"}}),
+            fetch_history=AsyncMock(return_value=[]),
+            fetch_progress_details=details)
+        state = await wh._load(self.user_id)
+        await wh._rebaseline_by_id(SETTINGS, state, "trakt", "trakt", port,
+                                   _span_noop, reason="force")
+        self.assertEqual(self._asked_about(details), [[101, 102]])
+
+
+def _span_noop(*_args, **_kwargs):
+    """The perf span, reduced to a context manager that does nothing. The tests
+    above reach _rebaseline_by_id directly, which is handed one by its caller."""
+    from contextlib import nullcontext
+
+    return nullcontext()
 
 
 class _PinnedClock:
@@ -662,7 +847,8 @@ class CursorTests(WatchStateTestCase):
                 await wh.sync(SETTINGS, self.user_id, today=today)
             with patch("app.providers.trakt.sync.fetch_last_activities", return_value=moved), \
                  patch("app.providers.trakt.sync.fetch_history", return_value=[]) as hist, \
-                 patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
+                 patch("app.providers.trakt.sync.fetch_progress_details",
+                       return_value={}), _no_sweep():
                 await wh.sync(SETTINGS, self.user_id, today=today)
         return hist.call_args.kwargs["start_at"]
 

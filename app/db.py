@@ -1980,6 +1980,30 @@ def MIGRATION_22(conn: sqlite3.Connection) -> None:
         )
 
 
+MIGRATION_23 = """
+-- {source: {source's own show id: plays}} — how many plays each service last
+-- reported against each title, and NOTHING about which episodes they were.
+--
+-- IT IS A CHANGE DETECTOR, WHICH IS WHY IT EARNS A COLUMN. One service publishes
+-- no cheap whole-library watch record at all: the only way to learn what somebody
+-- has seen of a title is to ask about that title, one call each, so re-reading a
+-- roster grew with everything ever tracked and a forced refresh spent seconds on
+-- it. It DOES publish a per-title play count for the whole library in a handful
+-- of calls, and that count moves in both directions with the watched set — so
+-- comparing this pass's counts against the stored ones names exactly the titles
+-- worth asking about properly.
+--
+-- NULL IS THE ORDINARY STATE AND MEANS "no sweep has been stored", which reads as
+-- "nothing can be concluded about what changed" and falls back to asking about
+-- every title once. That is what an instance sees on the first load after this,
+-- and what a restored backup sees: the column is deliberately NOT in the tracker's
+-- export, because it is a cache of one service's answer that costs one sweep to
+-- rebuild, and a stored map carried alongside restored progress rows could only
+-- claim that nothing had changed when everything might have.
+ALTER TABLE distrakt_watch_state ADD COLUMN play_counts_json TEXT;
+"""
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -2006,6 +2030,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (20, MIGRATION_20),
     (21, MIGRATION_21),
     (22, MIGRATION_22),
+    (23, MIGRATION_23),
 ]
 
 
