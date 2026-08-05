@@ -704,6 +704,39 @@ class ThePlaysSweepTests(WatchStateTestCase):
                          "the removal was missed because the evening had viewing in it")
         self.assertEqual(counts[(SHOW(102), 1)], {"trakt": 2})
 
+    async def test_a_season_marked_and_then_unmarked_comes_back_down(self):
+        """THE ROUND TRIP, AND THE DEFECT IT HID. Measured against the live
+        service, marking a season watched and then un-marking it returns the
+        show's play count to EXACTLY where it started — 31 to 39 and back to 31,
+        with the row's own "last updated" stamp reverting too.
+
+        The two reads are not consistent at the same instant: the history feed
+        carried the new plays immediately while the whole-library listing still
+        reported the old count. So the pass that folded the episodes in recorded
+        the STALE count beside them, and when the removal arrived the count it
+        compared against was the one it was returning to. Nothing moved, nothing
+        was re-read, and the season kept eight episodes it no longer had.
+
+        Scripted here exactly as it happened: the sweep lags the events by one
+        pass. The third pass must bring the count back down."""
+        await self._seed()
+        await self._force({"101": 20, "102": 1},
+                          {101: {1: {n: "" for n in range(1, 3)}}, 102: {1: {1: ""}}})
+        # The marking. The history reports eight new plays for 101; the sweep is
+        # a beat behind and still says 20.
+        await self._load({"101": 20, "102": 1}, {}, beacon="T2",
+                         events=[_ep_event(101, 1, n) for n in range(3, 11)])
+        watched = wh.watched_map(await wh._load(self.user_id))
+        self.assertEqual(watched[(SHOW(101), 1)], {"trakt": 10}, "the plays did not fold in")
+        # The un-marking. The count is back to where it began — and so is what the
+        # tracker has stored, if the pass above was allowed to record it.
+        details = await self._load({"101": 20, "102": 1},
+                                   {101: {1: {1: "", 2: ""}}}, beacon="T3")
+        self.assertEqual(self._asked_about(details), [[101]],
+                         "the season was never re-read, so the removal was missed")
+        self.assertEqual(wh.watched_map(await wh._load(self.user_id))[(SHOW(101), 1)],
+                         {"trakt": 2})
+
     async def test_an_ordinary_evening_costs_the_sweep_and_the_one_title(self):
         """The cost of asking every pass, pinned so it cannot grow back. One
         episode watched means one sweep and ONE title read — not the roster, which

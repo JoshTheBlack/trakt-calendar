@@ -1298,6 +1298,7 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
         play = _episode_play(event)
         if play is not None:
             plays.append(play)
+    _forget_play_counts_for(state, name, source, events)
 
     cursors[name] = _sweep_cursor(today)
     # THE WHOLE BLOB, not the four values the gate compares. A source may carry
@@ -1305,6 +1306,42 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
     # the gate needs is derived from it either way (see _beacons).
     beacon_by_source[name] = la
     return True
+
+
+def _forget_play_counts_for(state: dict, name: str, source, events: list) -> None:
+    """Drop the stored play count of every title this pass folded PLAYS into.
+
+    THE STORED COUNT IS A CLAIM THAT THE APP'S PROGRESS FOR A TITLE MATCHES THAT
+    NUMBER, and folding an event in breaks the claim. The two reads are not
+    consistent with each other at the same instant: measured against the live
+    service, marking a season watched appeared in the history feed IMMEDIATELY
+    while that show's row in the whole-library listing still carried its old count
+    for some seconds after. So a pass can advance a title's progress from the fast
+    read while recording the slow read's number beside it, and from then on the
+    two describe different moments.
+
+    WHY THAT IS NOT MERELY UNTIDY. Marking a season watched and un-marking it
+    returns the count to exactly where it started — 31 to 39 and back to 31, on
+    the account this was found on, with the row's own "last updated" stamp
+    reverting with it. If the intermediate number was never stored, the removal
+    arrives at a count EQUAL to the stored one, nothing looks changed, and the
+    season keeps the episodes the events had folded in. Nothing about the count is
+    unreliable; it was compared against a baseline that had drifted.
+
+    SO A TITLE THIS PASS TOUCHED KEEPS NO COUNT AT ALL, and the next sweep sees it
+    as one it has never had a number for — which reads as changed, and buys one
+    targeted re-read of a title the viewer has just been watching. That is the same
+    title the events already named, so it is a call per title watched rather than
+    per title tracked, and it is what makes the pair of reads honest with each
+    other again.
+    """
+    stored = (state.get(_PLAY_COUNTS) or {}).get(name)
+    if not stored:
+        return
+    for event in events:
+        show_id = ((event.get("show") or {}).get("ids") or {}).get(str(source))
+        if show_id is not None:
+            stored.pop(str(show_id), None)
 
 
 def _moved_ids(source, before: dict | None, sweep) -> int:
