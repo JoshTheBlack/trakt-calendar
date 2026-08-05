@@ -1044,12 +1044,30 @@ class AccountPageDisclosureTests(RegressionTestCase):
         self.login("tracker")
         self.assertIn("distrakt", self.me().lower())
 
-    def test_a_tracker_user_without_a_trakt_link_is_told_to_link_one(self):
-        """The exact dead end: approved for the tracker, no Trakt identity, so
-        every tracker route refuses and nothing says why."""
+    def test_a_tracker_user_with_nothing_linked_is_told_what_to_connect(self):
+        """The exact dead end: approved for the tracker, nothing that can read a
+        watch history linked, so every tracker route refuses and nothing says why.
+
+        THE SERVICES ARE NAMED FROM THE REGISTRY, so the sentence stays true as
+        sources are added. It named Trakt alone while Trakt was the only service
+        that could answer, and that sentence became wrong the moment a second one
+        could: it told somebody signed in with the other service to go and link a
+        service they may have chosen against.
+        """
         self.make_user("tracker", distrakt_approved=True)
         self.login("tracker")
-        self.assertIn("Link your Trakt account", self.me())
+        body = self.me()
+        self.assertIn("to finish setting up distrakt", body)
+        self.assertIn("Trakt or Simkl", body)
+
+    def test_the_notice_is_gone_once_any_of_them_is_linked(self):
+        """It asks for A service, not for a particular one — so linking either
+        answers it. Without this the page would go on demanding a link somebody
+        has already made, from a service that is already answering."""
+        user_id = self.make_user("tracker", distrakt_approved=True)
+        self.link_identity(user_id, "simkl", 901, "simkl-token")
+        self.login("tracker")
+        self.assertNotIn("to finish setting up distrakt", self.me())
 
     def test_administrator_is_not_advertised_to_non_admins(self):
         self.make_user("plain")

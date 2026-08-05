@@ -39,7 +39,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 # `auth` is the package this module lives in, reached through the parent so the
 # routes read the public surface app/auth/__init__.py exposes rather than
 # knowing which submodule each name is defined in.
-from .. import auth, authz, chrome, db, secrets_box
+from .. import auth, authz, chrome, db, providers, secrets_box
 from ..config import Settings, load_settings, save_settings
 from ..media import user_images
 from ..templating import templates
@@ -580,6 +580,20 @@ async def me_page(request: Request):
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "user": user,
         "linked": linked,
+        # THE SERVICES THAT COULD SUPPLY A WATCH HISTORY AND ARE NOT LINKED, by
+        # their own labels, for the notice that tells somebody with the tracker
+        # grant why it has nothing to read. Asked of the registry rather than
+        # written out, because more than one source can answer now and a sentence
+        # naming Trakt alone became wrong the moment a second one could: it told a
+        # viewer signed in with the other service to go and link a service they had
+        # deliberately not linked. An empty list means somebody is already linked
+        # and the notice does not appear at all.
+        # IN DECLARED ORDER, not alphabetical: `registered()` iterates the Source
+        # declaration, which is the app's one statement of which service comes
+        # first, and the sentence should not disagree with the rows below it.
+        "tracker_services_missing": [
+            provider.label for source, provider in providers.registered().items()
+            if str(source) in providers.tracker_sources() and str(source) not in linked],
         "trakt_login_configured": settings.trakt_login_configured,
         "simkl_login_configured": settings.simkl_login_configured,
         # Whether unlinking is offered at all. Without a password an account's

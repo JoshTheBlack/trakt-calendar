@@ -47,10 +47,15 @@
        discloses nothing to anyone else. For them it is the missing half of the
        gate, and without it the tracker just silently refuses with no way to work
        out why. #}
-    {% if user.distrakt_approved and 'trakt' not in linked %}
-    <p class="auth-notice"><strong>Link your Trakt account to finish setting up distrakt.</strong>
+    {# The services are named from the registry rather than written in, because
+       more than one of them can supply a watch history now and this notice
+       appears only while NONE of them is connected — so naming one of them
+       would tell somebody to link a service they may have chosen against. #}
+    {% if user.distrakt_approved and not user.has_tracker_identity %}
+    <p class="auth-notice"><strong>Connect {{ tracker_services_missing | join(' or ') }}
+      to finish setting up distrakt.</strong>
       It reads your own watch history with your own token, so it has nothing to read
-      until the account below is connected.</p>
+      until one of the accounts below is connected.</p>
     {% endif %}
 
     <div class="auth-list">
