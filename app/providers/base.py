@@ -381,9 +381,27 @@ class LibraryEntry(NamedTuple):
     progress record returns, so a caller folds either in through one path. An
     empty map is a real answer: the source holds the title and has seen none of
     it.
+
+    `unlisted_seasons_are_zero` IS THE DIFFERENCE BETWEEN TWO ANSWERS THAT LOOK
+    IDENTICAL IN `seasons` AND ARE NOT. A source may list only the seasons it has
+    watches in, so a season missing from the map means "none of it watched"; or it
+    may list every season it knows of, so a season missing means "no idea". Set it
+    where the FORMER is true of the payload, and the caller may then record a
+    ZERO for a season it is already asking about rather than recording nothing at
+    all. Recording nothing is what made a title both services hold, and both say
+    the viewer has seen none of, render as a claim only one of them made — the two
+    services agree at zero, and agreement at zero is still agreement.
+
+    IT IS A PROPERTY OF THE PAYLOAD, WHICH IS WHY IT RIDES ON THE ENTRY AND NOT ON
+    THE READ. The claim is only ever about a title this source HOLDS; a title
+    absent from the read has no entry, so there is no flag to consult and no way
+    for a caller to extend the claim to one. It defaults to False so a source that
+    has not thought about the question is read as saying nothing, which is the
+    answer that can only ever be too cautious.
     """
     ids: dict[str, Any]
     seasons: dict[int, dict[int, str]]
+    unlisted_seasons_are_zero: bool = False
 
 
 class LibraryRead(NamedTuple):

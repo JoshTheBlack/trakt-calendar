@@ -336,6 +336,15 @@ def _fold_library_item(entries: dict[str, LibraryEntry], item: dict) -> None:
     it does happen (a duplicated catalogue entry, an anime title also filed as
     television) dropping one of them would silently lose the episodes only it
     carried.
+
+    A SEASON ABSENT FROM `seasons[]` IS SIMKL SAYING ZERO, WHICH IS WHY EVERY
+    ENTRY THIS BUILDS SETS `unlisted_seasons_are_zero`. /sync/all-items lists only
+    the seasons a title has WATCHED EPISODES in — a title in the library whose
+    season 2 the viewer has seen none of produces no season-2 block at all. Only a
+    title absent from the LIBRARY is Simkl saying nothing. The two are different
+    answers and a caller that cannot tell them apart renders the first as a claim
+    only the other service made, which is a false single-source label on a season
+    both services agree is at zero.
     """
     show = item.get("show") or {}
     ids = _entry_ids(show)
@@ -345,12 +354,14 @@ def _fold_library_item(entries: dict[str, LibraryEntry], item: dict) -> None:
     seasons = _progress_from_seasons(item)
     previous = entries.get(str(key))
     if previous is None:
-        entries[str(key)] = LibraryEntry(ids=dict(ids), seasons=seasons)
+        entries[str(key)] = LibraryEntry(ids=dict(ids), seasons=seasons,
+                                         unlisted_seasons_are_zero=True)
         return
     merged = {season: dict(episodes) for season, episodes in previous.seasons.items()}
     for season, episodes in seasons.items():
         merged[season] = {**merged.get(season, {}), **episodes}
-    entries[str(key)] = LibraryEntry(ids={**previous.ids, **ids}, seasons=merged)
+    entries[str(key)] = LibraryEntry(ids={**previous.ids, **ids}, seasons=merged,
+                                     unlisted_seasons_are_zero=True)
 
 
 async def fetch_library(settings: Settings, *, start_at: str | None = None,

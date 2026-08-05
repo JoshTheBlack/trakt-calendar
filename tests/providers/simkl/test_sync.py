@@ -251,6 +251,22 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         read, _ = await self._read([{"shows": [item]}] + [{}] * 11)
         self.assertEqual(read.entries["show:tmdb:900"].seasons, {})
 
+    async def test_a_season_the_library_does_not_list_is_a_zero_and_says_so(self):
+        """/sync/all-items carries only the seasons a title has WATCHED EPISODES
+        in, so a season missing from a held title is one the viewer has seen none
+        of — not one nobody asked about. The entry says which of those two it
+        means, because only this module knows the payload well enough to answer.
+
+        Without it a season both services have seen none of renders as a claim
+        only the other one made, and a badge appears on an agreement.
+        """
+        read, _ = await self._read([{"shows": [self._item()]}] + [{}] * 11)
+        entry = read.entries["show:tmdb:900"]
+        self.assertTrue(entry.unlisted_seasons_are_zero)
+        # And season 1 is the only one it named, so the claim is about every OTHER
+        # season of a title it holds rather than about a list it hands over.
+        self.assertEqual(list(entry.seasons), [1])
+
     async def test_the_same_read_carries_the_plays_inside_it(self):
         """One pull answers both questions. Asking for the library and then for
         the history would read the same buckets twice, and they are the most

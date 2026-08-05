@@ -76,11 +76,18 @@ def _library_read(progress, *, complete=True, events=None) -> LibraryRead:
     KEYED BY THE SHARED IDENTITY, not by that service's own id, which is the
     entire difference: a roster record that names only Trakt still matches, and
     the service's own id comes back on the entry rather than being needed to ask.
+
+    EVERY ENTRY CARRIES `unlisted_seasons_are_zero`, because the live service this
+    stands in for does: its library lists only the seasons a title has watches in,
+    so a title present here with a season missing has been seen none of rather
+    than not been asked about. A fixture that dropped the flag would test a
+    service that does not exist.
     """
     return LibraryRead(
         entries={KEY(tid): LibraryEntry(ids={"simkl": tid, "tmdb": tid},
                                         seasons={int(season): dict(episodes)
-                                                 for season, episodes in seasons.items()})
+                                                 for season, episodes in seasons.items()},
+                                        unlisted_seasons_are_zero=True)
                  for tid, seasons in (progress or {}).items()},
         events=list(events or []), complete=complete)
 
@@ -667,6 +674,85 @@ class AskingWithoutAnIdTests(TwoSourceTestCase):
             library=AsyncMock(side_effect=SimklError("Simkl is unreachable")))
         self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 1, "simkl": 3})
         self.assertEqual(wh.unreadable_sources(state), ["simkl"])
+
+
+class AgreementAtZeroTests(TwoSourceTestCase):
+    """A season NEITHER service has any watches for, on a title BOTH of them hold.
+
+    THE FAILURE THIS IS WRITTEN AGAINST. A library that lists only the seasons a
+    title has watches in says nothing about a season the viewer has seen none of —
+    there is simply no block for it. Read as "this service was never asked", the
+    season came out carrying the other service's badge: `0/8 (Trakt)` on a title
+    Simkl holds and has equally seen none of. Both services agree, at zero, and a
+    badge claims one of them never spoke.
+
+    THE OTHER HALF MATTERS AS MUCH. A title a service genuinely does not hold has
+    no answer about any of its seasons, and `0/8 (Trakt)` is then the honest
+    render. Most of a roster built from one service is in that state, so a fix
+    that zeroed every silent season would be wrong far more often than the defect
+    it replaced.
+    """
+
+    async def test_a_season_neither_service_has_watches_for_reads_as_agreement(self):
+        """THE REGRESSION. Simkl holds the title and lists no season 2, which is
+        Simkl saying none of it — the same thing Trakt's empty season 2 says."""
+        state = await self._baseline(
+            BOTH, [_record(101)],
+            trakt={101: {1: _episodes(1, 2, 3), 2: {}}},
+            simkl={101: {1: _episodes(1, 2, 3)}})
+        per_source = wh.watched_map(state)[(KEY(101), 2)]
+        self.assertEqual(per_source, {"trakt": 0, "simkl": 0})
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER), "0/8")
+
+    async def test_a_title_the_library_does_not_hold_keeps_the_badge(self):
+        """THE GUARD AGAINST OVER-APPLYING IT. Nothing here is agreement: one
+        service has never heard of the title, so the number on the row is the only
+        one anybody offered and the badge says whose it is."""
+        state = await self._baseline(
+            BOTH, [_record(101)],
+            trakt={101: {1: _episodes(1, 2, 3), 2: {}}}, simkl={})
+        per_source = wh.watched_map(state)[(KEY(101), 2)]
+        self.assertEqual(per_source, {"trakt": 0})
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER),
+                         "0/8 (Trakt)")
+
+    async def test_a_zero_against_a_count_is_a_disagreement_and_shows_both(self):
+        """A zero is an answer like any other, so it disagrees like any other. The
+        services know different things and the row says so rather than picking."""
+        state = await self._baseline(
+            BOTH, [_record(101)],
+            trakt={101: {1: _episodes(1), 2: _episodes(1, 2, 3)}},
+            simkl={101: {1: _episodes(1)}})
+        per_source = wh.watched_map(state)[(KEY(101), 2)]
+        self.assertEqual(per_source, {"trakt": 3, "simkl": 0})
+        self.assertEqual(counts.counts_label(per_source, 8, LABELS, ORDER, ORDER),
+                         "3/8 (Trakt) · 0/8 (Simkl)")
+
+    async def test_no_season_is_invented_for_one_nobody_was_asking_about(self):
+        """A library read cannot say how many seasons a title has, and must not be
+        made to guess at one. The claim is only ever made about a season that is
+        already being asked about — otherwise a held title would grow a row per
+        season of a number nothing knows, and none of them would ever render."""
+        state = await self._baseline(
+            BOTH, [_record(101)], trakt={101: {1: _episodes(1, 2)}}, simkl={101: {}})
+        self.assertEqual(set(state["shows"][KEY(101)]["seasons"]), {"1"})
+        self.assertEqual(wh.watched_map(state)[(KEY(101), 1)], {"trakt": 2, "simkl": 0})
+        rows = await db.fetch_all(
+            "SELECT season FROM distrakt_show_progress WHERE user_id = ? "
+            "AND source = 'simkl'", (self.user_id,))
+        self.assertEqual([row["season"] for row in rows], [1])
+
+    async def test_a_season_only_the_library_ever_knew_is_retired_not_zeroed(self):
+        """The one case where this service's silence still means the season has
+        gone: nobody else was asking about it, so there is no season left to agree
+        about. Zeroing it instead would leave an unwatched season on the page for
+        ever, which is the opposite of what an unwatch is for."""
+        await self._baseline(BOTH, [_record(101)], trakt={},
+                             simkl={101: {4: _episodes(1, 2)}})
+        state = await self._baseline(BOTH, [_record(101)], trakt={},
+                                     simkl={101: {}}, simkl_activities=MOVED)
+        self.assertEqual(state["shows"][KEY(101)]["seasons"], {})
+        self.assertNotIn((KEY(101), 4), wh.watched_map(state))
 
 
 class SourceNamesTests(unittest.TestCase):

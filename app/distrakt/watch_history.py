@@ -481,7 +481,8 @@ def _event_key(payload: dict, media: Media) -> ItemKey | None:
 
 
 def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
-                       source: str = _LEGACY_SOURCE) -> None:
+                       source: str = _LEGACY_SOURCE, *,
+                       unlisted_is_zero: bool = False) -> None:
     """Replace ONE SOURCE's cached progress for one title with a fresh baseline.
     `season_to_eps` is what that port's progress read returns,
     {season: {episode: watched_at}}; a bare list of episode numbers is still
@@ -492,6 +493,23 @@ def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
     baseline is one service's complete answer about itself and no statement at
     all about the other. The ids MERGE for the same reason: each service names the
     title with its own id and both are needed to keep asking.
+
+    `unlisted_is_zero` SAYS THIS SERVICE'S SILENCE ABOUT A SEASON OF THIS TITLE IS
+    A ZERO RATHER THAN A SHRUG — see LibraryEntry in app/providers/base.py, which
+    is where a source declares it, and which is the only thing that knows whether
+    it is true of its own payload. A service can list only the seasons it has
+    watches in, and then a season it did not mention is one it has seen NONE of;
+    recording nothing for it leaves the other service's zero standing alone, and a
+    season both services agree is at zero renders as a claim only one of them made.
+    Agreement at zero is still agreement and has to look like it.
+
+    THE CLAIM IS ONLY MADE ABOUT A SEASON THE TRACKER IS ALREADY ASKING ABOUT —
+    one that already has a slot from somebody. A library read cannot say how many
+    seasons a title has and must not be made to guess: filling in every season of
+    every held title would write rows for seasons nobody is watching and nothing
+    would ever render. A season whose only slot was this service's, and which it
+    now says nothing about, is still retired rather than zeroed; that is an
+    unwatch, and it is the one case where silence means the season has gone.
     """
     shows = state.setdefault("shows", {})
     entry = shows.setdefault(str(key), {"ids": {}, "seasons": {}})
@@ -501,6 +519,10 @@ def _set_show_baseline(state: dict, key, ids: dict, season_to_eps: dict,
         slots.pop(str(source), None)
     for season, eps in (season_to_eps or {}).items():
         seasons.setdefault(str(int(season)), {})[str(source)] = episode_watches(eps)
+    if unlisted_is_zero:
+        for slots in seasons.values():
+            if slots:  # somebody else is still asking about this season
+                slots.setdefault(str(source), {})
     # A season left with no source saying anything is not a season anybody is
     # watching; dropping it here is what keeps an unwatch actually removing it.
     entry["seasons"] = {season: slots for season, slots in seasons.items() if slots}
@@ -1037,12 +1059,20 @@ def _fold_library(state: dict, name: str, read) -> None:
     if read.complete:
         for key, entry in list(shows.items()):
             found = read.entries.get(str(key))
+            # A TITLE THE READ DID NOT NAME HAS NO ENTRY AND THEREFORE NO CLAIM
+            # ABOUT ITS SEASONS. That is the whole reason the flag rides on the
+            # entry: this service holding a title and having seen none of a season
+            # is a zero, and this service not holding the title at all is silence,
+            # and there is no way to reach for the first while looking at the
+            # second.
             _set_show_baseline(state, key, found.ids if found else (entry.get("ids") or {}),
-                               found.seasons if found else {}, name)
+                               found.seasons if found else {}, name,
+                               unlisted_is_zero=bool(found and found.unlisted_seasons_are_zero))
         return
     for key, found in read.entries.items():
         if str(key) in shows:
-            _set_show_baseline(state, key, found.ids, found.seasons, name)
+            _set_show_baseline(state, key, found.ids, found.seasons, name,
+                               unlisted_is_zero=found.unlisted_seasons_are_zero)
 
 
 async def _sync_from_library(settings, state: dict, name: str, library, span, *,
@@ -1101,7 +1131,8 @@ async def _baseline_from_library(settings, state: dict, name: str, library,
         # on. It was never needed to place THIS call, which is the point.
         _set_show_baseline(state, key,
                            {**(record.get("ids") or {}), **(found.ids if found else {})},
-                           found.seasons if found else {}, name)
+                           found.seasons if found else {}, name,
+                           unlisted_is_zero=bool(found and found.unlisted_seasons_are_zero))
     return True
 
 
