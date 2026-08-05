@@ -176,8 +176,17 @@ function showRow(s) {
     // labelled — and that rule is the same one a closed month is written with, so
     // it has one home rather than a copy here that could disagree with it.
     const xy = s.counts || `${s.watched}/${s.total}`;
-    let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}`
-        : (s.bucket === 'completed') ? '' : xy;
+    // EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED. A completed row used to
+    // draw nothing here, on the reasoning that "finished" already says x equals y
+    // — which is true only while one service is answering. With two, a season
+    // lands in Completed on the PRIMARY service's number, and the other may still
+    // be part-way through it; a blank cell then reads as both of them agreeing the
+    // season is done, which is a claim neither of them made. The string is the
+    // server's (app/distrakt/counts.py), so a row where they disagree arrives here
+    // already carrying both numbers, each named, and drawing it is all that is
+    // left to do. The announcement post deliberately does NOT follow: it is prose
+    // rather than a ledger and carries one number or none (app/distrakt/live.py).
+    let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}` : xy;
     // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;

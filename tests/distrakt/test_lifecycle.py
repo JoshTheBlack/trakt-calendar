@@ -394,6 +394,65 @@ class WhereASeasonIsHeldTests(LifecycleTestCase):
         placed = await self._find(5)
         self.assertIsNone(placed.month)
 
+    async def test_a_verdict_the_month_under_way_reached_is_not_among_them(self):
+        """THE BOUNDARY THE OTHER SEARCH EXISTS TO CROSS, pinned here so that
+        widening it is a visibly failing test rather than a quiet change of what a
+        play does. A reconciliation sets aside everything this month settled before
+        it asks, so this search must not offer one back: a completed verdict handed
+        to reconcile_history is reopened, and one reached from these very counts
+        has nothing to withdraw."""
+        await store.add_month_record(self.user_id, self.this_month,
+                                     _show(6, kind=store.RecordKind.COMPLETED,
+                                           watched=8))
+        self.assertIsNone(await self._find(6))
+
+
+class WhereARowThePageDrewIsHeldTests(LifecycleTestCase):
+    """The page's own question, which covers one place more than a
+    reconciliation's: what the month under way has already settled.
+
+    A season finished this month has left the viewer's list, is not a premiere,
+    and sits on a month the settled walk starts one step after — so all three of
+    find_season's places miss it while the row is on screen with a modal to open.
+    """
+
+    async def _find(self, tid: int):
+        return await lifecycle.find_shown_season(self.user_id, _key(tid), 1,
+                                                 month=self.this_month)
+
+    async def test_a_season_this_month_completed_is_found(self):
+        await store.add_month_record(self.user_id, self.this_month,
+                                     _show(1, kind=store.RecordKind.COMPLETED,
+                                           watched=8))
+        placed = await self._find(1)
+        self.assertEqual(placed.record["kind"], store.RecordKind.COMPLETED)
+        self.assertEqual(placed.month, self.this_month)
+
+    async def test_a_season_this_month_was_given_up_on_is_found_too(self):
+        """Both verdicts are rows the page draws, so both are rows the modal has
+        to be able to answer about."""
+        await store.add_month_record(self.user_id, self.this_month,
+                                     _show(2, kind=store.RecordKind.ABANDONED))
+        placed = await self._find(2)
+        self.assertEqual(placed.record["kind"], store.RecordKind.ABANDONED)
+        self.assertEqual(placed.month, self.this_month)
+
+    async def test_an_earlier_months_verdict_still_answers(self):
+        """The composition, not a replacement: everything the reconciliation
+        search already found is still found, through that search."""
+        await store.add_month_record(self.user_id, self.last_month,
+                                     _show(3, kind=store.RecordKind.COMPLETED,
+                                           watched=8))
+        placed = await self._find(3)
+        self.assertEqual(placed.month, self.last_month)
+
+    async def test_the_viewers_own_list_still_answers_first(self):
+        await lifecycle.follow(self.user_id, _show(4))
+        self.assertIsNone((await self._find(4)).month)
+
+    async def test_nothing_anywhere_is_still_a_real_answer(self):
+        self.assertIsNone(await self._find(5))
+
 
 class CountingLookup:
     """A season lookup that answers a fixed detail and counts how often it was
@@ -530,6 +589,19 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         self.assertEqual(await self._reconcile([_play(4)], lookup), [])
         self.assertEqual(lookup.calls, [])
         self.assertIn((str(_key(4)), 1), await self.month_kinds(self.this_month))
+
+    async def test_a_season_this_month_was_given_up_on_raises_no_question(self):
+        """The other half of the same rule, and the half that fails loudest if the
+        month under way's verdicts ever start reaching the search: an abandoned
+        record found there is offered back to the viewer, so a season they gave up
+        on this morning would ask to be re-added this afternoon, every load."""
+        await store.add_month_record(self.user_id, self.this_month,
+                                     _show(5, kind=store.RecordKind.ABANDONED))
+        lookup = CountingLookup({"total": 10})
+        questions = await self._questions([_play(5)], lookup)
+        self.assertEqual(questions.given_up, [])
+        self.assertEqual(questions.unknown, [])
+        self.assertEqual(lookup.calls, [])
 
     async def test_the_second_pass_over_the_same_plays_writes_nothing(self):
         """Once a season has come back, a page load that sees the same plays must

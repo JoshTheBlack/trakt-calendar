@@ -31,8 +31,9 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app import db, distrakt
-from app.distrakt import counts, lifecycle, live, store, watch_history as wh
+from app import assets, db, distrakt
+from app.distrakt import (counts, discord_fmt, lifecycle, live,
+                          routes as distrakt_routes, store, watch_history as wh)
 from app.providers.base import ItemKey, LibraryEntry, LibraryRead, UnlistedSeasons
 from app.providers.simkl import SimklError
 from tests.support import AppTestCase, ORIGIN, new_db_path
@@ -1206,6 +1207,108 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
         row, = self._month().json()["shows"]
         self.assertEqual(row["watched"], 2)
         self.assertEqual(row["total"], 8)
+
+
+class ACompletedRowShowsWhatEachServiceSawTests(TwoSourceTestCase):
+    """A row in Completed, and the two things that have to be true of it.
+
+    WHICH BUCKET IT IS IN IS NOT UNDER TEST AND DOES NOT MOVE. A season is
+    bucketed on the primary service's number exactly as every other reader of one
+    number works, so a season Trakt calls finished is Completed however far
+    through it Simkl thinks the viewer is. What changes is that the ROW then says
+    so, instead of drawing nothing and letting "Completed" stand as a claim both
+    services made.
+
+    THE ANNOUNCEMENT POST IS THE OTHER HALF OF THE SAME RULE. It is prose rather
+    than a ledger, its completed line has never carried a count, and it gains none
+    here — one number in the post, both on the row.
+    """
+
+    MONTH = "2026-07"
+
+    async def _settle(self, watched_by_source: dict, *, watched: int, total: int = 10):
+        """One completed verdict on a month, written the way a freeze writes one:
+        the single number every one-number reader takes, plus what each service
+        actually said beside it."""
+        await store.add_month_record(self.user_id, self.MONTH, {
+            **_record(101), "kind": store.RecordKind.COMPLETED,
+            "title": "Show 101", "watched": watched, "total": total,
+            "started_airing": True, "finished_airing": True,
+            "watched_by_source": watched_by_source,
+            "total_by_source": {"trakt": total},
+        })
+        return await store.month_records(self.user_id, self.MONTH, store.SETTLED_KINDS)
+
+    async def _row(self, watched_by_source: dict, *, watched: int, total: int = 10):
+        records = await self._settle(watched_by_source, watched=watched, total=total)
+        rows = distrakt_routes._rows_for(lifecycle.shape_of(records),
+                                         store.MonthStanding.CURRENT)
+        self.assertEqual(len(rows), 1)
+        return rows[0]
+
+    async def test_a_completed_row_carries_a_count_at_all(self):
+        """It used to carry none — the word Completed above it was the whole
+        answer, and "how much of it did I see" had no answer on the page."""
+        row = await self._row({"trakt": 10, "simkl": 10}, watched=10)
+        self.assertEqual(row["bucket"], store.Bucket.COMPLETED)
+        self.assertEqual(row["counts"], "10/10")
+
+    async def test_a_completed_row_the_services_disagree_about_carries_both(self):
+        """Each named, which is the same rule a listed row is drawn with — a
+        completed row may not assert an agreement that does not exist."""
+        row = await self._row({"trakt": 10, "simkl": 3}, watched=10)
+        self.assertEqual(row["bucket"], store.Bucket.COMPLETED)
+        self.assertEqual(row["counts"], "10/10 (Trakt) · 3/10 (Simkl)")
+
+    async def test_the_bucket_still_follows_the_primary_service(self):
+        """Stated as its own assertion because it is the part that deliberately
+        did NOT change: the verdict is the primary's, and the row reports the
+        disagreement rather than being moved by it."""
+        row = await self._row({"trakt": 10, "simkl": 3}, watched=10)
+        self.assertEqual(row["watched"], 10)
+        self.assertEqual(row["bucket"], store.Bucket.COMPLETED)
+
+    async def test_the_announcement_post_keeps_one_number_for_that_same_row(self):
+        """The same row through the other renderer. Its completed line carries no
+        count today and must gain none: a service name in a paragraph of prose
+        reads as an aside about the tooling rather than as what was watched."""
+        row = await self._row({"trakt": 10, "simkl": 3}, watched=10)
+        post = discord_fmt.render_post2([row], {}, "📺",
+                                        standing=store.MonthStanding.CURRENT)
+        line, = [ln for ln in post.splitlines() if "Show 101" in ln]
+        self.assertEqual(line, "> 📺 ~~`Show 101 S01`~~")
+        self.assertNotIn("Simkl", post)
+        self.assertNotIn("Trakt", post)
+
+
+class TheRowTheBrowserDrawsTests(unittest.TestCase):
+    """The one decision the browser still makes about a count: whether to draw
+    the string the server wrote.
+
+    ASSERTED AGAINST THE SOURCE because there is no JavaScript runtime in this
+    suite and the rule is a single expression. What it protects is that no bucket
+    is singled out and blanked — the moment one is, the server's careful
+    "10/10 (Trakt) · 3/10 (Simkl)" is computed, frozen onto a month, and thrown
+    away one line before it is drawn.
+    """
+
+    def setUp(self):
+        self.source = (assets.BASE_DIR / "static/js/tracker/rows.js").read_text(
+            encoding="utf-8")
+
+    def counts_expression(self) -> str:
+        """The expression that decides what a show row's counts cell holds."""
+        return self.source.split("let counts =")[1].split(";")[0]
+
+    def test_no_bucket_is_blanked_out_of_the_counts_cell(self):
+        self.assertNotIn("bucket", self.counts_expression())
+
+    def test_the_cell_is_drawn_from_the_string_the_server_wrote(self):
+        """`s.counts` is the server's, and the fallback is only for a row from
+        before it was carried. Neither may be re-derived in the browser: the rule
+        is the one a month is frozen with (app/distrakt/counts.py)."""
+        self.assertIn("const xy = s.counts ||", self.source)
+        self.assertIn("xy", self.counts_expression())
 
 
 class SourceNamesTests(unittest.TestCase):

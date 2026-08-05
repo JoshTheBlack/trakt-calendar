@@ -451,6 +451,43 @@ async def find_season(user_id: int, key: ItemKey, season: int, *,
     return None
 
 
+async def find_shown_season(user_id: int, key: ItemKey, season: int, *,
+                            month: str) -> Placement | None:
+    """Where a season the month's PAGE is drawing is held — including a verdict
+    `month` has already reached.
+
+    A SECOND QUESTION, NOT A WIDER FIND_SEASON, and the difference is which rows
+    each answer is allowed to cover. find_season answers "where could a play that
+    has just arrived still land", and its bound on the settled walk is written for
+    that: a reconciliation has already set aside everything this month settled
+    before it asks, so for that caller those records really are asked about by
+    other means. The page has no such step. It draws what the month settled — a
+    season finished or given up on this month is a row on screen, with a modal to
+    open and ids to open it with — and asking find_season about one gets None,
+    because the viewer's list no longer holds it (it left when it settled), the
+    premiere step asks only about store.PREMIERE_KINDS, and the walk starts one
+    month earlier. Three misses, and the row the page just drew reads as a season
+    the tracker has never heard of.
+
+    WIDENING find_season INSTEAD WOULD CHANGE WHAT A PLAY DOES, which is the thing
+    that must not move: reconcile_history's own guard is what keeps a season this
+    month has already settled from being reopened, and the abandon control would
+    start finding a completed verdict and filing a second one beside it, putting
+    one season on the page twice under two headings. So the search that exists is
+    reused rather than rewritten — this asks it first, then asks the one place it
+    deliberately steps over — and nothing that reconciles anything can reach the
+    extra read.
+    """
+    placed = await find_season(user_id, key, season, month=month)
+    if placed is not None:
+        return placed
+    for kind in sorted(store.SETTLED_KINDS):
+        record = await store.find_month_record(user_id, month, kind, key, season)
+        if record is not None:
+            return Placement(record, month)
+    return None
+
+
 async def reconcile_history(user_id: int,
                             plays: Sequence[watch_history.EpisodePlay], *,
                             month: str,

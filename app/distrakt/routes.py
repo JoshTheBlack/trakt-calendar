@@ -897,12 +897,17 @@ async def api_distrakt_details(request: Request):
     if season is None:
         return JSONResponse({"ok": False, "error": "Missing season"}, status_code=400)
 
-    # Searched the way a reconciliation searches — the viewer's own list, then
-    # this month's premieres, then back over what earlier months settled — so a
-    # row the page can draw is a row this route can answer about, wherever the
-    # tracker happens to be holding it. See lifecycle.find_season.
+    # Searched over everywhere the page can draw a row from — the viewer's own
+    # list, this month's premieres, what this month settled, and back over what
+    # earlier months settled — so a row the page drew is a row this route can
+    # answer about, wherever the tracker happens to be holding it. It asks
+    # lifecycle.find_shown_season rather than find_season because the latter is
+    # written for a reconciliation and steps over the month under way's own
+    # verdicts, which is exactly the case the modal reported "could not load" for:
+    # a season finished this month has left the viewer's list and is not a
+    # premiere, so all three of that search's places miss it.
     today = clock.today()
-    placed = await lifecycle.find_season(
+    placed = await lifecycle.find_shown_season(
         user_id, key, season, month=distrakt_store.month_key(today.year, today.month))
     ids = (placed.record.get("ids") or {}) if placed else {}
     if not ids.get("trakt"):
