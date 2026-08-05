@@ -272,19 +272,41 @@ class TestThePrivateReadsRefuseToLookEmpty:
 
 
 class _PagedClient:
-    """A send() stand-in that serves canned pages in order and records the URLs.
+    """A send() stand-in that serves canned pages BY PAGE NUMBER and records the
+    URLs it was asked for.
 
-    The sweep pages by query parameter and follows the page-count header, so what
-    it ASKED for is half of what is under test.
+    Keyed on the `page=` parameter rather than on call order, deliberately: the
+    sweep asks for page one alone and then for the rest together, so the order the
+    remainder arrive in is not defined and a double that served them positionally
+    would hand page four's body to whichever coroutine happened to be scheduled
+    first. What it ASKED for is half of what is under test, which is why the URLs
+    are kept.
     """
 
     def __init__(self, *pages):
         self._pages = list(pages)
         self.urls: list[str] = []
+        self.in_flight = 0
+        self.most_at_once = 0
+
+    def _number(self, url: str) -> int:
+        for part in url.split("?", 1)[-1].split("&"):
+            if part.startswith("page="):
+                return int(part[len("page="):])
+        return 1
 
     async def __call__(self, _client, _method, url, **_kwargs):
         self.urls.append(url)
-        return self._pages.pop(0) if len(self._pages) > 1 else self._pages[0]
+        self.in_flight += 1
+        self.most_at_once = max(self.most_at_once, self.in_flight)
+        try:
+            # A real await, so two calls issued together are actually overlapping
+            # here rather than each running to completion before the next starts.
+            await asyncio.sleep(0)
+            index = self._number(url) - 1
+            return self._pages[index] if index < len(self._pages) else self._pages[-1]
+        finally:
+            self.in_flight -= 1
 
 
 def _page(body, status: int = 200, page_count: int = 1):
@@ -324,6 +346,40 @@ class TestThePlayCountSweep:
         assert complete
         assert len(send.urls) == 2
         assert "page=2" in send.urls[1]
+
+    def test_the_pages_after_the_first_go_out_together(self):
+        """Page one has to come back before anything knows how many there are;
+        after that they are disjoint slices of one listing with no ordering
+        between them. Issued one at a time this is five round trips end to end on
+        a real library, on the critical path of every load where anything moved.
+
+        ASSERTED AS OVERLAP RATHER THAN AS DURATION, which is the only form that
+        does not turn into a flaky clock comparison: the double counts how many
+        calls were in flight at once."""
+        pages = [_page([{"plays": n, "show": {"ids": {"trakt": n}}}], page_count=4)
+                 for n in range(1, 5)]
+        send = _PagedClient(*pages)
+        counts, complete = self._sweep(send)
+        assert counts == {"1": 1, "2": 2, "3": 3, "4": 4}
+        assert complete
+        # The first is alone — nothing yet knows there are four — and the other
+        # three overlap.
+        assert send.most_at_once == 3
+
+    def test_a_cap_on_how_many_pages_are_fetched_makes_the_sweep_incomplete(self):
+        """Running out of pages we are willing to fetch is not the same as running
+        out of pages to read, and a cap that quietly said "the rest of the library
+        has no plays" would read as a removal of everything past it."""
+        pages = [_page([{"plays": n, "show": {"ids": {"trakt": n}}}], page_count=9)
+                 for n in range(1, 4)]
+        send = _PagedClient(*pages)
+        with patch.object(transport, "send", send), \
+             patch.object(transport, "shared_client", lambda: None):
+            counts, complete = asyncio.run(
+                trakt_sync.fetch_play_counts(SETTINGS, limit=2, max_pages=2))
+        assert not complete
+        assert len(send.urls) == 2
+        assert set(counts) == {"1", "2"}
 
     def test_a_row_with_no_id_is_skipped_rather_than_keyed_on_nothing(self):
         send = _PagedClient(_page([{"plays": 1, "show": {"ids": {}}}, "not a dict"]))

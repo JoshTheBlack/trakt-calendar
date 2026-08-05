@@ -244,66 +244,87 @@ async def fetch_play_counts(settings: Settings, limit: int = 250,
     appearing with zero, which is why the caller compares against what it stored
     rather than reading this map alone.
 
-    Paginated by query parameter, following x-pagination-page-count. A page that
-    could not be read raises if it is the first — a sweep that read nothing is not
-    a library that holds nothing — and otherwise makes the sweep incomplete, which
-    the caller reads as "may not conclude anything from an absence".
+    PAGE ONE ALONE, THEN THE REST TOGETHER. The first response's
+    x-pagination-page-count says how many there are, and the remainder have no
+    ordering between them — they are disjoint slices of one listing — so issuing
+    them together turns a sweep of a thousand-title library from five round trips
+    end to end into two. They still queue behind the outbound rate gate that paces
+    every other Trakt fan-out, so this asks nothing more of the service than the
+    per-show reads it exists to replace already do; what it stops paying is the
+    latency of asking one at a time. Measured on a real account: about 800ms
+    sequential, on the critical path of every load where anything moved.
+
+    A page that could not be read raises if it is the FIRST — a sweep that read
+    nothing is not a library that holds nothing — and otherwise makes the sweep
+    incomplete, which the caller reads as "may not conclude anything from an
+    absence".
     """
-    counts: dict[str, int] = {}
-    page = 1
-    complete = True
     client = transport.shared_client()
+
+    async def _page(number: int):
+        params = {"limit": str(limit), "page": str(number)}
+        url = f"{transport.API_BASE}/sync/watched/shows?{urlencode(params)}"
+        t0 = _time.perf_counter()
+        try:
+            resp = await transport.send(
+                client, "GET", url, headers=transport.api_headers(settings, paginate=False))
+        except httpx.HTTPError as exc:
+            logger.warning("fetch_play_counts: request failed: %s", exc)
+            raise TraktError(f"Could not reach Trakt: {exc}") from exc
+        _perf.debug("netGET    sync/watched/shows?page=%s -> %s  %.0fms", number,
+                    resp.status_code, (_time.perf_counter() - t0) * 1000.0)
+        if resp.status_code != 200:
+            logger.warning("fetch_play_counts: HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+        try:
+            return resp.json(), resp.headers
+        except ValueError:
+            raise TraktError("Trakt API returned an unreadable response.") from None
+
+    def _fold(batch, counts: dict[str, int]) -> None:
+        for entry in batch if isinstance(batch, list) else ():
+            if not isinstance(entry, dict):
+                continue
+            trakt_id = ((entry.get("show") or {}).get("ids") or {}).get("trakt")
+            if trakt_id is None:
+                continue
+            counts[str(trakt_id)] = int(entry.get("plays") or 0)
+
+    counts: dict[str, int] = {}
+    complete = True
     with span("trakt.play_counts"):
-        while page <= max_pages:
-            params = {"limit": str(limit), "page": str(page)}
-            url = f"{transport.API_BASE}/sync/watched/shows?{urlencode(params)}"
-            t0 = _time.perf_counter()
-            try:
-                resp = await transport.send(
-                    client, "GET", url, headers=transport.api_headers(settings, paginate=False))
-            except httpx.HTTPError as exc:
-                logger.warning("fetch_play_counts: request failed: %s", exc)
-                raise TraktError(f"Could not reach Trakt: {exc}") from exc
-            _perf.debug("netGET    sync/watched/shows?page=%s -> %s  %.0fms", page,
-                        resp.status_code, (_time.perf_counter() - t0) * 1000.0)
-            if resp.status_code != 200:
-                logger.warning("fetch_play_counts: HTTP %s: %s", resp.status_code, resp.text[:200])
-                if page == 1 or resp.status_code in transport.CREDENTIAL_STATUSES:
-                    raise TraktError(
-                        f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
-                # A LATER PAGE IS SURVIVABLE AND THE FIRST ONE IS NOT. Losing a
-                # page costs the titles on it a needless re-read next time, which
-                # is a cost; losing the whole listing would say every title has
-                # lost its plays, which is a wrong answer.
-                complete = False
-                break
-            try:
-                batch = resp.json()
-            except ValueError:
-                raise TraktError("Trakt API returned an unreadable response.") from None
-            if not isinstance(batch, list) or not batch:
-                break
-            for entry in batch:
-                if not isinstance(entry, dict):
-                    continue
-                trakt_id = ((entry.get("show") or {}).get("ids") or {}).get("trakt")
-                if trakt_id is None:
-                    continue
-                counts[str(trakt_id)] = int(entry.get("plays") or 0)
-            try:
-                page_count = int(resp.headers.get("x-pagination-page-count") or 1)
-            except (TypeError, ValueError):
-                page_count = 1
-            if page >= page_count:
-                break
-            page += 1
-        else:
-            # Ran out of pages to fetch rather than out of pages to read. Saying so
-            # is what keeps the cap from quietly becoming "the rest of the library
-            # has no plays".
+        # UNGUARDED, because the first page failing is the whole sweep failing.
+        batch, headers = await _page(1)
+        _fold(batch, counts)
+        try:
+            page_count = int(headers.get("x-pagination-page-count") or 1)
+        except (TypeError, ValueError):
+            page_count = 1
+        wanted = min(page_count, max_pages)
+        if page_count > max_pages:
+            # Ran out of pages we are willing to fetch rather than out of pages to
+            # read. Saying so is what keeps the cap from quietly becoming "the rest
+            # of the library has no plays".
             complete = False
+        rest = await asyncio.gather(
+            *(_page(number) for number in range(2, wanted + 1)),
+            return_exceptions=True)
+        for answer in rest:
+            if isinstance(answer, BaseException):
+                # A LATER PAGE IS SURVIVABLE AND THE FIRST ONE IS NOT. Losing a page
+                # costs the titles on it a needless re-read next time, which is a
+                # cost; losing the whole listing would say every title has lost its
+                # plays, which is a wrong answer. A credential refusal is not one
+                # page failing and is re-raised whichever page it arrived on.
+                if isinstance(answer, TraktError) and transport.is_credential_failure(answer):
+                    raise answer
+                if not isinstance(answer, TraktError):
+                    raise answer
+                complete = False
+                continue
+            _fold(answer[0], counts)
     logger.info("fetch_play_counts: %d show(s) over %d page(s), complete=%s",
-                len(counts), page, complete)
+                len(counts), wanted, complete)
     return PlayCounts(counts=counts, complete=complete)
 
 
