@@ -9,7 +9,7 @@ locked by live measurement against the real Trakt API:
     five or six window reads, each cached and TTL'd independently.
 
   - STORE EACH SOURCE'S NORMALIZED RECORD, GROUPED BY TITLE, VERSIONED. A stored
-    window is `{"v": 2, "sources": [...], "entries": [{key, ids, by_source}]}`.
+    window is `{"v": 3, "sources": [...], "entries": [{key, ids, by_source}]}`.
     Normalizing on the way IN is what lets a second source fill these same rows:
     a payload stored raw would have to be interpreted at read time by something
     that knows every source's field layout, and that something is exactly what a
@@ -22,7 +22,7 @@ locked by live measurement against the real Trakt API:
     while one source was failing must not be served for a whole TTL as though
     that source had been asked and was empty. A source in NEITHER list was not in
     play when the window was filled, which is not a failure — it makes the window
-    a MISS to be refilled, the same treatment a payload without `"v": 2` gets.
+    a MISS to be refilled, the same treatment a payload of an older `"v"` gets.
 
     THE FILL ASKS EVERY SOURCE IN PLAY AND STORES THE UNION. No viewer's source
     selection reaches it; whose service a person reads is answered per group at
@@ -210,29 +210,152 @@ def cache_key(endpoint_key: str, start: date) -> str:
 # silently dropped on the way in, and the symptom would have been a matcher that
 # never matched.
 
-PAYLOAD_VERSION = 2
+PAYLOAD_VERSION = 3
+
+
+def group_base(record: Record) -> str:
+    """The part of a group key that names the TITLE, with no airing in it.
+
+    The cross-source waterfall (app/providers/base.py's resolve_key), never a
+    service's own id — keying on one of those would make the same title arriving
+    from two services two rows for ever. It stringifies whatever id it lands on,
+    which is the whole of this app's defence against the type mismatch that
+    matters most here: Simkl reports a tmdb id as the string "285652" and Trakt
+    reports the same one as the int 285652, and a comparison that did not coerce
+    would match NOTHING while looking exactly like sparse coverage from one
+    service. Nothing downstream may compare a raw id value for identity.
+
+    A TITLE THE WATERFALL CANNOT KEY GETS A PER-SOURCE BASE and so can never
+    merge with anything. That is deliberate: a visible duplicate is safer than a
+    wrong merge, and a title nobody can name in a shared id space is one there is
+    no honest way to recognize.
+    """
+    identity = resolve_key(record.media, record.ids)
+    return str(identity) if identity is not None else f"{record.source}:{record.id}"
+
+
+def episode_coords(record: Record) -> tuple[int, int] | None:
+    """(season, episode) when a record states BOTH, else None.
+
+    A THIRD OF PREMIERE ENTRIES STATE NEITHER, measured over July and August:
+    1230 of them carry no season or no episode number, overwhelmingly Simkl
+    anime, where a season is simply not part of how the entry is spelled — an
+    absolute episode number and nothing else — plus a scattering of Trakt records
+    that give a season and no number. So "the coordinates" is not a field a
+    matcher may assume it has, and None here is the ordinary case rather than a
+    malformed one. What such a record can still say is handled by `match_keys`
+    below.
+    """
+    if record.season is not None and record.episode_number is not None:
+        return (record.season, record.episode_number)
+    return None
 
 
 def group_key(record: Record) -> str:
-    """The key that decides which records are the SAME AIRING OF THE SAME TITLE.
+    """The key one record would take ON ITS OWN, before anything it was fetched
+    beside is considered.
 
     (shared identity, season, episode) for an episodic and (shared identity) for
     a film, exactly as two services listing the same S02E05 have to become one
-    card while one show's different episodes must never collapse. The identity is
-    the cross-source waterfall (app/providers/base.py's resolve_key), never a
-    service's own id — keying on one of those would make the same title arriving
-    from two services two rows for ever.
+    card while one show's different episodes must never collapse.
 
-    A TITLE THE WATERFALL CANNOT KEY GETS A PER-SOURCE KEY and so can never merge
-    with anything. That is deliberate: a visible duplicate is safer than a wrong
-    merge, and a title nobody can name in a shared id space is one there is no
-    honest way to recognize.
+    THIS IS NOT THE FINAL KEY. A record stating no coordinates can still turn out
+    to be the same airing as one that states them, and deciding that needs the
+    other records in the window — see `match_keys`, which is what `group_records`
+    actually keys on. This function stays because "what does this record say
+    about itself" is a separate question worth asking on its own.
     """
-    identity = resolve_key(record.media, record.ids)
-    base = str(identity) if identity is not None else f"{record.source}:{record.id}"
-    if record.season is not None and record.episode_number is not None:
-        return f"{base}|{record.season}|{record.episode_number}"
-    return base
+    base = group_base(record)
+    coords = episode_coords(record)
+    return f"{base}|{coords[0]}|{coords[1]}" if coords else base
+
+
+def match_keys(records: list[Record]) -> list[str]:
+    """The final group key for each of `records`, in the same order — THE
+    MATCHER.
+
+    Everything above answers "what does one record call itself". This answers the
+    question that actually decides whether two services produce one card or two,
+    and it needs the whole window because the hard case cannot be seen from one
+    record: TWO SOURCES CAN AGREE PERFECTLY ABOUT THE ID AND STILL FAIL TO MATCH,
+    because they describe the airing at DIFFERENT RESOLUTIONS. Measured on real
+    stored windows: one service lists an anime premiere as episode 1 with no
+    season at all and the other lists it as S01E01, same title, same tmdb id,
+    same day — and the coordinates being part of the key is what made those two
+    cards instead of one.
+
+    So a record that states no full coordinate is folded into a coordinated
+    airing of the SAME TITLE when exactly one of them can be the airing it means:
+
+      - same base (the same title in the same shared id space),
+      - same UTC calendar day, because a show airing twice in one week is two
+        airings and nothing here may guess which one an uncoordinated record is,
+      - and agreement on whichever half of the coordinate the record DID state.
+        This is the condition that carries most of the weight: one live window
+        holds eight uncoordinated records for a single title on one day, one per
+        episode, against that title's eight coordinated ones — day alone would
+        make all eight ambiguous and match none of them, while the stated episode
+        number picks each one out exactly.
+
+    AMBIGUITY IS COUNTED BEFORE ANYTHING ELSE NARROWS IT, AND THAT ORDER IS THE
+    WHOLE SAFETY ARGUMENT. Every coordinated airing of the title on that day is a
+    candidate, whoever listed it; only if there is EXACTLY ONE is the record
+    folded in, and only then is it asked whether that airing already carries a
+    record from this same source — in which case it is refused too, because
+    folding a service's uncoordinated listing into its own coordinated one would
+    be collapsing that service's listing rather than reconciling two of them, and
+    a service listing one airing twice is a repeat the calendar has always drawn
+    twice. Counting the other way round — narrowing by source and THEN counting —
+    is a real trap and not a theoretical one: on a day where one service lists
+    season 4 and the other season 5 of the same show, it would leave exactly one
+    survivor for an uncoordinated third record and merge it into the wrong
+    season, silently.
+
+    ZERO CANDIDATES OR SEVERAL, AND THE RECORD KEEPS ITS OWN KEY and renders as
+    its own card. That is the direction this has to fail in: a visible duplicate
+    is a cosmetic complaint, and a wrong merge hides one title behind another
+    with nothing on the page to say so.
+
+    WHAT THIS DELIBERATELY DOES NOT DO is match on title and day. Two different
+    SEASONS of one show premiering on the same day is a real thing — three live
+    examples, all with both records fully coordinated — and any rule of the form
+    "same title, same day, one card" destroys them. They are untouched here
+    precisely because both sides state a full coordinate and neither is a
+    candidate for folding.
+    """
+    bases = [group_base(record) for record in records]
+    coords = [episode_coords(record) for record in records]
+    keys = [f"{b}|{c[0]}|{c[1]}" if c else b for b, c in zip(bases, coords)]
+
+    # What each title's fully-coordinated airings are, and who listed them on
+    # which day — the only thing an uncoordinated record can be folded into.
+    coordinated: dict[str, dict[tuple[int, int], dict]] = {}
+    for index, record in enumerate(records):
+        if coords[index] is None:
+            continue
+        airing = coordinated.setdefault(bases[index], {}).setdefault(
+            coords[index], {"sources": set(), "days": set()})
+        airing["sources"].add(str(record.source))
+        airing["days"].add(record_utc_date(record))
+
+    for index, record in enumerate(records):
+        if coords[index] is not None:
+            continue
+        day = record_utc_date(record)
+        airings = coordinated.get(bases[index], {})
+        candidates = [
+            coordinate for coordinate, airing in airings.items()
+            if day in airing["days"]
+            and (record.episode_number is None or coordinate[1] == record.episode_number)
+            and (record.season is None or coordinate[0] == record.season)
+        ]
+        if len(candidates) != 1:
+            continue
+        coordinate = candidates[0]
+        if str(record.source) in airings[coordinate]["sources"]:
+            continue
+        keys[index] = f"{bases[index]}|{coordinate[0]}|{coordinate[1]}"
+    return keys
 
 
 def group_records(records: list[Record]) -> list[dict]:
@@ -257,11 +380,15 @@ def group_records(records: list[Record]) -> list[dict]:
     overwriting, because the calendar has always drawn both and this is not the
     place to decide it should stop. Two records from DIFFERENT sources under one
     key is the ordinary case and is exactly what the group is for.
+
+    WHICH RECORDS SHARE A KEY IS `match_keys`' ANSWER, NOT THIS FUNCTION'S. This
+    one owns the shape of what gets stored; that one owns what "the same airing"
+    means, and the split is worth keeping because the second is the part with a
+    live-data argument behind every clause of it.
     """
     index: dict[str, dict] = {}
     out: list[dict] = []
-    for record in records:
-        base = group_key(record)
+    for record, base in zip(records, match_keys(records)):
         name = str(record.source)
         key, bump = base, 1
         while key in index and name in index[key]["by_source"]:
@@ -331,6 +458,16 @@ def _decompress(blob) -> CachedWindow | None:
     raise on the read path or, worse, hand back groups that are not groups. With
     a ten-minute TTL the whole cache turns over in ten minutes, so a miss costs
     one refetch and there is nothing to migrate.
+
+    THE VERSION ALSO MOVES WHEN THE MEANING OF `key` MOVES, not only when the
+    envelope's shape does, and version 3 is exactly that: the same fields, keyed
+    under a different answer to "which records are the same airing" (see
+    `match_keys`). Rows from the two rules are individually readable and would
+    have gone on rendering — but a month spans five or six windows, so a mixture
+    would show one airing merged in the window that had been refilled and split
+    in the one that had not, from the same page. Refilling every window is the
+    only way that page is consistent with itself, and it is one refetch per
+    window rather than anything to migrate.
 
     `asked` IS TOLERATED AS MISSING RATHER THAN VERSIONED, and the fallback is
     chosen for what it makes a real stored row do. A row written before this
@@ -466,7 +603,16 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date
             "%d entr(ies) fell outside the %s window starting %s; trimmed.",
             overrun, endpoint.key, start,
         )
-    return dedupe_records(trimmed), answered
+    # THE ONE THING THE MATCHER NEEDS THAT A CALENDAR FILE DOES NOT CARRY: the
+    # ids a title is known by elsewhere. A source can list an airing under an id
+    # space the other source does not use at all — one live title is `mal` on one
+    # side and `tmdb` on the other, with nothing shared in either payload — and
+    # the group key is derived here, at fill, so an id learned later can never
+    # reach it. This is a batched DB read and never a network call; see
+    # enrich.overlay_match_ids for why only the IDS are taken and what its
+    # realistic ceiling is.
+    bridged = await calendar_enrich.overlay_match_ids(trimmed)
+    return dedupe_records(bridged), answered
 
 
 async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWindow, int] | None:

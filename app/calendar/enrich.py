@@ -229,6 +229,93 @@ def _backoff_elapsed(fail_count: int, failed_at: int | None, now: int) -> bool:
 # read-time overlay
 # ---------------------------------------------------------------------------
 
+def _simkl_candidates(records: list[Record]) -> dict[tuple[int, str], list[Record]]:
+    """The records in `records` that `simkl_titles` could have something to say
+    about, indexed by the (simkl_id, media) key that table is keyed on.
+
+    Shared by the two overlays below so "which records is this table about" has
+    one answer: a Simkl record carrying a usable numeric `simkl` id, and nothing
+    else. A record from another source, or one whose id will not parse, is not a
+    row this table could ever hold.
+    """
+    candidates: dict[tuple[int, str], list[Record]] = {}
+    for record in records:
+        if record.source != Source.SIMKL:
+            continue
+        raw_id = (record.ids or {}).get("simkl")
+        try:
+            simkl_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        candidates.setdefault((simkl_id, str(record.media)), []).append(record)
+    return candidates
+
+
+def _merge_ids(record: Record, upgrades: dict[str, Any]) -> None:
+    """Add id namespaces this record does not already carry, and NEVER override
+    one it does.
+
+    First-writer-wins over an id the calendar file already supplied, matching
+    app/calendar/cache.py's `group_records` — the calendar file is the thing that
+    was actually published for this airing, and enrichment describes the TITLE.
+    Where they disagree the calendar file is the more specific statement.
+    """
+    if not upgrades:
+        return
+    merged = dict(record.ids)
+    for namespace, value in upgrades.items():
+        merged.setdefault(namespace, value)
+    record.ids = merged
+
+
+async def overlay_match_ids(records: list[Record]) -> list[Record]:
+    """Merge stored enrichment's `ids` into the Simkl records a FILL is about to
+    group — and nothing else about them. Mutates in place and returns `records`.
+
+    WHY A FILL CONSULTS THIS TABLE AT ALL, WHEN `overlay_records` BELOW ALREADY
+    APPLIES IT AT READ. A group key is derived at FILL, from the ids the calendar
+    FILE carries; the read-time overlay is exactly that, an overlay, and arrives
+    strictly after the key that would have used it. So an id enrichment learns
+    can never reach the key by itself, and re-reading a stored window never
+    re-keys it. Measured on a live instance: 835 enrichment rows carrying a tmdb
+    id on 747 of them made no difference at all to how many entries merged,
+    because none of those ids was in play when the keys were derived. If the ids
+    are to inform matching, the fill has to go and ask for them, which is what
+    this function is.
+
+    IT APPLIES ONLY THE IDS, AND THAT RESTRAINT IS THE POINT. Every other field
+    enrichment holds — genres, network, country, certification, runtime, status,
+    overview — stays a READ-time overlay, because baking those into a stored
+    window would freeze one moment's enrichment into a row served for the whole
+    TTL and would make `enriched` a lie about what the window contains. An id is
+    the one thing a fill genuinely needs before it can do its own job.
+
+    WHAT IT CANNOT DO IS HELP A TITLE NOBODY HAS ENRICHED YET. The first fill of
+    an unfamiliar month finds no rows, keys on the calendar files alone, and only
+    picks up the bridge when that window is next refilled — the same self-healing
+    shape the rest of this module already has, one TTL wide.
+
+    AND THE CEILING IS LOW, WHICH IS WORTH WRITING DOWN SO NOBODY MEASURES THIS
+    AND CONCLUDES IT IS BROKEN. Of the Simkl-only groups on the author's live
+    cache that structurally cannot merge — the ones keyed by Simkl's own id —
+    enrichment held an external id for 6 of 98. The other 92 are titles Trakt
+    simply does not have, which is a catalogue difference no matching can close.
+    Single-digit gains are the honest expectation.
+    """
+    candidates = _simkl_candidates(records)
+    if not candidates:
+        return records
+    rows = await _read_rows(candidates.keys())
+    for key, group in candidates.items():
+        row = rows.get(key)
+        if row is None:
+            continue
+        upgrades = (row["fields"] or {}).get("ids") or {}
+        for record in group:
+            _merge_ids(record, upgrades)
+    return records
+
+
 def _apply(record: Record, fields: dict[str, Any]) -> None:
     record.genres = list(fields.get("genres") or [])
     record.network = str(fields.get("network") or "")
@@ -242,16 +329,7 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     # drain re-fetches it under the wider shape (see EXTRACT_VERSION below and
     # app/calendar/filter.py's prune_disguised_films, the only reader of this).
     record.anime_type = str(fields.get("anime_type") or "")
-    upgrades = fields.get("ids") or {}
-    if upgrades:
-        # First-writer-wins over an id the calendar file already supplied,
-        # matching app/calendar/cache.py's group_records — enrichment only
-        # ADDS a namespace (tvdb, mal, anidb) the calendar file never carries
-        # at all, it never overrides one the fill already had.
-        merged = dict(record.ids)
-        for namespace, value in upgrades.items():
-            merged.setdefault(namespace, value)
-        record.ids = merged
+    _merge_ids(record, fields.get("ids") or {})
     record.enriched = True
 
 
@@ -269,16 +347,7 @@ async def overlay_records(records: list[Record]) -> list[Record]:
     record read here and a record nobody has ever read are equally visible to
     the next drain tick.
     """
-    candidates: dict[tuple[int, str], list[Record]] = {}
-    for record in records:
-        if record.source != Source.SIMKL:
-            continue
-        raw_id = (record.ids or {}).get("simkl")
-        try:
-            simkl_id = int(raw_id)
-        except (TypeError, ValueError):
-            continue
-        candidates.setdefault((simkl_id, str(record.media)), []).append(record)
+    candidates = _simkl_candidates(records)
     if not candidates:
         return records
 
