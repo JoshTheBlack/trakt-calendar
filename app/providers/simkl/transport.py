@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time as _time
 from urllib.parse import urlencode
 
@@ -141,21 +142,12 @@ def api_params(settings: Settings, params: dict | None = None) -> dict:
 # titles — while staying under the 10 GET/second ceiling that applies to every
 # path regardless of caching.
 #
-# follow_redirects=True BECAUSE GET /tv/{id} DOES NOT ANSWER FOR EVERY ANIME
-# ID THE WAY IT WAS MEASURED TO, for the one title checked before this was
-# shipped. Measured live 2026-08-06 against a sample of ids this app's own
-# drain had recorded as an empty answer: GET /tv/{id} 302s to
-# GET /anime/{id} for a real fraction of anime titles (100% of a 94-id
-# sample pulled from the author's live database) — the redirect target
-# itself, not the /tv body, is where genres/network/country/certification
-# actually live for those. Without following it, `titles._fetch_json` reads
-# the bare 302 as a non-200 and returns None, which app/calendar/enrich.py
-# then stores as a genuine, backed-off failure — indistinguishable from a
-# title Simkl truly has nothing for. httpx resolves the (relative, same-host)
-# Location header on its own, so this costs nothing for the titles that
-# answer directly at /tv/{id} and silently fixes the ones that do not.
-CATALOG_POOL = http_pool.Pool("simkl", max_connections=8, timeout=30, concurrency=6,
-                              follow_redirects=True)
+# THIS POOL DOES NOT FOLLOW REDIRECTS OF ITS OWN ACCORD, even though GET
+# /tv/{id} 302s to GET /anime/{id} for a real fraction of anime titles and that
+# target is where the answer lives. `send` follows the hop instead, after
+# classifying it — see redirect_pool below for why a pool chosen before the
+# request cannot be the pool the answer is fetched under.
+CATALOG_POOL = http_pool.Pool("simkl", max_connections=8, timeout=30, concurrency=6)
 
 # EVERYTHING UNDER /sync/ AND /users/. The docs mandate SEQUENTIAL requests off
 # the cached paths, so this pool admits exactly one request at a time. Two
@@ -224,6 +216,132 @@ def cdn_client() -> httpx.AsyncClient:
     rule as catalog_client — see CDN_POOL for why this is its own pool rather
     than sharing the API host's."""
     return CDN_POOL.client()
+
+
+def client_for(pool: http_pool.Pool) -> httpx.AsyncClient:
+    """The client that belongs with `pool`.
+
+    Exists because a redirect is the one case where the code, rather than the
+    call site, has to pick a pool — and `send` must then reach that pool's
+    client without the caller's help. It goes through the three named accessors
+    above rather than calling `pool.client()` directly so a test double handed
+    to `catalog_client` is still the client a followed redirect lands on;
+    bypassing them would turn a recorded hop into a real network call.
+    """
+    if pool is CATALOG_POOL:
+        return catalog_client()
+    if pool is SYNC_POOL:
+        return sync_client()
+    if pool is CDN_POOL:
+        return cdn_client()
+    return pool.client()
+
+
+# ---------------------------------------------------------------------------
+# REDIRECTS: CLASSIFY THE TARGET, THEN PICK THE POOL.
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS NOT `follow_redirects=True` ON A POOL, WHICH IS WHAT IT USED TO
+# BE. A pool is a BUDGET, and the pool is chosen before the request leaves.
+# Letting httpx follow a hop inside that request means the answer is fetched
+# under a budget decided when nobody yet knew where it would land — the
+# ordering is backwards. Today the only hop this app sees is same-host and
+# lands inside the parallel-safe family, so nothing was actually wrong; it was
+# right by observation rather than by construction, and the difference shows up
+# the first time Simkl moves a path.
+#
+# WHAT IT WOULD COST TO BE WRONG, measured rather than imagined. Simkl allows
+# PARALLEL requests only on its Cloudflare-cached endpoints (the trending and
+# calendar data files, GET /movies/{id}, GET /tv/{id}, GET /anime/{id},
+# GET /tv/episodes/{id}, GET /anime/episodes/{id}); every other path is capped
+# at 10 GET/second and 1 POST/second. Benchmarked against the live endpoint,
+# the calendar enrichment drain's SEQUENTIAL rate alone was 23.5 requests per
+# second — already more than double the ceiling that applies off a cached path.
+# So a redirect that quietly carried this traffic somewhere uncached would
+# breach the published limit with no constant having changed and nothing in the
+# code noticing.
+#
+# AND TWO CONCRETE LEAKS A CROSS-HOST HOP WOULD OPEN, which is why "refuse
+# another host" is the rule rather than a fussy default:
+#   - Simkl's 302 Location carries the client id as a QUERY PARAMETER
+#     (`/anime/{id}?client_id=<...>`). Following it puts this instance's client
+#     id into a URL rather than only into a header, and a cross-host Location
+#     would hand that id to whatever host it named.
+#   - httpx strips `Authorization` on a cross-origin redirect but does NOT
+#     strip custom headers. Simkl's documented alternative credential is the
+#     custom `simkl-api-key` header, and this app already sends custom
+#     `app-name` / `app-version` headers on every call, so a blindly followed
+#     cross-host hop forwards headers httpx will not protect.
+#
+# THE CLASSIFICATION LIVES HERE, BESIDE THE POOLS, because "which endpoints may
+# run in parallel" is the same fact the pool declarations above are built out
+# of, and stating it twice is how the two would drift apart. Every Simkl call
+# in the app goes through `send`, and `send` is the only caller of this — so
+# there is one implementation and no call site can opt out of it.
+
+# 304 is deliberately absent: the calendar CDN answers 304 to a conditional GET
+# and that is an answer, not a hop.
+REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+
+# ONE HOP. That is what was measured — /tv/{id} to /anime/{id}, once — and an
+# unbounded chain is a way to spend a whole drain's budget on a single title.
+# A longer chain is refused loudly rather than walked.
+MAX_REDIRECT_HOPS = 1
+
+API_HOST = "api.simkl.com"
+CDN_HOST = "data.simkl.in"
+
+# The api.simkl.com paths Simkl's rate-limit documentation names as
+# parallel-safe: cached at the edge by id, carrying no per-user state. Written
+# as anchored patterns rather than prefixes so `/tv/{id}` cannot be read as
+# permission for everything under `/tv/` — `/tv/episodes/{id}` is listed on its
+# own precisely because the family is a list of endpoints, not a subtree.
+_PARALLEL_SAFE_API_PATHS = (
+    re.compile(r"^/movies/[^/]+/?$"),
+    re.compile(r"^/tv/[^/]+/?$"),
+    re.compile(r"^/anime/[^/]+/?$"),
+    re.compile(r"^/tv/episodes/[^/]+/?$"),
+    re.compile(r"^/anime/episodes/[^/]+/?$"),
+)
+
+
+def redirect_pool(origin_url: str, target_url: str) -> http_pool.Pool | None:
+    """The pool a redirect TARGET deserves, or None when it must not be followed.
+
+    Three answers, and each one is a different fact about the target:
+
+      CATALOG_POOL / CDN_POOL   the target is in the family Simkl declares
+                                parallel-safe, so the throughput budget that
+                                fetched the origin is the correct budget for
+                                the answer too.
+      SYNC_POOL                 the target is a Simkl path OUTSIDE that family.
+                                The request is still made — the data is real —
+                                but under the bounded budget the 10 GET/second
+                                ceiling asks for, which is what SYNC_POOL is.
+      None                      another host. Refused: see the header and
+                                client-id leaks written above this function.
+
+    `origin_url` is what makes the host check meaningful — the target must be
+    the host we were already talking to, not merely a host this app happens to
+    know the name of.
+    """
+    origin = httpx.URL(origin_url)
+    target = httpx.URL(target_url)
+    if target.host != origin.host:
+        return None
+    if target.host == CDN_HOST:
+        # Everything on the calendar CDN is a static data file, edge-cached and
+        # explicitly parallel-safe, so there is no sub-classification to make
+        # here the way there is on the API host.
+        return CDN_POOL
+    if target.host != API_HOST:
+        # A Simkl host this module does not know the regime for. Refusing beats
+        # guessing a budget: the whole point of classifying is not to run
+        # traffic under a limit nobody checked.
+        return None
+    return (CATALOG_POOL if any(pattern.match(target.path)
+                                for pattern in _PARALLEL_SAFE_API_PATHS)
+            else SYNC_POOL)
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +437,77 @@ async def send(client: httpx.AsyncClient, method: str, url: str, *,
       429  backs off — a numeric Retry-After wins over the exponential schedule
            (1s, 2s, 4s) — and raises SimklRateLimitError once the attempt count
            or the wall-clock budget is spent, rather than a fabricated response.
-      anything else, returned untouched.
+      3xx  re-issued at the target, on the pool `redirect_pool` says that target
+           deserves — which may not be the pool this call started on, and may be
+           a refusal. This is the ONLY place in the app that follows a Simkl
+           redirect; no pool is allowed to do it on its own.
 
     A POST is additionally paced to one per second (see POST_MIN_INTERVAL).
+    """
+    hops = 0
+    while True:
+        resp = await _send_once(client, method, url, pool=pool, headers=headers,
+                                json=json, timeout=timeout)
+        if resp.status_code not in REDIRECT_STATUSES:
+            return resp
+        location = resp.headers.get("location")
+        if not location:
+            # A redirect with nowhere to go is not a hop, it is a malformed
+            # answer. Handed back as-is so the caller reads it as the non-200 it
+            # is, rather than being turned into an exception here.
+            logger.warning("Simkl answered HTTP %s for %s with no Location header",
+                           resp.status_code, url)
+            return resp
+        if method.upper() != "GET":
+            # Only a GET is safe to replay at a new URL without deciding what
+            # happens to its BODY — and the only Simkl POSTs this app makes are
+            # under /sync/, which does not redirect. Returned untouched rather
+            # than guessed at.
+            logger.warning("Simkl redirected a %s of %s to %s; not following — only "
+                           "GET redirects are replayed", method.upper(), url, location)
+            return resp
+        target = str(httpx.URL(url).join(location))
+        hops += 1
+        if hops > MAX_REDIRECT_HOPS:
+            raise SimklError(
+                f"Simkl redirected {url} more than {MAX_REDIRECT_HOPS} time(s); "
+                f"refusing to keep following at {target}.", resp.status_code)
+        next_pool = redirect_pool(url, target)
+        if next_pool is None:
+            # LOUD, AND WITHOUT THE TARGET'S CREDENTIALS. The refusal is the
+            # security property, so it must be visible in the log rather than
+            # showing up as a title that mysteriously never enriches.
+            logger.warning(
+                "Simkl redirected %s off its own host to %s — refusing to follow, "
+                "because this app's custom headers and its client id would travel "
+                "with the request.", url, target)
+            raise SimklError(
+                f"Simkl redirected {url} to another host; not following.",
+                resp.status_code)
+        if next_pool is not pool:
+            # The budget changed, so the connections change with it — the two
+            # are halves of one thing (see this function's own docstring).
+            logger.info("Simkl redirected %s to %s; re-issuing on the %s pool",
+                        url, target, next_pool.name)
+            client = client_for(next_pool)
+            pool = next_pool
+        # Headers carry over unchanged, and that is safe for exactly one
+        # reason: redirect_pool has already established the target is the same
+        # host. It is not a general permission.
+        url = target
+
+
+async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
+                     pool: http_pool.Pool, headers: dict | None = None,
+                     json=None, timeout: float | None = None) -> httpx.Response:
+    """One request to one URL under one pool's gate, with the 412 breaker and
+    the 429 retry loop — everything that is about THIS request and not about
+    where its answer might point.
+
+    Split out of `send` so the redirect walk above runs OUTSIDE any pool's gate.
+    Holding one pool's semaphore while waiting for another's is how two pools
+    that redirect into each other would deadlock, and the split makes that
+    impossible rather than merely unlikely.
     """
     path = url.split("?", 1)[0].replace(API_BASE, "") or url
     remaining_block = _blocked_seconds_remaining()

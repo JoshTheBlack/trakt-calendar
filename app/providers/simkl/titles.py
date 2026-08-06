@@ -14,8 +14,9 @@ Simkl serves some anime straight off /tv/{id} and redirects the rest, and
 there is no way to tell which in advance. A Simkl "show" Record still never
 needs a second LOOKUP or a guess about which endpoint to try — it always
 asks /tv/{id} — but the transport has to actually FOLLOW that redirect for
-the answer to arrive; see transport.py's CATALOG_POOL for where that is
-turned on and why. This is also why migration 24's `simkl_titles.media`
+the answer to arrive. It does, in transport.send, and only after classifying
+the target: see transport.py's redirect_pool for why the hop picks its own
+pool rather than riding the one the /tv/{id} call was issued on. This is also why migration 24's `simkl_titles.media`
 column keeps only the app's own two-value vocabulary ('show'/'movie') rather
 than growing a third 'anime' value: which detail endpoint answered is not a
 fact this table ever needs to remember.

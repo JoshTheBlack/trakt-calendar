@@ -13,6 +13,7 @@ exactly the confusion the reset exists to prevent.
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -299,20 +300,186 @@ class PrivateCachingTests(TransportStateTestCase):
         self.assertIsNone(out)
 
 
-class CatalogPoolRedirectTests(unittest.IsolatedAsyncioTestCase):
-    """GET /tv/{id} 302s to GET /anime/{id} for a real fraction of anime ids
-    (measured live, see titles.py's module docstring) — the catalog client
-    has to follow that redirect itself, or the per-title lookup reads a bare
-    302 as "Simkl has nothing here" and backs off a title it never really
-    asked."""
+class RedirectClassificationTests(unittest.TestCase):
+    """Which pool a redirect TARGET deserves, decided from the target alone.
 
-    async def test_the_catalog_pool_follows_redirects(self):
-        client = transport.CATALOG_POOL.client()
-        self.assertTrue(client.follow_redirects)
-        # A neighbouring pool with a genuinely different regime (personal
-        # /sync/ and /users/ reads) is NOT expected to follow one — a
-        # redirect there would silently change whose data answered.
-        self.assertFalse(transport.SYNC_POOL.client().follow_redirects)
+    Pure function, so these assert the rule directly rather than through a
+    request: the pools are budgets, and the whole point of the change is that
+    the budget is picked after the destination is known."""
+
+    def test_a_parallel_safe_target_lands_on_the_catalog_pool(self):
+        for path in ("/anime/3157124", "/tv/38636", "/movies/1234",
+                     "/tv/episodes/99", "/anime/episodes/99"):
+            with self.subTest(path=path):
+                self.assertIs(
+                    transport.redirect_pool(transport.API_BASE + "/tv/1",
+                                            transport.API_BASE + path),
+                    transport.CATALOG_POOL)
+
+    def test_a_simkl_path_outside_the_family_lands_on_the_bounded_pool(self):
+        """Still fetched — the data is real — but under the 10 GET/second
+        budget rather than the parallel one, which is what SYNC_POOL is."""
+        for path in ("/search/id", "/users/settings", "/sync/activities",
+                     "/tv/38636/episodes"):
+            with self.subTest(path=path):
+                self.assertIs(
+                    transport.redirect_pool(transport.API_BASE + "/tv/1",
+                                            transport.API_BASE + path),
+                    transport.SYNC_POOL)
+
+    def test_the_episodes_endpoint_is_not_read_as_permission_for_the_subtree(self):
+        """`/tv/episodes/{id}` is parallel-safe and `/tv/{id}/anything` is not.
+        A prefix match would have conflated them."""
+        self.assertIs(
+            transport.redirect_pool(transport.API_BASE + "/tv/1",
+                                    transport.API_BASE + "/tv/episodes/5"),
+            transport.CATALOG_POOL)
+        self.assertIs(
+            transport.redirect_pool(transport.API_BASE + "/tv/1",
+                                    transport.API_BASE + "/tv/5/seasons/1"),
+            transport.SYNC_POOL)
+
+    def test_another_host_is_refused(self):
+        for target in ("https://evil.example/tv/1",
+                       "https://api.simkl.com.evil.example/tv/1",
+                       # Even Simkl's own other host: the rule is the host we
+                       # were already talking to, not a host we know the name of.
+                       "https://data.simkl.in/tv/1"):
+            with self.subTest(target=target):
+                self.assertIsNone(
+                    transport.redirect_pool(transport.API_BASE + "/tv/1", target))
+
+    def test_the_cdn_keeps_its_own_pool(self):
+        """Every file on data.simkl.in is a static, edge-cached data file, so a
+        hop within it needs no sub-classification — but it must not be answered
+        on the API host's pool either."""
+        self.assertIs(
+            transport.redirect_pool("https://data.simkl.in/calendar/2026/8/a.json",
+                                    "https://data.simkl.in/calendar/2026/8/b.json"),
+            transport.CDN_POOL)
+
+
+class RedirectRoutingTests(TransportStateTestCase):
+    """Following the hop: GET /tv/{id} 302s to GET /anime/{id} for a real
+    fraction of anime ids (measured live, see titles.py's module docstring), and
+    the answer has to be fetched under the budget its TARGET deserves rather
+    than the one its origin was issued on."""
+
+    def _redirect(self, location: str, status: int = 302):
+        return _resp(status, {"Location": location})
+
+    async def test_a_parallel_safe_hop_is_followed_on_the_parallel_safe_pool(self):
+        seen = []
+
+        def _record(pool):
+            seen.append(pool.name)
+            return client
+
+        client = FakeClient([self._redirect("/anime/3157124?client_id=cid"),
+                             httpx.Response(200, json={"title": "Shiranuhi"})])
+        with patch.object(transport, "client_for", _record):
+            resp = await transport.send(
+                client, "GET", transport.API_BASE + "/tv/3157124?client_id=cid",
+                pool=transport.CATALOG_POOL)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"title": "Shiranuhi"})
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(client.requests[1].url,
+                         transport.API_BASE + "/anime/3157124?client_id=cid")
+        # Already on the right pool, so no client swap was needed at all.
+        self.assertEqual(seen, [])
+
+    async def test_a_hop_off_the_parallel_safe_family_moves_to_the_bounded_pool(self):
+        client = FakeClient([self._redirect("/users/settings"),
+                             httpx.Response(200, json={"ok": True})])
+        swapped = []
+
+        def _record(pool):
+            swapped.append(pool)
+            return client
+
+        with patch.object(transport, "client_for", _record):
+            resp = await transport.send(client, "GET", transport.API_BASE + "/tv/1",
+                                        pool=transport.CATALOG_POOL)
+        self.assertEqual(resp.status_code, 200)
+        # The request IS made — the data is real — but under the pool whose
+        # budget matches the 10 GET/second ceiling that applies off a cached path.
+        self.assertEqual(swapped, [transport.SYNC_POOL])
+        self.assertEqual(len(client.requests), 2)
+
+    async def test_a_cross_host_hop_is_refused_and_never_sends_the_headers(self):
+        client = FakeClient([self._redirect("https://evil.example/tv/1"),
+                             httpx.Response(200, json={"stolen": True})])
+        with self.assertRaises(transport.SimklError):
+            await transport.send(client, "GET", transport.API_BASE + "/tv/1",
+                                 pool=transport.CATALOG_POOL,
+                                 headers=transport.api_headers(FAKE_SETTINGS))
+        # THE ASSERTION THAT MATTERS: no second request happened at all, so
+        # neither the custom app-name/credential headers httpx does not strip
+        # nor the client id in the URL ever reached the other host.
+        self.assertEqual(len(client.requests), 1)
+
+    async def test_a_chain_longer_than_the_bound_stops(self):
+        client = FakeClient([self._redirect("/anime/1"),
+                             self._redirect("/anime/2"),
+                             httpx.Response(200, json={"title": "never reached"})])
+        with self.assertRaises(transport.SimklError):
+            await transport.send(client, "GET", transport.API_BASE + "/tv/1",
+                                 pool=transport.CATALOG_POOL)
+        self.assertEqual(len(client.requests), transport.MAX_REDIRECT_HOPS + 1)
+
+    async def test_a_redirect_without_a_location_comes_back_as_it_is(self):
+        client = FakeClient([_resp(302)])
+        resp = await transport.send(client, "GET", transport.API_BASE + "/tv/1",
+                                    pool=transport.CATALOG_POOL)
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(len(client.requests), 1)
+
+    async def test_a_conditional_304_is_not_treated_as_a_hop(self):
+        """The calendar CDN answers 304 to an If-None-Match, and that is an
+        answer rather than a redirect."""
+        client = FakeClient([_resp(304)])
+        resp = await transport.send(client, "GET",
+                                    "https://data.simkl.in/calendar/2026/8/a.json",
+                                    pool=transport.CDN_POOL)
+        self.assertEqual(resp.status_code, 304)
+        self.assertEqual(len(client.requests), 1)
+
+    async def test_a_post_redirect_is_not_replayed(self):
+        """Replaying a POST at a new URL means deciding what happens to its
+        body, and nothing this app POSTs to Simkl redirects."""
+        client = FakeClient([self._redirect("/sync/elsewhere")])
+        resp = await transport.send(client, "POST", transport.API_BASE + "/sync/add",
+                                    pool=transport.SYNC_POOL, json={})
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(len(client.requests), 1)
+
+    async def test_no_pool_follows_a_redirect_on_its_own(self):
+        """The classification is worth nothing if the client walks the hop
+        before `send` ever sees it."""
+        for pool in (transport.CATALOG_POOL, transport.SYNC_POOL, transport.CDN_POOL):
+            with self.subTest(pool=pool.name):
+                self.assertFalse(pool.client().follow_redirects)
+
+    async def test_the_hop_is_walked_outside_the_pool_gate(self):
+        """A gate held across the hop would DEADLOCK the moment a target routes
+        back to the pool the origin was issued on — which is exactly what the
+        /tv/{id} to /anime/{id} case does. Pinned by shrinking the gate to a
+        single slot: with the walk inside it, the second leg waits on a
+        semaphore its own caller is holding, forever."""
+        client = FakeClient([self._redirect("/anime/1"),
+                             httpx.Response(200, json={"title": "A Show"})])
+        transport.CATALOG_POOL.gate()  # build the semaphore on this loop first
+        original = transport.CATALOG_POOL._sem
+        transport.CATALOG_POOL._sem = asyncio.Semaphore(1)
+        try:
+            resp = await asyncio.wait_for(
+                transport.send(client, "GET", transport.API_BASE + "/tv/1",
+                               pool=transport.CATALOG_POOL), timeout=5)
+        finally:
+            transport.CATALOG_POOL._sem = original
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(client.requests), 2)
 
 
 class HeaderTests(unittest.TestCase):
