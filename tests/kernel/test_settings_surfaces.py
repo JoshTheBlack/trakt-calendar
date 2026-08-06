@@ -232,6 +232,40 @@ class PrewarmSettingWidgetTests(SettingsSurfaceTestCase):
         self.assertIn("calendar_prewarm_enabled", payload)
 
 
+class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
+    """simkl_public_calendar_enabled: the checkbox on the Simkl tab and its
+    round trip through /api/settings, defaulting to True the way an instance
+    that never opens this tab needs it to."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self.admin_id)
+
+    def test_the_settings_screen_renders_the_toggle(self):
+        body = self.client.get("/?month=1&year=2026").text
+        self.assertIn('name="simkl_public_calendar_enabled"', body)
+
+    def test_it_defaults_on(self):
+        """An instance that never saves this field must read it back as True —
+        the whole point of the default is that nobody has to go find it."""
+        payload = self.client.get("/api/settings").json()
+        self.assertIs(payload["simkl_public_calendar_enabled"], True)
+
+    def test_saving_it_persists_as_a_bool(self):
+        resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": False})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        settings = load_settings()
+        self.assertIs(settings.simkl_public_calendar_enabled, False)
+
+        resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": True})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIs(load_settings().simkl_public_calendar_enabled, True)
+
+    def test_it_is_readable_back_through_the_settings_endpoint(self):
+        payload = self.client.get("/api/settings").json()
+        self.assertIn("simkl_public_calendar_enabled", payload)
+
+
 class SettingsTabsTests(SettingsSurfaceTestCase):
     """Settings is a handful of tabbed groups in one form."""
 
@@ -262,7 +296,7 @@ class SettingsTabsTests(SettingsSurfaceTestCase):
                          "s_calcache", "s_cachecap", "s_hide", "s_sonarr_url", "s_sonarr_key",
                          "s_radarr_url", "s_radarr_key", "s_seer_url", "s_seer_key",
                          "s_tmdb_key", "s_simkl_client_id", "s_simkl_client_secret",
-                         "s_simkl_access_token"):
+                         "s_simkl_access_token", "s_simkl_public_calendar"):
             with self.subTest(field=field_id):
                 self.assertIn(f'id="{field_id}"', body)
 

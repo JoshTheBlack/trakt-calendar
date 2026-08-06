@@ -180,6 +180,35 @@ class TestRegistry:
         assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
         assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(trakt_only)]
 
+    def test_default_settings_still_admits_unconfigured_simkl(self):
+        """simkl_public_calendar_enabled defaults True, so passing a Settings
+        object at all — which no caller did before this switch existed — must
+        not itself change who is asked. An instance that has touched nothing
+        about Simkl keeps reading its calendar exactly as before."""
+        assert Source.SIMKL in [
+            p.source for p in providers.calendar_sources(settings=Settings())]
+
+    def test_switching_it_off_drops_unconfigured_simkl_from_the_fill(self):
+        off = Settings(simkl_public_calendar_enabled=False)
+        sources = {p.source for p in providers.calendar_sources(settings=off)}
+        assert sources == {Source.TRAKT}
+
+    def test_switching_it_off_leaves_a_configured_simkl_untouched(self):
+        """The switch answers "may we reach a service nobody set up", not "is
+        Simkl allowed to answer" — once the credentials are filled in it stops
+        applying at all, exactly as D-59 requires."""
+        configured_off = Settings(
+            simkl_client_id="id", simkl_access_token="token",
+            simkl_public_calendar_enabled=False)
+        assert Source.SIMKL in [
+            p.source for p in providers.calendar_sources(settings=configured_off)]
+
+    def test_no_settings_at_all_behaves_like_the_switch_being_on(self):
+        """The pre-existing, no-argument call every untouched caller still
+        makes must keep admitting Simkl — the switch can only ever narrow a
+        caller that was updated to pass a Settings object."""
+        assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
+
     def test_registered_hands_back_a_copy(self):
         """A caller iterating the registry must not be able to empty it."""
         snapshot = providers.registered()

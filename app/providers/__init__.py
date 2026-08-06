@@ -94,7 +94,7 @@ def registered() -> dict[Source, Provider]:
     return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
-def calendar_sources(*, prefs=None, linked=None) -> list[Provider]:
+def calendar_sources(*, prefs=None, linked=None, settings=None) -> list[Provider]:
     """Every source that could put something on this account's calendar, in
     declared order. THE SET THE CACHE FILL ASKS.
 
@@ -124,12 +124,30 @@ def calendar_sources(*, prefs=None, linked=None) -> list[Provider]:
     genuinely differ — the tracker can read "linked" off the per-request Settings
     because every source it asks needs that account's token, and a calendar
     source needing no token would never appear there.
+
+    `settings=None` MEANS THE SAME "DON'T ASK" AS `prefs=None` — every existing
+    caller that has not been updated to pass one keeps today's behaviour exactly.
+    Where it IS passed, it governs one narrow thing: whether an UNCONFIGURED
+    Simkl (no client id, no access token — `settings.simkl_configured` false) may
+    still be asked for its public calendar files, via
+    `settings.simkl_public_calendar_enabled` (default True, so an instance that
+    never looks at the setting sees no change). The moment Simkl IS configured,
+    this check does not apply to it at all — the switch answers "may we reach a
+    service this instance was never given a reason to trust", not "is Simkl
+    allowed to answer", and a source an operator actually set up is governed by
+    `prefs` above like any other. Scoped to Simkl by name rather than generalized
+    into a per-source flag because there is exactly one source this is true of
+    today; a second one earns its own question when it exists.
     """
     out: list[Provider] = []
     for source, provider in registered().items():
         if not provider.capabilities.endpoints or provider.calendar_port is None:
             continue
         if prefs is not None and not prefs.admits_calendar(source, linked or ()):
+            continue
+        if (settings is not None and source is Source.SIMKL
+                and not provider.is_configured(settings)
+                and not settings.simkl_public_calendar_enabled):
             continue
         out.append(provider)
     return out
@@ -146,7 +164,7 @@ def for_calendar_sources(settings, *, prefs=None, linked=None) -> list[Provider]
     an explanation for, not an error — and it is the state the page explains
     rather than rendering an empty month.
     """
-    return [p for p in calendar_sources(prefs=prefs, linked=linked)
+    return [p for p in calendar_sources(prefs=prefs, linked=linked, settings=settings)
             if p.is_configured(settings)]
 
 

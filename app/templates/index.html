@@ -457,6 +457,16 @@
                         It does not expire, and there is nothing to refresh — if Simkl starts refusing it,
                         authorize the application again.</span>
                 </div>
+                <div class="field checkbox">
+                    <input type="checkbox" id="s_simkl_public_calendar" name="simkl_public_calendar_enabled">
+                    <label for="s_simkl_public_calendar">Read Simkl's public calendar</label>
+                    <span class="hint">On by default. Simkl's calendar files sit on a public CDN and need
+                        none of the credentials above, so this instance reads them even with the fields
+                        on this tab left blank. Turn it off if you would rather this instance never talk
+                        to Simkl at all until you configure it. Has no effect once the credentials above
+                        are filled in — a Simkl you have actually set up is governed by each account's own
+                        calendar source choice, not by this switch.</span>
+                </div>
                 </div>
 
                 <div class="tab-panel" data-tab-panel="calendar" role="tabpanel" hidden>

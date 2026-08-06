@@ -180,7 +180,7 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
 
 
 def _coverage_gap(prefs: source_prefs.SourcePrefs, linked: frozenset[str],
-                  year: int, month: int) -> tuple[str | None, str | None]:
+                  year: int, month: int, settings) -> tuple[str | None, str | None]:
     """(message, switch_url) when this viewer has named ONE calendar source and
     that source's declared reach does not cover {year, month} at all — the
     explicit "Simkl doesn't reach this month" state. (None, None) otherwise,
@@ -200,7 +200,7 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs, linked: frozenset[str],
 
     if prefs.calendar_source in (source_prefs.AUTO, source_prefs.BOTH):
         return None, None
-    admitted = providers.calendar_sources(prefs=prefs, linked=linked)
+    admitted = providers.calendar_sources(prefs=prefs, linked=linked, settings=settings)
     if not admitted or any(calendar_cache.month_covered(p, year, month) for p in admitted):
         return None, None
     named = admitted[0].label
@@ -269,7 +269,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.error = NOT_CONFIGURED
         return assembly
 
-    message, switch_url = _coverage_gap(source_selection, linked, year, month)
+    message, switch_url = _coverage_gap(source_selection, linked, year, month, settings)
     if message is not None:
         assembly.coverage_gap = True
         assembly.switch_url = switch_url

@@ -125,6 +125,7 @@ async function openSettings() {
         // like every other one.
         document.getElementById('s_simkl_client_id').value = s.simkl_client_id || '';
         updateSimklRedirectHint(s);
+        document.getElementById('s_simkl_public_calendar').checked = s.simkl_public_calendar_enabled !== false;
         applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
         updateTraktLoginHints(s);
@@ -339,6 +340,7 @@ async function saveSettings(event) {
         auto_approve_calendar: document.getElementById('s_auto_approve').value === 'true',
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
         simkl_client_id: document.getElementById('s_simkl_client_id').value.trim(),
+        simkl_public_calendar_enabled: document.getElementById('s_simkl_public_calendar').checked,
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
         pagination_limit: parseInt(document.getElementById('s_limit').value, 10) || 300,

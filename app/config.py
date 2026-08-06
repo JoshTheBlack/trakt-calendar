@@ -117,6 +117,19 @@ class Settings:
     # application. There is nothing to put in either field, and a refresh path
     # built on one would silently do nothing. A 401 from Simkl means the link has
     # to be made again.
+    #
+    # ON BY DEFAULT, which is exactly today's behaviour: Simkl's calendar files
+    # sit on a public CDN and need no client id or token at all, so the fill has
+    # always asked them regardless of whether this instance ever touches the
+    # three fields above (see providers.calendar_sources). This is the operator's
+    # lever to say no to that outbound read anyway — reasonable on self-hosted
+    # software even when the traffic is harmless, because "harmless" is the app's
+    # judgement and not necessarily theirs. It is NOT a Simkl on/off switch: once
+    # simkl_configured is true (the credentialed half, above) this setting is
+    # moot — a source an account has actually linked is governed by its own
+    # calendar-source preference, not by this instance-wide default. See
+    # providers.calendar_sources for where it is applied.
+    simkl_public_calendar_enabled: bool = True
     timezone: str = "Europe/Athens"
     endpoint: str = "shows/new"
     genres: str = DEFAULT_GENRES

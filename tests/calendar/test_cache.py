@@ -298,6 +298,59 @@ class FetchShapeTests(CacheTestCase):
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
 
 
+class SimklPublicCalendarSwitchTests(CacheTestCase):
+    """simkl_public_calendar_enabled: whether an UNCONFIGURED Simkl's public
+    calendar CDN is reached at all. Default settings (self.settings, plain
+    Settings()) is what every other test in this file already exercises — this
+    class pins the two states the switch actually changes rather than the
+    fill's own shape, which the tests above already cover."""
+
+    async def test_default_on_still_reaches_simkl(self):
+        """The regression that matters most: an instance that never opens the
+        Simkl tab keeps making the same request it always has."""
+        simkl_mock = AsyncMock(side_effect=base.SourceUnavailable("stub"))
+        client = _CaptureClient([StoredRecordTests.RICH])
+        with patch("app.providers.simkl.calendar.fetch_window", simkl_mock):
+            with patch("app.providers.trakt.transport.shared_client", return_value=client):
+                records, answered = await calendar_cache.fetch_window_records(
+                    SHOWS, self.settings, date(2026, 7, 13))
+        simkl_mock.assert_awaited()
+        self.assertEqual(answered, ["trakt"])
+        self.assertTrue(records)  # Trakt's own answer still comes through
+
+    async def test_switched_off_makes_no_simkl_request_and_still_renders(self):
+        """Off means off: not a slower failure, no call placed at all — and the
+        fill still succeeds from whatever source remains rather than erroring
+        or coming back empty."""
+        simkl_mock = AsyncMock(side_effect=base.SourceUnavailable("must not be called"))
+        off = Settings(simkl_public_calendar_enabled=False)
+        client = _CaptureClient([StoredRecordTests.RICH])
+        with patch("app.providers.simkl.calendar.fetch_window", simkl_mock):
+            with patch("app.providers.trakt.transport.shared_client", return_value=client):
+                records, answered = await calendar_cache.fetch_window_records(
+                    SHOWS, off, date(2026, 7, 13))
+        simkl_mock.assert_not_awaited()
+        self.assertEqual(answered, ["trakt"])
+        self.assertTrue(records)
+
+    async def test_a_configured_simkl_ignores_the_switch_in_either_position(self):
+        """Once simkl_configured is true, the switch is not the lever any more
+        — the account's own source preference is (see app/sources/prefs.py) —
+        so a configured instance must still be asked with the switch off."""
+        simkl_mock = AsyncMock(return_value=[])
+        configured_off = Settings(
+            simkl_client_id="id", simkl_access_token="token",
+            simkl_public_calendar_enabled=False)
+        client = _CaptureClient([StoredRecordTests.RICH])
+        with patch("app.providers.simkl.calendar.fetch_window", simkl_mock):
+            with patch("app.providers.trakt.transport.shared_client", return_value=client):
+                _, answered = await calendar_cache.fetch_window_records(
+                    SHOWS, configured_off, date(2026, 7, 13))
+        simkl_mock.assert_awaited()
+        self.assertIn("trakt", answered)
+        self.assertIn("simkl", answered)
+
+
 class InstanceFloorTests(CacheTestCase):
     """The content floor (README.md's "Genres / Countries / Networks" section)
     promises a HARD, pre-cache exclusion: a show it excludes should never enter

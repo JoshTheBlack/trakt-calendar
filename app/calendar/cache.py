@@ -371,7 +371,7 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date,
     answered: list[str] = []
     refusal: SourceUnavailable | None = None
     asked = 0
-    for provider in providers.calendar_sources(prefs=prefs, linked=linked):
+    for provider in providers.calendar_sources(prefs=prefs, linked=linked, settings=settings):
         if not provider.capabilities.answers(endpoint.key) or not _covers(provider, start):
             continue
         asked += 1
@@ -637,7 +637,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # stored window that names fewer than these was filled while one of them
     # could not be read, and the read below says so rather than serving the gap
     # as though nothing airs.
-    expected = {str(p.source) for p in providers.calendar_sources(prefs=prefs, linked=linked)
+    expected = {str(p.source) for p in providers.calendar_sources(prefs=prefs, linked=linked, settings=settings)
                 if p.capabilities.answers(endpoint.key)}
     groups: list[dict] = []
     as_of: int | None = None
