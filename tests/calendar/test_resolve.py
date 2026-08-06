@@ -27,6 +27,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.providers.trakt import calendar as trakt_calendar
+from app.sources import prefs as source_prefs
 from tests.support import calendar_records, new_db_path, window_fetch
 
 SHOWS = get_endpoint("shows")
@@ -272,6 +273,151 @@ class ResolvingOneSourceTests(unittest.TestCase):
         self.assertIsNone(calendar_resolve.resolve({"key": "x", "ids": {}, "by_source": {}}))
         self.assertIsNone(calendar_resolve.resolve(
             {"key": "x", "ids": {}, "by_source": {"trakt": {"title": "no air time"}}}))
+
+
+def _record(source, slug, *, tmdb=None, title=None, air_ts=1784145600.0):
+    """One source's record for an airing, as the cache stores them."""
+    ids = {"slug": slug, str(source): slug}
+    if tmdb is not None:
+        ids["tmdb"] = tmdb
+    return Record(
+        source=source, media="show", id=slug, ids=ids,
+        detail_url=f"https://example.test/{slug}", title=title or slug.title(),
+        air_ts=air_ts, season=1, episode_number=1, episode_label="S01E01",
+    )
+
+
+class WhichSourceAViewerReadsTests(unittest.TestCase):
+    """The per-viewer half: one stored window, several viewers, different
+    answers out of the same rows.
+
+    A group naming several sources is one title both services listed; a group
+    naming one is a title only that service had. Which of those a person is shown
+    is their own choice, and it is applied HERE — the window itself was filled by
+    asking everybody, so the choice can narrow what one person reads without
+    touching what the next person gets.
+    """
+
+    LINKED = frozenset({"trakt", "simkl"})
+
+    def groups(self):
+        """Three groups: one both services listed, one only Trakt, one only
+        Simkl — which is the shape a real window has (measured on the author's
+        own cache: 4 of 35 entries in one week carried both)."""
+        return calendar_cache.group_records([
+            _record(Source.TRAKT, "shared", tmdb=100, title="Shared"),
+            _record(Source.SIMKL, "shared-simkl", tmdb=100, title="Shared"),
+            _record(Source.TRAKT, "trakt-only"),
+            _record(Source.SIMKL, "simkl-only"),
+        ])
+
+    def read(self, selection, linked=None):
+        prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
+        linked = self.LINKED if linked is None else linked
+        return [(r.title, str(r.source))
+                for r in (calendar_resolve.resolve(g, prefs, linked) for g in self.groups())
+                if r is not None]
+
+    def test_naming_one_source_drops_the_groups_only_the_other_describes(self):
+        """The reported defect, stated as a test: every `source=` value used to
+        render the same cards, because nothing filtered by source at read."""
+        self.assertEqual(self.read("trakt"), [("Shared", "trakt"), ("Trakt-Only", "trakt")])
+        self.assertEqual(self.read("simkl"), [("Shared", "simkl"), ("Simkl-Only", "simkl")])
+
+    def test_both_reads_every_group_and_a_shared_one_once(self):
+        """A title two services listed is one card, not two — they merged into
+        one group on the shared tmdb id at fill — and the declared order picks
+        which side of it is shown."""
+        self.assertEqual(
+            self.read("both"),
+            [("Shared", "trakt"), ("Trakt-Only", "trakt"), ("Simkl-Only", "simkl")])
+
+    def test_auto_follows_the_links(self):
+        self.assertEqual([s for _, s in self.read("auto", frozenset({"simkl"}))],
+                         ["simkl", "simkl"])
+        self.assertEqual([s for _, s in self.read("auto", frozenset({"trakt"}))],
+                         ["trakt", "trakt"])
+
+    def test_an_account_that_has_linked_nothing_still_has_a_calendar(self):
+        """'auto' follows the links, and there are none to follow — but a
+        calendar needs no link to be worth reading, and blanking it for everybody
+        who only ever signs in would be a strange reading of "no opinion"."""
+        self.assertEqual(len(self.read("auto", frozenset())), 3)
+
+    def test_a_stated_selection_is_honoured_with_nothing_linked(self):
+        """The absence of a link is the absence of a statement; naming a service
+        IS a statement and stays one whatever is linked."""
+        self.assertEqual(self.read("simkl", frozenset()),
+                         [("Shared", "simkl"), ("Simkl-Only", "simkl")])
+
+    def test_no_account_asking_reads_everything(self):
+        """A public share page has no viewer to have a preference."""
+        titles = [calendar_resolve.resolve(g).title for g in self.groups()]
+        self.assertEqual(titles, ["Shared", "Trakt-Only", "Simkl-Only"])
+
+
+class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
+    """The invariant this fix restores, end to end: the stored window is the
+    union of what every source said, and two viewers who chose differently read
+    that one row without either of them changing it."""
+
+    async def asyncSetUp(self):
+        new_db_path("calsources")
+        await db.migrate()
+        self.settings = Settings()
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    LINKED = frozenset({"trakt", "simkl"})
+
+    async def fill_and_read(self, selection, *, allow_fetch=True):
+        """One span read as `selection`, with the fill answering for both
+        services. `allow_fetch=False` proves the read came out of the stored
+        window rather than out of a fetch shaped by the viewer."""
+        async def fetch(endpoint, settings, start):
+            if start != calendar_cache.window_start(date(2026, 7, 15)):
+                return [], ["trakt", "simkl"]
+            return [_record(Source.TRAKT, "trakt-only"),
+                    _record(Source.SIMKL, "simkl-only")], ["trakt", "simkl"]
+
+        prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
+        with patch("app.calendar.cache.fetch_window_records", fetch):
+            grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=date(2026, 7, 15), end_date=date(2026, 7, 15),
+                prefs=prefs, linked=self.LINKED, allow_fetch=allow_fetch, now=1000)
+        return [i.id for g in grouped for i in g["items"]], meta
+
+    async def test_a_viewer_naming_one_source_does_not_narrow_what_is_stored(self):
+        """The poisoning half of the defect. A `?source=simkl` load used to write
+        a Simkl-only window that every other viewer then read as the truth for
+        that week."""
+        ids, _ = await self.fill_and_read("simkl")
+        self.assertEqual(ids, ["simkl-only"])
+        window, _ = await calendar_cache.read_cached_window(
+            SHOWS.key, calendar_cache.window_start(date(2026, 7, 15)))
+        self.assertEqual(sorted(window.sources), ["simkl", "trakt"])
+        self.assertEqual(
+            sorted(s for g in window.groups for s in g["by_source"]), ["simkl", "trakt"])
+
+    async def test_the_next_viewer_reads_their_own_answer_out_of_that_window(self):
+        """No fetch is permitted for the second read, so whatever it finds was
+        put there by the first viewer's fill."""
+        await self.fill_and_read("simkl")
+        ids, _ = await self.fill_and_read("trakt", allow_fetch=False)
+        self.assertEqual(ids, ["trakt-only"])
+        ids, _ = await self.fill_and_read("both", allow_fetch=False)
+        self.assertEqual(ids, ["trakt-only", "simkl-only"])
+
+    async def test_a_source_selection_never_makes_a_span_partial(self):
+        """Not reading a source is not a source failing. The banner says data
+        could not be loaded, which is untrue of a service the viewer asked not to
+        see."""
+        for selection in ("auto", "both", "trakt", "simkl"):
+            with self.subTest(source=selection):
+                _, meta = await self.fill_and_read(selection)
+                self.assertFalse(meta["partial"])
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -17,12 +17,18 @@ locked by live measurement against the real Trakt API:
     in — the four local spellings of an air time are derived at READ, from
     `air_ts`, by app/providers/base.py's `render`.
 
-    `sources` NAMES WHO ANSWERED THIS FILL, and its absence from that list means
-    UNKNOWN rather than "had nothing": a window stored while one source was
-    failing must not be served for a whole TTL as though that source had been
-    asked and was empty. A payload without `"v": 2` reads as a MISS and is
-    refetched, so there is nothing to migrate — with a ten-minute TTL the whole
-    cache turns over in ten minutes.
+    `asked` NAMES WHO WAS REACHED FOR AND `sources` NAMES WHO ANSWERED, and the
+    gap between them is the only thing that means "incomplete": a window stored
+    while one source was failing must not be served for a whole TTL as though
+    that source had been asked and was empty. A source in NEITHER list was not in
+    play when the window was filled, which is not a failure — it makes the window
+    a MISS to be refilled, the same treatment a payload without `"v": 2` gets.
+
+    THE FILL ASKS EVERY SOURCE IN PLAY AND STORES THE UNION. No viewer's source
+    selection reaches it; whose service a person reads is answered per group at
+    READ (app/calendar/resolve.py), over these same shared rows, for exactly the
+    reason the per-viewer genre filter is: whoever happened to trigger a fill
+    must not decide what everybody else is served for that week.
 
   - `genres`/`countries`/`show_certifications`/`movie_certifications` ARE NOT
     SENT TO A SOURCE AS QUERY PARAMS, but they DO apply once, at fetch time, as
@@ -72,7 +78,8 @@ from ..cache import COMPRESS_LEVEL
 from ..media import artwork
 from ..perftrace import span
 from ..endpoints import ENDPOINTS, Endpoint
-from ..providers.base import Item, Record, SourceUnavailable, render, resolve_key
+from ..providers.base import (
+    Item, Provider, Record, SourceUnavailable, render, resolve_key)
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -272,11 +279,27 @@ def group_records(records: list[Record]) -> list[dict]:
 
 
 class CachedWindow(NamedTuple):
-    """One stored window: its groups, and which sources answered the fill that
-    produced them. A source missing from `sources` was not asked or could not be
-    read, which is a different thing from a source that answered with nothing."""
+    """One stored window: its groups, who was ASKED for them, and who ANSWERED.
+
+    THE TWO LISTS ARE DIFFERENT FACTS AND CONFLATING THEM IS WHAT MADE THE
+    "incomplete data" banner permanent. A source in `asked` but not in `sources`
+    was reached for and could not answer — that is the only thing "partial"
+    should ever mean. A source in neither was not in play when this window was
+    filled: either it did not exist on the instance yet, or its declared reach
+    does not cover this window at all. That is not a failure to report, it is a
+    window that predates the question — and the read path treats it as a MISS to
+    be refilled, exactly as a payload from an older shape version is a miss
+    rather than an error.
+
+    Storing only "who answered" left the reader with no way to tell those two
+    apart, so it had to guess by measuring TODAY'S sources against a window
+    filled possibly weeks ago; every window then read as partial the moment a
+    source was added, and a window outside a source's reach read as partial for
+    ever, because refilling it changed nothing.
+    """
     groups: list[dict]
     sources: tuple[str, ...]
+    asked: tuple[str, ...] = ()
 
 
 def _poster_sighting(record: Record):
@@ -307,6 +330,15 @@ def _decompress(blob) -> CachedWindow | None:
     raise on the read path or, worse, hand back groups that are not groups. With
     a ten-minute TTL the whole cache turns over in ten minutes, so a miss costs
     one refetch and there is nothing to migrate.
+
+    `asked` IS TOLERATED AS MISSING RATHER THAN VERSIONED, and the fallback is
+    chosen for what it makes a real stored row do. A row written before this
+    envelope carried the field records only who answered, and the honest reading
+    of it is "whoever answered was asked" — which makes such a row NOT partial
+    (nothing is asked-but-silent), and makes it a miss the moment a source is in
+    play that it never recorded. Both are the answers those rows want. Bumping
+    the version instead would throw away every window on the instance to learn
+    the same thing by refetching it.
     """
     data = json.loads(zlib.decompress(blob).decode("utf-8"))
     if not isinstance(data, dict) or data.get("v") != PAYLOAD_VERSION:
@@ -315,8 +347,10 @@ def _decompress(blob) -> CachedWindow | None:
     sources = data.get("sources")
     if not isinstance(groups, list) or not isinstance(sources, list):
         return None
-    return CachedWindow([g for g in groups if isinstance(g, dict)],
-                        tuple(str(s) for s in sources))
+    answered = tuple(str(s) for s in sources)
+    asked = data.get("asked")
+    asked = tuple(str(s) for s in asked) if isinstance(asked, list) else answered
+    return CachedWindow([g for g in groups if isinstance(g, dict)], answered, asked)
 
 
 def _covers(provider, start: date) -> bool:
@@ -345,9 +379,36 @@ def month_covered(provider, year: int, month: int) -> bool:
     return capabilities.covers(date(year, month, 1)) or capabilities.covers(date(year, month, days))
 
 
-async def fetch_window_records(endpoint: Endpoint, settings, start: date,
-                               *, prefs=None, linked=None) -> tuple[list[Record], list[str]]:
-    """Ask every admitted source what airs in this window, and return
+def _window_sources(endpoint: Endpoint, settings, start: date) -> list[Provider]:
+    """Which sources are IN PLAY for this (endpoint, window) — the one answer
+    both the fill and the completeness check read.
+
+    ONE FUNCTION BECAUSE TWO NEARLY-IDENTICAL LINES DRIFTED APART AND THE
+    DIFFERENCE WAS INVISIBLE. The fill skipped a source that does not publish
+    this endpoint OR whose declared reach misses this window; the reader, asking
+    the same question somewhere else, applied only the first of those two tests.
+    A window outside a source's reach was therefore expected from it, never
+    asked, never recorded, and reported as incomplete on every load for ever —
+    with a refill changing nothing, because the fill went on skipping it. Any
+    condition deciding "should this source have something to say here" belongs in
+    this function and nowhere else.
+
+    NO VIEWER'S PREFERENCE REACHES THIS. The window it describes is stored once
+    per (endpoint, week) and served to everybody, so narrowing the fill to what
+    one viewer asked for would write that viewer's exclusion into what every
+    other viewer then reads as the truth for that week. Which sources a PERSON
+    sees is a read-time question, answered per group in
+    app/calendar/resolve.py. What `settings` still governs here is the
+    operator's, not a viewer's: whether an unconfigured source's public calendar
+    may be reached at all.
+    """
+    return [p for p in providers.calendar_sources(settings=settings)
+            if p.capabilities.answers(endpoint.key) and _covers(p, start)]
+
+
+async def fetch_window_records(endpoint: Endpoint, settings, start: date
+                               ) -> tuple[list[Record], list[str]]:
+    """Ask every source in play for this window what airs in it, and return
     (records, the sources that ANSWERED), floor-filtered, trimmed and de-duped.
 
     THE FETCH BELONGS TO THE SOURCE AND THE SHAPE BELONGS HERE: this module knows
@@ -371,9 +432,7 @@ async def fetch_window_records(endpoint: Endpoint, settings, start: date,
     answered: list[str] = []
     refusal: SourceUnavailable | None = None
     asked = 0
-    for provider in providers.calendar_sources(prefs=prefs, linked=linked, settings=settings):
-        if not provider.capabilities.answers(endpoint.key) or not _covers(provider, start):
-            continue
+    for provider in _window_sources(endpoint, settings, start):
         asked += 1
         try:
             got = await provider.calendar_port.fetch_window(endpoint, settings, start, WINDOW_DAYS)
@@ -435,20 +494,30 @@ async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWind
 
 
 async def store_window(endpoint_key: str, start: date, records: list[Record],
-                       ttl_seconds: int, now: int, *, sources=()) -> list[dict]:
+                       ttl_seconds: int, now: int, *, sources=(), asked=None) -> list[dict]:
     """Store one window's records, grouped, under the versioned envelope, and
     hand back the groups it stored so a caller that is about to serve the same
     window does not group them a second time."""
     groups = group_records(records)
-    await store_groups(endpoint_key, start, groups, ttl_seconds, now, sources=sources)
+    await store_groups(endpoint_key, start, groups, ttl_seconds, now,
+                       sources=sources, asked=asked)
     return groups
 
 
 async def store_groups(endpoint_key: str, start: date, groups: list[dict],
-                       ttl_seconds: int, now: int, *, sources=()) -> None:
+                       ttl_seconds: int, now: int, *, sources=(), asked=None) -> None:
+    """Write one window under the versioned envelope.
+
+    `asked=None` records the sources that answered as also being the ones that
+    were asked. That is the truthful reading for a caller holding a window it did
+    not fill — it knows who spoke, and has no separate record of who was spoken
+    to — and it keeps such a window out of the "incomplete" state, which is
+    reserved for a source that was reached for and stayed silent.
+    """
     blob = _compress({
         "v": PAYLOAD_VERSION,
         "sources": [str(s) for s in sources],
+        "asked": [str(s) for s in (sources if asked is None else asked)],
         "entries": groups,
     })
     await db.execute(
@@ -470,39 +539,54 @@ def _ttl_seconds(settings) -> int:
 
 async def load_window(endpoint: Endpoint, settings, start: date, *,
                       allow_fetch: bool = True, now: int | None = None,
-                      prefs=None, linked=None) -> tuple[CachedWindow, int | None]:
+                      ) -> tuple[CachedWindow, int | None]:
     """Return (window, cached_at) for one window.
 
-    Fetches and caches when the window is missing or past its TTL and allow_fetch
-    is set. A public share page passes allow_fetch=False: it serves whatever is
-    cached — even stale, even nothing (returning an empty window, None) — and
-    never asks a source, so an unauthenticated visitor can never spend the
-    instance's rate limit. cached_at is None only when nothing was cached and
-    nothing was fetched.
+    Fetches and caches when the window is missing, past its TTL, or was filled
+    without a source that is in play for it now — and allow_fetch is set. A
+    public share page passes allow_fetch=False: it serves whatever is cached —
+    even stale, even nothing (returning an empty window, None) — and never asks a
+    source, so an unauthenticated visitor can never spend the instance's rate
+    limit. cached_at is None only when nothing was cached and nothing was
+    fetched.
+
+    A SOURCE THE WINDOW PREDATES MAKES IT A MISS, NOT A FAILURE. Admitting a new
+    source, or moving to a month a source only reaches now, leaves stored windows
+    that were filled without ever asking it. Nothing went wrong when they were
+    written, so reporting them as incomplete says something untrue and says it
+    until they expire; refetching them is what actually answers the question, and
+    it is the same treatment a payload in an older shape already gets.
     """
     ts = db.now() if now is None else now
     ttl = _ttl_seconds(settings)
+    in_play = [str(p.source) for p in _window_sources(endpoint, settings, start)]
     cached = await read_cached_window(endpoint.key, start)
     if cached is not None:
         window, cached_at = cached
-        if not allow_fetch or (ts - cached_at) <= ttl:
+        fresh = (ts - cached_at) <= ttl
+        unasked = set(in_play) - set(window.asked)
+        if not allow_fetch or (fresh and not unasked):
             return window, cached_at
+        if unasked:
+            logger.debug(
+                "the %s window starting %s was filled without %s; refilling.",
+                endpoint.key, start, ", ".join(sorted(unasked)))
     elif not allow_fetch:
-        return CachedWindow([], ()), None
+        return CachedWindow([], (), ()), None
     try:
-        records, answered = await fetch_window_records(
-            endpoint, settings, start, prefs=prefs, linked=linked)
+        records, answered = await fetch_window_records(endpoint, settings, start)
     except SourceUnavailable:
         if cached is not None:  # serve the stale copy rather than nothing
             return cached
         raise
-    groups = await store_window(endpoint.key, start, records, ttl, ts, sources=answered)
+    groups = await store_window(endpoint.key, start, records, ttl, ts,
+                                sources=answered, asked=in_play)
     # Recorded only on a genuine fetch, not on every cache-hit read: the URL
     # arrived here already, so this is the point a lookup is "paid for" rather
     # than a per-view cost added to the hot render path.
     sightings = (s for s in (_poster_sighting(r) for r in records) if s is not None)
     await artwork.record_poster_urls(sightings)
-    return CachedWindow(groups, tuple(answered)), ts
+    return CachedWindow(groups, tuple(answered), tuple(in_play)), ts
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +673,15 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     their hyphenated slugs, so it comes before rendering, which is what
     title-cases them.
 
+    `prefs` AND `linked` ARE THIS VIEWER'S SOURCE SELECTION, AND THEY ARE READ
+    ONLY HERE — never on the way down to the fill. They reach `resolve`, which
+    drops a group no admitted source describes and picks between the ones that
+    do. The windows underneath were filled by asking everybody, so two viewers
+    who have chosen differently read the very same rows and each sees their own
+    answer out of them; a selection cannot narrow what anybody else is served.
+    `prefs=None` means no account is asking (a public share page) and admits
+    everything the window holds.
+
     RESILIENT BUT LOUD on a window no source can supply. The windows load through
     a single asyncio.gather; a window that raised (nothing cached AND the fetch
     failed) is skipped so the rest of the span still renders, and meta['partial']
@@ -627,18 +720,11 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # that is slow below was blocking every other request while it worked.
     with span("calcache.load_windows", n=len(windows), fetch=allow_fetch):
         results = await asyncio.gather(
-            *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now,
-                          prefs=prefs, linked=linked)
+            *(load_window(endpoint, settings, start, allow_fetch=allow_fetch, now=now)
               for start in windows),
             return_exceptions=True,
         )
 
-    # Which sources a window SHOULD have been able to record an answer from. A
-    # stored window that names fewer than these was filled while one of them
-    # could not be read, and the read below says so rather than serving the gap
-    # as though nothing airs.
-    expected = {str(p.source) for p in providers.calendar_sources(prefs=prefs, linked=linked, settings=settings)
-                if p.capabilities.answers(endpoint.key)}
     groups: list[dict] = []
     as_of: int | None = None
     errored = 0
@@ -660,11 +746,16 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         groups.extend(window.groups)
         if cached_at is not None:
             as_of = cached_at if as_of is None else min(as_of, cached_at)
-            # Only a window that really was read is asked about its sources, so
-            # an uncached window on a public page stays quiet rather than
-            # reporting every source as missing from a window nobody filled.
-            if expected - set(window.sources):
-                incomplete = True
+        # THE WINDOW CARRIES ITS OWN VERDICT, and it is the only honest place for
+        # it: a source it names as asked but not as having answered was reached
+        # for at fill time and could not be read, which is the one thing this
+        # flag exists to say. Measuring today's sources against it instead — the
+        # shape this replaced — could not tell that apart from a window that
+        # simply predates a source, and so reported a failure nobody had.
+        # A window nobody filled (an uncached one on a public page) asked nothing
+        # and therefore stays quiet, rather than reporting every source missing.
+        if set(window.asked) - set(window.sources):
+            incomplete = True
 
     if errored and errored == len(windows):
         # Every window failed and none had a cached copy: there is no degraded
@@ -682,7 +773,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # render is per-entry object building and timezone arithmetic, and is the one
     # that grows with a busy month; the grouping is a sort plus a walk.
     with span("calcache.filter", entries=len(groups)) as sp:
-        records = [r for r in (calendar_resolve.resolve(group, prefs)
+        records = [r for r in (calendar_resolve.resolve(group, prefs, linked or ())
                                for group in dedupe_groups(groups)) if r is not None]
         certifications = show_certifications if endpoint.media == "show" else movie_certifications
         kept = calendar_filter.filter_records(records, genres, countries, certifications)

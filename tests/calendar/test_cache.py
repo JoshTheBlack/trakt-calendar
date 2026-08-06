@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import unittest
+import zlib
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -349,6 +350,164 @@ class SimklPublicCalendarSwitchTests(CacheTestCase):
         simkl_mock.assert_awaited()
         self.assertIn("trakt", answered)
         self.assertIn("simkl", answered)
+
+
+class SourcesInPlayForAWindowTests(CacheTestCase):
+    """`_window_sources` — the one answer to "who should have something to say
+    about this window", which the fill and the completeness check both read.
+
+    The two tests it applies used to be applied in one place and half-applied in
+    another: the reader asked only whether a source publishes the endpoint, and
+    not whether its calendar reaches the dates. A window outside a source's reach
+    was therefore expected from it, never asked, and reported as incomplete on
+    every load for ever — refilling it could not help, because the fill went on
+    skipping it for the same good reason.
+    """
+
+    def in_play(self, endpoint_key, start, settings=None):
+        return sorted(str(p.source) for p in calendar_cache._window_sources(
+            get_endpoint(endpoint_key), settings or self.settings, start))
+
+    def test_a_source_that_does_not_publish_the_endpoint_is_out_of_play(self):
+        """Simkl has no finales file at all (its calendar publishes premieres,
+        new shows, all shows and movies), so nothing about a finales window is
+        Simkl's to answer."""
+        near = calendar_cache.window_start(date.today())
+        self.assertEqual(self.in_play("shows", near), ["simkl", "trakt"])
+        self.assertEqual(self.in_play("shows/finales", near), ["trakt"])
+
+    def test_a_source_whose_reach_misses_the_window_is_out_of_play(self):
+        """The half that was missing from the reader. Simkl's calendar declares a
+        rolling window (Capabilities.days_before/days_after); Trakt declares
+        none, so it answers for any date."""
+        long_ago = calendar_cache.window_start(date.today() - timedelta(days=2000))
+        far_ahead = calendar_cache.window_start(date.today() + timedelta(days=400))
+        self.assertEqual(self.in_play("shows", long_ago), ["trakt"])
+        self.assertEqual(self.in_play("shows", far_ahead), ["trakt"])
+
+    def test_no_viewer_preference_reaches_it(self):
+        """It takes an endpoint, a Settings and a date, and that is the whole of
+        its input: a window is stored once per (endpoint, week) for everybody, so
+        there is no viewer whose selection could narrow it."""
+        import inspect
+        self.assertEqual(
+            list(inspect.signature(calendar_cache._window_sources).parameters),
+            ["endpoint", "settings", "start"])
+        self.assertEqual(
+            list(inspect.signature(calendar_cache.fetch_window_records).parameters),
+            ["endpoint", "settings", "start"])
+
+
+class AskedAndAnsweredTests(CacheTestCase):
+    """What "incomplete data" is allowed to mean.
+
+    A window records who was ASKED as well as who ANSWERED, because the two
+    failures they distinguish are opposites: a source reached for and silent is
+    something to warn about, while a source that was not in play when the window
+    was filled is a window to refill. Storing only "who answered" left the reader
+    measuring today's sources against a window filled weeks ago, which is why
+    admitting a source put a permanent warning on every cached window.
+    """
+
+    WINDOW = date(2026, 7, 6)
+
+    async def _read(self, *, now, allow_fetch=True):
+        grouped, meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=ZoneInfo("UTC"),
+            start_date=date(2026, 7, 7), end_date=date(2026, 7, 7),
+            now=now, allow_fetch=allow_fetch)
+        return [i.id for g in grouped for i in g["items"]], meta
+
+    async def _store(self, sources, asked, *, now=1000, slug="stored"):
+        records = calendar_records([_entry(slug, "2026-07-07T12:00:00Z")], SHOWS)
+        await calendar_cache.store_window(
+            SHOWS.key, self.WINDOW, records, 600, now, sources=sources, asked=asked)
+
+    async def test_a_source_asked_and_silent_is_what_partial_means(self):
+        await self._store(["trakt"], ["trakt", "simkl"])
+        ids, meta = await self._read(now=1000, allow_fetch=False)
+        self.assertEqual(ids, ["stored"])
+        self.assertTrue(meta["partial"])
+
+    async def test_a_window_filled_before_a_source_was_in_play_is_refilled(self):
+        """Nothing went wrong when it was written, so saying the data could not
+        be loaded is untrue — and stays untrue for as long as the row lives.
+        Refetching is what actually answers the question, the same treatment a
+        payload in an older shape already gets."""
+        await self._store(["trakt"], ["trakt"])
+        with patch("app.calendar.cache.fetch_window_records",
+                   window_fetch([_entry("refilled", "2026-07-07T12:00:00Z")])):
+            ids, meta = await self._read(now=1000)   # still well inside the TTL
+        self.assertEqual(ids, ["refilled"])
+        self.assertFalse(meta["partial"])
+        window, _ = await calendar_cache.read_cached_window(SHOWS.key, self.WINDOW)
+        self.assertEqual(sorted(window.asked), ["simkl", "trakt"])
+
+    async def test_a_public_page_serves_that_window_instead_of_refilling_it(self):
+        """allow_fetch=False is absolute: a share page spends none of the
+        instance's rate limit, whatever it thinks of what it found."""
+        await self._store(["trakt"], ["trakt"])
+        never = AsyncMock(side_effect=AssertionError("must not fetch"))
+        with patch("app.calendar.cache.fetch_window_records", never):
+            ids, _meta = await self._read(now=1000, allow_fetch=False)
+        self.assertEqual(ids, ["stored"])
+        never.assert_not_awaited()
+
+    async def test_a_window_from_the_older_envelope_reads_as_asked_by_whoever_answered(self):
+        """Rows written before `asked` existed record only who answered. Reading
+        them as "whoever answered was asked" is what keeps them out of the
+        partial state while still making them a miss once a source they never
+        recorded is in play."""
+        await self._store(["trakt"], None)
+        stored = await db.fetch_one(
+            "SELECT payload FROM api_cache WHERE cache_key = ?",
+            (calendar_cache.cache_key(SHOWS.key, self.WINDOW),))
+        payload = json.loads(zlib.decompress(stored["payload"]).decode())
+        del payload["asked"]
+        await db.execute(
+            "UPDATE api_cache SET payload = ? WHERE cache_key = ?",
+            (zlib.compress(json.dumps(payload).encode(), cache.COMPRESS_LEVEL),
+             calendar_cache.cache_key(SHOWS.key, self.WINDOW)))
+        window, _ = await calendar_cache.read_cached_window(SHOWS.key, self.WINDOW)
+        self.assertEqual(window.asked, ("trakt",))
+        _ids, meta = await self._read(now=1000, allow_fetch=False)
+        self.assertFalse(meta["partial"])
+
+    async def test_a_window_no_source_can_reach_is_not_partial_and_does_not_churn(self):
+        """The defect that no TTL could mask: outside Simkl's declared reach it
+        was expected, never asked, and the span stayed marked incomplete however
+        many times it was refilled."""
+        long_ago = date.today() - timedelta(days=2000)
+        with patch("app.calendar.cache.fetch_window_records",
+                   window_fetch([])) as _:
+            _grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=long_ago, end_date=long_ago, now=1000)
+        self.assertFalse(meta["partial"])
+        # And the second load of the same span is a cache hit, not another fill:
+        # a source that is out of play must not read as one that is missing.
+        never = AsyncMock(side_effect=AssertionError("must not refill"))
+        with patch("app.calendar.cache.fetch_window_records", never):
+            _grouped, meta = await calendar_cache.assemble_range(
+                SHOWS, self.settings, tz=ZoneInfo("UTC"),
+                start_date=long_ago, end_date=long_ago, now=1000)
+        self.assertFalse(meta["partial"])
+        never.assert_not_awaited()
+
+    async def test_an_endpoint_a_source_does_not_publish_is_not_partial_either(self):
+        """The same statement for the other of the two tests: Simkl has no
+        finales file, so a finales window it never appears in is complete."""
+        finales = get_endpoint("shows/finales")
+        records = calendar_records([_entry("ender", "2026-07-07T12:00:00Z")], finales)
+        await calendar_cache.store_window(
+            finales.key, self.WINDOW, records, 600, 1000, sources=["trakt"], asked=["trakt"])
+        never = AsyncMock(side_effect=AssertionError("must not refill"))
+        with patch("app.calendar.cache.fetch_window_records", never):
+            _grouped, meta = await calendar_cache.assemble_range(
+                finales, self.settings, tz=ZoneInfo("UTC"),
+                start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
+        self.assertFalse(meta["partial"])
+        never.assert_not_awaited()
 
 
 class InstanceFloorTests(CacheTestCase):
