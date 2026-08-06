@@ -299,6 +299,22 @@ class PrivateCachingTests(TransportStateTestCase):
         self.assertIsNone(out)
 
 
+class CatalogPoolRedirectTests(unittest.IsolatedAsyncioTestCase):
+    """GET /tv/{id} 302s to GET /anime/{id} for a real fraction of anime ids
+    (measured live, see titles.py's module docstring) — the catalog client
+    has to follow that redirect itself, or the per-title lookup reads a bare
+    302 as "Simkl has nothing here" and backs off a title it never really
+    asked."""
+
+    async def test_the_catalog_pool_follows_redirects(self):
+        client = transport.CATALOG_POOL.client()
+        self.assertTrue(client.follow_redirects)
+        # A neighbouring pool with a genuinely different regime (personal
+        # /sync/ and /users/ reads) is NOT expected to follow one — a
+        # redirect there would silently change whose data answered.
+        self.assertFalse(transport.SYNC_POOL.client().follow_redirects)
+
+
 class HeaderTests(unittest.TestCase):
     """What goes out on every request."""
 

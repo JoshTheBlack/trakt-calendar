@@ -3,17 +3,22 @@ calendar enrichment drain's only source of genres, country, certification,
 network, runtime, status and overview: the fields Simkl's calendar CDN files
 never carry at all (see calendar.py's Record docstring beside this module).
 
-BOTH ENDPOINTS ANSWER FOR ANIME TOO, SO THERE IS NO THIRD ENDPOINT HERE.
-Measured live 2026-08-06 against a known anime id (One Piece, simkl id 38636):
-GET /tv/{id} returned every field GET /anime/{id} does — genres, country,
-certification, network, `mapped_tvdb_seasons`, even `"type": "anime"` — so a
-Simkl "show" Record, which by construction never records whether the title
-behind it is a TV show or an anime (calendar.py's to_show_record folds both
-into Media.SHOW), never needs a second lookup or a guess about which one to
-try. This is also why migration 24's `simkl_titles.media` column keeps only
-the app's own two-value vocabulary ('show'/'movie') rather than growing a
-third 'anime' value: which detail endpoint answered is not a fact this table
-ever needs to remember.
+BOTH ENDPOINTS ANSWER FOR ANIME TOO, SO THERE IS NO THIRD ENDPOINT HERE —
+BUT "ANSWER" SOMETIMES MEANS "REDIRECT", NOT A 200 BODY. Measured live
+2026-08-06 against a known anime id (One Piece, simkl id 38636), GET /tv/{id}
+returned every field GET /anime/{id} does directly, in one call. A second,
+larger measurement the same day — 94 ids this app's own drain had already
+recorded as an empty answer, pulled from a live instance — found GET
+/tv/{id} instead answering 302 to GET /anime/{id} for every one of them:
+Simkl serves some anime straight off /tv/{id} and redirects the rest, and
+there is no way to tell which in advance. A Simkl "show" Record still never
+needs a second LOOKUP or a guess about which endpoint to try — it always
+asks /tv/{id} — but the transport has to actually FOLLOW that redirect for
+the answer to arrive; see transport.py's CATALOG_POOL for where that is
+turned on and why. This is also why migration 24's `simkl_titles.media`
+column keeps only the app's own two-value vocabulary ('show'/'movie') rather
+than growing a third 'anime' value: which detail endpoint answered is not a
+fact this table ever needs to remember.
 
 SIMKL'S "NOT FOUND" IS NOT AN HTTP STATUS, MEASURED LIVE THE SAME DAY. An id
 with nothing behind it answers 200 with an empty JSON array (`[]`), not a 404.

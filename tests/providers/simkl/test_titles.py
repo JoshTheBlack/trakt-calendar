@@ -13,6 +13,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from app.providers.base import Media
 from app.providers.simkl import titles, transport
 
@@ -130,6 +132,58 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(fields), {"genres", "network", "country", "certification",
                                        "runtime", "status", "overview", "ids"})
         self.assertEqual((fields["genres"], fields["runtime"], fields["ids"]), ([], None, {}))
+
+
+class AnimeRedirectTests(unittest.IsolatedAsyncioTestCase):
+    """Regression for the 62-of-260-empty-payloads defect: measured live
+    2026-08-06, GET /tv/{id} 302s to GET /anime/{id} for a real fraction of
+    anime ids (100% of a 94-id sample pulled from the author's live
+    database). Driven through a REAL httpx.AsyncClient with a MockTransport
+    — genuine redirect-following, no socket — rather than patching
+    cached_get, because the bug lived in whether the client follows the
+    Location header at all, one layer below cached_get's own logic."""
+
+    async def test_a_redirected_tv_lookup_still_answers(self):
+        anime_body = {
+            "title": "GuAn", "ids": {"simkl": 3198578, "mal": "62789"},
+            "genres": ["Action", "Fantasy"], "country": "CN",
+            "certification": "PG-13", "network": "Youku", "status": "airing",
+            "runtime": 30, "overview": "A crippled youth seizes divine power.",
+        }
+
+        def handler(request):
+            if request.url.path == "/tv/3198578":
+                return httpx.Response(
+                    302, headers={"location": "/anime/3198578?client_id=cid"})
+            if request.url.path == "/anime/3198578":
+                return httpx.Response(200, json=anime_body)
+            raise AssertionError(f"unexpected path {request.url.path}")
+
+        client = httpx.AsyncClient(follow_redirects=True,
+                                   transport=httpx.MockTransport(handler))
+        with patch("app.providers.simkl.transport.catalog_client", return_value=client), \
+             patch("app.cache.get", AsyncMock(return_value=None)), \
+             patch("app.cache.set", AsyncMock()):
+            fields = await titles.fetch_title(SETTINGS, 3198578, Media.SHOW)
+        self.assertIsNotNone(fields)
+        self.assertEqual(fields["genres"], ["action", "fantasy"])
+        self.assertEqual(fields["country"], "CN")
+        self.assertEqual(fields["network"], "Youku")
+
+    async def test_a_client_that_does_not_follow_redirects_would_lose_it(self):
+        """The other half of the same proof: without follow_redirects, the
+        bare 302 reads as a non-200 and the title is treated as unanswerable
+        — this is the defect as it shipped, pinned so it cannot regress."""
+        def handler(request):
+            return httpx.Response(302, headers={"location": "/anime/3198578?client_id=cid"})
+
+        client = httpx.AsyncClient(follow_redirects=False,
+                                   transport=httpx.MockTransport(handler))
+        with patch("app.providers.simkl.transport.catalog_client", return_value=client), \
+             patch("app.cache.get", AsyncMock(return_value=None)), \
+             patch("app.cache.set", AsyncMock()):
+            fields = await titles.fetch_title(SETTINGS, 3198578, Media.SHOW)
+        self.assertIsNone(fields)
 
 
 if __name__ == "__main__":  # pragma: no cover

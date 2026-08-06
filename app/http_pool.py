@@ -68,14 +68,23 @@ class Pool:
     """
 
     __slots__ = ("name", "max_connections", "timeout", "concurrency",
-                 "_loop", "_client", "_sem")
+                 "follow_redirects", "_loop", "_client", "_sem")
 
     def __init__(self, name: str, *, max_connections: int = 8,
-                 timeout: float = 30.0, concurrency: int | None = None):
+                 timeout: float = 30.0, concurrency: int | None = None,
+                 follow_redirects: bool = False):
         self.name = name
         self.max_connections = max_connections
         self.timeout = timeout
         self.concurrency = concurrency
+        # OFF BY DEFAULT: a redirect changes which resource answered, and most
+        # of this app's services (Trakt, Sonarr, Radarr, ...) never redirect a
+        # legitimate call, so following one silently would be more likely to
+        # mask a misconfigured URL than to help. A service whose own catalogue
+        # genuinely splits across paths that 30x between each other opts in
+        # explicitly at its own Pool() declaration, with the reason written
+        # there.
+        self.follow_redirects = follow_redirects
         self._loop = None
         self._client: httpx.AsyncClient | None = None
         self._sem: asyncio.Semaphore | None = None
@@ -106,7 +115,8 @@ class Pool:
             with span("http_pool.build", service=self.name):
                 limits = httpx.Limits(max_connections=self.max_connections,
                                       max_keepalive_connections=self.max_connections)
-                self._client = httpx.AsyncClient(timeout=self.timeout, limits=limits)
+                self._client = httpx.AsyncClient(timeout=self.timeout, limits=limits,
+                                                 follow_redirects=self.follow_redirects)
         return self._client
 
     def gate(self):

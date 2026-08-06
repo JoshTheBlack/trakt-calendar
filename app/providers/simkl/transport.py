@@ -140,7 +140,22 @@ def api_params(settings: Settings, params: dict | None = None) -> dict:
 # for throughput — a month's window can reference several hundred distinct
 # titles — while staying under the 10 GET/second ceiling that applies to every
 # path regardless of caching.
-CATALOG_POOL = http_pool.Pool("simkl", max_connections=8, timeout=30, concurrency=6)
+#
+# follow_redirects=True BECAUSE GET /tv/{id} DOES NOT ANSWER FOR EVERY ANIME
+# ID THE WAY IT WAS MEASURED TO, for the one title checked before this was
+# shipped. Measured live 2026-08-06 against a sample of ids this app's own
+# drain had recorded as an empty answer: GET /tv/{id} 302s to
+# GET /anime/{id} for a real fraction of anime titles (100% of a 94-id
+# sample pulled from the author's live database) — the redirect target
+# itself, not the /tv body, is where genres/network/country/certification
+# actually live for those. Without following it, `titles._fetch_json` reads
+# the bare 302 as a non-200 and returns None, which app/calendar/enrich.py
+# then stores as a genuine, backed-off failure — indistinguishable from a
+# title Simkl truly has nothing for. httpx resolves the (relative, same-host)
+# Location header on its own, so this costs nothing for the titles that
+# answer directly at /tv/{id} and silently fixes the ones that do not.
+CATALOG_POOL = http_pool.Pool("simkl", max_connections=8, timeout=30, concurrency=6,
+                              follow_redirects=True)
 
 # EVERYTHING UNDER /sync/ AND /users/. The docs mandate SEQUENTIAL requests off
 # the cached paths, so this pool admits exactly one request at a time. Two
