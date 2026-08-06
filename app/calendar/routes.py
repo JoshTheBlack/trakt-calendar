@@ -179,7 +179,7 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     return saved
 
 
-def _coverage_gap(prefs: source_prefs.SourcePrefs, linked: frozenset[str],
+def _coverage_gap(prefs: source_prefs.SourcePrefs,
                   year: int, month: int, settings) -> tuple[str | None, str | None]:
     """(message, switch_url) when this viewer has named ONE calendar source and
     that source's declared reach does not cover {year, month} at all — the
@@ -200,7 +200,7 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs, linked: frozenset[str],
 
     if prefs.calendar_source in (source_prefs.AUTO, source_prefs.BOTH):
         return None, None
-    admitted = providers.calendar_sources(prefs=prefs, linked=linked, settings=settings)
+    admitted = providers.calendar_sources(prefs=prefs, settings=settings)
     if not admitted or any(calendar_cache.month_covered(p, year, month) for p in admitted):
         return None, None
     named = admitted[0].label
@@ -255,7 +255,7 @@ class MonthAssembly:
 async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
                          year: int, month: int, not_watching: set[str],
                          source_selection: source_prefs.SourcePrefs,
-                         linked: frozenset[str]) -> MonthAssembly:
+                         ) -> MonthAssembly:
     """Fetch, filter and group a WHOLE month, and resolve what changed since this
     viewer last looked at it.
 
@@ -269,7 +269,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.error = NOT_CONFIGURED
         return assembly
 
-    message, switch_url = _coverage_gap(source_selection, linked, year, month, settings)
+    message, switch_url = _coverage_gap(source_selection, year, month, settings)
     if message is not None:
         assembly.coverage_gap = True
         assembly.switch_url = switch_url
@@ -291,7 +291,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
                 movie_certifications=prefs["movie_certifications"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
-                prefs=source_selection, linked=linked,
+                prefs=source_selection,
             )
             sp.set(items=meta["total"])
         assembly.total = meta["total"]
@@ -418,14 +418,12 @@ async def calendar_page(request: Request):
     tz = _resolve_viewer_tz(user, settings)
     days = _calendar.monthrange(year, month)[1]
 
-    # Which calendar source(s) this VIEWER reads from, and what they have
-    # linked — the calendar half of the same source-preference seam the
-    # tracker already reads (app/sources/prefs.py). `linked` comes from auth,
-    # never from Settings: a calendar source needs no token to be worth
-    # asking, so the tracker's shortcut of reading it off Settings does not
-    # transfer here.
+    # Which calendar source(s) this VIEWER reads from — the calendar half of the
+    # same source-preference seam the tracker already reads
+    # (app/sources/prefs.py). What they have LINKED is deliberately not part of
+    # it: a calendar needs no viewer credential, so linkage narrows the tracker
+    # and nothing here (app/sources/prefs.py's `admits_calendar`).
     source_selection = await _viewer_source_selection(request, user)
-    linked = user.linked_providers
 
     # This viewer's marks, read ONCE and handed to the assembly so the cards come
     # out of the template already carrying the class. The client used to add it
@@ -433,7 +431,7 @@ async def calendar_page(request: Request):
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     month_view = await assemble_month(
         user, settings, prefs, endpoint, tz, year, month, not_watching,
-        source_selection, linked)
+        source_selection)
     view = _view_preferences(prefs, settings)
 
     _apply_day_layout(month_view.grouped, not_watching=not_watching,
@@ -602,7 +600,6 @@ async def calendar_day(request: Request):
     # override, so this read asks the same source(s) the shell's own numbers
     # for the month were computed from.
     source_selection = await _viewer_source_selection(request, user)
-    linked = user.linked_providers
 
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
@@ -624,7 +621,7 @@ async def calendar_day(request: Request):
                 movie_certifications=prefs["movie_certifications"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
-                prefs=source_selection, linked=linked,
+                prefs=source_selection,
             )
             sp.set(items=meta["total"])
         # Same per-day presentation the shell's own blocks were rendered with, so a

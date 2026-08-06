@@ -47,6 +47,35 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(prefs.admits(prefs.AUTO, "trakt", {"trakt"}),
                          prefs.admits(prefs.AUTO, Source.TRAKT, {Source.TRAKT}))
 
+    def test_the_calendar_admits_every_source_under_auto_whoever_is_linked(self):
+        """The two halves read `auto` differently, and this is the difference.
+        A calendar is fetched with the instance's own credentials or with none,
+        so a viewer's links buy nothing and withhold nothing — an account whose
+        only link is to one service still reads the other's calendar, and so
+        does one that has linked nothing at all. `admits_calendar` takes no
+        linked set, which is what makes those three the same call."""
+        auto = prefs.SourcePrefs(user_id=1, calendar_source=prefs.AUTO)
+        self.assertTrue(auto.admits_calendar(Source.TRAKT))
+        self.assertTrue(auto.admits_calendar(Source.SIMKL))
+
+    def test_a_stated_calendar_selection_still_means_what_it_says(self):
+        """Widening the default must not widen a decision."""
+        named = prefs.SourcePrefs(user_id=1, calendar_source="simkl")
+        self.assertTrue(named.admits_calendar(Source.SIMKL))
+        self.assertFalse(named.admits_calendar(Source.TRAKT))
+        both = prefs.SourcePrefs(user_id=1, calendar_source=prefs.BOTH)
+        self.assertTrue(both.admits_calendar(Source.TRAKT))
+        self.assertTrue(both.admits_calendar(Source.SIMKL))
+
+    def test_the_tracker_still_needs_the_link_the_calendar_does_not(self):
+        """Stated explicitly so that widening the calendar cannot quietly widen
+        this too. Reading one person's viewing history means asking with THEIR
+        token, so a service they have not linked has nothing to answer with."""
+        auto = prefs.SourcePrefs(user_id=1, tracker_source=prefs.AUTO)
+        self.assertTrue(auto.admits_tracker(Source.TRAKT, {"trakt"}))
+        self.assertFalse(auto.admits_tracker(Source.SIMKL, {"trakt"}))
+        self.assertFalse(auto.admits_tracker(Source.TRAKT, set()))
+
     def test_every_known_service_is_a_valid_selection(self):
         """Spelled from Source rather than restated, so a service the app has
         cannot be one this refuses."""

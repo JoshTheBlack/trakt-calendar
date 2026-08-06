@@ -692,7 +692,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          show_certifications: str = "", movie_certifications: str = "",
                          network_filter=None, not_watching_ids: set[str] | None = None,
                          allow_fetch: bool = True, now: int | None = None,
-                         prefs=None, linked=None,
+                         prefs=None,
                          ) -> tuple[list[dict], dict]:
     """Assemble one viewer's calendar for the local day span [start_date, end_date].
 
@@ -717,12 +717,12 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     their hyphenated slugs, so it comes before rendering, which is what
     title-cases them.
 
-    `prefs` AND `linked` ARE THIS VIEWER'S SOURCE SELECTION, AND THEY ARE READ
-    ONLY HERE — never on the way down to the fill. They reach `resolve`, which
-    drops a group no admitted source describes and picks between the ones that
-    do. The windows underneath were filled by asking everybody, so two viewers
-    who have chosen differently read the very same rows and each sees their own
-    answer out of them; a selection cannot narrow what anybody else is served.
+    `prefs` IS THIS VIEWER'S SOURCE SELECTION, AND IT IS READ ONLY HERE — never
+    on the way down to the fill. It reaches `resolve`, which drops a group no
+    admitted source describes and picks between the ones that do. The windows
+    underneath were filled by asking everybody, so two viewers who have chosen
+    differently read the very same rows and each sees their own answer out of
+    them; a selection cannot narrow what anybody else is served.
     `prefs=None` means no account is asking (a public share page) and admits
     everything the window holds.
 
@@ -817,7 +817,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # render is per-entry object building and timezone arithmetic, and is the one
     # that grows with a busy month; the grouping is a sort plus a walk.
     with span("calcache.filter", entries=len(groups)) as sp:
-        records = [r for r in (calendar_resolve.resolve(group, prefs, linked or ())
+        records = [r for r in (calendar_resolve.resolve(group, prefs)
                                for group in dedupe_groups(groups)) if r is not None]
         # ONE BATCHED DB READ, NO NETWORK CALL: overlay whatever the background
         # enrichment drain already knows onto this read's Simkl records. See

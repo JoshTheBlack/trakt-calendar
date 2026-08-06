@@ -298,8 +298,6 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
     touching what the next person gets.
     """
 
-    LINKED = frozenset({"trakt", "simkl"})
-
     def groups(self):
         """Three groups: one both services listed, one only Trakt, one only
         Simkl — which is the shape a real window has (measured on the author's
@@ -311,11 +309,10 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
             _record(Source.SIMKL, "simkl-only"),
         ])
 
-    def read(self, selection, linked=None):
+    def read(self, selection):
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
-        linked = self.LINKED if linked is None else linked
         return [(r.title, str(r.source))
-                for r in (calendar_resolve.resolve(g, prefs, linked) for g in self.groups())
+                for r in (calendar_resolve.resolve(g, prefs) for g in self.groups())
                 if r is not None]
 
     def test_naming_one_source_drops_the_groups_only_the_other_describes(self):
@@ -332,22 +329,20 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
             self.read("both"),
             [("Shared", "trakt"), ("Trakt-Only", "trakt"), ("Simkl-Only", "simkl")])
 
-    def test_auto_follows_the_links(self):
-        self.assertEqual([s for _, s in self.read("auto", frozenset({"simkl"}))],
-                         ["simkl", "simkl"])
-        self.assertEqual([s for _, s in self.read("auto", frozenset({"trakt"}))],
-                         ["trakt", "trakt"])
+    def test_auto_reads_every_source_the_instance_can_fill_from(self):
+        """And it says nothing about who is linked, because it cannot: neither
+        `resolve` nor `admits_calendar` accepts a linked set at all. A calendar
+        is fetched with the instance's own credentials or with none, so no
+        viewer identity is spent on one — the same account gets these three
+        whether it has linked both services, one of them, or neither."""
+        self.assertEqual(
+            self.read("auto"),
+            [("Shared", "trakt"), ("Trakt-Only", "trakt"), ("Simkl-Only", "simkl")])
 
-    def test_an_account_that_has_linked_nothing_still_has_a_calendar(self):
-        """'auto' follows the links, and there are none to follow — but a
-        calendar needs no link to be worth reading, and blanking it for everybody
-        who only ever signs in would be a strange reading of "no opinion"."""
-        self.assertEqual(len(self.read("auto", frozenset())), 3)
-
-    def test_a_stated_selection_is_honoured_with_nothing_linked(self):
-        """The absence of a link is the absence of a statement; naming a service
-        IS a statement and stays one whatever is linked."""
-        self.assertEqual(self.read("simkl", frozenset()),
+    def test_a_stated_selection_is_still_exactly_what_it_says(self):
+        """Widening the default must not widen a decision: naming one service
+        still drops the groups only the other describes."""
+        self.assertEqual(self.read("simkl"),
                          [("Shared", "simkl"), ("Simkl-Only", "simkl")])
 
     def test_no_account_asking_reads_everything(self):
@@ -369,8 +364,6 @@ class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         db.close_thread_connection()
 
-    LINKED = frozenset({"trakt", "simkl"})
-
     async def fill_and_read(self, selection, *, allow_fetch=True):
         """One span read as `selection`, with the fill answering for both
         services. `allow_fetch=False` proves the read came out of the stored
@@ -386,7 +379,7 @@ class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
             grouped, meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 15), end_date=date(2026, 7, 15),
-                prefs=prefs, linked=self.LINKED, allow_fetch=allow_fetch, now=1000)
+                prefs=prefs, allow_fetch=allow_fetch, now=1000)
         return [i.id for g in grouped for i in g["items"]], meta
 
     async def test_a_viewer_naming_one_source_does_not_narrow_what_is_stored(self):

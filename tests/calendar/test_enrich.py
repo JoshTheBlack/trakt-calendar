@@ -481,7 +481,7 @@ class FilterExemptionThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase)
             grouped, _meta = await calendar_cache.assemble_range(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"),
                 start_date=date(2026, 7, 7), end_date=date(2026, 7, 7),
-                countries="-kr", now=1000, prefs=prefs, linked=("trakt", "simkl"))
+                countries="-kr", now=1000, prefs=prefs)
             titles = [i.title for g in grouped for i in g["items"]]
             self.assertNotIn("Moonshadow", titles, f"selection={selection}")
 

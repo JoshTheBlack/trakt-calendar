@@ -63,11 +63,11 @@ class AssembleMonthTests(unittest.TestCase):
     """assemble_month — the month's cards plus every number stated about them."""
 
     def _run(self, settings=None, prefs=None, not_watching=frozenset(),
-             source_selection=None, linked=frozenset()):
+             source_selection=None):
         return asyncio.run(calendar_routes.assemble_month(
             USER, settings or Settings(trakt_client_id="cid", trakt_access_token="tok"),
             prefs or NO_PREFS, ENDPOINT, UTC, 2026, 7, set(not_watching),
-            source_selection or DEFAULT_SOURCE_SELECTION, linked))
+            source_selection or DEFAULT_SOURCE_SELECTION))
 
     def test_no_configured_source_reports_it_and_assembles_nothing(self):
         """The one path that must not touch the cache at all — there is nobody to

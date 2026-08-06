@@ -28,7 +28,6 @@ viewer everything they asked for.
 from __future__ import annotations
 
 from ..providers.base import Record, Source
-from ..sources import prefs as source_prefs
 
 
 def source_order(group) -> list[str]:
@@ -43,7 +42,7 @@ def source_order(group) -> list[str]:
     return [str(s) for s in Source if str(s) in by_source]
 
 
-def admitted_order(group, prefs=None, linked=()) -> list[str]:
+def admitted_order(group, prefs=None) -> list[str]:
     """The sources in `group` this viewer will read, in declared order.
 
     THE PER-VIEWER EXCLUSION, AND IT HAS TO HAPPEN HERE. The window this group
@@ -57,26 +56,21 @@ def admitted_order(group, prefs=None, linked=()) -> list[str]:
     `prefs=None` means no account is asking — a public share page — and admits
     every source the group holds.
 
-    AN ACCOUNT THAT HAS LINKED NOTHING STILL HAS A CALENDAR. 'auto' means "follow
-    the links", and with no links there is nothing to follow — but a calendar
-    needs no link to be worth reading: this instance's own client credentials
-    fetch it, and one source's calendar files need no credential at all. Reading
-    the absence of a link as a decision to see nothing would blank the calendar
-    for every account on an instance whose operator configured the services
-    centrally and whose users only ever sign in, which is the ordinary shape of a
-    self-hosted install. Zero links is the absence of a statement, not a
-    statement of "none" — a stated selection ('both', or one service by name) is
-    honoured whatever is linked.
+    WHAT SOMEBODY HAS LINKED DOES NOT ENTER INTO IT, and this function takes no
+    `linked` so that it cannot start to. A calendar is fetched with the
+    instance's own credentials or with none at all, so no viewer's identity is
+    spent on one and there is no credential a link could supply — the account's
+    preference is the only narrowing there is. `app/sources/prefs.py`'s
+    `admits_calendar` owns that reasoning; linkage governs the tracker, where it
+    is correct because reading somebody's history needs their token.
     """
     order = source_order(group)
     if prefs is None:
         return order
-    if prefs.calendar_source == source_prefs.AUTO and not linked:
-        return order
-    return [name for name in order if prefs.admits_calendar(name, linked)]
+    return [name for name in order if prefs.admits_calendar(name)]
 
 
-def resolve(group, prefs=None, linked=()) -> Record | None:
+def resolve(group, prefs=None) -> Record | None:
     """The one record this viewer sees for `group`, or None when the group holds
     nothing this viewer reads.
 
@@ -97,7 +91,7 @@ def resolve(group, prefs=None, linked=()) -> Record | None:
     all read it. Handing back the one source's own ids would quietly narrow that
     union to whichever service happened to win.
     """
-    order = admitted_order(group, prefs, linked)
+    order = admitted_order(group, prefs)
     if not order:
         return None
     payload = (group.get("by_source") or {})[order[0]]

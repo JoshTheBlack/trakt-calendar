@@ -2,10 +2,11 @@
 
 Backs the `source_prefs` table. Three facts live here:
 
-  - CALENDAR SOURCE and TRACKER SOURCE: which of the linked services each half of
-    the app asks. Separately, because they are separate decisions — somebody can
+  - CALENDAR SOURCE and TRACKER SOURCE: which services each half of the app
+    asks. Separately, because they are separate decisions — somebody can
     reasonably want every service's calendar and only one service's idea of what
-    they have watched.
+    they have watched. The two halves also read `auto` differently, and
+    `admits_calendar` below is where that is written down.
   - PRECEDENCE: when two services fill the same field with different values,
     whose value the viewer sees. Resolved at READ over already-cached data, so
     changing it is instant and invalidates nothing.
@@ -27,9 +28,12 @@ from dataclasses import dataclass, field, replace
 from .. import db
 from ..providers.base import Source
 
-# Every service this account has linked, whichever they turn out to be. THE
-# DEFAULT, and it follows the links: linking a second service starts reading it
-# without anybody being asked to state anything, and unlinking one quietly stops.
+# "Whatever there is to ask", stated by nobody. THE DEFAULT, and what it comes
+# out to differs by half: for the TRACKER it follows the links, so linking a
+# second service starts reading it without anybody being asked to state
+# anything and unlinking one quietly stops; for the CALENDAR it is every source
+# the instance can fill from, because no link is spent reading one. See
+# `admits` and `admits_calendar`.
 AUTO = "auto"
 
 # Two services, stated. DELIBERATELY NOT THE SAME VALUE AS `auto`, and the
@@ -49,6 +53,12 @@ DEFAULT_SELECTION = AUTO
 
 def admits(selection: str, source: Source | str, linked) -> bool:
     """Whether `selection` says to ask `source`, given the services `linked`.
+
+    THE TRACKER'S PREDICATE. Reading one person's viewing history means asking a
+    service for THEIR data with THEIR token, so under `auto` — "follow the
+    links" — a service this account has no identity for has nothing to be asked
+    for and is not asked. `admits_tracker` is the only caller; the calendar
+    answers a different question, and `admits_calendar` below says why.
 
     `linked` is the set of services this account actually has an identity for.
     It is passed in rather than looked up because who is linked is auth's fact,
@@ -77,8 +87,27 @@ class SourcePrefs:
     tracker_source: str = DEFAULT_SELECTION
     precedence: dict = field(default_factory=dict)
 
-    def admits_calendar(self, source: Source | str, linked) -> bool:
-        return admits(self.calendar_source, source, linked)
+    def admits_calendar(self, source: Source | str) -> bool:
+        """Whether this account's calendar reads `source`.
+
+        IT TAKES NO `linked`, AND THAT IS THE WHOLE DIVERGENCE FROM `admits`.
+        A calendar is fetched with the INSTANCE's credentials or with none at
+        all — Trakt's windows go out under this instance's client id and secret,
+        and one source's calendar files are static public JSON needing nothing —
+        so no viewer's identity is spent reading one, and there is no credential
+        for a link to supply. Gating on links would make a signed-in account see
+        LESS than an anonymous visitor to a share link on the same instance,
+        which is backwards, and would take Trakt's calendar away from somebody
+        whose only link happens to be to the other service.
+
+        So `auto` here means "every source this INSTANCE can fill from", not
+        "every source this account has linked". A STATED selection — 'both', or
+        one service by name — is still exactly what it says and is honoured
+        whatever is linked; this only ever widens the default.
+        """
+        if self.calendar_source == AUTO:
+            return True
+        return admits(self.calendar_source, source, ())
 
     def admits_tracker(self, source: Source | str, linked) -> bool:
         return admits(self.tracker_source, source, linked)

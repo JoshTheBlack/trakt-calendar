@@ -180,6 +180,19 @@ class TestRegistry:
         assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
         assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(trakt_only)]
 
+    def test_an_accounts_auto_asks_every_source_the_instance_can_fill_from(self):
+        """The fill is instance-credentialed, so an account's links have no say
+        in it: `calendar_sources` takes no linked set, and `auto` therefore
+        cannot come out narrower for somebody who linked one service than for a
+        share-link visitor who is nobody at all."""
+        auto = prefs.SourcePrefs(user_id=1, calendar_source=prefs.AUTO)
+        assert ({p.source for p in providers.calendar_sources(prefs=auto)}
+                == {p.source for p in providers.calendar_sources()})
+
+    def test_a_stated_selection_still_narrows_the_fill(self):
+        named = prefs.SourcePrefs(user_id=1, calendar_source="simkl")
+        assert [p.source for p in providers.calendar_sources(prefs=named)] == [Source.SIMKL]
+
     def test_default_settings_still_admits_unconfigured_simkl(self):
         """simkl_public_calendar_enabled defaults True, so passing a Settings
         object at all — which no caller did before this switch existed — must

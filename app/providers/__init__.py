@@ -94,7 +94,7 @@ def registered() -> dict[Source, Provider]:
     return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
-def calendar_sources(*, prefs=None, linked=None, settings=None) -> list[Provider]:
+def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
     """Every source that could put something on this account's calendar, in
     declared order. THE SET THE CACHE FILL ASKS.
 
@@ -105,9 +105,9 @@ def calendar_sources(*, prefs=None, linked=None, settings=None) -> list[Provider
       - it carries a `calendar_port` to be asked THROUGH, so declaring endpoints
         without one is caught here rather than as an AttributeError on whichever
         source an instance happens to have;
-      - the account's `calendar_source` preference admits it, given what it has
-        LINKED. `prefs=None` means "no account is asking" — the pre-warm and the
-        instance-wide question below — and admits every source.
+      - the account's `calendar_source` preference admits it. `prefs=None` means
+        "no account is asking" — the pre-warm and the instance-wide question
+        below — and admits every source.
 
     IT DELIBERATELY DOES NOT ASK `is_configured`, and the pairing with
     `for_calendar_sources` below is the whole point. Whether a calendar can be
@@ -119,11 +119,13 @@ def calendar_sources(*, prefs=None, linked=None, settings=None) -> list[Provider
     fetch itself refuses when it genuinely cannot be made, and that refusal
     degrades one source rather than a month.
 
-    `linked` is passed in for the same reason app/sources/prefs.py takes it: who
-    is linked is auth's fact. Note this is where the calendar and the tracker
-    genuinely differ — the tracker can read "linked" off the per-request Settings
-    because every source it asks needs that account's token, and a calendar
-    source needing no token would never appear there.
+    IT TAKES NO `linked`, AND THE CONTRAST WITH `for_tracker_ports` BELOW IS THE
+    POINT. The tracker asks every source for one account's own data with that
+    account's own token, so a service they have not linked cannot answer and is
+    not asked. A calendar is fetched with the INSTANCE's credentials or with
+    none at all, so nothing here is a viewer's to supply — see
+    app/sources/prefs.py's `admits_calendar`, which is where the calendar's
+    `auto` is defined as "every source this instance can fill from".
 
     `settings=None` MEANS THE SAME "DON'T ASK" AS `prefs=None` — every existing
     caller that has not been updated to pass one keeps today's behaviour exactly.
@@ -143,7 +145,7 @@ def calendar_sources(*, prefs=None, linked=None, settings=None) -> list[Provider
     for source, provider in registered().items():
         if not provider.capabilities.endpoints or provider.calendar_port is None:
             continue
-        if prefs is not None and not prefs.admits_calendar(source, linked or ()):
+        if prefs is not None and not prefs.admits_calendar(source):
             continue
         if (settings is not None and source is Source.SIMKL
                 and not provider.is_configured(settings)
@@ -153,7 +155,7 @@ def calendar_sources(*, prefs=None, linked=None, settings=None) -> list[Provider
     return out
 
 
-def for_calendar_sources(settings, *, prefs=None, linked=None) -> list[Provider]:
+def for_calendar_sources(settings, *, prefs=None) -> list[Provider]:
     """The calendar sources this instance can actually USE right now — the same
     set as `calendar_sources`, narrowed to the ones whose credentials are filled
     in.
@@ -164,7 +166,7 @@ def for_calendar_sources(settings, *, prefs=None, linked=None) -> list[Provider]
     an explanation for, not an error — and it is the state the page explains
     rather than rendering an empty month.
     """
-    return [p for p in calendar_sources(prefs=prefs, linked=linked, settings=settings)
+    return [p for p in calendar_sources(prefs=prefs, settings=settings)
             if p.is_configured(settings)]
 
 
