@@ -41,6 +41,7 @@ from ..media import logos
 from ..perftrace import span
 from ..providers.trakt import TraktError
 from ..providers.trakt.detail import fetch_details, fetch_tile_info
+from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
 
@@ -158,6 +159,60 @@ def _requested_endpoint(request: Request, prefs: dict, settings):
     )
 
 
+async def _viewer_source_selection(request: Request, user) -> source_prefs.SourcePrefs:
+    """This viewer's saved source preferences, with `calendar_source` swapped
+    for a `?source=` override when the query names one of the app's own
+    selections.
+
+    THE OVERRIDE IS NEVER PERSISTED. It exists so a coverage-gap message (see
+    _coverage_gap below) can offer "show Trakt instead" as a link for THIS
+    view only, without silently rewriting the account's saved preference — the
+    same reason a share link's own view parameters never write back to the
+    owner's row. An unrecognized value is ignored rather than refused, since
+    this is a read of the calendar and not a form that owes the visitor an
+    error for a stray query string.
+    """
+    saved = await source_prefs.load(user.user_id)
+    requested = request.query_params.get("source")
+    if requested in source_prefs.SELECTIONS:
+        return dataclasses.replace(saved, calendar_source=requested)
+    return saved
+
+
+def _coverage_gap(prefs: source_prefs.SourcePrefs, linked: frozenset[str],
+                  year: int, month: int) -> tuple[str | None, str | None]:
+    """(message, switch_url) when this viewer has named ONE calendar source and
+    that source's declared reach does not cover {year, month} at all — the
+    explicit "Simkl doesn't reach this month" state. (None, None) otherwise,
+    including for 'auto' and 'both', which are never a single source's
+    promise to keep.
+
+    ROUTE-LEVEL BY DESIGN. The fill itself (app/providers/__init__.py's
+    calendar_sources, app/calendar/cache.py's _covers) already skips a source
+    outside its window with no route learning a date range belonging to a
+    particular service — so a month simply renders short under `source=both`,
+    which is correct and needs no message. Naming ONE source and getting
+    nothing back is different: an empty calendar reads as "nothing airs then"
+    when the honest answer is "this source does not reach that far", and only
+    the route knows which of those happened.
+    """
+    from .. import providers  # deferred: see the DECLARED_EDGES note for CALENDAR -> SOURCES
+
+    if prefs.calendar_source in (source_prefs.AUTO, source_prefs.BOTH):
+        return None, None
+    admitted = providers.calendar_sources(prefs=prefs, linked=linked)
+    if not admitted or any(calendar_cache.month_covered(p, year, month) for p in admitted):
+        return None, None
+    named = admitted[0].label
+    message = f"{named}'s calendar doesn't reach {_calendar.month_name[month]} {year}."
+    alternatives = [p for p in providers.registered().values()
+                   if str(p.source) != prefs.calendar_source]
+    switch_url = None
+    if alternatives:
+        switch_url = f"?year={year}&month={month}&source={alternatives[0].source}"
+    return message, switch_url
+
+
 @dataclasses.dataclass
 class MonthAssembly:
     """A month's cards plus every number the shell states ABOUT that month.
@@ -188,10 +243,19 @@ class MonthAssembly:
     # without asking the DOM, which only ever knows about the cards it holds.
     show_counts: dict[str, int] = dataclasses.field(default_factory=dict)
     error: str | None = None
+    # A Simkl-only month outside the declared coverage window's explicit
+    # empty state: set together, and only together, by _coverage_gap.
+    # `error` still carries the message a viewer reads — this
+    # pair is what the template uses to also offer the switch-source link,
+    # which a plain "not configured" error has none of.
+    coverage_gap: bool = False
+    switch_url: str | None = None
 
 
 async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
-                         year: int, month: int, not_watching: set[str]) -> MonthAssembly:
+                         year: int, month: int, not_watching: set[str],
+                         source_selection: source_prefs.SourcePrefs,
+                         linked: frozenset[str]) -> MonthAssembly:
     """Fetch, filter and group a WHOLE month, and resolve what changed since this
     viewer last looked at it.
 
@@ -203,6 +267,13 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
     assembly = MonthAssembly()
     if not settings.calendar_source_configured:
         assembly.error = NOT_CONFIGURED
+        return assembly
+
+    message, switch_url = _coverage_gap(source_selection, linked, year, month)
+    if message is not None:
+        assembly.coverage_gap = True
+        assembly.switch_url = switch_url
+        assembly.error = message
         return assembly
 
     days = _calendar.monthrange(year, month)[1]
@@ -220,6 +291,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
                 movie_certifications=prefs["movie_certifications"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
+                prefs=source_selection, linked=linked,
             )
             sp.set(items=meta["total"])
         assembly.total = meta["total"]
@@ -346,12 +418,22 @@ async def calendar_page(request: Request):
     tz = _resolve_viewer_tz(user, settings)
     days = _calendar.monthrange(year, month)[1]
 
+    # Which calendar source(s) this VIEWER reads from, and what they have
+    # linked — the calendar half of the same source-preference seam the
+    # tracker already reads (app/sources/prefs.py). `linked` comes from auth,
+    # never from Settings: a calendar source needs no token to be worth
+    # asking, so the tracker's shortcut of reading it off Settings does not
+    # transfer here.
+    source_selection = await _viewer_source_selection(request, user)
+    linked = user.linked_providers
+
     # This viewer's marks, read ONCE and handed to the assembly so the cards come
     # out of the template already carrying the class. The client used to add it
     # after the page had painted, which is what made hidden items visibly pop out.
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     month_view = await assemble_month(
-        user, settings, prefs, endpoint, tz, year, month, not_watching)
+        user, settings, prefs, endpoint, tz, year, month, not_watching,
+        source_selection, linked)
     view = _view_preferences(prefs, settings)
 
     _apply_day_layout(month_view.grouped, not_watching=not_watching,
@@ -368,7 +450,8 @@ async def calendar_page(request: Request):
     inline_groups = month_view.grouped[:INITIAL_DAY_BLOCKS]
     skeleton_groups = month_view.grouped[INITIAL_DAY_BLOCKS:]
     for group in skeleton_groups:
-        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]))
+        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]),
+                                source=request.query_params.get("source"))
 
     context = {
         "request": request,
@@ -407,6 +490,12 @@ async def calendar_page(request: Request):
                                 not_watching, view["hide_not_watching"]),
         "error": month_view.error,
         "partial": month_view.partial,
+        # A Simkl-only month outside its declared coverage window renders
+        # this explicit state rather than a blank calendar. `switch_url` is
+        # the query string to append to THIS page's own URL to preview the
+        # other source without saving anything.
+        "coverage_gap": month_view.coverage_gap,
+        "switch_url": month_view.switch_url,
         "generated": datetime.now().strftime("%H:%M"),
         # Sonarr/Radarr/Seerr writes land in the operator's own shared libraries
         # and Seerr's requests all carry one app-wide API key, so they are an
@@ -456,12 +545,21 @@ def _month_date(value, year: int, month: int) -> date | None:
     return parsed
 
 
-def _day_url(endpoint_key: str, day: date) -> str:
+def _day_url(endpoint_key: str, day: date, *, source: str | None = None) -> str:
     """The content request for one day. Built in one place because the shell's
     placeholder and the retry button on a day that failed must ask for exactly the
-    same thing."""
-    return (f"/calendar/day?endpoint={quote(endpoint_key)}"
-            f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+    same thing.
+
+    `source` carries the shell's own `?source=` override forward, when it has
+    one, so a day fetched after the fact reads from the same source selection
+    the shell resolved the month with — the shell never puts one in a
+    placeholder's URL for a viewer who never overrode anything, so the common
+    case is unchanged."""
+    url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
+          f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+    if source:
+        url += f"&source={quote(source)}"
+    return url
 
 
 @guard.get("/calendar/day", AuthLevel.CALENDAR_APPROVED)
@@ -499,6 +597,13 @@ async def calendar_day(request: Request):
     if not settings.calendar_source_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
 
+    # Same source selection the shell resolved for this month — see _day_url:
+    # the placeholder it built for this day already carries the same `source`
+    # override, so this read asks the same source(s) the shell's own numbers
+    # for the month were computed from.
+    source_selection = await _viewer_source_selection(request, user)
+    linked = user.linked_providers
+
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     context = {
@@ -507,7 +612,7 @@ async def calendar_day(request: Request):
         "new_ids": set(),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
-        "retry_url": _day_url(endpoint.key, day),
+        "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source")),
         "partial": False,
     }
     try:
@@ -519,6 +624,7 @@ async def calendar_day(request: Request):
                 movie_certifications=prefs["movie_certifications"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
+                prefs=source_selection, linked=linked,
             )
             sp.set(items=meta["total"])
         # Same per-day presentation the shell's own blocks were rendered with, so a

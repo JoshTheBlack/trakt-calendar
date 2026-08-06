@@ -224,6 +224,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "which services back the tracker for an account is that account's stated "
         "preference, so the sync asks the preference store before it asks any "
         "source"),
+    (CALENDAR, SOURCES): Edge(
+        "which services fill a viewer's calendar is that account's stated "
+        "preference, so the route reads it before asking the registry which "
+        "sources may fill a window — the same reason the tracker reaches SOURCES"),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
         "links a Discord post at the viewer's own calendar"),

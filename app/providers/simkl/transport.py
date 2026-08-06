@@ -148,6 +148,18 @@ CATALOG_POOL = http_pool.Pool("simkl", max_connections=8, timeout=30, concurrenc
 # stall the next call behind it.
 SYNC_POOL = http_pool.Pool("simkl-sync", max_connections=2, timeout=30, concurrency=1)
 
+# THE CALENDAR CDN — data.simkl.in, NOT api.simkl.com. A third pool rather than
+# reusing CATALOG_POOL: that pool is sized for the API host's catalog and
+# episode lookups, which carry a client_id and are subject to this instance's
+# 412 block; the CDN files take neither, are edge-cached with parallel requests
+# explicitly allowed, and can run several megabytes each. A slow calendar file
+# holding every connection open would starve a catalog lookup that has nothing
+# to do with it, which is exactly the coupling the two-pool split above exists
+# to avoid — so the calendar files get their own budget rather than sharing
+# either existing one. Timeout is longer than the other pools': the largest
+# archive months measured over 7 MB.
+CDN_POOL = http_pool.Pool("simkl-cdn", max_connections=6, timeout=45, concurrency=4)
+
 # A SEMAPHORE IS NOT ENOUGH FOR THE POST CAP, which is why this exists at all.
 # `concurrency=1` bounds how many requests are IN FLIGHT, not how fast they
 # LEAVE: two POSTs issued back to back both go out inside the same second and
@@ -190,6 +202,13 @@ def sync_client() -> httpx.AsyncClient:
     catalog_client, and deliberately a different client: sharing one would let a
     bulk catalog read hold every connection while a personal read waits."""
     return SYNC_POOL.client()
+
+
+def cdn_client() -> httpx.AsyncClient:
+    """The pooled client for the calendar CDN (data.simkl.in). Same ownership
+    rule as catalog_client — see CDN_POOL for why this is its own pool rather
+    than sharing the API host's."""
+    return CDN_POOL.client()
 
 
 # ---------------------------------------------------------------------------

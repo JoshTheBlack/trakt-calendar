@@ -186,7 +186,11 @@
 </nav>
 
 {% if error %}
-<div class="error-banner">⚠️ {{ error }}</div>
+{# A coverage gap (a stated single calendar source that doesn't reach
+   this month) is not a failure — it renders the same banner shape so it is
+   never mistaken for a blank calendar, but offers the other source's view
+   instead of a bare warning triangle. #}
+<div class="{{ 'warning-banner' if coverage_gap else 'error-banner' }}">⚠️ {{ error }}{% if coverage_gap and switch_url %} <a href="{{ switch_url }}">Show it anyway</a>{% endif %}</div>
 {% elif partial %}
 <div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
 {% endif %}

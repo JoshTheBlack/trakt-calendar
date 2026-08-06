@@ -34,15 +34,19 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual([p.source for p in providers.for_calendar_sources(configured)],
                          [Source.TRAKT])
 
-    def test_simkl_credentials_alone_are_not_a_calendar_source(self):
-        """It has no calendar module yet, so it answers no endpoint — and a
-        source that cannot answer any must not make the instance report that it
-        has a calendar source. That would render an empty month, which reads as
-        "nothing airs then" instead of "nobody was asked"."""
+    def test_simkl_credentials_alone_are_now_a_calendar_source(self):
+        """Simkl's calendar module now exists. The calendar CDN itself needs no
+        credential at all, but `is_configured` still asks for the tracker's
+        client id and access token, because that is the credential the tracker
+        needs and `is_configured` is one answer for the whole source — so an
+        instance that has linked Simkl for the tracker gets its calendar read
+        too, which is what an instance configuring Simkl for the first time
+        actually sees."""
         simkl_only = Settings(simkl_client_id="id", simkl_access_token="token")
         self.assertTrue(self.simkl.is_configured(simkl_only))
-        self.assertEqual(providers.for_calendar_sources(simkl_only), [])
-        self.assertFalse(simkl_only.calendar_source_configured)
+        self.assertEqual([p.source for p in providers.for_calendar_sources(simkl_only)],
+                         [Source.SIMKL])
+        self.assertTrue(simkl_only.calendar_source_configured)
 
     def test_it_is_configured_only_with_both_halves_of_the_credential(self):
         self.assertFalse(self.simkl.is_configured(Settings()))
@@ -51,12 +55,14 @@ class RegistrationTests(unittest.TestCase):
         self.assertTrue(self.simkl.is_configured(
             Settings(simkl_client_id="cid", simkl_access_token="tok")))
 
-    def test_it_answers_no_calendar_endpoint_yet(self):
-        """An empty endpoint set is how the fill path skips a source without any
-        route learning which source it is skipping."""
+    def test_it_answers_every_calendar_endpoint_except_finales(self):
+        """Simkl's calendar CDN carries no concept of a finale (there is no
+        endpoint for it), so that key is left out of Capabilities.endpoints —
+        which is how the fill path skips asking for it without any route
+        learning which source it is skipping."""
         for key in ENDPOINTS:
             with self.subTest(endpoint=key):
-                self.assertFalse(self.simkl.capabilities.answers(key))
+                self.assertEqual(self.simkl.capabilities.answers(key), key != "shows/finales")
 
     def test_the_port_and_the_private_data_flag_moved_together(self):
         """The same rule the conformance suite enforces across the registry,

@@ -450,6 +450,71 @@ class PartialDataBannerTests(CalendarRouteTestCase):
 
 
 # ---------------------------------------------------------------------------
+# A Simkl-only month outside the declared coverage window
+# ---------------------------------------------------------------------------
+
+class CoverageGapTests(CalendarRouteTestCase):
+    """Naming ONE calendar source that does not reach the requested
+    month must render an explicit state, never a blank calendar — and it is
+    the ROUTE's job, since only the route knows a source was picked on
+    purpose rather than merely admitted by 'auto'."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("gap_viewer")
+        self.sign_in_as(self.user_id)
+
+    def test_naming_simkl_for_a_month_it_does_not_reach_says_so(self):
+        """March 2015 is far outside Simkl's declared ~36 months back —
+        real Capabilities, no stub needed for the coverage question itself."""
+        # fetch_window_records is patched even though the coverage-gap branch
+        # returns before calling it, so a regression that removed the early
+        # return would fail LOUD (a real fetch) rather than quietly passing
+        # against a fixture that happens to render nothing.
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            resp = self.client.get("/calendar?year=2015&month=3&source=simkl")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Simkl", resp.text)
+        self.assertIn("doesn&#39;t reach", resp.text.replace("’", "'"))
+        self.assertIn("warning-banner", resp.text)
+        self.assertNotIn("error-banner", resp.text)
+        self.assertNotIn("empty-state", resp.text)  # not the plain "nothing matched" state
+
+    def test_the_gap_offers_a_link_to_the_other_source(self):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            resp = self.client.get("/calendar?year=2015&month=3&source=simkl")
+        self.assertIn("source=trakt", resp.text)
+
+    def test_naming_both_never_reports_a_gap(self):
+        """'both' is never one source's promise to keep — a month outside
+        Simkl's window under `both` just renders Trakt-only, silently, exactly
+        as it did before Simkl had a calendar at all."""
+        entries = [_entry("show-a", "Show A", "2015-03-05T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get("/calendar?year=2015&month=3&source=both")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("doesn&#39;t reach", resp.text)
+        self.assertIn("Show A", resp.text)
+
+    def test_auto_never_reports_a_gap_either(self):
+        entries = [_entry("show-a", "Show A", "2015-03-05T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get("/calendar?year=2015&month=3")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("doesn&#39;t reach", resp.text)
+
+    def test_a_month_inside_simkls_window_renders_normally(self):
+        """Naming Simkl for a month it DOES cover is not a gap at all — the
+        source is asked like any other, through the real fetch."""
+        entries = [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get("/?year=2026&month=7&source=simkl")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Show A", resp.text)
+        self.assertNotIn("doesn&#39;t reach", resp.text)
+
+
+# ---------------------------------------------------------------------------
 # the view logic the server now owns: counts, is-new, the committed baseline
 # ---------------------------------------------------------------------------
 

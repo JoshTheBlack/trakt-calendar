@@ -66,6 +66,21 @@ class CacheTestCase(unittest.IsolatedAsyncioTestCase):
         new_db_path("calcache")
         await db.migrate()
         self.settings = Settings()
+        # This file is about the FILL AND READ PATH, exercised against a Trakt
+        # response — it is not about Simkl, which is now a second admitted
+        # source for every endpoint here (Capabilities.endpoints is no longer
+        # empty; the fill asks it without checking is_configured, by design —
+        # see app/providers/__init__.py's calendar_sources). Left unpatched,
+        # every real fetch_window_records call in this file would reach
+        # Simkl's live CDN, which the suite's network guard refuses. Simkl is
+        # stubbed as UNREACHABLE rather than as an empty answer so it stays out
+        # of `sources`/`answered`, matching what every assertion in this file
+        # already expected before a second source existed.
+        simkl_patcher = patch(
+            "app.providers.simkl.calendar.fetch_window",
+            AsyncMock(side_effect=base.SourceUnavailable("not exercised in this test")))
+        simkl_patcher.start()
+        self.addCleanup(simkl_patcher.stop)
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -227,6 +242,20 @@ class FetchShapeTests(CacheTestCase):
             _, answered = await calendar_cache.fetch_window_records(
                 SHOWS, self.settings, date(2026, 7, 6))
         self.assertEqual(answered, ["trakt"])
+
+    async def test_simkl_failing_during_a_fill_does_not_claim_it_had_nothing(self):
+        """The class-wide Simkl stub raises SourceUnavailable by default — this
+        makes that failure EXPLICIT rather than incidental: Trakt still answers,
+        so the fill must succeed with `sources = ["trakt"]`, never
+        `["trakt", "simkl"]` with an empty Simkl contribution. The two are not
+        the same fact — the second would be stored and read back for a whole
+        TTL as "Simkl genuinely had nothing here"."""
+        client = _CaptureClient([StoredRecordTests.RICH])
+        with patch("app.providers.trakt.transport.shared_client", return_value=client):
+            records, answered = await calendar_cache.fetch_window_records(
+                SHOWS, self.settings, date(2026, 7, 13))
+        self.assertEqual(answered, ["trakt"])
+        self.assertTrue(records)  # Trakt's own answer still comes through
 
     async def test_a_source_that_answers_no_endpoint_is_never_asked(self):
         """The fill asks capabilities, never a name. A source registered for

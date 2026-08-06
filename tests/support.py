@@ -69,17 +69,25 @@ def window_fetch(entries):
 
     `entries` is either the raw entries every window should answer with, or a
     callable (endpoint, start) -> raw entries for a test that wants one window to
-    differ from another. The answer names `trakt` as the source that replied,
-    because that is what a fill returns and the read path marks a span partial
-    when a source it expected is missing from it.
+    differ from another. The answer names EVERY SOURCE THAT COULD HAVE ANSWERED
+    THIS ENDPOINT as having replied — `trakt` always, and `simkl` for the four
+    endpoints its calendar covers — because that is what a real fill against two
+    registered sources returns, and the read path marks a span partial when a
+    source it expected is missing from `sources`. A test exercising a genuinely
+    partial fetch (one source refused) builds its own stub instead of this one.
 
     Patching HERE rather than at the transport keeps the floor filter and the
     window trim out of the way, which is what a test about the read path wants;
     a test about the fill itself patches the client instead and gets both.
     """
     async def fetch(endpoint, settings, start, *, prefs=None, linked=None):
+        from app.providers.simkl import _SimklProvider
+
         rows = entries(endpoint, start) if callable(entries) else entries
-        return calendar_records(rows, endpoint), ["trakt"]
+        sources = ["trakt"]
+        if _SimklProvider.capabilities.answers(endpoint.key):
+            sources.append("simkl")
+        return calendar_records(rows, endpoint), sources
     return fetch
 
 

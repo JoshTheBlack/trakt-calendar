@@ -19,10 +19,16 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import TraktError
+from app.sources import prefs as source_prefs
 
 UTC = ZoneInfo("UTC")
 ENDPOINT = get_endpoint("shows")
 USER = SimpleNamespace(user_id=1, timezone="UTC", is_admin=False)
+
+# 'auto' admits every registered source, the same set assemble_month's callers
+# got before a per-viewer selection existed to narrow it — so tests about
+# something else keep exercising exactly what they did before.
+DEFAULT_SOURCE_SELECTION = source_prefs.SourcePrefs(user_id=1)
 
 NO_PREFS = {
     "endpoint": None, "card_style": None, "day_packing": None,
@@ -56,10 +62,12 @@ def _meta(total: int, watching: int = 0, not_watching: int = 0,
 class AssembleMonthTests(unittest.TestCase):
     """assemble_month — the month's cards plus every number stated about them."""
 
-    def _run(self, settings=None, prefs=None, not_watching=frozenset()):
+    def _run(self, settings=None, prefs=None, not_watching=frozenset(),
+             source_selection=None, linked=frozenset()):
         return asyncio.run(calendar_routes.assemble_month(
             USER, settings or Settings(trakt_client_id="cid", trakt_access_token="tok"),
-            prefs or NO_PREFS, ENDPOINT, UTC, 2026, 7, set(not_watching)))
+            prefs or NO_PREFS, ENDPOINT, UTC, 2026, 7, set(not_watching),
+            source_selection or DEFAULT_SOURCE_SELECTION, linked))
 
     def test_no_configured_source_reports_it_and_assembles_nothing(self):
         """The one path that must not touch the cache at all — there is nobody to

@@ -332,6 +332,19 @@ def _covers(provider, start: date) -> bool:
             or capabilities.covers(start + timedelta(days=WINDOW_DAYS - 1)))
 
 
+def month_covered(provider, year: int, month: int) -> bool:
+    """Whether ANY day of {year, month} falls inside `provider`'s declared
+    reach — the same question `_covers` asks per WINDOW, asked here per whole
+    month, for the one caller that needs a month-shaped answer: a route
+    deciding whether a source picked deliberately (not merely admitted by
+    'auto') can say anything at all about the month a viewer asked for. Public,
+    unlike `_covers`, because that caller lives outside this module.
+    """
+    days = _calendar.monthrange(year, month)[1]
+    capabilities = provider.capabilities
+    return capabilities.covers(date(year, month, 1)) or capabilities.covers(date(year, month, days))
+
+
 async def fetch_window_records(endpoint: Endpoint, settings, start: date,
                                *, prefs=None, linked=None) -> tuple[list[Record], list[str]]:
     """Ask every admitted source what airs in this window, and return

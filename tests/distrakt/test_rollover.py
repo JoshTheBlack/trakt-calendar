@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock, patch
 from app import auth, db, distrakt
 from app.distrakt import rollover, watch_history
 from app.calendar import state as calendar_state
-from app.providers.base import Item, ItemKey, Media, PlayCounts, Source
+from app.providers.base import Item, ItemKey, Media, PlayCounts, Source, SourceUnavailable
 from tests.support import new_db_path
 
 # The two credential flags the tracker's source selection reads. A fake
@@ -443,6 +443,19 @@ class DistraktImportFilterTests(RolloverTestCase):
         await super().asyncSetUp()
         from app.config import Settings
         self.settings = Settings(trakt_client_id="cid", trakt_access_token="tok", timezone="UTC")
+        # This class reads the calendar cache through import_premieres, which now
+        # asks Simkl too — its calendar declares endpoints and needs no
+        # credential, so the fill admits it even though this Settings object
+        # carries none (see app/providers/__init__.py's calendar_sources). Left
+        # unpatched, the real fetch would reach Simkl's live CDN, which the
+        # suite's network guard refuses. Stubbed unreachable, not empty, so it
+        # stays out of the fill's `sources` the way it would if this instance
+        # genuinely had no working second source.
+        simkl_patcher = patch(
+            "app.providers.simkl.calendar.fetch_window",
+            AsyncMock(side_effect=SourceUnavailable("not exercised in this test")))
+        simkl_patcher.start()
+        self.addCleanup(simkl_patcher.stop)
 
     async def _open_month(self, month_key: str) -> None:
         await distrakt.save_month(self.user_id, distrakt.new_month_doc(month_key))

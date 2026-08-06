@@ -147,17 +147,38 @@ class TestRegistry:
         """The two questions are different and both are asked. "Who could put
         something on a calendar" is a property of the SOURCE and decides who the
         fill asks; "who can we actually use" adds the credentials and is what the
-        page checks before it renders an explanation instead of a month."""
-        assert [p.source for p in providers.calendar_sources()] == [Source.TRAKT]
+        page checks before it renders an explanation instead of a month. Simkl's
+        calendar needs no credential at all, so it is listed here with NO
+        Settings object in play whatsoever — calendar_sources() takes none."""
+        assert {p.source for p in providers.calendar_sources()} == {Source.TRAKT, Source.SIMKL}
 
-    def test_a_source_with_no_calendar_is_in_neither_list(self):
-        """Registered for something else entirely. Asking it would render an
-        empty month, which reads as "nothing airs" rather than "nobody was
-        asked"."""
+    def test_a_source_with_no_calendar_port_would_be_in_neither_list(self):
+        """The negative half of the rule above, pinned against whichever source
+        genuinely carries no calendar_port today — asserted through the
+        registry rather than by name, so this does not silently stop meaning
+        anything the day every registered source has one."""
+        no_calendar = [p for p in providers.registered().values() if p.calendar_port is None]
+        for provider in no_calendar:
+            assert provider.source not in [p.source for p in providers.calendar_sources()]
+
+    def test_simkl_is_a_usable_calendar_source_once_its_own_credential_is_set(self):
+        """`for_calendar_sources` narrows to `is_configured`, which for Simkl
+        still asks the TRACKER's credential (client id + access token) even
+        though the calendar CDN itself needs neither. `is_configured` answers
+        for the whole source rather than per capability, so linking Simkl for
+        the tracker is what makes its calendar count as "usable" here too."""
         both = Settings(trakt_client_id="id", trakt_access_token="token",
                         simkl_client_id="id", simkl_access_token="token")
-        assert Source.SIMKL not in [p.source for p in providers.calendar_sources()]
-        assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(both)]
+        assert {p.source for p in providers.for_calendar_sources(both)} == {Source.TRAKT, Source.SIMKL}
+
+    def test_an_unconfigured_simkl_is_still_asked_by_the_fill_but_not_usable_yet(self):
+        """The fill (`calendar_sources`) does not ask `is_configured` at all —
+        so Simkl is admitted to the fill regardless; `for_calendar_sources`
+        is the narrower, credential-checked list a route uses to decide whether
+        there is anybody to explain the calendar with."""
+        trakt_only = Settings(trakt_client_id="id", trakt_access_token="token")
+        assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
+        assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(trakt_only)]
 
     def test_registered_hands_back_a_copy(self):
         """A caller iterating the registry must not be able to empty it."""
