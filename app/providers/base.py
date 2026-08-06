@@ -193,6 +193,12 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
     return ItemKey(str(media), match_source, match_id)
 
 
+# The two fields on `Record` that resolution writes and storage never does. See
+# `Record.field_sources` for what they hold and `Record.to_dict` for why they are
+# the one thing excluded from a stored record by name.
+PROVENANCE_FIELDS = ("field_sources", "alternatives")
+
+
 @dataclass
 class Record:
     """One airing as a SOURCE describes it, said in a way that is true for
@@ -290,6 +296,23 @@ class Record:
     # judging it on values it cannot answer for.
     enriched: bool = True
 
+    # WHO SUPPLIED WHAT, once several sources have described this airing.
+    # {field: [source, ...]} for every field any of them filled in, and
+    # {field: {source: value}} for the ones where they filled it in DIFFERENTLY.
+    # Both are set by app/calendar/resolve.py and by nothing else, and both are
+    # empty on a record only one source described — which is what keeps them free
+    # for the overwhelming majority of instances, where they always will be.
+    #
+    # NOT STORED, AND THEY MUST NOT BECOME STORED. A record is what ONE source
+    # said; these two are what several sources said WHEN COMPARED, which is an
+    # answer that only exists after resolution has run, at read, over a window
+    # filled without knowing who would read it. Writing them into a window would
+    # be storing the comparison, and the whole reason resolution runs at read is
+    # that a preference change must invalidate nothing. `to_dict` drops them for
+    # the same reason it drops empty genres.
+    field_sources: dict[str, list[str]] = field(default_factory=dict)
+    alternatives: dict[str, dict[str, Any]] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         """The JSON-safe form the cache stores.
 
@@ -299,13 +322,29 @@ class Record:
         round trip is exercised on every single window rather than only when a
         new field is added. The enums are already strings (StrEnum), so they
         serialize as themselves.
+
+        A FIELD WITH A DEFAULT FACTORY IS OMITTED WHEN IT IS EMPTY, which is the
+        same rule said for the fields whose default cannot be compared against.
+        An empty list is what `from_dict` builds when the key is absent, so
+        writing one out says nothing and costs bytes in every stored window.
+
+        THE PROVENANCE MAPS ARE OMITTED EVEN WHEN THEY ARE FULL, which is the one
+        exclusion by name here and is not an optimization. They say what several
+        sources said WHEN COMPARED — an answer that only exists after resolution
+        has run, at read, for one account. A window is filled without knowing who
+        will read it, so a comparison written into one would be one account's
+        answer in a row served to everybody, and the next preference change would
+        have to invalidate it. That is the exact coupling resolution runs at read
+        to avoid.
         """
         out: dict[str, Any] = {}
         for f in fields(self):
+            if f.name in PROVENANCE_FIELDS:
+                continue
             value = getattr(self, f.name)
             if f.default is not MISSING_DEFAULT and value == f.default:
                 continue
-            if f.name == "genres" and not value:
+            if f.default_factory is not MISSING_DEFAULT and not value:
                 continue
             out[f.name] = value
         return out

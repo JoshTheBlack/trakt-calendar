@@ -83,6 +83,103 @@ class SelectionTests(unittest.TestCase):
             self.assertIn(str(source), prefs.SELECTIONS)
 
 
+class NamingTheServicesTests(unittest.TestCase):
+    """The selection vocabulary, and what it does when a THIRD service exists.
+
+    `both` says "two" and means "do not narrow", which are the same thing only
+    while there are exactly two services. The replacement is two shapes rather
+    than a third word: `auto`, which grows because nobody stated it, and a set of
+    services named explicitly, which does not because somebody did.
+    """
+
+    def test_a_set_of_services_is_spelled_by_naming_them(self):
+        self.assertEqual(prefs.named_sources("trakt+simkl"), {"trakt", "simkl"})
+        self.assertEqual(prefs.named_sources("simkl"), {"simkl"})
+
+    def test_a_single_name_is_a_one_element_set(self):
+        """Which is why the values this column already held needed no rewriting:
+        they were always in the new spelling."""
+        self.assertTrue(prefs.is_selection("trakt"))
+        self.assertEqual(prefs.canonical_selection("trakt"), "trakt")
+
+    def test_the_order_a_set_is_written_in_does_not_make_a_second_value(self):
+        self.assertEqual(prefs.canonical_selection("simkl+trakt"), "trakt+simkl")
+        self.assertEqual(prefs.named_sources("simkl+trakt"),
+                         prefs.named_sources("trakt+simkl"))
+
+    def test_auto_is_the_one_selection_that_grows(self):
+        """A service registered tomorrow answers for an account that stated
+        nothing, and does not answer for one that named the services it wanted.
+        A name this app has never heard of stands in for that service here."""
+        auto = prefs.SourcePrefs(user_id=1, calendar_source=prefs.AUTO)
+        named = prefs.SourcePrefs(user_id=1, calendar_source="trakt+simkl")
+        self.assertTrue(auto.admits_calendar("letterboxd"))
+        self.assertFalse(named.admits_calendar("letterboxd"))
+
+    def test_a_stored_both_means_the_two_services_it_could_have_meant(self):
+        """THE MIGRATION OF MEANING, and it is a decision rather than an
+        accident: rows in the field carry `both`, and it was chosen from a menu
+        of two. Reading it as "all" would hand somebody a third service they were
+        never offered, so it reads as exactly the pair — frozen, and not derived
+        from whatever Source happens to hold today."""
+        self.assertEqual(prefs.named_sources(prefs.BOTH), {"trakt", "simkl"})
+        stored = prefs.SourcePrefs(user_id=1, calendar_source=prefs.BOTH)
+        self.assertTrue(stored.admits_calendar(Source.TRAKT))
+        self.assertTrue(stored.admits_calendar(Source.SIMKL))
+        self.assertFalse(stored.admits_calendar("letterboxd"))
+
+    def test_a_stored_both_and_the_named_pair_are_the_same_answer(self):
+        """Which is what makes `both` a legacy SPELLING rather than a legacy
+        BEHAVIOUR, and what lets nothing else in the app know about it."""
+        self.assertEqual(prefs.named_sources(prefs.BOTH),
+                         prefs.named_sources("trakt+simkl"))
+
+    def test_an_unreadable_selection_reads_as_the_widest_answer(self):
+        for value in ("", "letterboxd", "trakt+letterboxd", "+", None, "auto+trakt"):
+            with self.subTest(value=value):
+                self.assertIsNone(prefs.named_sources(value))
+                self.assertFalse(prefs.is_selection(value))
+
+    def test_the_tracker_reads_a_named_set_the_same_way(self):
+        """The vocabulary is one vocabulary; only what `auto` comes out to
+        differs between the two halves."""
+        self.assertTrue(prefs.admits("trakt+simkl", Source.SIMKL, set()))
+        self.assertFalse(prefs.admits("trakt", Source.SIMKL, {"simkl"}))
+
+
+class PerEndpointSelectionTests(unittest.TestCase):
+    """One account wanting a service's shows and not its movies."""
+
+    def prefs(self, **kwargs):
+        return prefs.SourcePrefs(user_id=1, **kwargs)
+
+    def test_an_override_answers_for_its_own_calendar_only(self):
+        stated = self.prefs(calendar_source=prefs.AUTO,
+                            endpoint_sources={"movies": "trakt"})
+        self.assertEqual(stated.calendar_selection("movies"), "trakt")
+        self.assertEqual(stated.calendar_selection("shows"), prefs.AUTO)
+        self.assertFalse(stated.admits_calendar(Source.SIMKL, "movies"))
+        self.assertTrue(stated.admits_calendar(Source.SIMKL, "shows"))
+
+    def test_asking_without_an_endpoint_gets_the_account_wide_answer(self):
+        """Every caller that has no endpoint in hand keeps the behaviour it had
+        before there was one to have."""
+        stated = self.prefs(endpoint_sources={"movies": "trakt"})
+        self.assertEqual(stated.calendar_selection(), prefs.AUTO)
+        self.assertTrue(stated.admits_calendar(Source.SIMKL))
+
+    def test_an_unreadable_override_falls_back_rather_than_erroring(self):
+        for value in ("letterboxd", "", 7, None, ["trakt"]):
+            with self.subTest(value=value):
+                stated = self.prefs(calendar_source="simkl",
+                                    endpoint_sources={"movies": value})
+                self.assertEqual(stated.calendar_selection("movies"), "simkl")
+
+    def test_an_endpoint_this_version_does_not_have_is_simply_never_asked_about(self):
+        stated = self.prefs(endpoint_sources={"retired-calendar": "trakt"})
+        self.assertEqual(stated.calendar_selection("shows"), prefs.AUTO)
+
+
 class StoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         new_db_path("source-prefs")
@@ -150,6 +247,34 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         stored = await prefs.load(self.user_id)
         self.assertEqual(stored.calendar_source, prefs.AUTO)
         self.assertEqual(stored.precedence, {})
+
+    async def test_a_named_set_and_a_per_endpoint_override_round_trip(self):
+        await prefs.save(replace(
+            await prefs.load(self.user_id),
+            calendar_source="simkl+trakt",
+            endpoint_sources={"movies": "trakt", "shows": "trakt+simkl"}))
+        again = await prefs.load(self.user_id)
+        # Stored in declared order, so one choice is one stored value.
+        self.assertEqual(again.calendar_source, "trakt+simkl")
+        self.assertEqual(again.endpoint_sources,
+                         {"movies": "trakt", "shows": "trakt+simkl"})
+
+    async def test_an_override_naming_an_unknown_service_is_refused(self):
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     endpoint_sources={"movies": "letterboxd"}))
+        self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM source_prefs"), 0)
+
+    async def test_a_row_predating_the_per_endpoint_column_reads_as_no_override(self):
+        """The column has a default, so the migration gave every existing row an
+        empty document rather than a NULL nothing can read."""
+        await db.execute(
+            "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
+            "precedence_json) VALUES (?, 'both', 'auto', '{}')",
+            (self.user_id,))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.endpoint_sources, {})
+        self.assertEqual(stored.calendar_source, prefs.BOTH)
 
     async def test_the_preference_goes_when_the_account_does(self):
         await prefs.save(replace(await prefs.load(self.user_id), tracker_source="simkl"))

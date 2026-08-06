@@ -2044,6 +2044,34 @@ CREATE INDEX ix_simkl_titles_fetched ON simkl_titles(fetched_at);
 """
 
 
+MIGRATION_25 = """
+-- WHICH SERVICES ANSWER FOR ONE PARTICULAR CALENDAR, when the account-wide
+-- `calendar_source` beside it is not the right answer for all of them.
+-- {endpoint key: selection}, the same vocabulary that column holds, and empty
+-- for every account that has never said otherwise.
+--
+-- WHY THE ACCOUNT-WIDE VALUE IS NOT ENOUGH, and this is measured rather than
+-- anticipated: on one real month a second service contributed 1773 MOVIE records
+-- against the first service's 46, because its movie calendar is a global release
+-- calendar while the other's is curated. That same account's SHOW calendar is
+-- where the second service adds coverage genuinely worth having. Those are
+-- opposite answers about one service, and one column can only give one of them,
+-- so an account would be choosing between an unreadable movies page and losing
+-- that service's shows entirely.
+--
+-- KEYED ON THE ENDPOINT KEY, which is what a stored calendar window is keyed on
+-- too, so "which services answer for movies" has one answer wherever it is
+-- asked. A key this version does not recognise is ignored on the way out rather
+-- than erroring — an endpoint can be retired, and a preference naming one should
+-- not stop a page rendering.
+--
+-- NOT A SECOND PRECEDENCE MAP. Whose spelling of a title wins does not change
+-- between calendars; how MANY items one of them lists does. Only the second is
+-- per endpoint.
+ALTER TABLE source_prefs ADD COLUMN endpoint_sources_json TEXT NOT NULL DEFAULT '{}';
+"""
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -2072,6 +2100,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (22, MIGRATION_22),
     (23, MIGRATION_23),
     (24, MIGRATION_24),
+    (25, MIGRATION_25),
 ]
 
 

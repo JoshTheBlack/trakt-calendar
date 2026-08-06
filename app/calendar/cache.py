@@ -963,15 +963,26 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # render is per-entry object building and timezone arithmetic, and is the one
     # that grows with a busy month; the grouping is a sort plus a walk.
     with span("calcache.filter", entries=len(groups)) as sp:
-        records = [r for r in (calendar_resolve.resolve(group, prefs)
-                               for group in dedupe_groups(groups)) if r is not None]
+        # RESOLUTION IN TWO HALVES WITH THE ENRICHMENT OVERLAY BETWEEN THEM, and
+        # the order is the point. The overlay fills in the fields one source's
+        # calendar files do not carry, and it has to act on that source's OWN
+        # record — before anything picks between the sources — or a merged group
+        # whose other source supplies the card would never have its enrichment
+        # considered, and a genre only that source knows could not win however
+        # the viewer set their preference.
+        parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key))
+                  for group in dedupe_groups(groups)]
         # ONE BATCHED DB READ, NO NETWORK CALL: overlay whatever the background
         # enrichment drain already knows onto this read's Simkl records. See
         # app/calendar/enrich.py — the drain derives its own work from the
         # stored calendar cache and does not need this read to queue anything
         # for it. Must run BEFORE the filter below, which is the only reason
-        # `record.enriched` is worth asking about here at all.
-        records = await calendar_enrich.overlay_records(records)
+        # `record.enriched` is worth asking about here at all. Still one call
+        # over one flat list, so splitting resolution around it costs no
+        # additional query.
+        await calendar_enrich.overlay_records([r for _, rs in parsed for r in rs])
+        records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
+                               for group, rs in parsed) if r is not None]
         # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
         # "movie"`) does not belong on a series endpoint — see
         # filter.prune_disguised_films for the measured rule and why this is

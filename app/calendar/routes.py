@@ -174,13 +174,19 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     """
     saved = await source_prefs.load(user.user_id)
     requested = request.query_params.get("source")
-    if requested in source_prefs.SELECTIONS:
-        return dataclasses.replace(saved, calendar_source=requested)
+    if requested and source_prefs.is_selection(requested):
+        # The override replaces the account-wide value AND clears the per-
+        # endpoint ones: a link that says "show me Trakt instead" has to mean
+        # that on the calendar the reader is looking at, and a stored override
+        # for that endpoint would quietly win over the thing they just clicked.
+        return dataclasses.replace(saved, calendar_source=requested,
+                                   endpoint_sources={})
     return saved
 
 
 def _coverage_gap(prefs: source_prefs.SourcePrefs,
-                  year: int, month: int, settings) -> tuple[str | None, str | None]:
+                  year: int, month: int, settings, *, endpoint=None,
+                  ) -> tuple[str | None, str | None]:
     """(message, switch_url) when this viewer has named ONE calendar source and
     that source's declared reach does not cover {year, month} at all — the
     explicit "Simkl doesn't reach this month" state. (None, None) otherwise,
@@ -190,23 +196,31 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs,
     ROUTE-LEVEL BY DESIGN. The fill itself (app/providers/__init__.py's
     calendar_sources, app/calendar/cache.py's _covers) already skips a source
     outside its window with no route learning a date range belonging to a
-    particular service — so a month simply renders short under `source=both`,
-    which is correct and needs no message. Naming ONE source and getting
-    nothing back is different: an empty calendar reads as "nothing airs then"
-    when the honest answer is "this source does not reach that far", and only
-    the route knows which of those happened.
+    particular service — so a month simply renders short when several sources
+    are admitted, which is correct and needs no message. Naming ONE source and
+    getting nothing back is different: an empty calendar reads as "nothing airs
+    then" when the honest answer is "this source does not reach that far", and
+    only the route knows which of those happened.
+
+    IT ASKS THE ENDPOINT'S OWN SELECTION, not the account-wide one, because a
+    per-calendar override is what actually governs what this page will show. A
+    viewer whose movies calendar alone names one service would otherwise get an
+    unexplained empty month while the account-wide value said several services
+    were answering.
     """
     from .. import providers  # deferred: see the DECLARED_EDGES note for CALENDAR -> SOURCES
 
-    if prefs.calendar_source in (source_prefs.AUTO, source_prefs.BOTH):
+    selection = prefs.calendar_selection(endpoint.key if endpoint is not None else None)
+    named_sources = source_prefs.named_sources(selection)
+    if named_sources is None or len(named_sources) != 1:
         return None, None
-    admitted = providers.calendar_sources(prefs=prefs, settings=settings)
+    admitted = providers.calendar_sources(prefs=prefs, settings=settings, endpoint=endpoint)
     if not admitted or any(calendar_cache.month_covered(p, year, month) for p in admitted):
         return None, None
     named = admitted[0].label
     message = f"{named}'s calendar doesn't reach {_calendar.month_name[month]} {year}."
     alternatives = [p for p in providers.registered().values()
-                   if str(p.source) != prefs.calendar_source]
+                   if str(p.source) not in named_sources]
     switch_url = None
     if alternatives:
         switch_url = f"?year={year}&month={month}&source={alternatives[0].source}"
@@ -269,7 +283,8 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.error = NOT_CONFIGURED
         return assembly
 
-    message, switch_url = _coverage_gap(source_selection, year, month, settings)
+    message, switch_url = _coverage_gap(source_selection, year, month, settings,
+                                        endpoint=endpoint)
     if message is not None:
         assembly.coverage_gap = True
         assembly.switch_url = switch_url

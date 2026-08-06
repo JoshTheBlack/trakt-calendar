@@ -94,7 +94,7 @@ def registered() -> dict[Source, Provider]:
     return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
-def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
+def calendar_sources(*, prefs=None, settings=None, endpoint=None) -> list[Provider]:
     """Every source that could put something on this account's calendar, in
     declared order. THE SET THE CACHE FILL ASKS.
 
@@ -150,11 +150,16 @@ def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
     exactly one source this is true of today; a second one earns its own question
     when it exists.
     """
+    endpoint_key = getattr(endpoint, "key", endpoint)
     out: list[Provider] = []
     for source, provider in registered().items():
         if not provider.capabilities.endpoints or provider.calendar_port is None:
             continue
-        if prefs is not None and not prefs.admits_calendar(source):
+        # `endpoint` scopes the preference to ONE calendar, because a selection
+        # can be stated per calendar (app/sources/prefs.py's
+        # `calendar_selection`). None asks the account-wide question, which is
+        # what every caller that has no endpoint in hand gets.
+        if prefs is not None and not prefs.admits_calendar(source, endpoint_key):
             continue
         if (settings is not None and source is Source.SIMKL
                 and not settings.simkl_public_calendar_enabled):
