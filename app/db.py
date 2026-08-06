@@ -2004,6 +2004,46 @@ ALTER TABLE distrakt_watch_state ADD COLUMN play_counts_json TEXT;
 """
 
 
+MIGRATION_24 = """
+-- One row per Simkl title, keyed on the id space and the media kind — never
+-- on an airing. A show listed twenty times in a month is twenty calendar
+-- entries and ONE row here, because the fields kept (genres, network,
+-- country, certification, runtime, status, overview) are facts about the
+-- TITLE, not about any one showing of it.
+--
+-- FILLED BY A BACKGROUND DRAIN, NEVER BY THE FILL OR READ PATH. Simkl's
+-- calendar CDN files carry none of these fields at all (see
+-- app/providers/simkl/calendar.py's Record docstring), so a calendar entry
+-- from that source is stored with them empty and this table is the only place
+-- they are ever filled in — read-time overlay, over already-cached windows,
+-- costing one batched DB read and no network call.
+--
+-- `payload` IS NEVER NULL, EVEN FOR A FAILED LOOKUP. An id Simkl does not
+-- recognise, or a request that failed outright, still gets a row (with an
+-- empty payload) the moment it is attempted — that row's mere existence is
+-- what stops the same id being queued again on every single read; only
+-- `failed_at`/`fail_count` say whether what it holds is real data or a
+-- recorded failure waiting out its backoff.
+CREATE TABLE simkl_titles (
+    simkl_id    INTEGER NOT NULL,
+    -- 'show' or 'movie' — the same two-value vocabulary Record.media already
+    -- uses. An anime title has no THIRD value here: Simkl's own /tv/{id}
+    -- answers for an anime id exactly as it does for an ordinary show
+    -- (measured live 2026-08-06, see app/providers/simkl/titles.py), so which
+    -- endpoint a lookup used is not a fact this table needs to remember.
+    media       TEXT    NOT NULL,
+    payload     BLOB    NOT NULL,
+    fetched_at  INTEGER NOT NULL,
+    failed_at   INTEGER,
+    fail_count  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (simkl_id, media)
+);
+-- The retention sweep and the backoff check both judge age off this column,
+-- so both are index-served rather than a table scan every heartbeat.
+CREATE INDEX ix_simkl_titles_fetched ON simkl_titles(fetched_at);
+"""
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -2031,6 +2071,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (21, MIGRATION_21),
     (22, MIGRATION_22),
     (23, MIGRATION_23),
+    (24, MIGRATION_24),
 ]
 
 

@@ -68,6 +68,7 @@ from itertools import groupby
 from typing import NamedTuple
 from zoneinfo import ZoneInfo
 
+from . import enrich as calendar_enrich
 from . import filter as calendar_filter
 from . import resolve as calendar_resolve
 from .. import db
@@ -775,8 +776,18 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     with span("calcache.filter", entries=len(groups)) as sp:
         records = [r for r in (calendar_resolve.resolve(group, prefs, linked or ())
                                for group in dedupe_groups(groups)) if r is not None]
+        # ONE BATCHED DB READ, NO NETWORK CALL: overlay whatever the background
+        # enrichment drain already knows onto this read's Simkl records, and
+        # queue anything it does not for the next drain tick. See
+        # app/calendar/enrich.py. Must run BEFORE the filter below, which is
+        # the only reason `record.enriched` is worth asking about here at all.
+        records = await calendar_enrich.overlay_records(records, now=now)
         certifications = show_certifications if endpoint.media == "show" else movie_certifications
-        kept = calendar_filter.filter_records(records, genres, countries, certifications)
+        # exempt_unenriched=True ONLY here, never at the floor in
+        # fetch_window_records — see filter.keep_record for why the two reads
+        # must not share that setting.
+        kept = calendar_filter.filter_records(records, genres, countries, certifications,
+                                              exempt_unenriched=True)
         sp.set(kept=len(kept))
 
     with span("calcache.normalize", entries=len(kept)) as sp:
@@ -789,7 +800,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         sp.set(items=len(items))
 
     with span("calcache.group", items=len(items)):
-        items = calendar_filter.filter_by_network(items, network_filter)
+        items = calendar_filter.filter_by_network(items, network_filter, exempt_unenriched=True)
         # Sorted on the LOCAL DAY first and the instant second. The two agree for
         # anything converted through one timezone, but a date-only release is
         # pinned to its own calendar date rather than to an offset from an
@@ -816,6 +827,14 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         "show_ids": list(dict.fromkeys(i.id for i in items)),
         "as_of": as_of,
         "partial": partial,
+        # How many of THIS read's items survived only because of the
+        # exempt_unenriched grace period above — not a count of every
+        # unenriched title on the instance, only the ones this viewer's span
+        # actually rendered. Nothing reads this yet; it exists so a future
+        # Sources-preference screen can say "N items here are still catching
+        # up" without inventing a second way to ask the question this
+        # function already answers.
+        "unenriched": sum(1 for i in items if not i.enriched),
     }
     return grouped, meta
 

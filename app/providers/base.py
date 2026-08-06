@@ -268,6 +268,18 @@ class Record:
     season: int | None = None
     episode_number: int | None = None
 
+    # WHETHER genres/network/country/certification/runtime/status/overview ARE
+    # REAL ANSWERS OR JUST THIS RECORD'S DEFAULTS. True for every source that
+    # carries these fields on its calendar payload already (Trakt does, so it
+    # never sets this). Simkl's calendar CDN files carry none of them — see
+    # app/providers/simkl/calendar.py — so a Simkl record starts False and is
+    # filled in by app/calendar/enrich.py's background drain; the per-viewer
+    # genre/country/certification/network filter (app/calendar/filter.py) reads
+    # this to tell "empty because there is nothing to say" apart from "empty
+    # because we have not looked yet", and exempts the second rather than
+    # judging it on values it cannot answer for.
+    enriched: bool = True
+
     def to_dict(self) -> dict[str, Any]:
         """The JSON-safe form the cache stores.
 

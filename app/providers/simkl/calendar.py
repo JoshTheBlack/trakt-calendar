@@ -261,6 +261,10 @@ def to_show_record(entry: dict) -> Record | None:
         # no country, no certification, no overview, no runtime. Left at
         # Record's defaults rather than guessed — a later enrichment pass
         # against Simkl's per-title detail endpoints is what fills these in.
+        # `enriched=False` says so explicitly, so the per-viewer filter in
+        # app/calendar/filter.py can tell this apart from a title that
+        # genuinely has none of those values (see app/calendar/enrich.py).
+        enriched=False,
     )
 
 
@@ -294,6 +298,8 @@ def to_movie_record(entry: dict) -> Record | None:
         air_ts=dt.timestamp(),
         date_only=True,
         poster=_poster_url(entry.get("poster")),
+        # See to_show_record's identical note just above.
+        enriched=False,
     )
 
 

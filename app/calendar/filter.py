@@ -103,12 +103,14 @@ def keep_network(network: str, inc: set[str], exc: set[str]) -> bool:
 
 class _HasNetwork(Protocol):
     network: str
+    enriched: bool
 
 
 ItemT = TypeVar("ItemT", bound=_HasNetwork)
 
 
-def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None) -> list[ItemT]:
+def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None,
+                      *, exempt_unenriched: bool = False) -> list[ItemT]:
     """Keep the normalized `items` whose network survives `networks`.
 
     Takes normalized items rather than raw entries because that is what the
@@ -116,11 +118,17 @@ def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None) ->
     after the stored entries have been replayed through the provider's
     normalizer, and `network` only exists on the far side of that. An empty spec
     is a pass-through.
+
+    `exempt_unenriched` is the same exemption keep_record applies, said here
+    because network is filtered separately and later (see the module
+    docstring) — an unenriched item's blank network must not be judged as "no
+    network" any more than its blank genres should be judged as "no genres".
     """
     inc, exc = parse_network_spec(networks)
     if not (inc or exc):
         return list(items)
-    return [item for item in items if keep_network(item.network, inc, exc)]
+    return [item for item in items
+            if (exempt_unenriched and not item.enriched) or keep_network(item.network, inc, exc)]
 
 
 def keep_values(genres, country, certification,
@@ -166,20 +174,43 @@ def keep_values(genres, country, certification,
 
 def keep_record(record, g_inc: set[str], g_exc: set[str],
                 c_inc: set[str], c_exc: set[str],
-                cert_inc: set[str], cert_exc: set[str]) -> bool:
-    """keep_values, asked of a Record."""
+                cert_inc: set[str], cert_exc: set[str],
+                *, exempt_unenriched: bool = False) -> bool:
+    """keep_values, asked of a Record.
+
+    `exempt_unenriched` lets a record that has not been enriched yet survive
+    regardless of what the spec says, rather than being judged on values it
+    cannot yet answer for — see Record.enriched. It is OFF by default and used
+    in exactly one place: app/calendar/cache.py's per-viewer READ. The
+    instance-wide content floor filter.filter_records applies at FILL time
+    (cache.py's fetch_window_records) deliberately does NOT set it — a Simkl
+    record is always unenriched at that point (enrichment only ever overlays
+    at read, never at fill; see app/calendar/enrich.py), so exempting it there
+    would make the floor a permanent no-op for every Simkl title rather than a
+    temporary gap that closes once enrichment catches up. The floor keeps
+    judging what it is given; only the read a viewer actually sees gets the
+    grace period.
+    """
+    if exempt_unenriched and not record.enriched:
+        return True
     return keep_values(record.genres, record.country, record.certification,
                        g_inc, g_exc, c_inc, c_exc, cert_inc, cert_exc)
 
 
 def filter_records(records, genres_spec: str, countries_spec: str,
-                   certifications_spec: str = "") -> list:
+                   certifications_spec: str = "", *, exempt_unenriched: bool = False) -> list:
     """Keep the `records` that pass all three specs.
 
     Certification vocabularies differ between shows and movies (TV Parental
     Guidelines vs. MPA ratings), so it is the caller's job to pass the spec
     matching the endpoint's media kind, exactly as it already picks the endpoint.
-    An empty set of specs is a fast pass-through (nothing to filter on).
+    An empty set of specs is a fast pass-through (nothing to filter on) —
+    EVEN WHEN `exempt_unenriched` IS SET, because an unenriched record survives
+    an empty spec exactly as an enriched one does; the exemption only matters
+    once there is something to be exempt FROM.
+
+    `exempt_unenriched` is passed straight through to keep_record — see there
+    for why only one caller sets it.
     """
     g_inc, g_exc = parse_spec(genres_spec)
     c_inc, c_exc = parse_spec(countries_spec)
@@ -187,4 +218,5 @@ def filter_records(records, genres_spec: str, countries_spec: str,
     if not (g_inc or g_exc or c_inc or c_exc or cert_inc or cert_exc):
         return list(records)
     return [r for r in records
-            if keep_record(r, g_inc, g_exc, c_inc, c_exc, cert_inc, cert_exc)]
+            if keep_record(r, g_inc, g_exc, c_inc, c_exc, cert_inc, cert_exc,
+                           exempt_unenriched=exempt_unenriched)]
