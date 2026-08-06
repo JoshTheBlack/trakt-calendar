@@ -15,6 +15,7 @@ No network — the one normalizer test runs on a literal Trakt calendar entry.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import date
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
@@ -206,18 +207,24 @@ class TestRegistry:
         sources = {p.source for p in providers.calendar_sources(settings=off)}
         assert sources == {Source.TRAKT}
 
-    def test_switching_it_off_leaves_a_configured_simkl_untouched(self):
-        """The switch answers "may we reach a service nobody set up", not "is
-        Simkl allowed to answer" — once the credentials are filled in it stops
-        applying at all. Widening it into a second gate on a configured Simkl
-        would withhold a calendar that needs no credential over an unrelated
-        tracker credential, which is the thing the source selector already
-        refuses to do."""
+    def test_switching_it_off_drops_a_configured_simkl_too(self):
+        """The switch answers exactly one question — does Simkl contribute to
+        this instance's calendar — and it is not conditioned on credentials.
+        It used to apply only while Simkl was unconfigured, which was very
+        nearly always the case (nothing about the calendar needs an
+        instance-level Simkl token) and left the rare operator who HAD set one
+        with a switch they could not use."""
         configured_off = Settings(
             simkl_client_id="id", simkl_access_token="token",
             simkl_public_calendar_enabled=False)
-        assert Source.SIMKL in [
+        assert Source.SIMKL not in [
             p.source for p in providers.calendar_sources(settings=configured_off)]
+
+    def test_a_configured_simkl_is_still_admitted_with_the_switch_on(self):
+        """Default-on is what every existing instance has, configured or not."""
+        configured_on = Settings(simkl_client_id="id", simkl_access_token="token")
+        assert Source.SIMKL in [
+            p.source for p in providers.calendar_sources(settings=configured_on)]
 
     def test_no_settings_at_all_behaves_like_the_switch_being_on(self):
         """The pre-existing, no-argument call every untouched caller still
@@ -339,6 +346,17 @@ class TestTrackerPort:
         ports = providers.for_tracker_ports(
             _ALL_SOURCES, _ALL_NAMES, Settings(trakt_client_id="c", trakt_access_token="t"))
         assert [source for source, _p in ports] == [Source.TRAKT]
+
+    def test_the_calendar_switch_is_not_a_gate_on_the_tracker(self):
+        """simkl_public_calendar_enabled governs exactly one thing — whether
+        Simkl contributes to the CALENDAR. Reading somebody's own Simkl viewing
+        is a different question answered by their own credential, and turning
+        the calendar off must not take their watch history with it."""
+        for enabled in (True, False):
+            settings = dataclasses.replace(
+                _CONFIGURED, simkl_public_calendar_enabled=enabled)
+            ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, settings)
+            assert [source for source, _p in ports] == [Source.TRAKT, Source.SIMKL]
 
     def test_tracker_sources_names_who_could_back_it_at_all(self):
         assert providers.tracker_sources() == {str(Source.TRAKT), str(Source.SIMKL)}

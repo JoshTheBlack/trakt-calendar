@@ -235,7 +235,12 @@ class PrewarmSettingWidgetTests(SettingsSurfaceTestCase):
 class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
     """simkl_public_calendar_enabled: the checkbox on the Simkl tab and its
     round trip through /api/settings, defaulting to True the way an instance
-    that never opens this tab needs it to."""
+    that never opens this tab needs it to.
+
+    THE STORED KEY KEEPS ITS ORIGINAL SPELLING while the label says something
+    different, and that is deliberate: the key is what the value is saved under
+    in app_settings, so renaming it would orphan every operator's existing
+    choice and quietly reset it to the default."""
 
     def setUp(self):
         super().setUp()
@@ -244,6 +249,13 @@ class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
     def test_the_settings_screen_renders_the_toggle(self):
         body = self.client.get("/?month=1&year=2026").text
         self.assertIn('name="simkl_public_calendar_enabled"', body)
+
+    def test_the_label_says_what_the_setting_does(self):
+        """It governs whether Simkl contributes to the calendar, full stop —
+        not only whether an unconfigured Simkl may be reached, which was a
+        qualifier that almost never failed to apply and so said nothing."""
+        body = self.client.get("/?month=1&year=2026").text
+        self.assertIn("Include Simkl results on the calendar", body)
 
     def test_it_defaults_on(self):
         """An instance that never saves this field must read it back as True —

@@ -129,17 +129,26 @@ def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
 
     `settings=None` MEANS THE SAME "DON'T ASK" AS `prefs=None` — every existing
     caller that has not been updated to pass one keeps today's behaviour exactly.
-    Where it IS passed, it governs one narrow thing: whether an UNCONFIGURED
-    Simkl (no client id, no access token — `settings.simkl_configured` false) may
-    still be asked for its public calendar files, via
-    `settings.simkl_public_calendar_enabled` (default True, so an instance that
-    never looks at the setting sees no change). The moment Simkl IS configured,
-    this check does not apply to it at all — the switch answers "may we reach a
-    service this instance was never given a reason to trust", not "is Simkl
-    allowed to answer", and a source an operator actually set up is governed by
-    `prefs` above like any other. Scoped to Simkl by name rather than generalized
-    into a per-source flag because there is exactly one source this is true of
-    today; a second one earns its own question when it exists.
+    Where it IS passed, it governs one narrow thing: whether Simkl contributes to
+    this instance's calendar at all, via `settings.simkl_public_calendar_enabled`
+    (default True, so an instance that never looks at the setting sees no
+    change).
+
+    IT IS NOT CONDITIONED ON WHETHER SIMKL IS CONFIGURED, and it used to be —
+    the switch applied only to an instance with no Simkl credentials. That
+    qualifier was very nearly always true and therefore said nothing: Simkl's
+    calendar files are public and need no credential, so essentially no instance
+    ever has a reason to set the instance-level access token `is_configured`
+    asks for, and an operator who HAD set one was left with a switch they could
+    not use to turn Simkl's calendar off. One control that means what it says
+    beats two whose truth table nobody can hold.
+
+    WHAT IT STILL MUST NOT BE is a gate on the TRACKER. It answers exactly one
+    question — does Simkl contribute to the calendar — and a calendar needing no
+    credential is not withheld over an unrelated tracker credential. Scoped to
+    Simkl by name rather than generalized into a per-source flag because there is
+    exactly one source this is true of today; a second one earns its own question
+    when it exists.
     """
     out: list[Provider] = []
     for source, provider in registered().items():
@@ -148,7 +157,6 @@ def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
         if prefs is not None and not prefs.admits_calendar(source):
             continue
         if (settings is not None and source is Source.SIMKL
-                and not provider.is_configured(settings)
                 and not settings.simkl_public_calendar_enabled):
             continue
         out.append(provider)

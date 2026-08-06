@@ -118,17 +118,31 @@ class Settings:
     # built on one would silently do nothing. A 401 from Simkl means the link has
     # to be made again.
     #
-    # ON BY DEFAULT, which is exactly today's behaviour: Simkl's calendar files
-    # sit on a public CDN and need no client id or token at all, so the fill has
-    # always asked them regardless of whether this instance ever touches the
-    # three fields above (see providers.calendar_sources). This is the operator's
-    # lever to say no to that outbound read anyway — reasonable on self-hosted
-    # software even when the traffic is harmless, because "harmless" is the app's
-    # judgement and not necessarily theirs. It is NOT a Simkl on/off switch: once
-    # simkl_configured is true (the credentialed half, above) this setting is
-    # moot — a source an account has actually linked is governed by its own
-    # calendar-source preference, not by this instance-wide default. See
-    # providers.calendar_sources for where it is applied.
+    # WHETHER SIMKL CONTRIBUTES TO THIS INSTANCE'S CALENDAR AT ALL. ON BY
+    # DEFAULT, which is exactly the behaviour every existing instance already
+    # has: Simkl's calendar files sit on a public CDN and need no client id or
+    # token, so the fill has always asked them regardless of whether this
+    # instance ever touches the three credential fields above (see
+    # providers.calendar_sources, which is where this is applied). This is the
+    # operator's lever to say no — reasonable on self-hosted software even when
+    # the traffic is harmless, because "harmless" is the app's judgement and not
+    # necessarily theirs.
+    #
+    # IT APPLIES WHETHER OR NOT SIMKL IS CONFIGURED. It once applied only to an
+    # instance with no Simkl credentials, and that qualifier was very nearly
+    # always true and so said nothing: nothing this app does with the calendar
+    # needs an instance-level Simkl token, so almost no instance ever has one,
+    # while the rare operator who does was left unable to turn Simkl's calendar
+    # off at all.
+    #
+    # THE FIELD NAME KEEPS ITS OLD SPELLING even though the label no longer says
+    # "public": it is the key this value is stored under in app_settings, and
+    # renaming it would orphan every choice an operator has already made and
+    # silently reset it to the default.
+    #
+    # IT IS NOT A GATE ON THE TRACKER. Reading somebody's Simkl watch history is
+    # a separate question answered by their own linked identity; a calendar that
+    # needs no credential is not withheld over an unrelated one.
     simkl_public_calendar_enabled: bool = True
     timezone: str = "Europe/Athens"
     endpoint: str = "shows/new"
