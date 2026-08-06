@@ -23,7 +23,11 @@ is 10 GET/second, so a viewer loading a month would wait on it. Instead:
           `simkl_titles` already has a usable answer for (or a failure still
           inside its backoff), fetches a bounded batch of what is left through
           app/providers/simkl/titles.py, and UPSERTs the answer (or the fact
-          that it failed) into `simkl_titles`.
+          that it failed) into `simkl_titles`. A FILL also asks for a drain
+          the moment it stores new records, through `run_drain`/
+          `schedule_drain` below, rather than only ever waiting for the next
+          heartbeat tick — see that section for the coalescing latch that
+          keeps ten simultaneous fills from running ten passes.
 
 THE DRAIN'S WORK IS DERIVED FROM THE STORED CALENDAR, NOT FROM AN IN-MEMORY
 QUEUE A READ HAPPENED TO POPULATE. An earlier version of this module fed the
@@ -410,6 +414,148 @@ async def drain(settings, *, now: int | None = None) -> int:
     # present, and an operator should be able to see that it ran.
     logger.info("Simkl enrichment drain: fetched %d of %d queued title(s).", fetched, len(batch))
     return fetched
+
+
+# ---------------------------------------------------------------------------
+# the coalescing latch — a fill can ask for a pass sooner than the heartbeat
+# ---------------------------------------------------------------------------
+#
+# THE FIRST VIEW OF AN UNFAMILIAR MONTH USED TO WAIT ON THE HEARTBEAT: a fill
+# stores unenriched records and nothing looked at them again until the next
+# 60-second tick, so a card could sit without genres, network, or overview —
+# and unjudged by any filter that needs those fields — for up to a minute.
+# `schedule_drain` below is what a fill calls the moment it stores new
+# records, so the drain that would have run on the next tick anyway typically
+# runs within about a second instead.
+#
+# WHY A LATCH OF DEPTH ONE, NOT A QUEUE, IS THE RIGHT SHAPE HERE — and this
+# has to be argued from what `drain` costs, not merely asserted. `drain` is
+# IDEMPOTENT AND DERIVES ITS ENTIRE WORKLIST FRESH FROM THE STORED CALENDAR
+# every time it runs (`_owed_titles`, above): it does not consume anything a
+# caller handed it. Queueing N requests behind a running pass would therefore
+# not do N times the work — it would do the SAME work once and then spend N-1
+# more full scans of the stored calendar re-deriving "nothing is owed any
+# more". That scan is measured cheap per call (`_owed_titles`'s own
+# docstring), but it is also the one thing here that grows with how many
+# windows an instance has accumulated, so a queue's redundancy is exactly the
+# part that gets worse over the life of an instance while a depth-one latch's
+# does not. At most one pass runs, at most one more is remembered to run
+# after it — ten viewers opening ten unfamiliar months produce at most two
+# passes, not ten.
+#
+# WHY THE SECOND PASS IS A RERUN FLAG RATHER THAN DROPPING THE REQUEST. A
+# fill landing WHILE a pass is running names titles that pass has already
+# read `_owed_titles` past — the running pass derived its worklist once, at
+# the start, and has no way to notice a window stored a moment later.
+# Dropping a request that arrives mid-pass would send those titles back to
+# waiting for the next heartbeat tick, which is the exact delay this latch
+# exists to remove. Remembering "go around once more" guarantees the very
+# next pass's fresh scan sees them, without ever running two passes at once.
+_drain_active = False
+_drain_rerun_requested = False
+
+# Strong references to scheduled drain tasks, held for the task's lifetime.
+# A bare `asyncio.create_task(...)` whose result nobody keeps can be garbage
+# collected mid-flight — nothing else in this module holds the coroutine, so
+# without this set a fill-triggered drain could simply vanish before it ran.
+# Each task discards itself here via its own done callback once it finishes,
+# so this never accumulates: the latch above already guarantees at most one
+# entry, since a second `schedule_drain` call while one task is live folds
+# into the flag rather than creating another task.
+_drain_tasks: set[asyncio.Task] = set()
+
+
+async def run_drain(settings) -> int:
+    """Run one latched pass of `drain`, or fold this call into the pass
+    already running — see the module note above this function for why a
+    latch of depth one, rather than a queue, is what `drain`'s own cost
+    argues for.
+
+    THE SAME LATCH SERVES EVERY CALLER, THE HEARTBEAT INCLUDED. app/main.py's
+    heartbeat tick calls this directly (awaited, so a tick still does not
+    return until its own pass — or the rerun it triggered — has finished);
+    `schedule_drain` below calls it from a background task for a fill. A
+    heartbeat tick landing while a fill-triggered pass is running therefore
+    coalesces exactly like a second fill would, rather than starting a
+    concurrent pass of its own — one running drain at a time, regardless of
+    who asked for it.
+
+    THE LATCH RELEASES UNDER EXCEPTION, NOT ONLY ON SUCCESS: `finally` clears
+    `_drain_active` whether `drain` returned normally or raised, so a batch
+    that fails cannot wedge every later caller into "rerun requested, never
+    actually run" — the very next call starts a fresh pass rather than
+    finding the latch permanently held. The rerun flag is also cleared the
+    moment this call ACQUIRES the latch, not only after it is consumed below:
+    a flag left set by a pass that raised before ever checking it must not
+    cause an unrequested extra pass the next time the latch is free.
+
+    Returns how many titles the pass(es) this call actually ran fetched — 0
+    when this call only set the rerun flag and ran nothing itself.
+    """
+    global _drain_active, _drain_rerun_requested
+    if _drain_active:
+        _drain_rerun_requested = True
+        return 0
+    _drain_active = True
+    _drain_rerun_requested = False
+    try:
+        fetched = await drain(settings)
+        while _drain_rerun_requested:
+            _drain_rerun_requested = False
+            fetched = await drain(settings)
+        return fetched
+    finally:
+        _drain_active = False
+
+
+def _forget_drain_task(task: asyncio.Task) -> None:
+    """The done callback every task `schedule_drain` creates carries: drop
+    the strong reference now that the task no longer needs one, and LOG
+    rather than swallow an exception that escaped `run_drain` — the whole
+    reason this path exists is to do better than waiting for the heartbeat,
+    and a drain that dies quietly here, with nothing watching, would be
+    worse than that: not silent-and-safe, silent-and-stuck, since nothing
+    else would notice until the next tick's own `run_drain` call happened to
+    log the same failure again."""
+    _drain_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("Fill-triggered enrichment drain failed.", exc_info=exc)
+
+
+def schedule_drain(settings) -> None:
+    """Ask the drain to run soon rather than waiting for the next heartbeat
+    tick. Call this when a window FILL stores new records (see
+    app/calendar/cache.py's `load_window`) — never from a read: the read path
+    already promises no outbound call (see the module docstring), and firing
+    a drain from `overlay_records` would put that promise in the same
+    function it is meant to hold for.
+
+    FIRE AND FORGET, ON PURPOSE, AND NEVER AWAITED BY THE CALLER. The caller
+    is a request that just finished fetching and storing a calendar window;
+    it must not wait on enrichment to answer that request, so this schedules
+    the work as a background task and returns immediately. Coalescing is
+    `run_drain`'s job, not this function's — calling this while a pass is
+    already running is exactly as safe as calling it while nothing is
+    running, because `run_drain` folds a busy call into the rerun flag rather
+    than ever executing two passes at once.
+
+    DEGRADES TO A NO-OP RATHER THAN RAISING wherever there is no running
+    event loop to schedule onto — a script, a synchronous test path, or the
+    app already tearing down at shutdown. The heartbeat drain is unchanged
+    and still runs every tick regardless of whether this ever fires, so the
+    only cost of a skipped schedule here is the one tick this call was meant
+    to save.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    task = asyncio.create_task(run_drain(settings))
+    _drain_tasks.add(task)
+    task.add_done_callback(_forget_drain_task)
 
 
 # ---------------------------------------------------------------------------

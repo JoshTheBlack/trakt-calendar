@@ -617,6 +617,14 @@ async def load_window(endpoint: Endpoint, settings, start: date, *,
         raise
     groups = await store_window(endpoint.key, start, records, ttl, ts,
                                 sources=answered, asked=in_play)
+    # A FILL, NOT A READ — this line only runs when the branch above actually
+    # fetched and stored, never on a cache-hit return further up. That is
+    # what lets it ask for enrichment sooner than the next heartbeat tick
+    # without weakening "the read path never makes an outbound call": nothing
+    # here is served to a viewer yet, and the scheduled drain is fire-and-
+    # forget (see enrich.schedule_drain) so this request does not wait on it
+    # either. A pure cache-hit read never reaches this line at all.
+    calendar_enrich.schedule_drain(settings)
     # Recorded only on a genuine fetch, not on every cache-hit read: the URL
     # arrived here already, so this is the point a lookup is "paid for" rather
     # than a per-view cost added to the hot render path.

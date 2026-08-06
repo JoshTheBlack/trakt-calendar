@@ -11,6 +11,7 @@ ever silently dropping a title the stored calendar names.
 """
 from __future__ import annotations
 
+import asyncio
 import unittest
 from datetime import date
 from types import SimpleNamespace
@@ -542,6 +543,159 @@ class FilmPruneThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
             start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
         titles = [i.title for g in grouped for i in g["items"]]
         self.assertIn("The Ribbon Hero", titles)
+
+
+class RunDrainLatchTests(EnrichTestCase):
+    """The coalescing latch app/calendar/cache.py's load_window (a fill) and
+    app/main.py's heartbeat both go through: at most one pass runs, at most
+    one more is remembered to run after it — see the module note above
+    `run_drain` in app/calendar/enrich.py for why a queue is the wrong shape
+    given what `drain` itself costs to run redundantly."""
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="")
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # Module-level latch state outlives any one test's instance; start
+        # every test from the same clean slate rather than trusting whatever
+        # the previous test left behind.
+        calendar_enrich._drain_active = False
+        calendar_enrich._drain_rerun_requested = False
+        calendar_enrich._drain_tasks.clear()
+
+    async def asyncTearDown(self):
+        for task in list(calendar_enrich._drain_tasks):
+            task.cancel()
+        calendar_enrich._drain_active = False
+        calendar_enrich._drain_rerun_requested = False
+        await super().asyncTearDown()
+
+    async def test_a_single_call_runs_one_pass(self):
+        spy = AsyncMock(return_value=3)
+        with patch("app.calendar.enrich.drain", spy):
+            fetched = await calendar_enrich.run_drain(self.SETTINGS)
+        self.assertEqual(fetched, 3)
+        spy.assert_awaited_once()
+        self.assertFalse(calendar_enrich._drain_active)
+
+    async def test_a_call_while_one_is_running_does_not_start_a_second_pass_but_causes_one_more(self):
+        gate = asyncio.Event()
+        calls: list[int] = []
+
+        async def fake_drain(settings):
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                await gate.wait()
+            return 0
+
+        with patch("app.calendar.enrich.drain", fake_drain):
+            first = asyncio.create_task(calendar_enrich.run_drain(self.SETTINGS))
+            await asyncio.sleep(0)  # let the first pass start and block on the gate
+            second_result = await calendar_enrich.run_drain(self.SETTINGS)
+            self.assertEqual(second_result, 0)  # coalesced — ran nothing of its own
+            self.assertEqual(len(calls), 1)  # no concurrent second pass started
+            self.assertTrue(calendar_enrich._drain_rerun_requested)
+            gate.set()
+            await first
+        self.assertEqual(len(calls), 2)  # exactly one rerun happened
+        self.assertFalse(calendar_enrich._drain_active)
+        self.assertFalse(calendar_enrich._drain_rerun_requested)
+
+    async def test_three_requests_during_one_run_still_cause_exactly_one_more(self):
+        gate = asyncio.Event()
+        calls: list[int] = []
+
+        async def fake_drain(settings):
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                await gate.wait()
+            return 0
+
+        with patch("app.calendar.enrich.drain", fake_drain):
+            first = asyncio.create_task(calendar_enrich.run_drain(self.SETTINGS))
+            await asyncio.sleep(0)
+            for _ in range(3):
+                result = await calendar_enrich.run_drain(self.SETTINGS)
+                self.assertEqual(result, 0)
+            self.assertEqual(len(calls), 1)  # still only the original pass
+            gate.set()
+            await first
+        # Three requests arriving during one run still cause exactly one more
+        # pass, not three — the flag is a bool, not a counter.
+        self.assertEqual(len(calls), 2)
+
+    async def test_a_raising_pass_still_releases_the_latch(self):
+        with patch("app.calendar.enrich.drain", AsyncMock(side_effect=RuntimeError("boom"))):
+            with self.assertRaises(RuntimeError):
+                await calendar_enrich.run_drain(self.SETTINGS)
+        self.assertFalse(calendar_enrich._drain_active)
+        self.assertFalse(calendar_enrich._drain_rerun_requested)
+        # A later caller is not wedged behind the failure — it starts fresh.
+        spy = AsyncMock(return_value=1)
+        with patch("app.calendar.enrich.drain", spy):
+            fetched = await calendar_enrich.run_drain(self.SETTINGS)
+        self.assertEqual(fetched, 1)
+        spy.assert_awaited_once()
+
+    async def test_schedule_drain_runs_the_drain_in_the_background(self):
+        spy = AsyncMock(return_value=5)
+        with patch("app.calendar.enrich.drain", spy):
+            calendar_enrich.schedule_drain(self.SETTINGS)
+            self.assertEqual(len(calendar_enrich._drain_tasks), 1)
+            [task] = list(calendar_enrich._drain_tasks)
+            result = await task
+        self.assertEqual(result, 5)
+        spy.assert_awaited_once()
+        self.assertEqual(calendar_enrich._drain_tasks, set())  # discarded by its own done callback
+
+    async def test_a_fill_triggered_pass_and_a_heartbeat_call_do_not_run_concurrently(self):
+        """The same latch covers both callers: a fill's schedule_drain and
+        the heartbeat's own run_drain call must not run two passes at once —
+        the heartbeat call folds into the rerun flag instead."""
+        gate = asyncio.Event()
+        calls: list[int] = []
+
+        async def fake_drain(settings):
+            calls.append(len(calls) + 1)
+            if len(calls) == 1:
+                await gate.wait()
+            return 0
+
+        with patch("app.calendar.enrich.drain", fake_drain):
+            calendar_enrich.schedule_drain(self.SETTINGS)  # the fill
+            [background] = list(calendar_enrich._drain_tasks)
+            await asyncio.sleep(0)  # let the background pass start and block on the gate
+            heartbeat_result = await calendar_enrich.run_drain(self.SETTINGS)  # the heartbeat tick
+            self.assertEqual(heartbeat_result, 0)  # coalesced, not a concurrent pass
+            self.assertEqual(len(calls), 1)
+            gate.set()
+            await background
+        self.assertEqual(len(calls), 2)
+
+    async def test_a_scheduled_drain_that_raises_is_logged_and_releases_the_latch(self):
+        with patch("app.calendar.enrich.drain", AsyncMock(side_effect=RuntimeError("boom"))):
+            with self.assertLogs("app.calendar.enrich", level="ERROR") as captured:
+                calendar_enrich.schedule_drain(self.SETTINGS)
+                [task] = list(calendar_enrich._drain_tasks)
+                with self.assertRaises(RuntimeError):
+                    await task
+                await asyncio.sleep(0)  # let the done callback finish logging
+        self.assertTrue(any("drain failed" in line.lower() for line in captured.output))
+        self.assertFalse(calendar_enrich._drain_active)
+        # The latch is free for a later caller — nothing here left it stuck.
+        spy = AsyncMock(return_value=2)
+        with patch("app.calendar.enrich.drain", spy):
+            fetched = await calendar_enrich.run_drain(self.SETTINGS)
+        self.assertEqual(fetched, 2)
+
+    async def test_schedule_drain_is_a_noop_with_no_running_event_loop(self):
+        """Degrades to "not scheduled" rather than raising — a script, a
+        synchronous test path, or shutdown all lack a running loop to
+        schedule onto. Simulated here since this test itself runs inside
+        one: get_running_loop is made to fail exactly as it would outside
+        one."""
+        with patch("asyncio.get_running_loop", side_effect=RuntimeError("no running loop")):
+            calendar_enrich.schedule_drain(self.SETTINGS)  # must not raise
+        self.assertEqual(calendar_enrich._drain_tasks, set())
 
 
 if __name__ == "__main__":  # pragma: no cover

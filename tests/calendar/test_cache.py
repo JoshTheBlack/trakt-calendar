@@ -21,7 +21,7 @@ import unittest
 import zlib
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 from app import cache, db
@@ -796,6 +796,40 @@ class ReadPathTests(CacheTestCase):
             _, as_of = await calendar_cache.read_month(
                 SHOWS, self.settings, tz=ZoneInfo("UTC"), year=2026, month=7, now=555)
         self.assertEqual(as_of, 555)
+
+    async def test_a_fill_schedules_a_drain(self):
+        """A window that actually fetched and stored asks for enrichment
+        sooner than the next heartbeat tick — see app/calendar/enrich.py's
+        schedule_drain, called from load_window right after store_window."""
+        # schedule_drain is an ordinary sync function (fire-and-forget, never
+        # awaited by its caller) — a MagicMock, not an AsyncMock, is what
+        # pins that: an AsyncMock here would leave an unawaited coroutine
+        # behind and mask a caller that mistakenly started awaiting it.
+        schedule = MagicMock()
+        with patch("app.calendar.cache.calendar_enrich.schedule_drain", schedule):
+            with patch("app.calendar.cache.fetch_window_records",
+                       window_fetch([_entry("first", "2026-07-06T12:00:00Z")])):
+                await calendar_cache.load_window(SHOWS, self.settings, date(2026, 7, 6), now=1000)
+        schedule.assert_called_once_with(self.settings)
+
+    async def test_a_cache_hit_read_schedules_no_drain(self):
+        """THE INVARIANT THIS MUST NOT WEAKEN: a pure read never makes an
+        outbound call, and scheduling a drain is adjacent to that promise
+        because the drain itself does. Hooking schedule_drain into the FILL
+        branch of load_window rather than into the function as a whole is
+        what keeps a cache-hit return — no fetch, nothing new stored — from
+        ever reaching it."""
+        schedule = MagicMock()
+        with patch("app.calendar.cache.calendar_enrich.schedule_drain", schedule):
+            with patch("app.calendar.cache.fetch_window_records",
+                       window_fetch([_entry("first", "2026-07-06T12:00:00Z")])):
+                await calendar_cache.load_window(SHOWS, self.settings, date(2026, 7, 6), now=1000)
+            schedule.reset_mock()
+            # Within TTL: served from cache, no fetch and therefore no schedule.
+            never_fetch = AsyncMock(side_effect=AssertionError("must not fetch"))
+            with patch("app.calendar.cache.fetch_window_records", never_fetch):
+                await calendar_cache.load_window(SHOWS, self.settings, date(2026, 7, 6), now=1000)
+        schedule.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

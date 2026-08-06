@@ -168,7 +168,11 @@ async def _heartbeat_tick() -> None:
         settings_routes.maybe_refresh_trakt_token,
         _sweep_auth_rows,
         lambda: calendar_cache.prewarm_calendar_cache(load_settings()),
-        lambda: calendar_enrich.drain(load_settings()),
+        # run_drain, not drain directly — the same coalescing latch a fill
+        # uses (app/calendar/enrich.py's schedule_drain), so a heartbeat tick
+        # landing while a fill-triggered pass is already running folds into
+        # it rather than starting a second, concurrent pass of its own.
+        lambda: calendar_enrich.run_drain(load_settings()),
     ):
         try:
             await job()
