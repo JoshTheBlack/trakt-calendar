@@ -196,7 +196,10 @@ class TestRegistry:
     def test_switching_it_off_leaves_a_configured_simkl_untouched(self):
         """The switch answers "may we reach a service nobody set up", not "is
         Simkl allowed to answer" — once the credentials are filled in it stops
-        applying at all, exactly as D-59 requires."""
+        applying at all. Widening it into a second gate on a configured Simkl
+        would withhold a calendar that needs no credential over an unrelated
+        tracker credential, which is the thing the source selector already
+        refuses to do."""
         configured_off = Settings(
             simkl_client_id="id", simkl_access_token="token",
             simkl_public_calendar_enabled=False)
