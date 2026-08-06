@@ -14,24 +14,40 @@ is 10 GET/second, so a viewer loading a month would wait on it. Instead:
           app/providers/simkl/calendar.py. Nothing here runs at fill time.
   READ    `overlay_records` reads `simkl_titles` — ONE BATCHED QUERY, NO
           NETWORK CALL — and fills in whatever it already knows for the Simkl
-          records this read resolved to. A title with no row yet, or one whose
-          last attempt failed and is out of its backoff, is queued for the
-          NEXT DRAIN. This is deliberately per-read, in-memory, and lossy
-          across a restart: the queue exists to feed the drain, not to
-          promise an eventual fetch, and the next viewer who reads a window
-          holding that title re-queues it for free.
-  DRAIN   the heartbeat calls `drain()`, which pops a bounded batch off that
-          queue, fetches each through app/providers/simkl/titles.py, and
-          UPSERTs the answer (or the fact that it failed) into `simkl_titles`.
-          Never reads the calendar cache itself — it only ever sees ids that a
-          real read already surfaced, which is what keeps a heartbeat tick
-          cheap regardless of how many calendar windows the instance holds.
+          records this read resolved to. A record this overlay cannot answer
+          for is simply left at `enriched=False`; it does not need to queue
+          anything for the drain to eventually find it (see DRAIN below).
+  DRAIN   the heartbeat calls `drain()`, which asks
+          app/calendar/cache.py's `cached_calendar_groups` for every Simkl id
+          ANY currently-stored calendar window names, subtracts the ones
+          `simkl_titles` already has a usable answer for (or a failure still
+          inside its backoff), fetches a bounded batch of what is left through
+          app/providers/simkl/titles.py, and UPSERTs the answer (or the fact
+          that it failed) into `simkl_titles`.
+
+THE DRAIN'S WORK IS DERIVED FROM THE STORED CALENDAR, NOT FROM AN IN-MEMORY
+QUEUE A READ HAPPENED TO POPULATE. An earlier version of this module fed the
+drain from a `_pending` dict that `overlay_records` filled and a full queue
+silently dropped an id from — measured on a live instance, `simkl_titles` grew
+100 -> 260 rows over several minutes while two specific titles (which had
+aired, rendered, and been read many times) were never attempted even once,
+because the queue was full on every read that offered them and nothing
+preferred an older offer over a newer one. Deriving the owed set fresh from
+`api_cache` every drain tick cannot drop an id that way: a window's Simkl ids
+are knowable the moment FILL stores it, whether or not any viewer has read it
+yet, and asking "what does the cache currently hold, minus what
+`simkl_titles` already answered" is complete and idempotent — an id either
+shows up in the difference or it does not, with no queue state to lose it in
+between. It also survives a restart for free, which the queue design gave up
+on deliberately and which turned out to be the wrong trade.
 
 A TITLE Simkl DOES NOT KNOW STILL GETS A ROW, WITH AN EMPTY PAYLOAD. That is
-what stops the same id being queued again on every single read after the
-first failed attempt — presence of a row is the whole signal `overlay_records`
-uses to decide "already attempted"; `failed_at`/`fail_count` are what decide
-whether it is worth attempting again yet.
+what stops the same id being re-attempted on every single drain tick after
+the first failed attempt — presence of a row with a real payload is what
+`overlay_records` reads as "already attempted and answered";
+`failed_at`/`fail_count` are what decide whether an empty row is worth
+attempting again yet, and the same backoff rule is what keeps a failed id out
+of `drain`'s owed set until it has waited long enough.
 
 THIS MODULE NEVER MAKES A NETWORK CALL FROM overlay_records. That function is
 called from app/calendar/cache.py's assemble_range, which a public share page
@@ -47,6 +63,7 @@ import logging
 import zlib
 from typing import Any
 
+from . import cache as calendar_cache
 from .. import db
 from ..providers.base import Media, Record, Source
 from ..providers.simkl import titles as simkl_titles
@@ -77,38 +94,6 @@ RETENTION_SECONDS = 30 * 24 * 60 * 60
 # unanswerable id is retried at most once a day rather than never again.
 _BACKOFF_BASE_SECONDS = 60 * 60
 _BACKOFF_MAX_SECONDS = 24 * 60 * 60
-
-# The in-memory queue `overlay_records` feeds and `drain` consumes. A dict
-# rather than a set or a list: insertion order is preserved (first surfaced,
-# first fetched) and a title read by several viewers between two drains is
-# only ever queued once. MODULE STATE, NOT A TABLE — it resets on restart,
-# which costs nothing worse than one extra read before an id is re-queued,
-# the same trade calendar/cache.py's own `_last_prewarm_at` marker makes.
-_PENDING_MAX = 500
-_pending: dict[tuple[int, str], None] = {}
-
-
-def _enqueue(simkl_id: int, media: str) -> None:
-    if len(_pending) >= _PENDING_MAX:
-        # Not an error: the queue is a hint, not a promise, and a full queue
-        # simply means this tick's drain has plenty to do already. The title
-        # is re-offered by the very next read that resolves to it.
-        return
-    _pending[(simkl_id, media)] = None
-
-
-def _pop_batch(limit: int) -> list[tuple[int, str]]:
-    batch = list(_pending.keys())[:limit]
-    for key in batch:
-        _pending.pop(key, None)
-    return batch
-
-
-def pending_count() -> int:
-    """How many titles are queued for the next drain. Read by tests; not load-
-    bearing for anything in the app itself."""
-    return len(_pending)
-
 
 # ---------------------------------------------------------------------------
 # storage
@@ -213,15 +198,19 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     record.enriched = True
 
 
-async def overlay_records(records: list[Record], *, now: int | None = None) -> list[Record]:
+async def overlay_records(records: list[Record]) -> list[Record]:
     """Fill in whatever `simkl_titles` already knows about the Simkl records in
-    `records`, mutating them in place, and queue anything unanswered for the
-    next drain. Returns `records` for convenience at the call site.
+    `records`, mutating them in place. Returns `records` for convenience at
+    the call site.
 
     NO NETWORK CALL HAPPENS HERE, EVER — see the module docstring. A record
     this overlay cannot answer for is simply left at `enriched=False`, which
     is what lets app/calendar/filter.py exempt it rather than judge it on
-    values it has not been able to look up yet.
+    values it has not been able to look up yet. It does not need to queue
+    anything for `drain` to find later, either: `drain` derives its own work
+    straight from the stored calendar cache (see `_owed_titles` below), so a
+    record read here and a record nobody has ever read are equally visible to
+    the next drain tick.
     """
     candidates: dict[tuple[int, str], list[Record]] = {}
     for record in records:
@@ -236,19 +225,15 @@ async def overlay_records(records: list[Record], *, now: int | None = None) -> l
     if not candidates:
         return records
 
-    ts = db.now() if now is None else now
     rows = await _read_rows(candidates.keys())
     for key, group in candidates.items():
         row = rows.get(key)
         if row is None:
-            _enqueue(*key)
             continue
         fields = row["fields"]
         if not fields:
-            # A stored failure: nothing to apply, and worth retrying only once
-            # its backoff has elapsed.
-            if _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
-                _enqueue(*key)
+            # A stored failure: nothing to apply. Whether it is worth
+            # attempting again yet is `drain`'s question, not a read's.
             continue
         for record in group:
             _apply(record, fields)
@@ -258,6 +243,43 @@ async def overlay_records(records: list[Record], *, now: int | None = None) -> l
 # ---------------------------------------------------------------------------
 # the heartbeat drain
 # ---------------------------------------------------------------------------
+
+def _media_values() -> tuple[str, str]:
+    return (str(Media.SHOW), str(Media.MOVIE))
+
+
+async def _owed_titles() -> dict[tuple[int, str], str]:
+    """Every (simkl_id, media) any currently-stored calendar window names,
+    mapped to that title's display name — the full set of Simkl titles this
+    instance's calendar could show, independent of whether a viewer has ever
+    read the window naming them. See the module docstring for why this
+    replaces an in-memory queue fed by reads.
+
+    Filtering OWED down to what is actually worth fetching (excluding a title
+    already answered, and one still inside its backoff) is `drain`'s job, not
+    this function's — it stays a pure "what does the cache currently name"
+    question so it has exactly one reason to change.
+    """
+    groups = await calendar_cache.cached_calendar_groups()
+    media_values = _media_values()
+    owed: dict[tuple[int, str], str] = {}
+    for group in groups:
+        record = (group.get("by_source") or {}).get(str(Source.SIMKL))
+        if not isinstance(record, dict):
+            continue
+        media = record.get("media")
+        if media not in media_values:
+            continue
+        raw_id = (record.get("ids") or {}).get("simkl")
+        try:
+            simkl_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        key = (simkl_id, media)
+        if key not in owed:
+            owed[key] = str(record.get("title") or "")
+    return owed
+
 
 async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
     fields = await simkl_titles.fetch_title(settings, simkl_id, Media(media))
@@ -269,24 +291,57 @@ async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
 
 
 async def drain(settings, *, now: int | None = None) -> int:
-    """One heartbeat's worth of enrichment: fetch detail for a bounded batch of
-    titles a recent read found unenriched, and store what came back. Returns
-    how many titles were newly enriched (0 when the queue was empty or
-    everything in the batch failed).
+    """One heartbeat's worth of enrichment: derive what the stored calendar
+    still owes (see `_owed_titles`), fetch detail for a bounded batch of what
+    is left after already-answered and still-backed-off titles are excluded,
+    and store what came back. Returns how many titles were newly enriched (0
+    when nothing was owed or everything in the batch failed).
+
+    THE BOUND IS ON WORK PER TICK, NOT ON HOW MUCH IS DERIVED. `_owed_titles`
+    scans every stored calendar window every tick — measured cheap (see its
+    docstring) — precisely so the set it hands back is always complete; only
+    the fetch below is capped, which is what keeps a large backlog from
+    turning one heartbeat into a burst against Simkl's rate ceiling. A full
+    backlog drains within a few minutes of ordinary heartbeat ticks rather
+    than in one.
 
     RUNS THROUGH CATALOG_POOL, WHICH ALLOWS PARALLEL REQUESTS — see
     app/providers/simkl/transport.py — so the batch is fetched concurrently
     rather than one title at a time.
     """
-    batch = _pop_batch(DRAIN_BATCH_SIZE)
+    ts = db.now() if now is None else now
+    owed = await _owed_titles()
+    if not owed:
+        return 0
+    rows = await _read_rows(owed.keys())
+    batch: list[tuple[int, str, str]] = []
+    for (simkl_id, media), title in owed.items():
+        if len(batch) >= DRAIN_BATCH_SIZE:
+            break
+        row = rows.get((simkl_id, media))
+        if row is not None:
+            if row["fields"]:
+                continue  # already answered
+            if not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
+                continue  # failed recently; not worth asking again yet
+        batch.append((simkl_id, media, title))
     if not batch:
         return 0
-    ts = db.now() if now is None else now
     results = await asyncio.gather(
-        *(_fetch_one(settings, simkl_id, media, ts) for simkl_id, media in batch),
+        *(_fetch_one(settings, simkl_id, media, ts) for simkl_id, media, _title in batch),
         return_exceptions=True,
     )
-    fetched = sum(1 for r in results if r is True)
+    fetched = 0
+    for (simkl_id, media, title), result in zip(batch, results):
+        if result is True:
+            fetched += 1
+            # DEBUG, not INFO: the summary line below is the operator-facing
+            # one (the same reasoning calendar/cache.py's pre-warm line
+            # carries); this is the per-title detail worth having in a debug
+            # log, named rather than left as a bare id, per the author's own
+            # request — an id alone is unreadable in a log.
+            logger.debug("Simkl enrichment drain: enriched %r (simkl id %s, %s).",
+                         title, simkl_id, media)
     # INFO, NOT DEBUG, and the same reasoning as calendar/cache.py's own
     # pre-warm line: this spends the instance's Simkl budget with no viewer
     # present, and an operator should be able to see that it ran.
@@ -301,8 +356,8 @@ async def drain(settings, *, now: int | None = None) -> int:
 async def sweep(now: int | None = None) -> int:
     """Delete `simkl_titles` rows past the retention window, on the same
     heartbeat that sweeps api_cache. A swept row is not lost data so much as a
-    forced recheck: the very next read that resolves to that title finds no
-    row, queues it, and the next drain re-fetches it — see overlay_records."""
+    forced recheck: the very next drain tick that finds the title still named
+    by a stored window sees no row and re-fetches it — see `_owed_titles`."""
     ts = db.now() if now is None else now
     cutoff = ts - RETENTION_SECONDS
     result = await db.execute("DELETE FROM simkl_titles WHERE fetched_at <= ?", (cutoff,))

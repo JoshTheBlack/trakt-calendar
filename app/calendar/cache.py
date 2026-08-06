@@ -494,6 +494,41 @@ async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWind
     return window, int(row["cached_at"])
 
 
+async def cached_calendar_groups() -> list[dict]:
+    """Every group ANY currently-stored calendar window holds, across every
+    endpoint and window, read straight off `api_cache` — no fetch, and no
+    dependency on whether a viewer has ever read one of these windows.
+
+    THIS IS WHAT app/calendar/enrich.py's DRAIN SCANS to learn which Simkl ids
+    the stored calendar names, rather than depending on an in-memory queue a
+    viewer's read happened to populate — see that module for the starvation a
+    queue-fed design produced. A window is filled (by fetch_window_records)
+    before anybody has read it, so the ids it names are knowable straight from
+    this table; nothing about deriving the drain's work needs a read to have
+    happened first.
+
+    ONE QUERY, EVERY CALENDAR ROW, EVERY CALL — deliberately not paged or
+    cached. Measured against the author's live database: 33 stored windows,
+    1.7 MB decompressed, under 5ms to inflate all of them. That cost does not
+    grow with how long the instance has run either: the number of distinct
+    (endpoint, window) keys is bounded by the prewarm horizon and how far a
+    viewer has ever browsed, and app/cache.py's own TTL sweep retires the ones
+    nobody has read in a while, so this table stays roughly constant-sized
+    rather than accumulating one row per week forever.
+    """
+    rows = await db.fetch_all(
+        "SELECT payload FROM api_cache WHERE cache_key LIKE 'calendar:%'")
+    groups: list[dict] = []
+    for row in rows:
+        try:
+            window = _decompress(row["payload"])
+        except (zlib.error, ValueError):
+            continue
+        if window is not None:
+            groups.extend(window.groups)
+    return groups
+
+
 async def store_window(endpoint_key: str, start: date, records: list[Record],
                        ttl_seconds: int, now: int, *, sources=(), asked=None) -> list[dict]:
     """Store one window's records, grouped, under the versioned envelope, and
@@ -777,11 +812,12 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         records = [r for r in (calendar_resolve.resolve(group, prefs, linked or ())
                                for group in dedupe_groups(groups)) if r is not None]
         # ONE BATCHED DB READ, NO NETWORK CALL: overlay whatever the background
-        # enrichment drain already knows onto this read's Simkl records, and
-        # queue anything it does not for the next drain tick. See
-        # app/calendar/enrich.py. Must run BEFORE the filter below, which is
-        # the only reason `record.enriched` is worth asking about here at all.
-        records = await calendar_enrich.overlay_records(records, now=now)
+        # enrichment drain already knows onto this read's Simkl records. See
+        # app/calendar/enrich.py — the drain derives its own work from the
+        # stored calendar cache and does not need this read to queue anything
+        # for it. Must run BEFORE the filter below, which is the only reason
+        # `record.enriched` is worth asking about here at all.
+        records = await calendar_enrich.overlay_records(records)
         certifications = show_certifications if endpoint.media == "show" else movie_certifications
         # exempt_unenriched=True ONLY here, never at the floor in
         # fetch_window_records — see filter.keep_record for why the two reads
