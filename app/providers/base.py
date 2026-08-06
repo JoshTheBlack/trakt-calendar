@@ -268,6 +268,16 @@ class Record:
     season: int | None = None
     episode_number: int | None = None
 
+    # SIMKL'S OWN "IS THIS ACTUALLY A FILM" ANSWER, carried on the record so
+    # app/calendar/filter.py's read-time prune can act on it — see
+    # prune_disguised_films there for the rule and app/providers/simkl/
+    # titles.py's `_extract` for where the value comes from. Empty for every
+    # record no enrichment has looked up yet (including every non-Simkl
+    # source, which never sets this at all) and for the small serial formats
+    # ("ona", "ova", "tv", "special") that must NOT be pruned; only "movie"
+    # means "this is a film masquerading on a series endpoint".
+    anime_type: str = ""
+
     # WHETHER genres/network/country/certification/runtime/status/overview ARE
     # REAL ANSWERS OR JUST THIS RECORD'S DEFAULTS. True for every source that
     # carries these fields on its calendar payload already (Trakt does, so it

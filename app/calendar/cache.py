@@ -818,6 +818,13 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # for it. Must run BEFORE the filter below, which is the only reason
         # `record.enriched` is worth asking about here at all.
         records = await calendar_enrich.overlay_records(records)
+        # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
+        # "movie"`) does not belong on a series endpoint — see
+        # filter.prune_disguised_films for the measured rule and why this is
+        # a read-time exclusion rather than something fetch_window_records can
+        # do at fill. Same reasoning as the exemption below: it can only act
+        # on what enrichment has already found, so it runs right beside it.
+        records = calendar_filter.prune_disguised_films(records, endpoint.media)
         certifications = show_certifications if endpoint.media == "show" else movie_certifications
         # exempt_unenriched=True ONLY here, never at the floor in
         # fetch_window_records — see filter.keep_record for why the two reads

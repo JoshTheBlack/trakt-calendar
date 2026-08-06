@@ -54,6 +54,21 @@ called from app/calendar/cache.py's assemble_range, which a public share page
 reaches with allow_fetch=False — the same rule that page holds everywhere else
 in the calendar package applies here too, and is why enrichment can only ever
 be discovered as pending, never performed, on a read.
+
+"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION". A ROW A NARROWER
+extraction wrote — every simkl_titles row that existed before ids/type/
+anime_type/trailers/etc. were added to what app/providers/simkl/titles.py's
+`_extract` keeps — carries no `extract_version` key at all, and `drain` reads
+that the same way it reads a version number that does not match: owed, not
+done, exactly like a title never attempted. Without this an already-answered
+row from the old shape would sit there for its full 30-day retention window
+before the wider extraction ever touched it, which is not what "owed" is
+supposed to mean. Backoff still governs FAILURES (a stored empty payload);
+a stale-shaped SUCCESS is re-fetched on the very next drain tick regardless of
+backoff, because nothing about it failed. `overlay_records` is unaffected —
+it applies whatever fields an old row already carries in the meantime, so a
+title enriched under the old shape stays enriched (just missing the newer
+fields) while it waits its turn to be re-fetched.
 """
 from __future__ import annotations
 
@@ -70,12 +85,45 @@ from ..providers.simkl import titles as simkl_titles
 
 logger = logging.getLogger(__name__)
 
-# Bounded per tick so a heartbeat that finds a large backlog (a fresh install,
-# or a long-stopped instance whose enrichment table emptied through the
-# retention sweep below) never turns one minute of maintenance into a burst
-# against Simkl's rate ceiling. At this size a full backlog drains within a
-# few minutes of ordinary traffic rather than in one tick.
-DRAIN_BATCH_SIZE = 20
+# RAISED FROM 20 TO 300, MEASURED 2026-08-06 AGAINST THE LIVE ENDPOINT, NOT
+# ESTIMATED. Median latency to GET /tv/{id} is ~20ms because the endpoint is
+# Cloudflare-cached (146 of 150 sampled requests answered cache HIT); at 20
+# on a 60-second heartbeat the drain was spending ~0.4 SECONDS of every tick
+# doing work and sitting idle the other 99.3% — 432 real titles measured
+# ~22 minutes to clear at that pace and ~18 seconds even with no parallelism
+# at all. 300 sits inside the measured 200-500 range Simkl's own limits
+# support (see the next paragraph) and, with CATALOG_POOL's existing
+# concurrency of 6 — left untouched; run-to-run variance at 20ms swamps
+# whatever effect tuning it would have — clears an ordinarily-browsed
+# month's worth of titles inside a single tick.
+#
+# THE CAVEAT THIS NUMBER DEPENDS ON, KEPT BESIDE IT SO IT TRAVELS WITH IT:
+# Simkl's published rate limits allow PARALLEL / high-rate requests only on
+# its Cloudflare-cached-by-id family — the trending and calendar data files,
+# GET /movies/{id}, GET /tv/{id}, GET /anime/{id}, GET /tv/episodes/{id} and
+# GET /anime/episodes/{id}. This drain calls /tv/{id} and NOTHING ELSE (see
+# app/providers/simkl/titles.py), so it qualifies. EVERYTHING ELSE Simkl
+# exposes stays capped at 10 GET/second and 1 POST/second — the tracker's
+# /sync/ reads and every POST run SEQUENTIALLY on SYNC_POOL
+# (app/providers/simkl/transport.py), which admits one request at a time on
+# purpose. A large number here is not licence to raise a batch, a pool's
+# concurrency, or anything else on one of those other paths — measured, the
+# sequential benchmark for THIS endpoint alone already ran at 23.5 req/s,
+# above the general 10 GET/s ceiling, and that is only legitimate because the
+# path is declared cached and parallel-safe; the same rate on an
+# uncached path would breach Simkl's limit without anyone touching a
+# constant.
+#
+# TWO THINGS MAKE THE REAL WORLD SLOWER THAN THIS BENCHMARK: 20ms is the
+# cache-HIT case, and a title nobody has fetched before — everything on a
+# fresh instance's first drain — is likelier to MISS; and each title here
+# also costs a database write, which the benchmark did not measure at all.
+#
+# Bounded per tick regardless of size so a heartbeat that finds a large
+# backlog (a fresh install, or a long-stopped instance whose enrichment table
+# emptied through the retention sweep below) never turns one minute of
+# maintenance into an unbounded burst.
+DRAIN_BATCH_SIZE = 300
 
 # Catalog metadata barely moves, so a stale row is not urgent — but a row that
 # is never revisited would eventually be inaccurate for a title Simkl reissues
@@ -185,6 +233,11 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     record.runtime = fields.get("runtime")
     record.status = str(fields.get("status") or "")
     record.overview = str(fields.get("overview") or "")
+    # Missing on a row written by the older, narrower extraction — reads as ""
+    # exactly like an unenriched record, which is the honest answer until the
+    # drain re-fetches it under the wider shape (see EXTRACT_VERSION below and
+    # app/calendar/filter.py's prune_disguised_films, the only reader of this).
+    record.anime_type = str(fields.get("anime_type") or "")
     upgrades = fields.get("ids") or {}
     if upgrades:
         # First-writer-wins over an id the calendar file already supplied,
@@ -320,9 +373,19 @@ async def drain(settings, *, now: int | None = None) -> int:
             break
         row = rows.get((simkl_id, media))
         if row is not None:
-            if row["fields"]:
-                continue  # already answered
-            if not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
+            fields = row["fields"]
+            current = bool(fields) and fields.get("extract_version") == simkl_titles.EXTRACT_VERSION
+            if current:
+                continue  # already answered, under the current extraction
+            # A SUCCESS ROW WITH NO fields IS A STORED FAILURE (see
+            # _upsert_failure); anything else with fields but the WRONG (or
+            # no) extract_version is a row the OLDER, narrower extraction
+            # wrote. That is not "answered" any more than an unattempted id
+            # is — see the module docstring and titles.EXTRACT_VERSION — so
+            # it is owed a re-fetch regardless of backoff, which exists to
+            # slow down repeated FAILURES, not to protect a stale success
+            # from being refreshed.
+            if not fields and not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
                 continue  # failed recently; not worth asking again yet
         batch.append((simkl_id, media, title))
     if not batch:

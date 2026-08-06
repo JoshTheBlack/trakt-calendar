@@ -131,6 +131,38 @@ def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None,
             if (exempt_unenriched and not item.enriched) or keep_network(item.network, inc, exc)]
 
 
+def prune_disguised_films(records, endpoint_media) -> list:
+    """Drop a record Simkl's own enrichment marks as a FILM from a SERIES
+    endpoint (shows/new, shows/premieres, shows — anything whose media is
+    "show", never a movie endpoint).
+
+    THE SIGNAL IS `anime_type == "movie"`, MEASURED, NOT `total_episodes`.
+    Two titles measured live carry `total_episodes: 1` — The Ribbon Hero, an
+    ONA SERIES (Original Net Animation: an anime released to the web, not a
+    film), and Shiranuhi, an actual film — and only `anime_type` tells them
+    apart. `ona`, `ova`, `tv` and `special` are all SERIAL formats and must
+    survive this check untouched; only `movie` is pruned. Across three
+    disjoint samples totalling 300 titles this measured at 1.7% of entries
+    (5 of 300), which is why this is one condition here rather than new
+    machinery — see app/providers/simkl/titles.py's `_extract` for where the
+    field is captured.
+
+    RUNS AT READ, NOT AT FILL, because the truth only arrives once enrichment
+    has looked the title up (app/calendar/enrich.py's background drain), and
+    the fill has already stored the window by the time that happens. A title
+    whose enrichment has not landed yet therefore still renders as a series
+    entry — `anime_type` defaults to "" on an unenriched record, which is not
+    "movie" — until its simkl_titles row exists. That is a deliberate,
+    temporary gap in the honest direction (the same shape the genre/country/
+    certification exemption already accepts elsewhere in this module), not a
+    defect to chase; it resolves itself within a drain tick or two of the
+    title being enriched.
+    """
+    if str(endpoint_media) != "show":
+        return list(records)
+    return [r for r in records if getattr(r, "anime_type", "") != "movie"]
+
+
 def keep_values(genres, country, certification,
                 g_inc: set[str], g_exc: set[str],
                 c_inc: set[str], c_exc: set[str],

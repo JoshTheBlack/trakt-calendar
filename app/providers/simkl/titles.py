@@ -57,13 +57,33 @@ DETAIL_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 _DETAIL_PATHS = {Media.SHOW: "tv", Media.MOVIE: "movies"}
 
-# The id namespaces a detail payload can add over what the calendar file
-# already gave a record (see providers/base.py's ID_KEYS / Record.ids).
-# `simkl`, `slug`, `tmdb` and `imdb` all ride the calendar file already, and a
-# detail payload's own copy of those is not worth a second source of truth for
-# them — these three are the ones measured live to appear only on the detail
-# endpoints, never on the calendar files.
-_ID_UPGRADES = ("tvdb", "mal", "anidb")
+# Bumped whenever _extract's OUTPUT SHAPE changes in a way a stored
+# simkl_titles row must not be mistaken for already having. A row this app
+# wrote before this field existed at all — the entire narrower-extraction
+# generation, ~260 of them measured live on 2026-08-06 — has no key here,
+# which reads as "a version this constant does not recognise" exactly as
+# safely as an explicit mismatch would. app/calendar/enrich.py's drain reads
+# this to decide whether an already-successful row is actually DONE or only
+# owed a re-fetch under the wider extraction — see its own comment for why
+# that is the only place the distinction has to be made: overlay_records
+# still applies whatever an old row happens to carry in the meantime, so a
+# title already enriched under the old shape does not regress to unenriched
+# while it waits its turn to be re-fetched.
+EXTRACT_VERSION = 2
+
+# MEASURED ACROSS 300 REAL TITLES, THREE DISJOINT SAMPLES (2026-08-06): Simkl's
+# `ids` map is not a fixed namespace set. Besides the three this app used to
+# keep alone (tvdb, mal, anidb) it also returned tmdb, imdb, traktslug,
+# tvdbslug, anilist, kitsu and mdlslug on a meaningful fraction of titles, and
+# two namespaces — `tmdbtv` and `trakttvslug` — that appeared exactly once
+# each across the whole sample and never again in a later round. An allowlist
+# would have silently dropped those two, and would drop whatever Simkl adds
+# next; the whole map is kept instead (see _extract). tmdb (40/45, then 84/105,
+# then 137/150) and imdb (28/45, then 72/105, then 98/150) matter most: they
+# are exactly the ids app/providers/base.py's identity waterfall already
+# matches Trakt and Simkl records on, so a Simkl-only title enrichment gives a
+# tmdb id to can land on the SAME calendar group as its Trakt counterpart with
+# no matcher of its own — the mechanism already exists, this only feeds it.
 
 
 def _genre_slug(name: str) -> str:
@@ -91,21 +111,67 @@ def _looks_like_a_title(payload: Any) -> bool:
 
 def _extract(payload: dict) -> dict[str, Any]:
     """The subset of one detail payload this app keeps, in Record's own field
-    names — genres already slugged, everything else taken as Simkl sends it."""
+    names — genres already slugged, everything else taken as Simkl sends it.
+
+    THE `ids` MAP IS KEPT WHOLE, THE REST STAYS A WHITELIST. Ids are small,
+    bounded (a dozen or so short strings) and the one place completeness beats
+    selectivity — see EXTRACT_VERSION's neighbour comment above for why an
+    allowlist there was actively wrong. `relations` and `users_recommendations`
+    are the opposite case: measured to run tens of kilobytes each, and neither
+    is read by anything this app does, so they are the reason the REST of the
+    payload stays a named list rather than "store what Simkl sent".
+
+    type/anime_type/trailers/total_episodes/poster/first_aired were all
+    measured present and cheap (single scalars or one short list) and are
+    kept for the reasons named where each is consumed: `type` drives the
+    anime genre slug below and app/calendar/filter.py's film prune keys on
+    `anime_type` (both need the ENRICHED value, not a guess from the redirect
+    a title happened to take to get here). `trailers` is what the detail
+    modal work already on this app's roadmap is documented to want.
+    `total_episodes`, `poster` and `first_aired`
+    cost nothing to keep and round out what a future card/modal can draw on
+    without a second lookup — but note total_episodes is NOT a film signal
+    (see the filter module's own docstring for the measured counter-example).
+    `airs` (a nested day/time/timezone object) and `ratings` (nested, multi-
+    source) were left out: cheap individually, but nothing shipping in this
+    change reads either, and — like every other field here — adding one later
+    costs no migration, since simkl_titles.payload is an opaque blob.
+    """
     ids = payload.get("ids") or {}
-    upgraded_ids = {
-        key: str(ids[key]) for key in _ID_UPGRADES if ids.get(key) not in (None, "")
+    full_ids = {
+        str(key): str(value) for key, value in ids.items() if value not in (None, "")
     }
     runtime = payload.get("runtime")
+    total_episodes = payload.get("total_episodes")
+    genres = [_genre_slug(g) for g in (payload.get("genres") or []) if g]
+    # THE PAYLOAD SAYS WHETHER A TITLE IS ANIME OUTRIGHT ("type": "anime"), SO
+    # THIS DOES NOT INFER IT FROM WHICH ENDPOINT ANSWERED OR WHETHER A REDIRECT
+    # WAS FOLLOWED. Giving it the same "anime" genre slug Trakt titles can
+    # already carry makes Simkl's anime filterable by the control that already
+    # filters Trakt's, with no new filter dimension.
+    if str(payload.get("type") or "").lower() == "anime" and "anime" not in genres:
+        genres.append("anime")
     return {
-        "genres": [_genre_slug(g) for g in (payload.get("genres") or []) if g],
+        "extract_version": EXTRACT_VERSION,
+        "genres": genres,
         "network": str(payload.get("network") or ""),
         "country": str(payload.get("country") or ""),
         "certification": str(payload.get("certification") or ""),
         "runtime": int(runtime) if isinstance(runtime, (int, float)) else None,
         "status": str(payload.get("status") or ""),
         "overview": str(payload.get("overview") or ""),
-        "ids": upgraded_ids,
+        "ids": full_ids,
+        "type": str(payload.get("type") or ""),
+        # THE ONE FIELD THE FILM PRUNE ACTUALLY KEYS ON. Measured live: `ona`,
+        # `ova`, `tv` and `special` are all SERIAL formats (ONA = Original Net
+        # Animation, an anime series released to the web, not a film) — only
+        # `movie` means "this is a film". See app/calendar/filter.py's
+        # prune_disguised_films for where that distinction is spent.
+        "anime_type": str(payload.get("anime_type") or ""),
+        "total_episodes": int(total_episodes) if isinstance(total_episodes, (int, float)) else None,
+        "poster": str(payload.get("poster") or ""),
+        "first_aired": str(payload.get("first_aired") or ""),
+        "trailers": payload.get("trailers") if isinstance(payload.get("trailers"), list) else [],
     }
 
 

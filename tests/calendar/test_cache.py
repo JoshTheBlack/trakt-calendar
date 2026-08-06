@@ -1269,5 +1269,42 @@ class NetworkFilterTests(unittest.TestCase):
                 self.assertEqual(self.kept(items, spec), ["HBO", ""])
 
 
+class PruneDisguisedFilmsTests(unittest.TestCase):
+    """A Simkl entry whose enrichment says `anime_type: "movie"` does not
+    belong on a series endpoint — see filter.prune_disguised_films. Only
+    `movie` is a film; `ona`, `ova`, `tv` and `special` are all serial
+    formats and total_episodes is deliberately not the signal (a measured
+    one-episode ONA series and a measured one-episode film both carry it)."""
+
+    @staticmethod
+    def _record(anime_type):
+        return SimpleNamespace(title=anime_type or "unenriched", anime_type=anime_type)
+
+    def test_a_movie_is_pruned_from_a_show_endpoint(self):
+        records = [self._record("movie"), self._record("tv")]
+        kept = calendar_filter.prune_disguised_films(records, "show")
+        self.assertEqual([r.title for r in kept], ["tv"])
+
+    def test_every_serial_anime_type_survives(self):
+        records = [self._record(t) for t in ("ona", "ova", "tv", "special")]
+        kept = calendar_filter.prune_disguised_films(records, "show")
+        self.assertEqual(len(kept), 4)
+
+    def test_an_unenriched_record_is_not_pruned(self):
+        """total_episodes is not the signal, and neither is "we have not
+        looked yet" — a record with no anime_type at all (unenriched, or a
+        non-Simkl source) must render until enrichment actually says movie."""
+        record = SimpleNamespace(title="pending")  # no anime_type attribute at all
+        kept = calendar_filter.prune_disguised_films([record], "show")
+        self.assertEqual(kept, [record])
+
+    def test_a_movie_endpoint_is_never_pruned(self):
+        """The rule only ever applies to a SERIES endpoint — a title correctly
+        listed as a film on the movies endpoint must not be touched by it."""
+        records = [self._record("movie")]
+        kept = calendar_filter.prune_disguised_films(records, "movie")
+        self.assertEqual(kept, records)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

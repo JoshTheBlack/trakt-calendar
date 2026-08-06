@@ -22,6 +22,7 @@ from app.calendar import cache as calendar_cache, enrich as calendar_enrich
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
+from app.providers.simkl import titles as simkl_titles
 from tests.support import new_db_path
 
 SHOWS = get_endpoint("shows")
@@ -35,8 +36,11 @@ _AIR_TS = 1783425600.0
 # titles.py always returns even for a title with no runtime or genres. Used
 # wherever a test only cares that a call SUCCEEDED, not what it found.
 _OK_FIELDS = {
+    "extract_version": simkl_titles.EXTRACT_VERSION,
     "genres": [], "network": "", "country": "", "certification": "",
     "runtime": None, "status": "", "overview": "", "ids": {},
+    "type": "", "anime_type": "", "total_episodes": None, "poster": "",
+    "first_aired": "", "trailers": [],
 }
 
 
@@ -288,6 +292,7 @@ class DrainTests(EnrichTestCase):
     async def test_an_already_answered_title_is_not_refetched(self):
         await self._stored([_simkl_record(1, title="X")])
         await calendar_enrich._upsert_success(1, "show", {
+            "extract_version": simkl_titles.EXTRACT_VERSION,
             "genres": ["drama"], "network": "", "country": "", "certification": "",
             "runtime": None, "status": "", "overview": "", "ids": {},
         }, now=1000)
@@ -296,6 +301,43 @@ class DrainTests(EnrichTestCase):
             fetched = await calendar_enrich.drain(self.SETTINGS, now=2000)
         self.assertEqual(fetched, 0)
         spy.assert_not_awaited()
+
+    async def test_a_row_from_the_older_extraction_is_re_fetched_not_treated_as_complete(self):
+        """A row written before ids/type/anime_type/trailers existed carries
+        no `extract_version` key at all — the shape every one of the ~260
+        rows already in a live simkl_titles table is in. It must be treated
+        as OWED, not as already answered, so the author does not wait a full
+        30-day retention cycle for the fields that make matching cheap."""
+        await self._stored([_simkl_record(1, title="X")])
+        await calendar_enrich._upsert_success(1, "show", {
+            # The exact shape the narrower extraction wrote: no
+            # extract_version, no type/anime_type/trailers, ids limited to
+            # tvdb/mal/anidb.
+            "genres": ["drama"], "network": "AMC", "country": "US",
+            "certification": "", "runtime": None, "status": "", "overview": "",
+            "ids": {"tvdb": "999"},
+        }, now=1000)
+        spy = AsyncMock(return_value=_OK_FIELDS)
+        with patch("app.providers.simkl.titles.fetch_title", spy):
+            fetched = await calendar_enrich.drain(self.SETTINGS, now=1000)
+        self.assertEqual(fetched, 1)
+        spy.assert_awaited_once()
+
+    async def test_a_stale_row_still_overlays_its_old_fields_while_owed(self):
+        """The overlay is not gated on extract_version — it applies whatever
+        an old row already carries, so a title enriched under the narrower
+        extraction does not regress to unenriched while it waits for the
+        drain to re-fetch it under the wider shape."""
+        await calendar_enrich._upsert_success(1, "show", {
+            "genres": ["drama"], "network": "AMC", "country": "US",
+            "certification": "", "runtime": None, "status": "", "overview": "",
+            "ids": {"tvdb": "999"},
+        }, now=1000)
+        record = _simkl_record(1)
+        [got] = await calendar_enrich.overlay_records([record])
+        self.assertTrue(got.enriched)
+        self.assertEqual(got.network, "AMC")
+        self.assertEqual(got.anime_type, "")  # not carried by the old shape
 
     async def test_a_failed_lookup_still_writes_a_row_so_it_is_not_requeued_forever(self):
         await self._stored([_simkl_record(1, title="X")])
@@ -441,6 +483,65 @@ class FilterExemptionThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase)
                 countries="-kr", now=1000, prefs=prefs, linked=("trakt", "simkl"))
             titles = [i.title for g in grouped for i in g["items"]]
             self.assertNotIn("Moonshadow", titles, f"selection={selection}")
+
+
+class FilmPruneThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
+    """End-to-end: the worked example from the report (Shiranuhi, `anime_type:
+    "movie"`, `total_episodes: 1`) reaches a series endpoint's read exactly
+    as it did live, and the prune closes it — including the transitional
+    state where enrichment has not landed yet."""
+
+    async def asyncSetUp(self):
+        new_db_path("enrich-film-prune")
+        await db.migrate()
+        self.settings = Settings()
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def _stored(self, records, *, now=1000):
+        await calendar_cache.store_window(
+            SHOWS.key, date(2026, 7, 6), records, 600, now,
+            sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+
+    async def test_an_unenriched_film_still_renders(self):
+        """THE STATED, ACCEPTABLE GAP: the truth only arrives with
+        enrichment, so a film that has not been looked up yet renders as an
+        ordinary series entry until its simkl_titles row lands."""
+        await self._stored([_simkl_record(1, title="Shiranuhi")])
+        grouped, _meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=ZoneInfo("UTC"),
+            start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
+        titles = [i.title for g in grouped for i in g["items"]]
+        self.assertIn("Shiranuhi", titles)
+
+    async def test_the_same_film_is_pruned_once_enriched(self):
+        await calendar_enrich._upsert_success(1, "show", {
+            "genres": ["anime"], "network": "", "country": "", "certification": "",
+            "runtime": None, "status": "", "overview": "", "ids": {},
+            "anime_type": "movie",
+        }, now=999)
+        await self._stored([_simkl_record(1, title="Shiranuhi")])
+        grouped, _meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=ZoneInfo("UTC"),
+            start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
+        titles = [i.title for g in grouped for i in g["items"]]
+        self.assertNotIn("Shiranuhi", titles)
+
+    async def test_a_one_episode_ona_series_is_not_pruned(self):
+        """The Ribbon Hero worked example: total_episodes=1 on a genuine ONA
+        SERIES must survive — only anime_type == "movie" is a film."""
+        await calendar_enrich._upsert_success(2, "show", {
+            "genres": ["anime"], "network": "", "country": "", "certification": "",
+            "runtime": None, "status": "", "overview": "", "ids": {},
+            "anime_type": "ona",
+        }, now=999)
+        await self._stored([_simkl_record(2, title="The Ribbon Hero")])
+        grouped, _meta = await calendar_cache.assemble_range(
+            SHOWS, self.settings, tz=ZoneInfo("UTC"),
+            start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
+        titles = [i.title for g in grouped for i in g["items"]]
+        self.assertIn("The Ribbon Hero", titles)
 
 
 if __name__ == "__main__":  # pragma: no cover

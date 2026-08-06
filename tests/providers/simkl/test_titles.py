@@ -66,7 +66,15 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fields["network"], "AMC")
         self.assertEqual(fields["status"], "ended")
         self.assertEqual(fields["runtime"], 47)
-        self.assertEqual(fields["ids"], {"tvdb": "81189"})
+        # THE WHOLE ids MAP, NOT AN ALLOWLIST — every namespace the payload
+        # named survives, coerced to str, including ones the calendar file
+        # already supplied (simkl, slug, tmdb, imdb): completeness beats
+        # selectivity here because ids are small and bounded.
+        self.assertEqual(fields["ids"], {
+            "simkl": "11121", "slug": "breaking-bad", "tmdb": "1396",
+            "imdb": "tt0903747", "tvdb": "81189",
+        })
+        self.assertEqual(fields["extract_version"], titles.EXTRACT_VERSION)
 
     async def test_a_movie_is_read_through_the_movies_path(self):
         payload = {**TV_PAYLOAD, "ids": {"simkl": 472214, "tmdb": "27205"}}
@@ -85,8 +93,59 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
             fields = await titles.fetch_title(SETTINGS, 38636, Media.SHOW)
         self.assertEqual(spy.await_args.args[2], "tv/38636")
         spy.assert_awaited_once()
-        self.assertEqual(fields["genres"], ["action", "adventure", "martial-arts"])
-        self.assertEqual(fields["ids"], {"tvdb": "81797", "mal": "21", "anidb": "69"})
+        # "anime" is appended from the payload's own stated "type", not
+        # inferred from having followed a redirect to get here.
+        self.assertEqual(fields["genres"],
+                         ["action", "adventure", "martial-arts", "anime"])
+        self.assertEqual(fields["ids"], {
+            "simkl": "38636", "slug": "one-piece", "tmdb": "37854",
+            "imdb": "tt0388629", "tvdb": "81797", "mal": "21", "anidb": "69",
+        })
+        self.assertEqual(fields["type"], "anime")
+
+    async def test_an_unusual_rare_id_namespace_survives_extraction(self):
+        """Measured live 2026-08-06: `tmdbtv` and `trakttvslug` each appeared
+        on exactly one title across 300 sampled — precisely the kind of
+        namespace an allowlist would have silently dropped and nobody would
+        have noticed missing."""
+        payload = {**TV_PAYLOAD, "ids": {**TV_PAYLOAD["ids"], "tmdbtv": "999888"}}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            fields = await titles.fetch_title(SETTINGS, 1, Media.SHOW)
+        self.assertEqual(fields["ids"]["tmdbtv"], "999888")
+
+    async def test_relations_and_users_recommendations_are_not_stored(self):
+        """These two are measured to run tens of kilobytes each and nothing
+        in this app reads them — the whitelist discipline for the REST of the
+        payload (everything but `ids`) still applies."""
+        payload = {**TV_PAYLOAD, "relations": [{"title": "x"} for _ in range(500)],
+                  "users_recommendations": [{"title": "y"} for _ in range(500)]}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            fields = await titles.fetch_title(SETTINGS, 1, Media.SHOW)
+        self.assertNotIn("relations", fields)
+        self.assertNotIn("users_recommendations", fields)
+
+    async def test_anime_type_and_trailers_are_captured(self):
+        payload = {**TV_PAYLOAD, "type": "anime", "anime_type": "movie",
+                  "total_episodes": 1, "poster": "abc123",
+                  "first_aired": "2026-01-01T00:00:00Z",
+                  "trailers": [{"name": "Trailer", "youtube": "abc123"}]}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            fields = await titles.fetch_title(SETTINGS, 1, Media.SHOW)
+        self.assertEqual(fields["anime_type"], "movie")
+        self.assertEqual(fields["total_episodes"], 1)
+        self.assertEqual(fields["poster"], "abc123")
+        self.assertEqual(fields["first_aired"], "2026-01-01T00:00:00Z")
+        self.assertEqual(fields["trailers"], [{"name": "Trailer", "youtube": "abc123"}])
+
+    async def test_a_serial_anime_type_is_captured_as_is_not_pruned_here(self):
+        """This module only records the value; app/calendar/filter.py decides
+        what to do with it. ona/ova/tv/special are all serial formats and
+        must not be confused with `movie` anywhere downstream."""
+        for serial_type in ("ona", "ova", "tv", "special"):
+            payload = {**TV_PAYLOAD, "anime_type": serial_type}
+            with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+                fields = await titles.fetch_title(SETTINGS, 1, Media.SHOW)
+            self.assertEqual(fields["anime_type"], serial_type)
 
     async def test_genres_are_slugged_to_match_trakts_own_spelling(self):
         """Simkl spells 'Game Show'; Trakt's calendar payload already arrives as
@@ -129,9 +188,14 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
         payload = {"title": "X", "ids": {"simkl": 1}}
         with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
             fields = await titles.fetch_title(SETTINGS, 1, Media.SHOW)
-        self.assertEqual(set(fields), {"genres", "network", "country", "certification",
-                                       "runtime", "status", "overview", "ids"})
-        self.assertEqual((fields["genres"], fields["runtime"], fields["ids"]), ([], None, {}))
+        self.assertEqual(set(fields), {
+            "extract_version", "genres", "network", "country", "certification",
+            "runtime", "status", "overview", "ids", "type", "anime_type",
+            "total_episodes", "poster", "first_aired", "trailers",
+        })
+        self.assertEqual(
+            (fields["genres"], fields["runtime"], fields["ids"], fields["trailers"]),
+            ([], None, {"simkl": "1"}, []))
 
 
 class AnimeRedirectTests(unittest.IsolatedAsyncioTestCase):
