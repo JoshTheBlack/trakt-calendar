@@ -445,23 +445,19 @@ body.hide-not-watching .card.not-watching { display: none; }
    near-black panel and over the gold a hover turns on, where a transparent
    symbol would be readable on one of the three. */
 .source-logo { height: 13px; width: auto; display: block; border-radius: 4px; }
-/* THE SERVICE MARKS ON A POSTER, IN ONE CENTRED STACK ALONG THE BOTTOM EDGE.
-   Every corner of a poster is already claimed — runtime and episode down the
-   left, rating and the watching eye down the right, the network's own logo
-   bottom-right — so a mark given a corner of its own lands on one of them, which
-   is what put the flip control on top of the network. The middle of the bottom
-   edge is the one place free on every card, and putting both marks in ONE
-   container is also what stops them being given the same place separately. */
+/* THE SERVICE MARK ON A POSTER, CENTRED ALONG THE BOTTOM EDGE. Every corner of a
+   poster is already claimed — runtime and episode down the left, rating and the
+   watching eye down the right, the network's own logo bottom-right — so a mark
+   given a corner of its own lands on one of them, which is what put the flip
+   control on top of the network. The middle of the bottom edge is the one place
+   free on every card. It stays a CONTAINER rather than being folded into the
+   button's own rule because placing what is drawn on a poster is a question
+   about the poster, and a second mark that ever earns a place here has to be
+   given it here, where the clearance from everything else is already settled. */
 .poster-marks {
     position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%);
     z-index: 6; display: flex; align-items: center; gap: 6px;
 }
-.source-badge {
-    display: inline-flex; padding: 3px; border-radius: 8px;
-    background: rgba(10,12,16,0.82); border: 1px solid var(--card-border);
-    backdrop-filter: blur(4px); opacity: 0.85;
-}
-.source-badge .source-logo { height: 15px; }
 .poster-marks .source-swap { padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px); }
 .poster-marks .source-logo { height: 15px; }
 /* The flip control. A button, because it does something; sized down to the logo

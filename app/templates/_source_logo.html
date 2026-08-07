@@ -1,10 +1,10 @@
 {# How each service is SHOWN, in one place.
 
-   Four surfaces need "which service is this, and what does it look like" — the
-   outbound button on a card, the badge saying which service a card came from,
-   the little logo beside a field two services disagreed about, and the same on
-   the public share card. Written out at each of them, a third service would be
-   four edits and one of them would be forgotten; here it is one.
+   Three surfaces need "which service is this, and what does it look like" — the
+   outbound button on a card, the little logo beside a field two services
+   disagreed about, and the same on the public share card. Written out at each of
+   them, a third service would be three edits and one of them would be forgotten;
+   here it is one.
 
    THE FILENAMES ARE NAMED HERE AND NOWHERE ELSE, and they are images rather than
    scripts or stylesheets, so they are not cache-busted assets — an image is
@@ -19,18 +19,19 @@
    it is dropped on, and it reads at 10px where lettering would not. A WORDMARK is
    the service's NAME, and it is what a button gets: a button is a promise about
    where a click goes, and the name says that where a symbol asks to be
-   recognised. So marks go on the flip control, the dual chips and the badge;
-   wordmarks go on the outbound buttons and nowhere else. #}
+   recognised. So marks go on the flip control and the dual chips; wordmarks go
+   on the outbound buttons and nowhere else.
+
+   A MARK IS ALWAYS PART OF A CONTROL, and that is the rule that decides whether
+   one is drawn at all. There used to be a third use — a badge naming the service
+   that listed a card, drawn on every card from any service but the first. It
+   looked exactly like the flip control it sat beside, so most posters carried
+   something that asked to be clicked and did nothing when it was. The outbound
+   button already names the service a card came from, so removing it cost no
+   attribution. Anything new that wants to draw a mark has to be something a
+   reader can act on. #}
 
 {% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
-
-{# Whether a card sourced from `source` says so. The first service in
-   app/providers/base.py's `Source` declaration is the one this app has always
-   read, and badging every one of its cards would put a badge on every card on
-   an instance that has only ever had it. Named here, with the other facts
-   about how a service is shown, so the rule is in one place rather than in each
-   template that draws a card. #}
-{% macro badged(source) %}{{ 'yes' if source|string != 'trakt' else '' }}{% endmacro %}
 
 {% macro mark(source, css='') %}<img class="source-logo {{ css }}"
      src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'trakt-circlemark-dark.svg' }}"

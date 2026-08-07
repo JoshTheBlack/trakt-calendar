@@ -85,7 +85,14 @@
            boosted it is a body swap with htmx keeping history, and with no
            JavaScript it degrades to a plain submit of the query the calendar
            route already reads. The endpoint travels with it because the services
-           offered are the ones that answer THIS calendar. #}
+           offered are the ones that answer THIS calendar.
+
+           NOT DRAWN AT ALL when there is nothing to choose between — one service
+           able to fill this calendar, or none. `source_choices` is empty then;
+           the emptiness is decided in the route, where both halves of "could
+           this service fill this calendar" are already known, rather than by the
+           template counting options. #}
+        {% if source_choices %}
         <form class="control" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved">
             <input type="hidden" name="month" value="{{ month }}">
             <input type="hidden" name="year" value="{{ year }}">
@@ -97,6 +104,7 @@
                 {% endfor %}
             </select>
         </form>
+        {% endif %}
         <div class="control">
             <label for="cardStyleSelect">🎬</label>
             <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">

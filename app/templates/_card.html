@@ -66,26 +66,23 @@
         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
         {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
-        {# THE SERVICE MARKS, IN ONE STACK ALONG THE BOTTOM EDGE, CENTRED. Both of
-           them are small round marks that say something about which service you
-           are looking at, both can be on one card, and the poster's four corners
-           are already spoken for — runtime and episode, rating and the watching
-           eye, and the network's own logo bottom-right, which is what the flip
-           control was landing on top of when it had a corner of its own. Between
-           the episode badge and the network logo there is a gap on every card,
-           and one container is also what stops these two ever being given the
-           same place separately.
+        {# THE FLIP CONTROL, CENTRED ALONG THE BOTTOM EDGE, AND ONLY WHERE THERE IS
+           SOMETHING TO FLIP TO. A mark on the poster is a CONTROL, so it is drawn
+           only when `alternatives` names the poster — that is, only when another
+           service supplied a different one. Drawn on every card it read as an
+           offer of a choice that could not be made, and a control that cannot do
+           anything is worse than no control: the reader clicks it and nothing
+           happens. WHICH service a card came from is still on the card — the
+           outbound button below wears that service's own name — so nothing about
+           attribution depends on a mark up here.
 
-           WHICH SERVICE THIS CARD IS is shown only when it is not the one this app
-           has always read. Two services can list the same title without agreeing
-           it is the same title, and when they don't you get two cards — this is
-           what makes that read as a disagreement between services rather than as
-           the app showing something twice. #}
-        {% if src.badged(item.source) or 'poster' in item.alternatives %}
-        <div class="poster-marks">
-            {% if src.badged(item.source) %}<span class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.mark(item.source) }}</span>{% endif %}
-            {% if 'poster' in item.alternatives %}{{ swap('poster') }}{% endif %}
-        </div>
+           The middle of the bottom edge, because the poster's four corners are
+           already spoken for: runtime and episode down the left, rating and the
+           watching eye down the right, the network's own logo bottom-right, which
+           is what this control was landing on top of when it had a corner of its
+           own. #}
+        {% if 'poster' in item.alternatives %}
+        <div class="poster-marks">{{ swap('poster') }}</div>
         {% endif %}
         {# Both eyes reference the <symbol>s defined once per page instead of
            repeating ~800 bytes of path data on every card; which one shows is a

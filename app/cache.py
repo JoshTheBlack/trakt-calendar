@@ -36,10 +36,35 @@ LEGACY_CACHE_DIR = DATA_DIR / "cache"
 # the CPU cost of level 9. The calendar window cache uses the same level.
 COMPRESS_LEVEL = 6
 
-# Entries past their per-row TTL are held this much longer before eviction, so a
-# brief clock skew — or a window that just lapsed and is about to be re-read —
-# isn't discarded the instant it expires.
-TTL_GRACE_SECONDS = 6 * 60 * 60
+# Entries past their per-row TTL are held this much longer before being DELETED.
+#
+# IT IS SIZED BY THE PUBLIC SHARE LINK, not by clock skew, and that is why it is
+# ninety days rather than the few hours it used to be. A share page serves
+# whatever is cached and never fetches (app/calendar/share_routes.py reads with
+# `allow_fetch=False`, so an unauthenticated visitor can never spend the
+# instance's rate limit) — which means that once a month's windows are swept, a
+# link somebody handed out renders an empty calendar with nothing on the page to
+# say why. The row therefore has to outlive the month it describes plus a margin
+# for somebody opening the link late, and a calendar month's windows are the
+# cheapest rows in the table.
+#
+# WHAT THIS IS NOT: a reservation. Grace only delays the first pass of `sweep`.
+# The second pass evicts least-recently-stored rows whenever the total exceeds
+# `Settings.api_cache_max_bytes`, and it does not consult this at all — so under
+# real pressure the cap still wins and a share link can still go empty. The
+# honest claim is that this makes a shared month survive in practice, not that
+# it guarantees it. Measured on a live instance while this was written, against a
+# 1 GB cap: 22.9 MB total — 12.9 MB of Simkl CDN bodies over 45 rows, 9.7 MB of
+# Trakt responses over 8610 rows, and 0.3 MB of calendar windows over 16 rows. So
+# the headroom is very large and holding the windows longer is close to free.
+#
+# IT DOES NOT MEAN STALE DATA ON A NORMAL READ. Nothing serves an expired row as
+# fresh: `get` applies its own cutoff and misses, and
+# app/calendar/cache.py's `load_window` compares `cached_at` against the TTL and
+# refetches. The only readers a surviving row reaches are the deliberate
+# no-fetch ones — `get_stale` and `load_window(allow_fetch=False)` — which is
+# exactly the path this is for.
+TTL_GRACE_SECONDS = 90 * 24 * 60 * 60
 
 
 def _encode(value) -> bytes:

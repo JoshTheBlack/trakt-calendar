@@ -84,10 +84,12 @@ class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
         self.assertNotIn("source-swap", self.html)
         self.assertNotIn("chip dual", self.html)
 
-    def test_it_is_not_badged_with_the_service_this_app_has_always_read(self):
-        """Badging every card of the original source would put a badge on every
-        card on an instance that only ever had it, which says nothing."""
-        self.assertNotIn("source-badge", self.html)
+    def test_nothing_at_all_is_drawn_on_its_poster_to_name_a_service(self):
+        """A mark on the poster is a CONTROL. There is nothing to flip to here, so
+        drawing one would offer a choice that cannot be made, and a reader who
+        clicks it gets nothing."""
+        self.assertNotIn("poster-marks", self.html)
+        self.assertNotIn("source-logo", self.html.split('class="card-body"')[0])
 
     def test_its_outbound_button_is_its_own_services(self):
         self.assertIn('title="View on Trakt"', self.html)
@@ -102,15 +104,19 @@ class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
 
 class ACardTheOtherServiceListedTests(unittest.TestCase):
     """The unmatched case: two services listed a title without agreeing it is the
-    same title, so it draws twice. The badge is what makes that read as the two
-    services disagreeing rather than as the app showing something twice."""
+    same title, so it draws twice. It still has to say which service it came
+    from — otherwise the two cards read as the app showing one thing twice."""
 
     def setUp(self):
         self.html = _card_html(_record(Source.SIMKL))
 
-    def test_it_says_which_service_listed_it(self):
-        self.assertIn("source-badge", self.html)
-        self.assertIn('title="Listed by Simkl"', self.html)
+    def test_it_says_which_service_listed_it_on_its_outbound_button(self):
+        """AND NOWHERE ON THE POSTER. This is the whole attribution a
+        single-source card has, so it is asserted here rather than left to the
+        button's own tests: if the button ever stopped naming its service, a
+        merged instance would have cards nothing could attribute."""
+        self.assertIn("Simkl", self.html)
+        self.assertNotIn("poster-marks", self.html)
 
     def test_the_outbound_button_wears_the_name_of_where_it_actually_goes(self):
         """It used to be one service's logo on every card, including the ones
@@ -172,6 +178,19 @@ class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
         """A logo inviting a click that changes nothing is worse than no logo."""
         self.assertIsNone(_swap(self.html, "overview"))
         self.assertNotIn('data-field="overview"', self.html)
+
+    def test_a_merged_card_is_marked_on_exactly_the_fields_that_conflict(self):
+        """The poster is where the rule is easiest to break, because the mark
+        drawn there used to be two things at once — a flip AND a badge — and only
+        one of them depended on there being an alternative."""
+        html = _card_html(
+            _record(Source.TRAKT),
+            _record(Source.SIMKL, overview="Another overview.",
+                    poster="https://trakt.test/p.jpg"))
+        self.assertIsNotNone(_swap(html, "overview"))
+        self.assertIsNone(_swap(html, "poster"))
+        self.assertIsNone(_swap(html, "title"))
+        self.assertNotIn("poster-marks", html)
 
     def test_the_swap_stops_the_click_reaching_the_card_underneath(self):
         """The card opens the details modal on click; flipping one value must not

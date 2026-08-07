@@ -1208,6 +1208,41 @@ class EvictionTests(CacheTestCase):
         await cache.sweep(now=now, max_bytes=None)
         self.assertEqual(await self._keys(), {"fresh", "no-ttl"})
 
+    async def test_a_lapsed_window_is_kept_long_enough_to_outlive_its_month(self):
+        """WHY THE GRACE IS MONTHS AND NOT HOURS: a public share link serves
+        whatever is cached and never fetches, so a swept window is a shared
+        calendar that renders empty. The row has to outlive the month it
+        describes plus a margin for somebody opening the link late."""
+        now = 1_000_000_000
+        month = 31 * 24 * 60 * 60
+        self.assertGreaterEqual(cache.TTL_GRACE_SECONDS, 60 * 24 * 60 * 60)
+        await self._insert("last-month", cached_at=now - month, byte_size=10,
+                           ttl_seconds=600)
+        await cache.sweep(now=now, max_bytes=None)
+        self.assertEqual(await self._keys(), {"last-month"})
+
+    async def test_the_grace_ends_and_it_is_ninety_days(self):
+        now = 1_000_000_000
+        await self._insert("just-inside", byte_size=10, ttl_seconds=600,
+                           cached_at=now - 600 - 90 * 24 * 60 * 60 + 60)
+        await self._insert("just-outside", byte_size=10, ttl_seconds=600,
+                           cached_at=now - 600 - 90 * 24 * 60 * 60 - 60)
+        await cache.sweep(now=now, max_bytes=None)
+        self.assertEqual(await self._keys(), {"just-inside"})
+
+    async def test_the_grace_is_not_a_reservation_and_the_size_cap_still_wins(self):
+        """The honest limit of the change above, stated as a test so nobody reads
+        the long grace as a promise: the second pass does not consult it, so a
+        row well inside its grace is still evicted when the table is over
+        budget."""
+        now = 1_000_000_000
+        await self._insert("older-in-grace", cached_at=now - 86_400, byte_size=100,
+                           ttl_seconds=600)
+        await self._insert("newer-in-grace", cached_at=now - 60, byte_size=100,
+                           ttl_seconds=600)
+        await cache.sweep(now=now, max_bytes=100)
+        self.assertEqual(await self._keys(), {"newer-in-grace"})
+
     async def test_size_cap_evicts_least_recently_stored_first(self):
         # Three 100-byte entries, oldest to newest; cap fits two.
         await self._insert("oldest", cached_at=100, byte_size=100)

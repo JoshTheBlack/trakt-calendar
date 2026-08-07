@@ -174,13 +174,13 @@ class NothingOnThePosterIsDrawnOnTopOfAnythingElseTests(unittest.TestCase):
                     self.assertTrue(not same_edges or apart,
                                     f"{name} and {other} are drawn on top of each other")
 
-    def test_the_service_marks_are_one_stack_rather_than_two_corners(self):
-        """The badge saying which service listed a card and the control that flips
-        one of its fields are the same kind of mark and can both be on one card, so
-        they share one container and cannot be given the same place separately."""
+    def test_a_service_mark_is_placed_by_the_stack_and_never_by_itself(self):
+        """Whatever is drawn on a poster is placed in one container, so a second
+        mark that ever earns a place there cannot be given one separately — which
+        is exactly how the flip control ended up on the network's logo."""
         self.assertIn('class="poster-marks"', CARD)
-        self.assertIsNone(self._anchor(".source-badge"),
-                          "the source badge positions itself instead of sitting in the stack")
+        self.assertIsNone(self._anchor(".source-swap"),
+                          "the flip control positions itself instead of sitting in the stack")
 
     def test_the_stack_sits_between_the_two_bottom_corners(self):
         """Both bottom corners are taken — the episode badge on one side, the

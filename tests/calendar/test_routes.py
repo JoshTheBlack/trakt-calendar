@@ -16,6 +16,7 @@ real.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import unittest
@@ -24,9 +25,10 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, db
+from app import auth, db, providers
 from app.calendar import cache as calendar_cache, routes as calendar_routes
 from app.calendar import state as calendar_state
+from app.providers.base import Capabilities
 from app.providers.trakt import TraktError
 from app.config import Settings, save_settings
 from app.sources import prefs as source_prefs
@@ -51,6 +53,28 @@ def _entry(slug: str, title: str, first_aired: str) -> dict:
             "ids": {"slug": slug, "trakt": abs(hash(slug)) % 100000},
         },
     }
+
+
+class _ThirdSource:
+    """A service the app does not have, for the tests that check a rule was
+    DERIVED rather than written down for the two that exist. It is deliberately
+    not a `Source` member: the point is that nothing in the code under test may
+    reach for one by name."""
+
+    source = "mercury"
+    label = "Mercury"
+    sync_port = None
+    calendar_port = object()
+    capabilities = Capabilities(
+        endpoints=frozenset({"shows"}), days_before=None, days_after=None,
+        private_user_data=False)
+
+    def is_configured(self, settings) -> bool:
+        return True
+
+
+def _third_source() -> _ThirdSource:
+    return _ThirdSource()
 
 
 class CalendarRouteTestCase(unittest.TestCase):
@@ -543,15 +567,61 @@ class SourceSelectorTests(CalendarRouteTestCase):
         return resp.text
 
     def test_it_offers_the_services_that_answer_this_calendar(self):
-        """Season finales are published by one service, so its control offers one
-        — naming a service for a calendar it does not answer yields nothing, which
-        on screen is indistinguishable from a service that had nothing to say."""
         shows = [value for value, _ in
                  self._options(self._page("/calendar?year=2026&month=7&endpoint=shows"))]
         self.assertEqual(shows, ["", "auto", "trakt", "simkl"])
-        finales = [value for value, _ in self._options(
-            self._page("/calendar?year=2026&month=7&endpoint=shows/finales"))]
-        self.assertEqual(finales, ["", "auto", "trakt"])
+
+    def test_a_calendar_one_service_publishes_gets_no_control_at_all(self):
+        """Season finales are published by one service, so "my sources", "every
+        service" and "that one only" are three labels for one outcome. A control
+        offering them says a choice is available when none is."""
+        html = self._page("/calendar?year=2026&month=7&endpoint=shows/finales")
+        self.assertNotIn('id="sourceSelect"', html)
+        self.assertIn('id="endpointSelect"', html)
+
+    def test_a_service_switched_off_for_the_instance_is_not_offered(self):
+        """The reported fault, and the reason the admission is asked of
+        app/providers rather than counted here: with the instance-wide switch off
+        the control was still offering a service the calendar underneath it would
+        refuse. One service is left, so there is nothing to choose and nothing is
+        drawn."""
+        save_settings(dataclasses.replace(
+            _configured_settings(), simkl_public_calendar_enabled=False))
+        html = self._page("/calendar?year=2026&month=7&endpoint=shows")
+        self.assertNotIn('id="sourceSelect"', html)
+        self.assertIn('id="endpointSelect"', html)
+
+    def test_what_it_offers_is_derived_and_never_a_list_of_service_names(self):
+        """The rule has to keep working for a service nobody has written yet, so
+        this asks the function with a registry that has one. Anything spelling a
+        service name in the logic would leave the hypothetical one out while the
+        two real ones survived."""
+        from app.endpoints import get_endpoint
+
+        endpoint = get_endpoint("shows")
+        settings = _configured_settings()
+        real = calendar_routes._source_choices(endpoint, "", settings)
+        with patch("app.providers.registered", return_value=dict(
+                providers.registered(), **{"mercury": _third_source()})):
+            widened = calendar_routes._source_choices(endpoint, "", settings)
+        self.assertEqual([c["value"] for c in widened],
+                         [c["value"] for c in real] + ["mercury"])
+        self.assertIn({"value": "mercury", "label": "Mercury only", "selected": False},
+                      widened)
+
+    def test_a_hypothetical_service_switched_off_leaves_the_other_two(self):
+        """The two halves compose: the registry widens the offer and the
+        instance's own admission narrows it, and neither knows a name."""
+        from app.endpoints import get_endpoint
+
+        registry = dict(providers.registered(), **{"mercury": _third_source()})
+        with patch("app.providers.registered", return_value=registry):
+            with patch("app.calendar.resolve.instance_sources",
+                       return_value=frozenset({"trakt", "mercury"})):
+                choices = calendar_routes._source_choices(
+                    get_endpoint("shows"), "", _configured_settings())
+        self.assertEqual([c["value"] for c in choices],
+                         ["", "auto", "trakt", "mercury"])
 
     def test_with_nothing_overridden_it_sits_on_the_accounts_own_answer(self):
         options = self._options(self._page("/calendar?year=2026&month=7"))

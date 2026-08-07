@@ -661,11 +661,13 @@ async def cached_calendar_groups() -> list[dict]:
     ONE QUERY, EVERY CALENDAR ROW, EVERY CALL — deliberately not paged or
     cached. Measured against the author's live database: 33 stored windows,
     1.7 MB decompressed, under 5ms to inflate all of them. That cost does not
-    grow with how long the instance has run either: the number of distinct
-    (endpoint, window) keys is bounded by the prewarm horizon and how far a
-    viewer has ever browsed, and app/cache.py's own TTL sweep retires the ones
-    nobody has read in a while, so this table stays roughly constant-sized
-    rather than accumulating one row per week forever.
+    grow without bound as the instance runs either: the number of distinct
+    (endpoint, window) keys is bounded by the prewarm horizon, by how far a
+    viewer has ever browsed, and by app/cache.py's TTL sweep, which retires a
+    window a long while after it lapses — long on purpose, because a share link
+    never refetches (see TTL_GRACE_SECONDS). So the ceiling is roughly "every
+    endpoint × the weeks in the grace period", which is scores of rows rather
+    than one per week forever, and these are the smallest rows in the table.
     """
     rows = await db.fetch_all(
         "SELECT payload FROM api_cache WHERE cache_key LIKE 'calendar:%'")

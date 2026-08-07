@@ -31,7 +31,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import cache as calendar_cache, share_links, state as calendar_state
+from . import (cache as calendar_cache, resolve as calendar_resolve, share_links,
+               state as calendar_state)
 from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
@@ -184,8 +185,9 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     return saved
 
 
-def _source_choices(endpoint, requested) -> list[dict]:
-    """The toolbar's source control: what it offers, and which option is on.
+def _source_choices(endpoint, requested, settings) -> list[dict]:
+    """The toolbar's source control: what it offers, which option is on, and
+    whether it is drawn at all. An empty list means the toolbar draws nothing.
 
     A VIEW CONTROL AND NOT A PREFERENCE, which is the whole of why it is built
     here out of the query string rather than out of the stored row. `?source=`
@@ -200,26 +202,48 @@ def _source_choices(endpoint, requested) -> list[dict]:
     way back: without it, overriding once would leave no way to stop overriding
     short of editing the address.
 
-    ONLY SERVICES THAT ANSWER THIS CALENDAR ARE OFFERED. Naming one that does not
-    publish this endpoint is legal and simply yields nothing, which on screen is
-    indistinguishable from a service that answered and had nothing to say.
+    IT OFFERS EXACTLY THE SERVICES THAT COULD ACTUALLY FILL THIS CALENDAR, which
+    is two questions and neither of them is asked here. Whether a service is on
+    this INSTANCE's calendar at all belongs to `providers.calendar_sources`, and
+    it is asked through `resolve.instance_sources` so that an operator switching
+    a service off empties this control by the same rule that empties the
+    calendar underneath it — a second spelling of that question living here is a
+    copy that answers differently the first time either is edited. Whether it
+    publishes THIS calendar is `capabilities.answers`. No service is named in
+    either check, so a third one is offered the day it is registered.
+
+    AND WITH FEWER THAN TWO IT IS NOT DRAWN. One service that can answer means
+    "my sources", "every service" and "that one only" are three labels for one
+    outcome, and offering them makes the page look as though a choice is
+    available when none is. Nothing else on the toolbar is drawn to be inert
+    either.
+
+    THE COST OF NOT DRAWING IT, taken deliberately: a `?source=` in the address
+    on a single-service calendar has no control to clear it with. That override
+    only arrives by following a link, switching calendars drops it (the picker
+    beside this one carries no source), and the alternative was to keep drawing
+    a control whose whole purpose on that page would be to undo something the
+    reader did not do.
     """
     from .. import providers  # deferred: see _coverage_gap, same reason
 
+    admitted = calendar_resolve.instance_sources(settings)
     chosen = requested if requested and source_prefs.is_selection(requested) else ""
+    services = [(str(source), provider.label)
+                for source, provider in providers.registered().items()
+                if provider.capabilities.answers(endpoint.key)
+                and (admitted is None or str(source) in admitted)]
+    if len(services) < 2:
+        return []
     choices = [
         {"value": "", "label": "My sources"},
         {"value": source_prefs.AUTO, "label": "Every service"},
     ]
-    offered = {source_prefs.AUTO}
-    for source, provider in providers.registered().items():
-        if not provider.capabilities.answers(endpoint.key):
-            continue
-        offered.add(str(source))
-        choices.append({"value": str(source), "label": f"{provider.label} only"})
+    choices += [{"value": value, "label": f"{label} only"} for value, label in services]
     # An override this calendar does not offer — a named pair, or a service that
     # answers a different endpoint — is still in force, so it is shown rather
     # than silently reading as the stored answer it is currently overriding.
+    offered = {source_prefs.AUTO, *(value for value, _ in services)}
     if chosen and chosen not in offered:
         choices.append({"value": chosen, "label": chosen.replace(
             source_prefs.SEPARATOR, " and ").title()})
@@ -526,8 +550,11 @@ async def calendar_page(request: Request):
         "endpoint": endpoint,
         "endpoints": endpoint_choices(),
         # The toolbar's source control. Built from the query string, applying to
-        # this view alone, and storing nothing — see _source_choices.
-        "source_choices": _source_choices(endpoint, request.query_params.get("source")),
+        # this view alone, and storing nothing — see _source_choices. Empty when
+        # fewer than two services could fill this calendar, and the template
+        # draws nothing at all rather than an inert control.
+        "source_choices": _source_choices(
+            endpoint, request.query_params.get("source"), settings),
         "timezone_groups": build_timezone_options(settings.timezone),
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,

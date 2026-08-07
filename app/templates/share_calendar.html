@@ -144,15 +144,12 @@
                         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
                         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
                         {% if item.network %}<div class="network-badge"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
-                        {# Which service listed it, shown only when it is not the
-                           one this app has always read — see _card.html, which
-                           carries the same mark in the same stack along the
-                           bottom edge, and for the same reasons. #}
-                        {% if src.badged(item.source) %}
-                        <div class="poster-marks">
-                            <span class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.mark(item.source) }}</span>
-                        </div>
-                        {% endif %}
+                        {# NOTHING IS DRAWN ON THIS POSTER TO NAME A SERVICE. The
+                           calendar's own card puts a mark here only where a field
+                           can be flipped to another service's answer, and a
+                           visitor has no flip (see _card.html). Which service a
+                           card came from is said by the outbound button below,
+                           which wears that service's own name. #}
                         <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
                     </div>
                     <div class="card-body">
