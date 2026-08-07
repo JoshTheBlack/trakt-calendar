@@ -537,8 +537,13 @@ def _window_sources(endpoint: Endpoint, settings, start: date) -> list[Provider]
     other viewer then reads as the truth for that week. Which sources a PERSON
     sees is a read-time question, answered per group in
     app/calendar/resolve.py. What `settings` still governs here is the
-    operator's, not a viewer's: whether an unconfigured source's public calendar
-    may be reached at all.
+    operator's, not a viewer's: whether a source contributes to this instance's
+    calendar at all. That one IS applied at the fill, and belongs there for the
+    same reason the content floor does — it is one decision taken for every
+    viewer at once, so honouring it here costs the instance nothing it will ever
+    show. It is applied at READ as well (app/calendar/resolve.py), because a
+    window filled before the operator changed their mind still holds the records
+    they just switched off.
     """
     return [p for p in providers.calendar_sources(settings=settings)
             if p.capabilities.answers(endpoint.key) and _covers(p, start)]
@@ -870,7 +875,9 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     differently read the very same rows and each sees their own answer out of
     them; a selection cannot narrow what anybody else is served.
     `prefs=None` means no account is asking (a public share page) and admits
-    everything the window holds.
+    everything the window holds — everything, that is, that `settings` still
+    admits: which services this INSTANCE puts on its calendar is the operator's
+    answer and applies to a share page and a signed-in viewer alike.
 
     RESILIENT BUT LOUD on a window no source can supply. The windows load through
     a single asyncio.gather; a window that raised (nothing cached AND the fetch
@@ -970,7 +977,13 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # whose other source supplies the card would never have its enrichment
         # considered, and a genre only that source knows could not win however
         # the viewer set their preference.
-        parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key))
+        # `settings` GOES IN BESIDE `prefs` AND ANSWERS A DIFFERENT QUESTION.
+        # `prefs` is this viewer's; `settings` is the operator's — a source this
+        # instance has switched off its calendar is off for everybody, and a
+        # window filled while it was still in play is still sitting in the cache
+        # holding its records. Reading it here is what makes that switch take
+        # effect immediately instead of one TTL from now.
+        parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key, settings))
                   for group in dedupe_groups(groups)]
         # ONE BATCHED DB READ, NO NETWORK CALL: overlay whatever the background
         # enrichment drain already knows onto this read's Simkl records. See

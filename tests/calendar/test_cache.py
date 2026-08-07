@@ -367,6 +367,104 @@ class SimklPublicCalendarSwitchTests(CacheTestCase):
         self.assertIn("simkl", answered)
 
 
+class SimklCalendarSwitchAtReadTests(CacheTestCase):
+    """The other half of the same switch, and the half an operator actually
+    sees: a window ALREADY CACHED when they change their mind.
+
+    Applying it only at the fill left every stored window still holding — and
+    still rendering — the records of a source that had just been switched off,
+    for as long as its TTL had left to run. The setting is the operator's and is
+    instance-wide, so it narrows what everybody reads at once and can be applied
+    over the shared rows without deciding anything on one viewer's behalf; a
+    VIEWER's own selection still may not reach the fill, which
+    tests/calendar/test_resolve.py pins from the other side.
+    """
+
+    WINDOW = date(2026, 7, 6)
+    DAY = date(2026, 7, 7)
+    AIR = datetime(2026, 7, 7, 12, tzinfo=timezone.utc).timestamp()
+
+    def _trakt_records(self):
+        return calendar_records([_entry("trakt-only", "2026-07-07T12:00:00Z")], SHOWS)
+
+    def _simkl_records(self):
+        """A Simkl airing no Trakt record matches, so it is a card of its own —
+        which is what makes its disappearance visible in the rendered ids."""
+        return [base.Record(
+            source=base.Source.SIMKL, media="show", id="simkl-only",
+            ids={"simkl": "simkl-only", "tmdb": 5150},
+            detail_url="https://simkl.test/simkl-only", title="Simkl Only",
+            air_ts=self.AIR, season=1, episode_number=1, episode_label="S01E01")]
+
+    async def _store(self, records, *, sources, asked, now=1000):
+        await calendar_cache.store_window(
+            SHOWS.key, self.WINDOW, records, 600, now, sources=sources, asked=asked)
+
+    async def _read(self, settings, *, now=1000, allow_fetch=False):
+        grouped, meta = await calendar_cache.assemble_range(
+            SHOWS, settings, tz=ZoneInfo("UTC"),
+            start_date=self.DAY, end_date=self.DAY, now=now, allow_fetch=allow_fetch)
+        return sorted(i.id for g in grouped for i in g["items"]), meta
+
+    async def test_switched_off_hides_simkl_from_a_window_already_cached(self):
+        """The reported defect: the box was unticked and the results stayed."""
+        await self._store(self._trakt_records() + self._simkl_records(),
+                          sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        ids, _meta = await self._read(Settings(simkl_public_calendar_enabled=False))
+        self.assertEqual(ids, ["trakt-only"])
+
+    async def test_the_same_cached_window_still_shows_simkl_with_the_switch_on(self):
+        """The control for the test above: nothing about the stored row changed,
+        so the switch is what the difference is."""
+        await self._store(self._trakt_records() + self._simkl_records(),
+                          sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        ids, _meta = await self._read(Settings())
+        self.assertEqual(ids, ["simkl-only", "trakt-only"])
+
+    async def test_switching_it_off_neither_refills_nor_reports_partial(self):
+        """Off is a READ-time narrowing over rows that are still perfectly good:
+        a source out of play was not asked and was not silent, so there is
+        nothing to refetch and nothing to warn about."""
+        await self._store(self._trakt_records() + self._simkl_records(),
+                          sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        never = AsyncMock(side_effect=AssertionError("must not refill"))
+        with patch("app.calendar.cache.fetch_window_records", never):
+            ids, meta = await self._read(Settings(simkl_public_calendar_enabled=False),
+                                         allow_fetch=True)
+        self.assertEqual(ids, ["trakt-only"])
+        self.assertFalse(meta["partial"])
+        never.assert_not_awaited()
+
+    async def test_turning_it_back_on_refills_a_window_filled_while_it_was_off(self):
+        """THE ASYMMETRY, AND THE ONE THAT WOULD BE WORSE THAN THE DEFECT. A
+        window filled while the switch was off legitimately holds no Simkl
+        records, so no read-time rule can conjure them back — an operator who
+        changed their mind twice would be left with a permanently Simkl-less
+        calendar. What saves it is already there: the window records who was
+        ASKED, and one that never asked a source now in play is a miss, TTL or
+        no TTL. Nothing is cleared here and the stored row is still fresh."""
+        await self._store(self._trakt_records(), sources=["trakt"], asked=["trakt"])
+        refill = AsyncMock(return_value=(self._trakt_records() + self._simkl_records(),
+                                         ["trakt", "simkl"]))
+        with patch("app.calendar.cache.fetch_window_records", refill):
+            ids, meta = await self._read(Settings(), allow_fetch=True)
+        refill.assert_awaited()
+        self.assertEqual(ids, ["simkl-only", "trakt-only"])
+        self.assertFalse(meta["partial"])
+
+    async def test_a_share_page_reads_the_switch_too(self):
+        """A public page has no viewer whose preference could narrow anything,
+        and the operator's answer is not a viewer's preference — it governs what
+        the instance shows anybody. allow_fetch=False is the share path, and it
+        must not become a way to see a source the operator switched off."""
+        await self._store(self._trakt_records() + self._simkl_records(),
+                          sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+        items, _as_of = await calendar_cache.read_month(
+            SHOWS, Settings(simkl_public_calendar_enabled=False), tz=ZoneInfo("UTC"),
+            year=2026, month=7, prefs=None, allow_fetch=False, now=1000)
+        self.assertEqual([i.id for i in items], ["trakt-only"])
+
+
 class SourcesInPlayForAWindowTests(CacheTestCase):
     """`_window_sources` — the one answer to "who should have something to say
     about this window", which the fill and the completeness check both read.

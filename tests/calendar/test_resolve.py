@@ -351,6 +351,71 @@ class WhichSourceAViewerReadsTests(unittest.TestCase):
         self.assertEqual(titles, ["Shared", "Trakt-Only", "Simkl-Only"])
 
 
+class WhatTheInstanceAdmitsAtReadTests(unittest.TestCase):
+    """The OTHER exclusion, and it is the operator's rather than a viewer's:
+    whether a service is on this instance's calendar at all.
+
+    It is applied at the fill and here as well, which the per-viewer selection
+    above may never be. The difference is who it decides for — an instance-wide
+    setting narrows what everybody is shown, exactly as the content floor does,
+    so honouring it while filling poisons nothing; a preference is one person's
+    and would. Applying it here too is what makes it take effect on rows that are
+    already cached rather than a TTL later.
+    """
+
+    def groups(self):
+        return calendar_cache.group_records([
+            _record(Source.TRAKT, "shared", tmdb=100, title="Shared"),
+            _record(Source.SIMKL, "shared-simkl", tmdb=100, title="Shared"),
+            _record(Source.TRAKT, "trakt-only"),
+            _record(Source.SIMKL, "simkl-only"),
+        ])
+
+    def read(self, settings=None, selection=None):
+        prefs = (source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
+                 if selection is not None else None)
+        return [(r.title, str(r.source)) for r in
+                (calendar_resolve.resolve(g, prefs, None, settings) for g in self.groups())
+                if r is not None]
+
+    def test_a_source_the_instance_switched_off_is_read_by_nobody(self):
+        """Including on a merged card: the group stays, and the service that is
+        still admitted supplies it."""
+        off = Settings(simkl_public_calendar_enabled=False)
+        self.assertEqual(self.read(off),
+                         [("Shared", "trakt"), ("Trakt-Only", "trakt")])
+
+    def test_no_settings_at_all_still_reads_every_source(self):
+        """`settings=None` means nobody is asking the instance-wide question,
+        which is what every caller holding nothing but a stored row gets."""
+        self.assertEqual(self.read(),
+                         [("Shared", "trakt"), ("Trakt-Only", "trakt"),
+                          ("Simkl-Only", "simkl")])
+
+    def test_default_settings_read_exactly_what_no_settings_do(self):
+        """The switch defaults on, so passing a Settings object cannot itself
+        change what an instance that has never touched it shows."""
+        self.assertEqual(self.read(Settings()), self.read())
+
+    def test_a_viewers_selection_behaves_the_same_in_both_positions(self):
+        """The two exclusions compose and neither redefines the other: a stated
+        selection means exactly what it says while the instance still admits
+        both, and cannot re-admit a service the instance does not."""
+        for selection, on, off in (
+                ("auto", [("Shared", "trakt"), ("Trakt-Only", "trakt"), ("Simkl-Only", "simkl")],
+                 [("Shared", "trakt"), ("Trakt-Only", "trakt")]),
+                ("both", [("Shared", "trakt"), ("Trakt-Only", "trakt"), ("Simkl-Only", "simkl")],
+                 [("Shared", "trakt"), ("Trakt-Only", "trakt")]),
+                ("trakt", [("Shared", "trakt"), ("Trakt-Only", "trakt")],
+                 [("Shared", "trakt"), ("Trakt-Only", "trakt")]),
+                ("simkl", [("Shared", "simkl"), ("Simkl-Only", "simkl")], []),
+        ):
+            with self.subTest(source=selection):
+                self.assertEqual(self.read(Settings(), selection), on)
+                self.assertEqual(
+                    self.read(Settings(simkl_public_calendar_enabled=False), selection), off)
+
+
 class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
     """The invariant this fix restores, end to end: the stored window is the
     union of what every source said, and two viewers who chose differently read

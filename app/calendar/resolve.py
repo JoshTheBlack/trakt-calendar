@@ -31,12 +31,23 @@ be honoured while filling it without deciding for everybody else too. It is
 honoured here instead: a group naming no source this viewer admits resolves to
 nothing and never reaches their page, while the same row still gives the next
 viewer everything they asked for.
+
+TWO EXCLUSIONS MEET HERE AND THEY ARE DIFFERENT IN KIND. The one above is a
+VIEWER'S, and it may only ever be applied here. The other is the OPERATOR'S —
+whether a service contributes to this instance's calendar at all
+(app/providers/__init__.py's `calendar_sources`, given a Settings) — and it is
+applied at the fill too, deliberately, because it decides for every viewer at
+once exactly as the instance-wide content floor does. It is applied HERE as well
+so that turning it off takes effect on the windows already sitting in the cache,
+instead of the operator watching a service they have just switched off go on
+rendering until every window's TTL runs out.
 """
 from __future__ import annotations
 
 from dataclasses import replace
 from typing import Any
 
+from .. import providers
 from ..providers.base import Record, Source
 
 # ---------------------------------------------------------------------------
@@ -111,7 +122,28 @@ def source_order(group) -> list[str]:
     return [str(s) for s in Source if str(s) in by_source]
 
 
-def admitted_order(group, prefs=None, endpoint=None) -> list[str]:
+def instance_sources(settings=None) -> frozenset[str] | None:
+    """The names this INSTANCE puts on its calendar at all, or None for "nobody
+    is asking that question".
+
+    THE OPERATOR'S HALF OF ADMISSION, asked of the one function that owns it
+    rather than restated here — `providers.calendar_sources` is where a source
+    being switched off for this whole instance is decided, and a second copy of
+    that rule living in the read path is a copy that would answer differently the
+    first time either one is edited. Neither `prefs` nor `endpoint` is passed
+    down with it: this is the instance-wide question only, and the viewer's own
+    narrowing is applied separately below, where it can be seen to be per viewer.
+
+    `settings=None` MEANS THE SAME "DON'T NARROW" IT MEANS THERE. Every caller
+    that has no Settings in hand — a test resolving one group, a caller with
+    nothing but a stored row — keeps reading every source the row holds.
+    """
+    if settings is None:
+        return None
+    return frozenset(str(p.source) for p in providers.calendar_sources(settings=settings))
+
+
+def admitted_order(group, prefs=None, endpoint=None, settings=None) -> list[str]:
     """The sources in `group` this viewer will read, in declared order.
 
     THE PER-VIEWER EXCLUSION, AND IT HAS TO HAPPEN HERE. The window this group
@@ -139,14 +171,27 @@ def admitted_order(group, prefs=None, endpoint=None) -> list[str]:
     preference is the only narrowing there is. `app/sources/prefs.py`'s
     `admits_calendar` owns that reasoning; linkage governs the tracker, where it
     is correct because reading somebody's history needs their token.
+
+    `settings` IS THE OPERATOR'S EXCLUSION AND IT IS NOT THE SAME THING. A source
+    this instance no longer puts on its calendar is gone for everybody, so a
+    window filled while it was still in play holds records nobody should now be
+    shown — see `instance_sources`. Applying it here is what makes switching a
+    source off take effect on the spot rather than a TTL later; the fill applies
+    it too, so the instance stops paying for records it will never show. Switching
+    it back ON needs no cache clearing either: a stored window records which
+    sources were ASKED for it, and one that never asked a source now in play is a
+    MISS that refills (app/calendar/cache.py's `load_window`).
     """
     order = source_order(group)
+    instance = instance_sources(settings)
+    if instance is not None:
+        order = [name for name in order if name in instance]
     if prefs is None:
         return order
     return [name for name in order if prefs.admits_calendar(name, endpoint)]
 
 
-def admitted_records(group, prefs=None, endpoint=None) -> list[Record]:
+def admitted_records(group, prefs=None, endpoint=None, settings=None) -> list[Record]:
     """Every admitted source's record for `group`, parsed, in declared order.
 
     SEPARATE FROM `resolve_records` BELOW SO THAT SOMETHING CAN HAPPEN BETWEEN
@@ -162,7 +207,7 @@ def admitted_records(group, prefs=None, endpoint=None) -> list[Record]:
     """
     by_source = group.get("by_source") or {}
     out: list[Record] = []
-    for name in admitted_order(group, prefs, endpoint):
+    for name in admitted_order(group, prefs, endpoint, settings):
         try:
             out.append(Record.from_dict(by_source[name]))
         except (ValueError, TypeError, KeyError):
@@ -358,7 +403,7 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     return resolved
 
 
-def resolve(group, prefs=None, endpoint=None) -> Record | None:
+def resolve(group, prefs=None, endpoint=None, settings=None) -> Record | None:
     """`admitted_records` and `resolve_records` in one call, for a caller with
     nothing to do in between.
 
@@ -366,4 +411,4 @@ def resolve(group, prefs=None, endpoint=None) -> Record | None:
     the enrichment overlay — and calls the two halves itself. Everything else
     wants this.
     """
-    return resolve_records(group, admitted_records(group, prefs, endpoint), prefs)
+    return resolve_records(group, admitted_records(group, prefs, endpoint, settings), prefs)
