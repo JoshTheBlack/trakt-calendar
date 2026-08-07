@@ -1112,6 +1112,18 @@ a.ep-check:hover { background: rgba(76,175,80,0.2); }
    click to go and mark it off. */
 .ep-check.unseen { color: var(--text-faint); font-weight: 400; }
 a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+/* WHOSE TICKS THESE ARE, drawn only where the services disagree about the
+   season. Quiet on purpose: nothing is wrong when two services hold different
+   records of the same viewing, and styling the note as a warning would make an
+   account that simply linked its second service last week read as broken. Text
+   rather than a service logo — see the note in tracker/details.js. */
+.ep-source-note {
+    font-size: 0.72rem; color: var(--text-faint); margin: 2px 0 6px 0;
+}
+.ep-source {
+    flex: 0 0 auto; font-size: 0.68rem; color: var(--text-faint);
+    border: 1px solid var(--border, #39404d); border-radius: 999px; padding: 0 6px;
+}
 
 /* The emoji map is keyed on this exact string, so it is shown rather than left in
    a tooltip. Truncates instead of wrapping — a long network name must not push

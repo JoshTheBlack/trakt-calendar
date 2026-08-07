@@ -118,5 +118,59 @@ class SeasonSummaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["premiere"], "7/13")
 
 
+class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
+    """What a card opens on when Simkl is the only service that listed it.
+
+    The route-level behaviour lives in tests/calendar/test_detail_modal.py; what
+    is here is the part that belongs to this module — that the two lookups behind
+    one modal both stay on the cached, tokenless half of Simkl. A modal that
+    quietly read through SYNC_POOL would spend one person's quota to draw a fact
+    that is identical for everybody.
+    """
+
+    TITLE = {"title": "A Show", "ids": {"simkl": 55}, "overview": "Words.",
+             "genres": ["Game Show"], "trailers": [{"youtube": "abc123"}]}
+
+    async def _details(self, season=1):
+        calls = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            calls.append((path, kwargs))
+            return self.TITLE if path.startswith("tv/5") else EPISODES
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)):
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, 55, season)
+        return got, calls
+
+    async def test_both_lookups_cache_and_neither_is_private(self):
+        _got, calls = await self._details()
+        self.assertEqual([path for path, _ in calls], ["tv/55", "tv/episodes/55"])
+        for path, kwargs in calls:
+            with self.subTest(path=path):
+                self.assertIs(kwargs["pool"], transport.CATALOG_POOL)
+                self.assertNotIn("private", kwargs)
+
+    async def test_the_cast_is_empty_because_simkl_publishes_none(self):
+        """Not a lookup that failed. Simkl has no cast on any endpoint this app
+        can reach, and no third metadata service is pulled in to fill it."""
+        got, _calls = await self._details()
+        self.assertEqual(got["cast"], [])
+
+    async def test_a_bare_youtube_id_becomes_a_url_here_and_not_in_the_renderer(self):
+        got, _calls = await self._details()
+        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123")
+
+    async def test_a_title_simkl_cannot_place_still_answers_with_every_key(self):
+        """Simkl's "not found" is a 200 with a body that is not a title, so the
+        modal has to render around an answer that says nothing rather than error.
+        """
+        with patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(side_effect=[[], []])):
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, 55, 1)
+        self.assertEqual(got["overview"], "")
+        self.assertEqual(got["episodes"], [])
+        self.assertIn("certification", got)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

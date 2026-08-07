@@ -5,6 +5,13 @@
    entry), `not_watching` and `new_ids` (sets, tested by membership rather than
    queried per card), `is_admin` and `settings` (which action buttons exist).
 
+   ONE data- ATTRIBUTE PER SERVICE'S OWN ID, and both are drawn whenever the
+   group carried them. The details modal hands them all to /api/details and the
+   SERVER picks who to ask, because only the server can see whose credentials
+   this instance has (see app/calendar/detail_source.py). A card carrying only
+   `data-simkl-id` is a title no other service listed, and it opens on Simkl's
+   own answer rather than refusing.
+
    The not-watching and is-new classes are decided HERE, on the server. They used
    to be added by the client after /api/state resolved, which meant hidden items
    painted and then popped out and the badges arrived a frame late.
@@ -56,7 +63,7 @@
 {%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.mark(name) }}</span>{% endfor -%}
 </button>
 {%- endmacro -%}
-<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
+<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>

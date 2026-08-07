@@ -402,6 +402,27 @@ class Settings:
         return bool(self.simkl_client_id.strip() and self.simkl_access_token.strip())
 
     @property
+    def simkl_catalogue_configured(self) -> bool:
+        """Whether this instance can make PUBLIC Simkl catalogue reads.
+
+        The pair to `trakt_catalogue_configured`, drawn for the same reason and
+        with a bigger gap between the halves: Simkl's per-title endpoints — a
+        show's record, its episode list — take the client id as a query parameter
+        and no bearer at all (app/providers/simkl/transport.py's `api_params`),
+        so the answer to "can we look a title up" is the client id and nothing
+        else. Asking `simkl_configured` in front of one of those asks whether
+        this instance has issued a Simkl TOKEN, which essentially no instance
+        running only the public halves ever has — the author's own live instance
+        has a client id and no token — and would refuse every Simkl-only title's
+        detail modal on a credential the lookup never sends.
+
+        The calendar is a third answer again and is not this one: those files
+        come from a CDN that takes neither (see calendar.py in that package), so
+        a source that is unconfigured by BOTH properties still fills a month.
+        """
+        return bool(self.simkl_client_id.strip())
+
+    @property
     def simkl_login_configured(self) -> bool:
         """Whether "Log in with Simkl" can be offered.
 

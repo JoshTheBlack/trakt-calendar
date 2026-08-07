@@ -341,6 +341,28 @@ class TheCardAgreesWithTheResolutionVocabularyTests(unittest.TestCase):
         self.assertNotIn("card_style", CARD)
 
 
+class TheIdsTheModalIsOpenedWithTests(unittest.TestCase):
+    """A card carries EVERY service's own id, not just Trakt's.
+
+    The modal hands them all to the server, which picks who to ask — so a missing
+    attribute here is a card that opens on an apology instead of on the one
+    service that could describe it. The failure is invisible from the calendar
+    page, which renders identically either way.
+    """
+
+    def test_a_merged_card_carries_both_services_ids(self):
+        html = _card_html(_record(Source.TRAKT), _record(Source.SIMKL))
+        self.assertIn('data-trakt-id="trakt-id"', html)
+        self.assertIn('data-simkl-id="simkl-id"', html)
+
+    def test_a_simkl_only_card_carries_simkls_and_an_empty_trakt_slot(self):
+        """The empty slot matters: the script tests each attribute for a value,
+        so an absent one and a blank one have to mean the same thing."""
+        html = _card_html(_record(Source.SIMKL))
+        self.assertIn('data-simkl-id="simkl-id"', html)
+        self.assertIn('data-trakt-id=""', html)
+
+
 class ThePosterOnlyWallRendersAMergedCardTests(unittest.TestCase):
     """The layout with the least room, over a card carrying the most marks."""
 

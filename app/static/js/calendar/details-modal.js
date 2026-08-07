@@ -1,4 +1,28 @@
 // ---- Details modal ----
+
+// Which card dataset key holds which service's own id. The card draws one per
+// service the group carried, and ALL of them are sent: the server decides who to
+// ask, because only it can see whose credentials this instance has filled in
+// (app/calendar/detail_source.py). Sending one plus a service name would move
+// that decision to the side that cannot answer it.
+const DETAIL_ID_KEYS = { trakt: 'traktId', simkl: 'simklId' };
+
+// The query string for a details request, from whatever ids a card carries.
+// Empty when the card carries none, which is the one case nothing can describe.
+function detailsQuery(dataset, media, season) {
+    const parts = [`media=${encodeURIComponent(media)}`];
+    let ids = 0;
+    for (const [source, key] of Object.entries(DETAIL_ID_KEYS)) {
+        const value = dataset[key];
+        if (!value) continue;
+        ids += 1;
+        parts.push(`${source}=${encodeURIComponent(value)}`);
+    }
+    if (!ids) return null;
+    if (season) parts.push(`season=${encodeURIComponent(season)}`);
+    return parts.join('&');
+}
+
 async function openDetails(card, event) {
     if (event) {
         const interactive = event.target.closest('.watch-toggle, .trakt-btn, a, button');
@@ -7,7 +31,6 @@ async function openDetails(card, event) {
     const title = card.dataset.title || card.querySelector('.show-title')?.textContent || 'Details';
     const poster = card.dataset.poster || '/static/images/nopostertv.png';
     const media = card.dataset.media;
-    const id = card.dataset.traktId;
     const season = card.dataset.season;
 
     document.getElementById('detailsTitle').textContent = title;
@@ -15,19 +38,22 @@ async function openDetails(card, event) {
     document.getElementById('detailsBody').innerHTML = '<div class="details-loading">⏳ Loading details…</div>';
     document.getElementById('detailsModal').classList.add('open');
 
-    if (!id) {
-        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">No Trakt id available for this item.</div>';
+    const q = detailsQuery(card.dataset, media, season);
+    if (!q) {
+        // No service name in the copy any more. A card with no id at all is a
+        // listing nothing can be looked up from, and naming one service made a
+        // title the OTHER service could describe perfectly read as broken.
+        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">Nothing here can describe this item.</div>';
         return;
     }
     try {
-        const q = `media=${encodeURIComponent(media)}&id=${encodeURIComponent(id)}` + (season ? `&season=${encodeURIComponent(season)}` : '');
         const res = await fetch(`/api/details?${q}`);
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
-        renderDetails(d, poster, media, season);
+        renderDetails(d, poster, media, title, season);
     } catch (e) {
         console.error(e);
-        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">⚠️ Could not load details from Trakt.</div>';
+        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">⚠️ Could not load details for this item.</div>';
     }
 }
 
@@ -63,7 +89,11 @@ function buildDetailsActions(card, media, title) {
     });
 }
 
-function renderDetails(d, poster, media, season) {
+// `title` comes from the CARD, not from the payload. Which service answered
+// decides what is in the payload — Simkl's catalogue record is stored without a
+// title, because the listing that put the card on the page already had one — and
+// the modal's heading is set from the card for the same reason.
+function renderDetails(d, poster, media, title, season) {
     const chips = [];
     if (d.status) chips.push(`<span class="chip">${esc(d.status)}</span>`);
     if (d.network) chips.push(`<span class="chip network">📡 ${esc(d.network)}</span>`);
@@ -74,14 +104,16 @@ function renderDetails(d, poster, media, season) {
 
     let html = `
         <div class="details-hero">
-            <img src="${esc(poster)}" alt="${esc(d.title)} poster">
+            <img src="${esc(poster)}" alt="${esc(title)} poster">
             <div class="d-meta">
                 <div class="d-chips">${chips.join('')}</div>
                 ${d.overview ? `<div class="details-overview">${esc(d.overview)}</div>` : '<div class="d-empty">No overview available.</div>'}
             </div>
         </div>`;
 
-    // Trailer (Trakt exposes it via extended=full). Embed YouTube inline, else link out.
+    // Trailer. Trakt exposes it via extended=full and Simkl carries a bare
+    // YouTube id its provider builds into a URL, so by the time it is here the
+    // key means the same thing whoever filled it in. Embed inline, else link out.
     if (d.trailer) {
         const yt = youTubeId(d.trailer);
         html += `<div class="details-section-title">▶️ Trailer</div>`;
@@ -100,8 +132,14 @@ function renderDetails(d, poster, media, season) {
                 </div>`).join('') + `</div>`;
     }
 
-    if (media !== 'movie' && season) {
-        html += `<div class="details-section-title">📺 Season ${esc(season)} Episodes</div>`;
+    // THE SEASON THAT WAS ANSWERED, not the one that was asked about. They are
+    // the same for a card whose listing stated a season; where it did not, a
+    // source whose episode list holds exactly one season answers with that one
+    // (Simkl's calendar files omit the season on anime), and the heading has to
+    // say which season the rows below it are.
+    const answered = (d.season === null || d.season === undefined) ? season : d.season;
+    if (media !== 'movie' && answered) {
+        html += `<div class="details-section-title">📺 Season ${esc(answered)} Episodes</div>`;
         if (d.episodes && d.episodes.length) {
             html += `<div class="ep-list">` + d.episodes.map(ep => `
                 <div class="ep-row">

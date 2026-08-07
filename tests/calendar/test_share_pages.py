@@ -369,7 +369,7 @@ class SharePageDetailsModalTests(SharePageTestCase):
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
         self._seed_detail_cache()
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&id=123&season=2")
+            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
         d = resp.json()
         self.assertTrue(d["ok"])
@@ -383,7 +383,7 @@ class SharePageDetailsModalTests(SharePageTestCase):
         """A show the owner never opened has nothing cached — the modal renders
         around the blanks rather than triggering a fetch."""
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&id=555&season=1")
+            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=555&season=1")
         self.assertEqual(resp.status_code, 200, resp.text)
         d = resp.json()
         self.assertTrue(d["ok"])
@@ -394,13 +394,13 @@ class SharePageDetailsModalTests(SharePageTestCase):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._seed_detail_cache()
         with self._no_network():
-            resp = self.client.get("/u/modalowner/details?media=show&id=123&season=2")
+            resp = self.client.get("/u/modalowner/details?media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["cast"][0]["name"], "A Actor")
 
     def test_a_bad_token_details_request_is_a_404(self):
         with self._no_network():
-            resp = self.client.get("/s/not-a-real-token/details?media=show&id=123&season=2")
+            resp = self.client.get("/s/not-a-real-token/details?media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 404)
 
 

@@ -18,7 +18,7 @@ from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
 from ..base import Capabilities, Record, Source
-from . import calendar, sync
+from . import calendar, detail, sync
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
 __all__ = ["SimklError", "SimklRateLimitError", "SimklBlockedError"]
@@ -80,6 +80,27 @@ class _SimklCalendarPort:
         return await calendar.fetch_window(endpoint, settings, start, days)
 
 
+class _SimklDetailPort:
+    """Simkl's answer to "describe this one title" (app/providers/base.py's
+    DetailPort).
+
+    A thin delegator over detail.py, exactly as the two ports above are over
+    their own modules, and through the MODULE object for the same reason.
+    """
+
+    def catalogue_configured(self, settings: Settings) -> bool:
+        # The client id alone, and NOT `is_configured` below. Simkl's per-title
+        # endpoints send the client id as a query parameter and no bearer, so a
+        # token this instance has never issued cannot be what decides whether a
+        # Simkl-only card can open — see Settings.simkl_catalogue_configured.
+        return settings.simkl_catalogue_configured
+
+    async def fetch_details(self, settings: Settings, media, source_id,
+                            season: int | None, *, cache_only: bool = False) -> dict:
+        return await detail.fetch_details(settings, media, source_id, season,
+                                          cache_only=cache_only)
+
+
 class _SimklProvider:
     """Simkl as the registry sees it: an id, a label, what it can answer, and
     whether it is configured. Everything this package actually DOES is called
@@ -119,6 +140,11 @@ class _SimklProvider:
     # — the conformance test (tests/providers/test_protocol_conformance.py)
     # fails if only one of the two moves, exactly as it does for sync_port.
     calendar_port = _SimklCalendarPort()
+    # THE PORT THAT MAKES A SIMKL-ONLY CARD OPENABLE. Without it the modal has
+    # nowhere to send a title no other service listed, which is the state a
+    # Simkl-only card was in: it refused with "No Trakt id available for this
+    # item" on 690 of the shows in one live month.
+    detail_port = _SimklDetailPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured

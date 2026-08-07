@@ -822,6 +822,64 @@ class CalendarPort(Protocol):
 
 
 @runtime_checkable  # see the note on SyncPort above
+class DetailPort(Protocol):
+    """A source that can describe ONE TITLE as fully as it knows how — what the
+    detail modal draws.
+
+    A FIFTH PROTOCOL, and it exists now for the reason `Provider`'s own docstring
+    below gives for keeping itself narrow: a detail lookup is a different
+    consumer with a different degradation story from a calendar window, so it
+    becomes its own protocol the moment a second source needs one. That moment
+    has arrived — a title only one service listed has to be describable by that
+    service or its card opens on nothing.
+
+    LIKE CalendarPort, THIS ASKS ABOUT THE WORLD RATHER THAN ABOUT ONE PERSON.
+    Every answer is identical for every viewer, which is why it caches globally
+    and why a viewer who has linked nothing still gets one.
+
+    THE ANSWER'S KEY SET IS THE SAME WHOEVER GIVES IT, and that is the whole
+    reason this is a protocol rather than two functions the route branches
+    between. One client-side renderer draws the modal, so a key present on only
+    one source's answer would read as a template bug rather than as a lookup that
+    source cannot make. A source with nothing to say for a key says it with an
+    empty value — which is exactly what `cache_only` already produces on a source
+    that CAN answer, so the renderer has always had to tolerate it.
+    """
+
+    def catalogue_configured(self, settings: Settings) -> bool:
+        """Whether this instance can make this source's PUBLIC per-title reads.
+
+        DELIBERATELY NOT `Provider.is_configured`, and the pair is the same split
+        `Settings.trakt_catalogue_configured` draws beside `trakt_configured`:
+        that one asks whether somebody's PRIVATE data can be read, which needs a
+        token, and asking it in front of a public catalogue lookup makes an
+        instance-wide, globally cached fact hinge on one account's credential.
+        Two sources make the gap bigger rather than smaller — Simkl's catalogue
+        takes a client id and no token at all, so an instance that has never
+        issued a Simkl token can still describe every title Simkl listed.
+
+        Must answer without a network call: it gates the call.
+        """
+        ...
+
+    async def fetch_details(self, settings: Settings, media, source_id,
+                            season: int | None, *, cache_only: bool = False) -> dict:
+        """One title, in THIS SOURCE's own id space, as the modal's field set.
+
+        `source_id` is the id this source knows the title by — the value under
+        this source's own name in a group's `ids` map — and never another
+        service's, because a source cannot look a title up by an id it does not
+        issue.
+
+        `cache_only=True` serves whatever is already cached and makes no outbound
+        call, which is what the public share pages use so a visitor's click can
+        never spend the owner's rate limit. Fields with nothing cached behind them
+        come back empty and the modal renders around them.
+        """
+        ...
+
+
+@runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
     """What the registry needs in order to offer a source at all: who it is,
     what it can answer, and whether it is usable right now.
@@ -830,7 +888,8 @@ class Provider(Protocol):
     consumer with a different degradation story, and folding them in here would
     mean a source that only publishes a calendar could not be registered at all.
     They become their own protocols when a second source actually needs them —
-    which is what `sync_port` below already is.
+    which is what `sync_port` below already is, and what `detail_port` became
+    once a title only one service listed had to be describable by that service.
 
     THE CALENDAR VERB IS A PORT RATHER THAN A METHOD, and the shape it has is
     the shape the app actually uses. There used to be a
@@ -855,6 +914,12 @@ class Provider(Protocol):
     # `capabilities.endpoints` while carrying no port would be claiming a calendar
     # it cannot produce.
     calendar_port: CalendarPort | None
+    # How this source describes ONE title, or None for a source that cannot.
+    # Declared here for the same reason as the two ports above: the detail modal
+    # asks the registry which source can describe the title in front of it and
+    # never names a service, so a card from a source nobody added a port for
+    # opens on an honest refusal rather than on an AttributeError.
+    detail_port: DetailPort | None
 
     def is_configured(self, settings: Settings) -> bool:
         """Whether this source has the credentials it needs to be asked

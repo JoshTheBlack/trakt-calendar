@@ -21,7 +21,7 @@ from datetime import date
 
 from .. import register
 from ..base import Capabilities, Record, Source
-from . import calendar, sync
+from . import calendar, detail, sync
 from .transport import TraktError, TraktRateLimitError
 
 __all__ = ["TraktError", "TraktRateLimitError"]
@@ -40,6 +40,29 @@ class _TraktCalendarPort:
     async def fetch_window(self, endpoint, settings: Settings,
                            start: date, days: int) -> list[Record]:
         return await calendar.fetch_window(endpoint, settings, start, days)
+
+
+class _TraktDetailPort:
+    """Trakt's answer to "describe this one title" (app/providers/base.py's
+    DetailPort).
+
+    Thin, and through the module object, for the same reason the two ports either
+    side of it are: patching app.providers.trakt.detail.fetch_details has to reach
+    what this calls.
+    """
+
+    def catalogue_configured(self, settings: Settings) -> bool:
+        # The client id alone. Trakt's public endpoints authenticate with the
+        # `trakt-api-key` header, and only the per-person reads under /sync/ take
+        # a bearer — see Settings.trakt_catalogue_configured for why asking the
+        # narrower question here turned every Simkl-only viewer's roster row into
+        # an error.
+        return settings.trakt_catalogue_configured
+
+    async def fetch_details(self, settings: Settings, media, source_id,
+                            season: int | None, *, cache_only: bool = False) -> dict:
+        return await detail.fetch_details(settings, str(media), source_id, season,
+                                          cache_only=cache_only)
 
 
 class _TraktSyncPort:
@@ -115,6 +138,10 @@ class _TraktProvider:
     # And the same for `capabilities.endpoints`: declaring five calendars while
     # carrying no port would be claiming a calendar this source cannot produce.
     calendar_port = _TraktCalendarPort()
+    # And the same again for the modal: it asks the registry which source can
+    # describe the title in front of it, so a card carrying a Trakt id gets
+    # Trakt's richer answer without the route naming this package.
+    detail_port = _TraktDetailPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured

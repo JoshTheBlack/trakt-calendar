@@ -133,6 +133,7 @@
                    Trakt link still reaches the full details. #}
                 <div class="card{% if item.id in not_watching %} not-watching{% endif %}"
                      data-trakt-id="{{ item.ids.get('trakt') or '' }}"
+                     data-simkl-id="{{ item.ids.get('simkl') or '' }}"
                      data-media="{{ item.media }}"
                      data-season="{{ item.season if item.season is not none else '' }}"
                      data-title="{{ item.title }}"

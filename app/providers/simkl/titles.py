@@ -35,11 +35,17 @@ exactly as it would for a genuine failure (see app/calendar/enrich.py).
 THESE ENDPOINTS TAKE NO TOKEN and are cached through CATALOG_POOL exactly like
 the tracker's per-title lookups in detail.py beside this module — same pool,
 same "spends nobody's personal quota" reasoning, different fields kept. THIS
-IS A SEPARATE MODULE FROM detail.py DELIBERATELY: that one already exists and
-is the tracker's — it answers "what does a season look like" for the tiles the
-tracker draws, and touching it for an unrelated calendar concern would mean
-two features changing the same file for two different reasons. This module
-answers a calendar question and nothing here is read by the tracker.
+IS A SEPARATE MODULE FROM detail.py DELIBERATELY: that one answers "what does
+one title look like right now" for whoever is drawing it, and this one answers
+"what does the calendar keep about a title, forever, in a row on disk". The
+two have different reasons to change — this one's output shape is versioned and
+a change to it re-fetches every stored row (EXTRACT_VERSION below), while a
+change to what a modal draws costs nothing.
+
+WHO READS THIS: app/calendar/enrich.py's drain, which stores what comes back,
+and detail.py's `fetch_details`, which draws the modal from the same record
+rather than issuing a second lookup of its own. The tracker's tiles do not —
+they ask detail.py for a season, which is a different endpoint.
 """
 from __future__ import annotations
 
@@ -323,18 +329,25 @@ def _extract(payload: dict) -> dict[str, Any]:
     }
 
 
-async def fetch_title(settings: Settings, simkl_id: int, media: Media | str) -> dict | None:
-    """One title's enrichment fields, or None when Simkl could not answer for
+async def fetch_title(settings: Settings, simkl_id: int, media: Media | str,
+                      *, cache_only: bool = False) -> dict | None:
+    """One title's catalogue fields, or None when Simkl could not answer for
     `simkl_id` — a real failure (network, rate limit, an instance-wide block)
-    or an id it does not recognise. The caller (app/calendar/enrich.py) treats
-    both the same way: record the attempt and back off, rather than guessing
-    which one happened from a status code that measurement showed is not
+    or an id it does not recognise. The enrichment drain (app/calendar/enrich.py)
+    treats both the same way: record the attempt and back off, rather than
+    guessing which one happened from a status code that measurement showed is not
     trustworthy here (see the module docstring).
 
     Cached exactly like every other Cloudflare-edged Simkl read — through
     CATALOG_POOL, on its own TTL — so a title several calendar windows
     reference costs one call regardless of how many times the drain is asked
     about it before that TTL turns over.
+
+    `cache_only=True` makes no outbound call and answers None when nothing is
+    cached, which is a THIRD indistinguishable way of failing and is handled by
+    the same caller branch. It is what the public share pages read with: a
+    visitor's click serves what the owner's own views already warmed and can
+    never spend the instance's Simkl budget.
     """
     path = _DETAIL_PATHS.get(Media(media))
     if path is None or not simkl_id:
@@ -343,6 +356,7 @@ async def fetch_title(settings: Settings, simkl_id: int, media: Media | str) -> 
         payload = await transport.cached_get(
             transport.catalog_client(), settings, f"{path}/{simkl_id}", {},
             pool=transport.CATALOG_POOL, ttl_seconds=DETAIL_CACHE_TTL_SECONDS,
+            cache_only=cache_only,
         )
     except transport.SimklError:
         return None

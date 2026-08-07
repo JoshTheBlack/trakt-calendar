@@ -969,6 +969,17 @@ async def api_distrakt_details(request: Request):
     was written by whichever services the account actually syncs. An account
     that signs in with Simkl alone therefore opens the modal on any roster row
     that carries a Trakt id, and sees its own watched episodes on it.
+
+    THE WATCHED HALF IS EVERY SERVICE'S ANSWER, NOT ONE OF THEM — see the read
+    below for what it used to do and why the union is the honest reply.
+
+    THE DETAIL HALF IS STILL TRAKT'S ALONE, and that is a narrower rule than the
+    calendar's modal now follows. The tracker files a season under a roster row
+    it already refuses without a Trakt id, so there is no roster row here for
+    which Simkl would be the only possible answer — the case the calendar had 690
+    of in one month does not arise on this route. Widening it would mean widening
+    that refusal too, which is a change to what the tracker will file rather than
+    a change to what a modal draws.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
@@ -1001,29 +1012,50 @@ async def api_distrakt_details(request: Request):
         details = await trakt_detail.fetch_details(settings, Media.SHOW, ids["trakt"], season)
     except TraktError as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    progress = await db.fetch_one(
-        "SELECT watched_episodes_json FROM distrakt_show_progress WHERE user_id = ? "
-        "AND media = ? AND match_source = ? AND match_id = ? AND season = ?",
+    rows = await db.fetch_all(
+        "SELECT source, watched_episodes_json FROM distrakt_show_progress "
+        "WHERE user_id = ? AND media = ? AND match_source = ? AND match_id = ? "
+        "AND season = ? ORDER BY source",
         (user_id, key.media, key.match_source, key.match_id, season),
     )
+    # ONE ROW PER SERVICE, AND EVERY ONE OF THEM IS READ. This used to be a
+    # fetch_one with no `source` predicate, which on an account syncing two
+    # services returned whichever row the database happened to hand back first —
+    # so the ticks were one service's, chosen arbitrarily, and the viewer was
+    # never told whose. Nothing was corrupted by it, because this route only
+    # draws; what it produced was a season reading "6 watched" beside a row
+    # counting 8, with no way to tell that two answers existed.
+    #
     # watch_history owns what that column holds — {episode: watched_at} now, a
     # bare list of numbers before dates were stored — so the shape is read there
     # rather than guessed at again here. Guessing at it here is exactly how this
     # route came to answer "nothing watched" for everyone: it read the dated
     # mapping as a list and dropped every entry.
-    watched: list[int] = []
-    if progress is not None:
+    by_source: dict[str, list[int]] = {}
+    for row in rows:
         try:
-            stored = json.loads(progress["watched_episodes_json"] or "{}")
-            watched = sorted(int(ep) for ep in watch_history.episode_watches(stored))
+            stored = json.loads(row["watched_episodes_json"] or "{}")
+            episodes = sorted(int(ep) for ep in watch_history.episode_watches(stored))
         except (TypeError, ValueError):
-            watched = []
+            episodes = []
+        if episodes:
+            by_source[str(row["source"])] = episodes
+    # THE UNION IS THE ANSWER, AND EACH SERVICE'S OWN LIST TRAVELS BESIDE IT.
+    # Watching happens once; two services holding a record of it are two
+    # RECORDINGS of one act, so an episode either service saw is an episode this
+    # person watched — anything narrower under-reports what they actually did, and
+    # picking one service to believe is the arbitrary choice this replaced. The
+    # per-service lists are sent because the two genuinely disagree (one service
+    # scrobbles and the other was linked last week), and a tick with no
+    # attribution turns that disagreement into what looks like a bug in the count.
+    watched = sorted({episode for episodes in by_source.values() for episode in episodes})
     return JSONResponse({
         "ok": True,
         **details,
         "slug": str(ids.get("slug") or ""),
         "season": season,
         "watched_episodes": watched,
+        "watched_by_source": by_source,
     })
 
 

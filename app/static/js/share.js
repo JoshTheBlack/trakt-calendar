@@ -4,11 +4,35 @@
  * render below is a copy of the calendar's details modal. The one difference is
  * where the data comes from: a token-scoped, rate-limited, CACHE-ONLY endpoint at
  * "<this page's path>/details", rather than the session-only /api/details. It
- * never calls Trakt — it serves back only what the owner's own views already
- * cached (see share_routes._details), so a public page still makes zero Trakt
- * calls. Progressive enhancement: with JavaScript off, the card's own Trakt link
- * still reaches the full details.
+ * never calls a source — it serves back only what the owner's own views already
+ * cached (see share_routes._details), so a public page still makes zero outbound
+ * calls. Progressive enhancement: with JavaScript off, the card's own outbound
+ * button still reaches the full details.
+ *
+ * WHICH SERVICE ANSWERS IS THE SERVER'S DECISION, on both pages, and the card
+ * simply hands over every id it carries — see the calendar modal's own
+ * DETAIL_ID_KEYS for why. A card only Simkl listed opens on Simkl's answer here
+ * exactly as it does on the owner's own calendar.
  */
+
+// One query-string parameter per service's own id, from a card's dataset. The
+// same shape the calendar's modal sends, because the endpoint behind both is the
+// same code with the fetch switched off.
+const SHARE_DETAIL_ID_KEYS = { trakt: 'traktId', simkl: 'simklId' };
+
+function shareDetailsQuery(dataset, media, season) {
+    const parts = [`media=${encodeURIComponent(media)}`];
+    let ids = 0;
+    for (const [source, key] of Object.entries(SHARE_DETAIL_ID_KEYS)) {
+        const value = dataset[key];
+        if (!value) continue;
+        ids += 1;
+        parts.push(`${source}=${encodeURIComponent(value)}`);
+    }
+    if (!ids) return null;
+    if (season) parts.push(`season=${encodeURIComponent(season)}`);
+    return parts.join('&');
+}
 
 // Where the details endpoint lives for whichever share URL this page was reached
 // by (/s/<token>, /u/<name>, /c/<slug>): the current path plus "/details".
@@ -25,31 +49,32 @@ async function openShareDetails(card, event) {
     const title = d.title || 'Details';
     const poster = d.poster || '/static/images/nopostertv.png';
     const media = d.media;
-    const id = d.traktId;
     const season = d.season;
 
     document.getElementById('detailsTitle').textContent = title;
     document.getElementById('detailsBody').innerHTML = '<div class="details-loading">⏳ Loading details…</div>';
     document.getElementById('detailsModal').classList.add('open');
 
-    if (!id) {
-        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">No Trakt id available for this item.</div>';
+    const q = shareDetailsQuery(d, media, season);
+    if (!q) {
+        document.getElementById('detailsBody').innerHTML = '<div class="d-empty">Nothing here can describe this item.</div>';
         return;
     }
     try {
-        const q = `media=${encodeURIComponent(media)}&id=${encodeURIComponent(id)}`
-            + (season ? `&season=${encodeURIComponent(season)}` : '');
         const res = await fetch(`${shareDetailsBase()}?${q}`);
         const dd = await res.json();
         if (!dd.ok) throw new Error(dd.error || 'failed');
-        renderShareDetails(dd, poster, media, season);
+        renderShareDetails(dd, poster, media, title, season);
     } catch (e) {
         console.error(e);
         document.getElementById('detailsBody').innerHTML = '<div class="d-empty">⚠️ Could not load details.</div>';
     }
 }
 
-function renderShareDetails(d, poster, media, season) {
+// `title` comes from the CARD for the same reason it does on the calendar page:
+// which service answered decides what is in the payload, and Simkl's catalogue
+// record is stored without a title.
+function renderShareDetails(d, poster, media, title, season) {
     const chips = [];
     if (d.status) chips.push(`<span class="chip">${esc(d.status)}</span>`);
     if (d.network) chips.push(`<span class="chip network">📡 ${esc(d.network)}</span>`);
@@ -59,7 +84,7 @@ function renderShareDetails(d, poster, media, season) {
 
     let html = `
         <div class="details-hero">
-            <img src="${esc(poster)}" alt="${esc(d.title)} poster">
+            <img src="${esc(poster)}" alt="${esc(title)} poster">
             <div class="d-meta">
                 <div class="d-chips">${chips.join('')}</div>
                 ${d.overview ? `<div class="details-overview">${esc(d.overview)}</div>` : '<div class="d-empty">No overview available.</div>'}
@@ -84,8 +109,11 @@ function renderShareDetails(d, poster, media, season) {
                 </div>`).join('') + `</div>`;
     }
 
-    if (media !== 'movie' && season) {
-        html += `<div class="details-section-title">📺 Season ${esc(season)} Episodes</div>`;
+    // The season that was ANSWERED — see the calendar modal's note; a listing
+    // that stated no season can still be answered by a source with one.
+    const answered = (d.season === null || d.season === undefined) ? season : d.season;
+    if (media !== 'movie' && answered) {
+        html += `<div class="details-section-title">📺 Season ${esc(answered)} Episodes</div>`;
         if (d.episodes && d.episodes.length) {
             html += `<div class="ep-list">` + d.episodes.map(ep => `
                 <div class="ep-row">

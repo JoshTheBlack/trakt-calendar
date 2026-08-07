@@ -1,5 +1,12 @@
 // ---- Show details modal (the calendar's, plus this user's watched episodes) ----
 
+// How a service is written when a tick has to say whose it is. TEXT, NOT A LOGO,
+// and that follows a rule stated in _source_logo.html rather than a preference:
+// a mark is always part of a CONTROL there, and an attribution on a read-only
+// episode row is not something a reader can act on. A mark here would look
+// exactly like the flip control on a card and do nothing when it was clicked.
+const SERVICE_NAMES = { trakt: 'Trakt', simkl: 'Simkl' };
+
 function closeDistraktDetails() {
     document.getElementById('distraktDetailsModal').classList.remove('open');
 }
@@ -83,30 +90,64 @@ function renderDistraktDetails(d) {
                 </div>`).join('') + `</div>`;
     }
 
+    // A TICK IS THE UNION OF EVERY SERVICE THAT RECORDED THE EPISODE, and the
+    // services that recorded it are named wherever they disagree. Watching
+    // happens once, so an episode either service saw is one this person watched;
+    // but the two records really do differ (one service scrobbles, the other was
+    // linked last week), and a tick that showed one service's answer without
+    // saying so is what this replaced — see api_distrakt_details for the read.
+    const bySource = d.watched_by_source || {};
+    const services = Object.keys(bySource).sort();
+    const seenBy = new Map();
+    for (const service of services) {
+        for (const number of (bySource[service] || [])) {
+            const key = Number(number);
+            if (!seenBy.has(key)) seenBy.set(key, []);
+            seenBy.get(key).push(SERVICE_NAMES[service] || service);
+        }
+    }
     const watched = new Set((d.watched_episodes || []).map(Number));
+    // Only where the services disagree, which is the same rule a calendar card
+    // follows for a field two services filled in differently: agreement needs no
+    // caption, and captioning it everywhere would put a service's name on every
+    // row of a one-service account's list.
+    const disagree = services.length > 1
+        && services.some(service => (bySource[service] || []).length !== watched.size);
+
     html += `<div class="details-section-title">📺 Season ${esc(d.season)} Episodes`
         + (watched.size ? ` <span class="ep-watched-count">${watched.size} watched</span>` : '')
         + `</div>`;
+    if (disagree) {
+        html += `<div class="ep-source-note">`
+            + services.map(service =>
+                `${esc(SERVICE_NAMES[service] || service)} recorded ${(bySource[service] || []).length}`
+              ).join(' · ')
+            + `</div>`;
+    }
     if (d.episodes && d.episodes.length) {
         html += `<div class="ep-list">` + d.episodes.map(ep => {
-            const seen = watched.has(Number(ep.number));
+            const number = Number(ep.number);
+            const seen = watched.has(number);
+            const recorders = seenBy.get(number) || [];
             const url = traktEpisodeUrl(d.slug, d.season, ep.number);
             // Every episode gets a marker: a solid tick when this user has watched
             // it, a hollow one when they haven't. Both open that episode on Trakt,
             // so the unwatched ones are the useful link — that is where you go to
             // mark it off.
             const glyph = seen ? '✓' : '○';
-            const label = seen ? 'Watched — open on Trakt' : 'Not watched — open on Trakt';
+            const by = recorders.length ? ` (${recorders.join(', ')})` : '';
+            const label = (seen ? 'Watched' : 'Not watched') + by + ' — open on Trakt';
             const cls = 'ep-check' + (seen ? '' : ' unseen');
             const mark = url
                 ? `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener"
-                      title="${label}">${glyph}</a>`
-                : `<span class="${cls}" title="${label}">${glyph}</span>`;
+                      title="${esc(label)}">${glyph}</a>`
+                : `<span class="${cls}" title="${esc(label)}">${glyph}</span>`;
             return `
                 <div class="ep-row${seen ? ' watched' : ''}">
                     ${mark}
                     <span class="ep-num">E${String(ep.number).padStart(2, '0')}</span>
                     <span class="ep-title">${esc(ep.title)}</span>
+                    ${(disagree && recorders.length) ? `<span class="ep-source">${esc(recorders.join(' · '))}</span>` : ''}
                     ${ep.rating ? `<span class="ep-rating">⭐ ${esc(ep.rating)}</span>` : ''}
                     <span class="ep-date">${esc(ep.air_display || 'TBA')}</span>
                 </div>`;

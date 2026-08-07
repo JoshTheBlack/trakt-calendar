@@ -31,8 +31,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, resolve as calendar_resolve, share_links,
-               state as calendar_state)
+from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
+               share_links, state as calendar_state)
 from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
@@ -40,8 +40,9 @@ from ..endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
+from ..providers.base import SourceUnavailable
 from ..providers.trakt import TraktError
-from ..providers.trakt.detail import fetch_details, fetch_tile_info
+from ..providers.trakt.detail import fetch_tile_info
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
@@ -796,24 +797,43 @@ async def api_tile(request: Request):
 
 @guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)
 async def api_details(request: Request):
-    """Full detail payload for the modal.
+    """Full detail payload for the modal, from whichever service can describe
+    the title.
 
-    Catalogue credential only, for the same reason as /api/tile: everything this
-    returns — overview, cast, the episode list — is public and shared.
+    THE CALLER HANDS OVER IDS, NOT A SERVICE. The query carries one parameter per
+    id namespace the card was drawn with — `trakt=`, `simkl=` — and
+    detail_source.choose picks who to ask. That keeps "which service answers" on
+    the side that can see whether a service's credentials are filled in, and it
+    is why this is a branch on ONE route rather than a second route per source: a
+    Simkl-only title asks the same question at the same level about the same
+    thing, and a second route would be a second gate, a second refusal shape and
+    a second place the client decides who to ask.
+
+    Catalogue credentials only, for the same reason as /api/tile: everything this
+    returns — overview, cast, the episode list — is public and shared. What
+    changed is that "catalogue" is now a question per SOURCE. It used to gate on
+    Trakt's, which refuses a title that needs no Trakt credential at all.
     """
     settings = load_settings()
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
-    trakt_id = request.query_params.get("id")
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    chosen = detail_source.choose(
+        settings, detail_source.ids_from_query(request.query_params))
+    if chosen is None:
+        # 404 rather than 400: the request was well formed and there is simply
+        # nobody who can answer it. The modal says so in its own words.
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    source, source_id = chosen
     try:
-        details = await fetch_details(
-            settings, media, trakt_id, route_params.season(request.query_params.get("season")))
-    except TraktError as exc:
+        details = await detail_source.fetch(
+            settings, source, media, source_id,
+            route_params.season(request.query_params.get("season")))
+    except SourceUnavailable as exc:
+        # The shared degradation contract rather than one service's error type:
+        # this route can now be answered by either of two sources and catching
+        # only Trakt's would let Simkl's escape as a 500.
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, **details})
+    return JSONResponse({"ok": True, "source": str(source), **details})
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

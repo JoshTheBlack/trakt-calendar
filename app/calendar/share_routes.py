@@ -30,10 +30,9 @@ import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, share_card, share_card_cache,
+from . import (cache as calendar_cache, detail_source, share_card, share_card_cache,
                share_code, share_links, state as calendar_state)
 from .. import auth, authz, clock, perftrace, route_params
-from ..providers.trakt import detail as trakt_detail
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
@@ -988,13 +987,20 @@ async def share_by_slug(request: Request, slug: str):
 # ---------------------------------------------------------------------------
 # details for a card on a public page — same modal content as the calendar
 # ---------------------------------------------------------------------------
-# CACHE-ONLY, same as the calendar view above: this never calls Trakt. The
-# owner's own calendar views already fetch and cache each show's detail (cast,
-# trailer, episodes);
-# this serves that cache back to visitors. A show the owner has not viewed comes
+# CACHE-ONLY, same as the calendar view above: this never calls a source. The
+# owner's own calendar views already fetch and cache each title's detail (cast,
+# trailer, episodes) and the enrichment drain warms Simkl's catalogue record;
+# this serves that cache back to visitors. A title the owner has not viewed comes
 # back with empty fields and the modal renders around them — no public request
 # ever spends the owner's rate limit. Rate-limited per IP like every other share
 # request; no membership gate is needed because there is no fetch to amplify.
+#
+# WHICH SERVICE ANSWERS IS DECIDED BY THE SAME CODE THE SIGNED-IN ROUTE USES
+# (detail_source), and that shared decision is the point: this modal is
+# documented as showing the same content as the calendar's, and two copies of
+# "who describes this title" would make that stop being true in a way neither
+# page could show on its own. Only the cache_only flag differs, which is exactly
+# the one thing that is genuinely different about a public request.
 
 def _season_param(value) -> int | None:
     try:
@@ -1010,12 +1016,16 @@ async def _details(request: Request, share_row) -> Response:
     if share_row is None:
         return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
     media = request.query_params.get("media", "show")
-    trakt_id = (request.query_params.get("id") or "").strip()
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    chosen = detail_source.choose(
+        settings, detail_source.ids_from_query(request.query_params))
+    if chosen is None:
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    source, source_id = chosen
     season = _season_param(request.query_params.get("season"))
-    details = await trakt_detail.fetch_details(settings, media, trakt_id, season, cache_only=True)
-    return JSONResponse({"ok": True, **details})
+    details = await detail_source.fetch(settings, source, media, source_id, season,
+                                        cache_only=True)
+    return JSONResponse({"ok": True, "source": str(source), **details})
 
 
 @guard.get("/s/{token}/details", AuthLevel.PUBLIC)

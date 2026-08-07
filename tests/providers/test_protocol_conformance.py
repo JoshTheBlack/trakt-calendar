@@ -28,8 +28,9 @@ import inspect
 import unittest
 
 from app import providers
-from app.providers.base import (CalendarPort, LibraryPort, PlayCountPort, Provider,
-                                SyncPort)
+from app.config import Settings
+from app.providers.base import (CalendarPort, DetailPort, LibraryPort, PlayCountPort,
+                                Provider, SyncPort)
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -172,6 +173,43 @@ class PlayCountPortIsOptionalTooTests(unittest.TestCase):
                                  hasattr(port, "fetch_play_counts"))
 
 
+class EverySourceCanDescribeATitleTests(unittest.TestCase):
+    """DetailPort, and the reason it is not optional in practice.
+
+    The detail modal asks the registry which source can describe the card in
+    front of it and never names a service. A registered source with no detail
+    port is therefore one whose cards open on a refusal — which is exactly the
+    state a Simkl-only card was in — and the refusal looks like a bug in the
+    modal rather than like a source that was never given an answer.
+    """
+
+    def test_every_registered_source_carries_a_detail_port(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertIsNotNone(
+                    provider.detail_port,
+                    f"{source} can list a title but cannot describe one")
+
+    def test_every_detail_port_present_satisfies_detailport(self):
+        for source, provider in providers.registered().items():
+            port = provider.detail_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                self.assertIsInstance(port, DetailPort)
+
+    def test_the_catalogue_question_is_not_the_private_one(self):
+        """A public per-title lookup must not be gated on a token it never sends.
+        Asserted against a Settings carrying each source's ID and nothing else,
+        which is the live instance's own shape for Simkl.
+        """
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                settings = Settings(**{f"{source}_client_id": "an-id"})
+                self.assertTrue(provider.detail_port.catalogue_configured(settings))
+                self.assertFalse(provider.is_configured(settings))
+
+
 class TheCheckWouldActuallyFailTests(unittest.TestCase):
     """A conformance test that cannot fail is decoration.
 
@@ -208,7 +246,7 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
         # somebody deleted a member outright. These four are read by
         # app/providers/__init__.py itself.
         for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
-                     "is_configured"):
+                     "detail_port", "is_configured"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 
