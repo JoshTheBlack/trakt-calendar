@@ -973,13 +973,25 @@ async def api_distrakt_details(request: Request):
     THE WATCHED HALF IS EVERY SERVICE'S ANSWER, NOT ONE OF THEM — see the read
     below for what it used to do and why the union is the honest reply.
 
-    THE DETAIL HALF IS STILL TRAKT'S ALONE, and that is a narrower rule than the
-    calendar's modal now follows. The tracker files a season under a roster row
-    it already refuses without a Trakt id, so there is no roster row here for
-    which Simkl would be the only possible answer — the case the calendar had 690
-    of in one month does not arise on this route. Widening it would mean widening
-    that refusal too, which is a change to what the tracker will file rather than
-    a change to what a modal draws.
+    THE DETAIL HALF IS STILL TRAKT'S ALONE, and that is narrower than it should
+    be. It is written down here as a KNOWN GAP rather than as a design, because
+    the reasoning that would justify it is false.
+
+    A ROSTER ROW DOES NOT NEED A TRAKT ID TO EXIST. The roster keys on the shared
+    identity waterfall (app/providers/base.py's MATCH_SOURCES — tmdb, tvdb, imdb,
+    mal) and never on a Trakt id, so a season baselined from a Simkl library read
+    is filed perfectly well with none: Simkl's id map carries `traktslug` but
+    never a numeric `trakt` (0 of 7768 catalogue records measured), and
+    `collect_ids` drops the slug. So the refusal below catches rows the tracker
+    was happy to create, and tells the viewer they are "Not on your roster" about
+    a row that demonstrably is.
+
+    WHY IT IS NOT FIXED IN THE SAME BREATH AS THE WATCHED READ: the repair is the
+    one the calendar's modal already had — ask whichever service the row carries
+    an id for, which `live.detail_source` on this same page already knows how to
+    choose — and it changes what this route can ANSWER rather than how it reads
+    one column. That is its own piece of work with its own tests, not a rider on
+    a fix to the watched half.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
