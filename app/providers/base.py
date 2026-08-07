@@ -284,6 +284,25 @@ class Record:
     # means "this is a film masquerading on a series endpoint".
     anime_type: str = ""
 
+    # WHERE AND HOW THIS FILM IS BEING RELEASED, as {country: [release type]} —
+    # TMDB's numbering (1 premiere, 2 limited theatrical, 3 theatrical,
+    # 4 digital, 5 physical, 6 TV), which is what the service publishes. Read by
+    # app/calendar/filter.py's release rule and by nothing else; see
+    # app/providers/simkl/titles.py's `_release_types_by_country` for where the
+    # value comes from and why the dates that sit beside these types in the
+    # payload are deliberately not kept.
+    #
+    # NOT `country` PLURAL, AND NOT A REPLACEMENT FOR IT. `country` is where a
+    # title was MADE and is one value; this is a list, it is about distribution,
+    # and the two disagree constantly — a film made in France released only in
+    # Brazil answers FR to one and BR to the other, and both are true.
+    #
+    # ONLY ENRICHMENT EVER SETS IT, so it never reaches a stored window: a
+    # calendar file carries no release schedule, and `to_dict` omits an empty
+    # default factory. That is the same reason `enriched` exists — the filter
+    # must be able to tell "no release blocks" from "nobody has looked yet".
+    release_types_by_country: dict[str, list[int]] = field(default_factory=dict)
+
     # WHETHER genres/network/country/certification/runtime/status/overview ARE
     # REAL ANSWERS OR JUST THIS RECORD'S DEFAULTS. True for every source that
     # carries these fields on its calendar payload already (Trakt does, so it

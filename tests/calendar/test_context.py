@@ -34,6 +34,7 @@ NO_PREFS = {
     "endpoint": None, "card_style": None, "day_packing": None,
     "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
     "show_certifications": "", "movie_certifications": "",
+    "movie_release_countries": "", "movie_release_types": "",
 }
 
 
@@ -54,9 +55,11 @@ def _day(date_iso: str, *item_ids: str) -> dict:
 
 
 def _meta(total: int, watching: int = 0, not_watching: int = 0,
-          partial: bool = False, show_ids=(), unenriched: int = 0) -> dict:
+          partial: bool = False, show_ids=(), unenriched: int = 0,
+          release_filtered: int = 0) -> dict:
     return {"total": total, "watching": watching, "not_watching": not_watching,
-            "partial": partial, "show_ids": list(show_ids), "unenriched": unenriched}
+            "partial": partial, "show_ids": list(show_ids), "unenriched": unenriched,
+            "release_filtered": release_filtered}
 
 
 class AssembleMonthTests(unittest.TestCase):
@@ -190,6 +193,16 @@ class ViewPreferencesTests(unittest.TestCase):
             with self.subTest(key=key):
                 view = calendar_routes._view_preferences({**NO_PREFS, key: "TV-MA"}, Settings())
                 self.assertEqual(view["filters_summary"], "certification")
+
+    def test_both_release_specs_collapse_to_one_label(self):
+        """Where a film is released and in what format are two halves of one
+        question, so they name one dimension between them — the same reasoning
+        the two certification specs already follow."""
+        for key in ("movie_release_countries", "movie_release_types"):
+            with self.subTest(key=key):
+                view = calendar_routes._view_preferences({**NO_PREFS, key: "us"}, Settings())
+                self.assertTrue(view["filters_active"])
+                self.assertEqual(view["filters_summary"], "film release")
 
     def test_no_filters_reports_inactive_with_an_empty_summary(self):
         view = calendar_routes._view_preferences(NO_PREFS, Settings())

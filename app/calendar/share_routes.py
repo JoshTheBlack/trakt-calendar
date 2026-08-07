@@ -229,9 +229,9 @@ async def _read_month(view: ShareView, settings, owner_prefs,
     nobody to ask at all, and reads as an empty month rather than raising.
 
     The prefs come from the OWNER's account rather than from the URL, exactly as
-    they do for the owner's own calendar: genres, countries and certifications
-    are the owner's editorial choices about their calendar, not view options a
-    visitor gets to set.
+    they do for the owner's own calendar: genres, countries, certifications and
+    the films-calendar release narrowing are the owner's editorial choices about
+    their calendar, not view options a visitor gets to set.
 
     WHICH SERVICES ANSWER IS THE OWNER'S TOO, and it is read HERE rather than by
     each caller, which is what keeps the count invariant. A share link's page and
@@ -250,6 +250,8 @@ async def _read_month(view: ShareView, settings, owner_prefs,
         genres=owner_prefs["genres"], countries=owner_prefs["countries"],
         show_certifications=owner_prefs["show_certifications"],
         movie_certifications=owner_prefs["movie_certifications"],
+        movie_release_countries=owner_prefs["movie_release_countries"],
+        movie_release_types=owner_prefs["movie_release_types"],
         network_filter=view.network_filter,
         prefs=await source_prefs.load(owner_id), allow_fetch=False,
     )

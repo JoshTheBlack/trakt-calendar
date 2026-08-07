@@ -237,6 +237,18 @@
   {{ 'is' if unenriched == 1 else 'are' }} still being looked up, so your filters
   haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
 {% endif %}
+{# A release filter REMOVES films rather than moving them: a film out only in
+   Brazil does not match a filter asking for American releases at all. So this
+   one can empty a month completely, which is exactly the state that reads as a
+   broken calendar if the page says nothing. It is said whether or not the month
+   came out empty, because a month showing twelve films out of thirteen hundred
+   is just as much a filter's doing and just as worth being able to undo. #}
+{% if release_filtered %}
+<div class="hint enrichment-note">🎬 {{ release_filtered }} film{{ '' if release_filtered == 1 else 's' }}
+  {{ 'is' if release_filtered == 1 else 'are' }} hidden by your release filter — they have no release
+  in the countries or formats you picked.
+  <a href="#" onclick="openFilters(); return false;">Change it</a>.</div>
+{% endif %}
 
 <main>
     {% if not grouped %}
@@ -710,6 +722,37 @@
                         <label>Movie certifications <span class="hint">(film ratings)</span></label>
                         <div class="chip-picker" id="f_movie_certifications" data-vocab="G,PG,PG-13,R,NC-17,NR"></div>
                     </div>
+                </div>
+                {# FILMS ONLY, and the label says so rather than leaving somebody
+                   to discover it by setting one and watching nothing happen on
+                   Season Premieres. This is a different question from the
+                   Countries field above: that one is where a title was MADE,
+                   this one is where and how it is being RELEASED, and one
+                   service's film calendar is every release in every market —
+                   over a thousand titles in a month — which is unreadable
+                   without it. A film released nowhere you picked is REMOVED,
+                   not moved to another date; the calendar says how many, so a
+                   month this empties can be undone. #}
+                <p class="hint">Film releases: these narrow the movie calendars only, and
+                    they are about where a film is being <em>released</em> rather than where
+                    it was made.</p>
+                <div class="field">
+                    <label for="f_release_countries">Release countries</label>
+                    <input type="text" id="f_release_countries" name="movie_release_countries"
+                           spellcheck="false" autocomplete="off" placeholder="us, gb, -br">
+                    <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code>
+                        to exclude. Blank means every market. A film with no release in any of
+                        these disappears from the calendar rather than moving.</span>
+                </div>
+                <div class="field">
+                    <label>Release types</label>
+                    <div class="chip-picker" id="f_release_types"
+                         data-vocab="1,2,3,4,5,6"
+                         data-labels="Premiere,Limited theatrical,Theatrical,Digital,Physical,TV"></div>
+                    <span class="hint">Same three-state chips as above. A country and a type are
+                        matched <strong>together</strong>: "us" plus "Theatrical" means a film in
+                        American cinemas, not one that premiered elsewhere and opened in cinemas
+                        somewhere else. Leave every chip grey to keep every format.</span>
                 </div>
                 <div class="field">
                     <label for="f_networks">Networks</label>

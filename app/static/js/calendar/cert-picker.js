@@ -7,6 +7,14 @@
 // backend never has to know a picker produced the string. The same component
 // backs both the instance-floor copy and the per-user Filters copy; only the
 // vocabulary (declared per-picker in data-vocab) differs.
+//
+// A PICKER MAY LABEL ITS CHIPS DIFFERENTLY FROM WHAT IT STORES, through an
+// optional data-labels paired positionally with data-vocab. A certification IS
+// its own label, so those pickers name nothing; a film's release type is stored
+// as the number the service publishes (3 for theatrical, 4 for digital) and
+// nobody can read that off a chip. Storing the word instead would have put a
+// translation table between the preference and the payload, and made a release
+// type the service adds later unnameable until somebody edited it.
 const CERT_CHIP_STATES = ['', 'include', 'exclude'];
 
 function setChipState(chip, state) {
@@ -19,12 +27,13 @@ function setChipState(chip, state) {
 // repeatedly never re-adds chips; the modal open just resets their states.
 function buildCertPicker(picker) {
     if (picker.dataset.built) return;
-    (picker.dataset.vocab || '').split(',').map(t => t.trim()).filter(Boolean).forEach(token => {
+    const labels = (picker.dataset.labels || '').split(',').map(t => t.trim());
+    (picker.dataset.vocab || '').split(',').map(t => t.trim()).filter(Boolean).forEach((token, i) => {
         const chip = document.createElement('button');
         chip.type = 'button';
         chip.className = 'cert-chip';
         chip.dataset.token = token;
-        chip.textContent = token;
+        chip.textContent = labels[i] || token;
         setChipState(chip, '');
         chip.addEventListener('click', () => {
             const next = (CERT_CHIP_STATES.indexOf(chip.dataset.state) + 1) % CERT_CHIP_STATES.length;

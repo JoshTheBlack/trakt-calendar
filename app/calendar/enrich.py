@@ -341,6 +341,12 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     # drain re-fetches it under the wider shape (see EXTRACT_VERSION below and
     # app/calendar/filter.py's prune_disguised_films, the only reader of this).
     record.anime_type = str(fields.get("anime_type") or "")
+    # {country: [release type]} for a film, empty for everything else and for
+    # every row the narrower extraction wrote. app/calendar/filter.py's release
+    # rule reads it, and an empty map means "this record cannot answer" rather
+    # than "this film is released nowhere" — see keep_release there.
+    releases = fields.get("release_types_by_country")
+    record.release_types_by_country = dict(releases) if isinstance(releases, dict) else {}
     _merge_ids(record, fields.get("ids") or {})
     record.enriched = True
 

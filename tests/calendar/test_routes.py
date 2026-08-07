@@ -293,7 +293,34 @@ class ViewerFilterTests(CalendarRouteTestCase):
         self.assertEqual(prefs["countries"], "")
         self.assertEqual(prefs["show_certifications"], "")
         self.assertEqual(prefs["movie_certifications"], "")
+        self.assertEqual(prefs["movie_release_countries"], "")
+        self.assertEqual(prefs["movie_release_types"], "")
         self.assertEqual(prefs["network_filter"], [])
+
+    def test_the_release_filter_round_trips_and_keeps_only_numbers(self):
+        """The release types are stored as the numbers the service publishes,
+        so a word is dropped on the way IN rather than stored as a preference
+        that can never do anything — the read path already ignores one it
+        cannot parse."""
+        self.sign_in_as(self.user1)
+        resp = self.client.post("/api/me/prefs", json={
+            "movie_release_countries": " us , , -br ",
+            "movie_release_types": "3, theatrical, -1, 3"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        prefs = self.client.get("/api/me/prefs").json()["prefs"]
+        self.assertEqual(prefs["movie_release_countries"], "us, -br")
+        self.assertEqual(prefs["movie_release_types"], "3, -1")
+
+    def test_a_release_filter_does_not_narrow_a_show_calendar(self):
+        """It is a films-only dimension, and the specs travel with every read —
+        so the show calendars have to be untouched rather than merely
+        unaffected by accident."""
+        self.sign_in_as(self.user1)
+        self.client.post("/api/me/prefs", json={
+            "movie_release_countries": "zz", "movie_release_types": "5"})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page)
+        self.assertIn("The Comedy", page)
 
     def test_a_viewer_can_filter_shows_by_certification(self):
         """A per-user certification exclude behaves exactly like the existing

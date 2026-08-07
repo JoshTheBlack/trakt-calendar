@@ -843,6 +843,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          start_date: date, end_date: date,
                          genres: str = "", countries: str = "",
                          show_certifications: str = "", movie_certifications: str = "",
+                         movie_release_countries: str = "", movie_release_types: str = "",
                          network_filter=None, not_watching_ids: set[str] | None = None,
                          allow_fetch: bool = True, now: int | None = None,
                          prefs=None,
@@ -893,6 +894,18 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 
     `show_certifications`/`movie_certifications` are two separate specs (the two
     vocabularies don't overlap); the one matching `endpoint.media` applies here.
+
+    `movie_release_countries`/`movie_release_types` narrow a FILMS calendar to
+    the markets and formats this viewer cares about, and do nothing at all on a
+    show endpoint. They apply EARLIER than the other filters — over each group's
+    per-source records, before resolution picks between them — because the
+    release schedule belongs to whichever source published one and a group must
+    not lose a service's record to a rule about something else. See
+    filter.filter_release_groups.
+
+    `meta['release_filtered']` counts how many groups that rule removed, so a
+    page emptied by it can say which filter emptied it rather than reading as a
+    month with nothing in it.
 
     `meta` carries: total, watching, not_watching (from not_watching_ids, if
     given — otherwise every item counts as watching), show_ids (the span's full,
@@ -996,8 +1009,19 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # over one flat list, so splitting resolution around it costs no
         # additional query.
         await calendar_enrich.overlay_records([r for _, rs in parsed for r in rs])
+        # THE RELEASE NARROWING RUNS HERE, BEFORE THE PICK, AND ON THE GROUP.
+        # A films calendar that lists every release in every market needs a way
+        # to say "the ones out here, in the formats I watch"; the per-country
+        # release schedule only exists on the records of whichever source
+        # published one, so asking after resolution would ask the winner alone
+        # and asking per record would strip a service off a merged card to
+        # enforce a rule about release formats. Counted rather than silently
+        # applied, so a month this empties can say so — see meta below.
+        narrowed = calendar_filter.filter_release_groups(
+            parsed, endpoint.media, movie_release_countries, movie_release_types)
+        release_filtered = len(parsed) - len(narrowed)
         records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
-                               for group, rs in parsed) if r is not None]
+                               for group, rs in narrowed) if r is not None]
         # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
         # "movie"`) does not belong on a series endpoint — see
         # filter.prune_disguised_films for the measured rule and why this is
@@ -1058,6 +1082,13 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # up" without inventing a second way to ask the question this
         # function already answers.
         "unenriched": sum(1 for i in items if not i.enriched),
+        # How many titles the release filter removed from THIS read. A country
+        # rule removes films rather than re-dating them — a film released only
+        # in Brazil does not match a US filter at all — so a viewer who narrows
+        # hard enough can empty a month completely, and an empty month with
+        # nothing on the page to explain it reads as the app being broken. The
+        # calendar says which filter did it and offers the way back.
+        "release_filtered": release_filtered,
     }
     return grouped, meta
 
@@ -1065,6 +1096,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, month: int,
                      genres: str = "", countries: str = "",
                      show_certifications: str = "", movie_certifications: str = "",
+                     movie_release_countries: str = "", movie_release_types: str = "",
                      network_filter=None, prefs=None,
                      allow_fetch: bool = True, now: int | None = None) -> tuple[list[Item], int | None]:
     """One viewer's normalized, filtered, month-trimmed calendar items, as a flat
@@ -1089,6 +1121,8 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
         start_date=date(year, month, 1), end_date=date(year, month, days),
         genres=genres, countries=countries,
         show_certifications=show_certifications, movie_certifications=movie_certifications,
+        movie_release_countries=movie_release_countries,
+        movie_release_types=movie_release_types,
         network_filter=network_filter, prefs=prefs, allow_fetch=allow_fetch, now=now,
     )
     items = [item for day in grouped for item in day["items"]]

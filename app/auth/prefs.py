@@ -44,6 +44,12 @@ def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings,
             (settings.movie_certifications or "") if seed_filters else "",
         ),
     )
+    # THE RELEASE FILTERS ARE NOT SEEDED FROM SETTINGS AT ALL, not even under
+    # `seed_filters`, and the reason is that there is nothing to carry over:
+    # they have no settings.json field to inherit from, because they narrow ONE
+    # viewer's films calendar and were never an instance-wide value. Their
+    # column defaults ('' — every market, every format) are what every account
+    # starts on, including the operator's own at onboarding.
 
 
 async def get_user_prefs(user_id: int) -> dict:
@@ -54,7 +60,8 @@ async def get_user_prefs(user_id: int) -> dict:
     row = await db.fetch_one(
         "SELECT endpoint, card_style, day_packing, hide_not_watching, "
         "network_filter_json, genres, countries, show_certifications, "
-        "movie_certifications FROM user_prefs WHERE user_id = ?",
+        "movie_certifications, movie_release_countries, movie_release_types "
+        "FROM user_prefs WHERE user_id = ?",
         (user_id,),
     )
     if row is None:
@@ -62,6 +69,7 @@ async def get_user_prefs(user_id: int) -> dict:
             "endpoint": None, "card_style": None, "day_packing": None,
             "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
             "show_certifications": "", "movie_certifications": "",
+            "movie_release_countries": "", "movie_release_types": "",
         }
     return {
         "endpoint": row["endpoint"],
@@ -73,6 +81,8 @@ async def get_user_prefs(user_id: int) -> dict:
         "countries": row["countries"] or "",
         "show_certifications": row["show_certifications"] or "",
         "movie_certifications": row["movie_certifications"] or "",
+        "movie_release_countries": row["movie_release_countries"] or "",
+        "movie_release_types": row["movie_release_types"] or "",
     }
 
 
@@ -83,6 +93,7 @@ _USER_PREF_FIELDS = frozenset({
     "endpoint", "card_style", "day_packing", "hide_not_watching",
     "network_filter", "genres", "countries",
     "show_certifications", "movie_certifications",
+    "movie_release_countries", "movie_release_types",
 })
 
 

@@ -130,6 +130,7 @@ def _filters_active(prefs: dict) -> bool:
     return bool(
         prefs["genres"] or prefs["countries"] or prefs["network_filter"]
         or prefs["show_certifications"] or prefs["movie_certifications"]
+        or prefs["movie_release_countries"] or prefs["movie_release_types"]
     )
 
 
@@ -146,6 +147,11 @@ def _filters_summary(prefs: dict) -> str:
             ("country", prefs["countries"]),
             ("certification", prefs["show_certifications"] or prefs["movie_certifications"]),
             ("network", prefs["network_filter"]),
+            # One label for the two release specs, the same way the two
+            # certification specs share one: the tooltip names a DIMENSION, and
+            # "where and how a film is released" is one dimension asked in two
+            # halves.
+            ("film release", prefs["movie_release_countries"] or prefs["movie_release_types"]),
         ) if value
     ]
     return ", ".join(named)
@@ -340,6 +346,12 @@ class MonthAssembly:
     # own filters would remove, and the honest thing is to say so and let the
     # count fall to zero on its own as the background drain catches up.
     unenriched: int = 0
+    # How many titles this viewer's release filter removed from this month. A
+    # release-country rule removes films rather than moving them — a film out
+    # only in Brazil does not match a US filter at all — so it can empty a month
+    # outright, and an empty month with nothing on the page to explain it reads
+    # as a broken calendar rather than as a filter doing its job.
+    release_filtered: int = 0
 
 
 async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
@@ -380,6 +392,8 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
                 genres=prefs["genres"], countries=prefs["countries"],
                 show_certifications=prefs["show_certifications"],
                 movie_certifications=prefs["movie_certifications"],
+                movie_release_countries=prefs["movie_release_countries"],
+                movie_release_types=prefs["movie_release_types"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
                 prefs=source_selection,
@@ -393,6 +407,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # instead of silently showing a short one.
         assembly.partial = meta["partial"]
         assembly.unenriched = meta["unenriched"]
+        assembly.release_filtered = meta["release_filtered"]
         assembly.show_counts = Counter(
             item.id for group in assembly.grouped for item in group["items"])
         # The is-new diff and its baseline commit belong to whoever produced
@@ -587,6 +602,10 @@ async def calendar_page(request: Request):
         "error": month_view.error,
         "partial": month_view.partial,
         "unenriched": month_view.unenriched,
+        # How many films this viewer's own release filter took off this month,
+        # so a page it emptied can name the filter that emptied it instead of
+        # showing a month that looks like it has nothing in it.
+        "release_filtered": month_view.release_filtered,
         # A Simkl-only month outside its declared coverage window renders
         # this explicit state rather than a blank calendar. `switch_url` is
         # the query string to append to THIS page's own URL to preview the
@@ -718,6 +737,8 @@ async def calendar_day(request: Request):
                 genres=prefs["genres"], countries=prefs["countries"],
                 show_certifications=prefs["show_certifications"],
                 movie_certifications=prefs["movie_certifications"],
+                movie_release_countries=prefs["movie_release_countries"],
+                movie_release_types=prefs["movie_release_types"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
                 prefs=source_selection,
@@ -875,6 +896,28 @@ def _filter_spec(value) -> str:
     return ", ".join(t for t in (s.strip() for s in str(value or "").split(",")) if t)
 
 
+def _release_type_spec(value) -> str:
+    """Normalize a release-type spec to comma-separated numbers, keeping the
+    same leading-'-' exclude convention every other spec here uses.
+
+    The vocabulary is TMDB's release-type numbering, which is what the service
+    publishes (see app/providers/simkl/titles.py's RELEASE_TYPE_LABELS). A token
+    that is not a number is DROPPED rather than stored: the read path ignores
+    one it cannot parse, so keeping it would store a preference that can never
+    do anything and would show up on the filters screen as if it could.
+    """
+    kept: list[str] = []
+    for raw in str(value or "").split(","):
+        token = raw.strip()
+        bare = token[1:].strip() if token.startswith("-") else token
+        if not bare.isdigit():
+            continue
+        spelled = f"-{int(bare)}" if token.startswith("-") else str(int(bare))
+        if spelled not in kept:
+            kept.append(spelled)
+    return ", ".join(kept)
+
+
 def _network_list(value) -> list[str]:
     """Networks as a de-duplicated list, from either a JSON array or the comma
     string the textarea produces. Names are matched exactly on the read path, so
@@ -940,6 +983,15 @@ async def post_me_prefs(request: Request):
         updates["show_certifications"] = _filter_spec(data["show_certifications"])
     if "movie_certifications" in data:
         updates["movie_certifications"] = _filter_spec(data["movie_certifications"])
+    if "movie_release_countries" in data:
+        updates["movie_release_countries"] = _filter_spec(data["movie_release_countries"])
+    if "movie_release_types" in data:
+        # NUMBERS ONLY, AND A BAD TOKEN IS DROPPED HERE RATHER THAN AT READ.
+        # The read path already ignores one it cannot parse, so storing it would
+        # be storing a preference that silently does nothing forever — the same
+        # reason the Sources screen refuses an unknown selection on the way in
+        # while resolution tolerates one on the way out.
+        updates["movie_release_types"] = _release_type_spec(data["movie_release_types"])
     if "network_filter" in data:
         updates["network_filter"] = _network_list(data["network_filter"])
     if not updates:

@@ -24,6 +24,16 @@ NETWORK IS THE FOURTH, and it is deliberately kept apart from the other three
 (parse_network_spec below says why). It also applies LATER: the three above run
 on the resolved Record, while network runs on rendered items, because that is the
 shape both callers hold at the point they filter.
+
+THE RELEASE FILTER IS THE FIFTH AND IT IS A FILMS-ONLY DIMENSION, running
+EARLIER than any of them — over a group's per-source records, before resolution
+picks between them. It exists because one service's films calendar is a global
+release calendar: every release in every market, measured at 1314 titles in one
+real August against the other service's 25. Narrowing it needs the per-country
+release schedule, which no calendar payload carries and only the per-title
+catalogue does, so like the film prune it can act only on what enrichment has
+already found. See filter_release_groups for the rule and for why it is asked
+once per group rather than once per record.
 """
 from __future__ import annotations
 
@@ -129,6 +139,138 @@ def filter_by_network(items: Sequence[ItemT], networks: Iterable[str] | None,
         return list(items)
     return [item for item in items
             if (exempt_unenriched and not item.enriched) or keep_network(item.network, inc, exc)]
+
+
+def parse_release_type_spec(spec: str) -> tuple[set[int], set[int]]:
+    """Split a release-type spec into (includes, excludes) as NUMBERS.
+
+    The vocabulary is TMDB's numbering, which Simkl reproduces verbatim — see
+    app/providers/simkl/titles.py's RELEASE_TYPE_LABELS for the names. The spec
+    is stored as those numbers rather than as words because they are what the
+    service publishes: a stored "theatrical" would need a translation table
+    sitting between the preference and the payload, and a seventh type would
+    then be unnameable until somebody edited that table.
+
+    A token that is not a number is DROPPED rather than refused. This runs on
+    the read path over a stored value, where the rule everywhere else in this
+    package is that a preference a later version wrote must not stop a page
+    rendering; the write path is where a bad value is refused (see
+    app/calendar/routes.py).
+    """
+    raw_inc, raw_exc = parse_spec(spec)
+
+    def numbers(tokens: set[str]) -> set[int]:
+        out: set[int] = set()
+        for token in tokens:
+            try:
+                out.add(int(token))
+            except ValueError:
+                continue
+        return out
+
+    return numbers(raw_inc), numbers(raw_exc)
+
+
+def keep_release_blocks(release_types_by_country, c_inc: set[str], c_exc: set[str],
+                        t_inc: set[int], t_exc: set[int]) -> bool:
+    """Whether one film's {country: [type]} map has a release the viewer asked
+    for. THE PREDICATE, said once, over the values rather than the object.
+
+    THE TWO DIMENSIONS ARE JUDGED ON THE SAME BLOCK, WHICH IS THE WHOLE RULE
+    AND IS NOT WHAT ASKING THEM SEPARATELY WOULD DO. "US, theatrical" means a US
+    block that is theatrical — not "has a US release" and, unrelatedly, "has a
+    theatrical release somewhere". A film premiering in Brazil and reaching
+    American cinemas satisfies both readings; a film premiering in America and
+    reaching Brazilian cinemas satisfies only the loose one, and a viewer who
+    asked for American theatrical releases did not ask for it. Measured over one
+    live August: the joint reading takes 1314 films to 219 and the loose one
+    would not.
+
+    AN EXCLUDE DISQUALIFIES THE BLOCK, NOT THE FILM, and that is the difference
+    from every other dimension in this module — those are scalars, where one
+    excluded value is the title's only answer. Here a film has several answers,
+    so `-br` means "a Brazilian release is not one I count"; a film out in both
+    Brazil and America still survives on its American block, and only a
+    Brazil-only film disappears.
+
+    EMPTY IS NOT A DECISION. A film with no blocks at all cannot be judged, and
+    the caller (keep_release) is what decides that it is kept rather than
+    dropped — this function is asked only about a film that has something to
+    say.
+    """
+    for country, types in (release_types_by_country or {}).items():
+        code = str(country).lower()
+        if c_exc and code in c_exc:
+            continue
+        if c_inc and code not in c_inc:
+            continue
+        for kind in types or ():
+            if t_exc and kind in t_exc:
+                continue
+            if t_inc and kind not in t_inc:
+                continue
+            return True
+    return False
+
+
+def keep_release(record, c_inc: set[str], c_exc: set[str],
+                 t_inc: set[int], t_exc: set[int]) -> bool:
+    """keep_release_blocks, asked of a Record, with the "we do not know" case
+    answered here.
+
+    A RECORD CARRYING NO RELEASE MAP IS KEPT, ALWAYS. Three real situations
+    produce one and none of them is "this film is released nowhere": a source
+    whose calendar payload has no release schedule at all (Trakt's does not, so
+    every Trakt record answers this way), a Simkl film whose enrichment has not
+    landed yet, and a row written before the map was extracted. Dropping any of
+    them would let a filter delete titles it has no information about — the same
+    reasoning behind `exempt_unenriched` above, except that it needs no flag,
+    because an empty map already says exactly "nothing to judge".
+
+    THE COST OF THAT, STATED: a viewer who narrows to US theatrical still sees
+    the curated handful of films the other service listed, because that service
+    never says how a film is being released. That is the honest answer — this
+    filter can only act on what somebody actually published.
+    """
+    blocks = getattr(record, "release_types_by_country", None)
+    if not blocks:
+        return True
+    return keep_release_blocks(blocks, c_inc, c_exc, t_inc, t_exc)
+
+
+def filter_release_groups(parsed, endpoint_media, countries_spec: str,
+                          types_spec: str) -> list:
+    """Keep the (group, records) pairs holding at least one record whose release
+    survives the two specs. A MOVIE-ENDPOINT RULE and inert everywhere else.
+
+    IT TAKES THE PAIRS THE READ PATH HOLDS AT THIS POINT rather than a flat list
+    of records, and that is the decision, not a convenience. The question is
+    which TITLES a viewer sees, so it has to be asked once per group: dropping
+    individual records instead would leave a title both services listed rendering
+    as a single-source card whenever one of them happened to be the one that
+    could answer, quietly changing what the card says about its own provenance
+    to enforce a filter about something else entirely.
+
+    A GROUP SURVIVES IF ANY OF ITS RECORDS DOES, which follows from the same
+    place: a record that cannot answer is kept (see keep_release), so a merged
+    group always survives on its uninformed side. That is the honest reading —
+    one service saying nothing about release formats is not evidence against
+    what the other one said.
+
+    RUNS AT READ, LIKE EVERY OTHER PER-VIEWER NARROWING HERE, and for the extra
+    reason `prune_disguised_films` gives: the release map arrives only once the
+    background enrichment drain has looked the title up, long after the window
+    was stored. An unenriched film is therefore still shown until its row lands.
+    """
+    if str(endpoint_media) != "movie":
+        return list(parsed)
+    c_inc, c_exc = parse_spec(countries_spec)
+    t_inc, t_exc = parse_release_type_spec(types_spec)
+    if not (c_inc or c_exc or t_inc or t_exc):
+        return list(parsed)
+    return [pair for pair in parsed
+            if any(keep_release(record, c_inc, c_exc, t_inc, t_exc)
+                   for record in pair[1])]
 
 
 def prune_disguised_films(records, endpoint_media) -> list:

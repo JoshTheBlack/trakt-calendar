@@ -2072,6 +2072,35 @@ ALTER TABLE source_prefs ADD COLUMN endpoint_sources_json TEXT NOT NULL DEFAULT 
 """
 
 
+MIGRATION_26 = """
+-- WHICH MARKETS AND WHICH RELEASE FORMATS A VIEWER'S FILMS CALENDAR SHOWS.
+-- Two more per-viewer filter specs beside `genres` and `countries` above, in
+-- the identical `us,gb,-br` format and read by the identical parser, because
+-- they are the same kind of statement: what this ONE person's calendar
+-- contains, applied at read against a cache shared with everybody else.
+--
+-- WHY A FILM NEEDS ITS OWN COUNTRY DIMENSION WHEN `countries` ALREADY EXISTS.
+-- `countries` is where a title was MADE — one value, and on a live sample only
+-- 67% of films have one at all. This is where and how it is being RELEASED,
+-- which is a list per title and is the only thing that makes a global release
+-- calendar readable: measured on one real August, 1314 films, of which 444 have
+-- a US release block at all and 219 have one that is theatrical or digital.
+-- Same word, different fact, so a viewer who wants American films and a viewer
+-- who wants films out in America are asking two different questions.
+--
+-- THE TYPES ARE TMDB'S NUMBERING, WHICH SIMKL REPRODUCES: 1 premiere,
+-- 2 limited theatrical, 3 theatrical, 4 digital, 5 physical, 6 TV. Stored as
+-- the numbers rather than names so the stored value is the vocabulary the
+-- service actually publishes and no translation table sits between the two.
+--
+-- EMPTY IS EVERY MARKET AND EVERY FORMAT, so nothing changes for an account
+-- that never opens the filters, and neither column has any effect at all on a
+-- show calendar — a release format is not a fact about an episode.
+ALTER TABLE user_prefs ADD COLUMN movie_release_countries TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN movie_release_types TEXT NOT NULL DEFAULT '';
+"""
+
+
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
@@ -2101,6 +2130,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (23, MIGRATION_23),
     (24, MIGRATION_24),
     (25, MIGRATION_25),
+    (26, MIGRATION_26),
 ]
 
 
