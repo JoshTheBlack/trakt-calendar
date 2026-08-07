@@ -310,8 +310,15 @@ body.card-poster .card-body,
 body.card-horizontal .card-body { gap: 5px; overflow: hidden; }
 body.card-poster .overview,
 body.card-horizontal .overview { display: block; flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
+/* THE DESCRIPTION'S HEIGHT COMES FROM ITS ROW, and `stretch` is what hands it
+   over. In these two layouts the description has no cap of its own — it is meant
+   to fill whatever the card has left and scroll — so the element that scrolls has
+   to be given a bounded height by something. As a direct child of the column that
+   was the card body itself; wrapped in a ROW, `flex: 1 1 auto` now sizes it along
+   the row's main axis (across) and says nothing about its height, so without this
+   it grows to fit its text and runs out under the air date and the buttons. */
 body.card-poster .overview-row,
-body.card-horizontal .overview-row { flex: 1 1 auto; min-height: 0; }
+body.card-horizontal .overview-row { flex: 1 1 auto; min-height: 0; align-items: stretch; }
 body.card-poster .overview::-webkit-scrollbar,
 body.card-horizontal .overview::-webkit-scrollbar { width: 5px; }
 body.card-poster .overview::-webkit-scrollbar-thumb,
@@ -443,8 +450,12 @@ body.hide-not-watching .card.not-watching { display: none; }
 .source-badge .source-logo { height: 11px; }
 /* The flip control. A button, because it does something; sized down to the logo
    so it reads as a mark beside the value rather than as an action bar. */
+/* `align-self` because the row it sits in is told to stretch, and what that
+   stretch is for is the description beside it — a flip button as tall as a
+   paragraph is a click target nobody aimed at. */
 .source-swap {
-    flex: 0 0 auto; display: inline-flex; align-items: center; padding: 2px 4px;
+    flex: 0 0 auto; align-self: flex-start;
+    display: inline-flex; align-items: center; padding: 2px 4px;
     border-radius: 6px; border: 1px solid var(--card-border);
     background: rgba(255,255,255,0.04); cursor: pointer; opacity: 0.7;
     transition: opacity .16s ease, border-color .16s ease;
