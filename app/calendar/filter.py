@@ -289,16 +289,35 @@ def prune_disguised_films(records, endpoint_media) -> list:
     machinery — see app/providers/simkl/titles.py's `_extract` for where the
     field is captured.
 
-    RUNS AT READ, NOT AT FILL, because the truth only arrives once enrichment
-    has looked the title up (app/calendar/enrich.py's background drain), and
-    the fill has already stored the window by the time that happens. A title
-    whose enrichment has not landed yet therefore still renders as a series
-    entry — `anime_type` defaults to "" on an unenriched record, which is not
-    "movie" — until its simkl_titles row exists. That is a deliberate,
-    temporary gap in the honest direction (the same shape the genre/country/
-    certification exemption already accepts elsewhere in this module), not a
-    defect to chase; it resolves itself within a drain tick or two of the
-    title being enriched.
+    THIS IS THE BACKSTOP AND NO LONGER THE ONLY RULE, WHICH CHANGES WHAT IT IS
+    FOR. A Simkl anime film is now kept off the series endpoints at the FILL
+    instead — app/providers/simkl/calendar.py's `is_anime_film` reads the
+    `anime_type` the CALENDAR file states on the entry itself, so the entry
+    never enters a show window and is normalized onto the movies one instead.
+    What still reaches this function, and why it stays:
+
+      - A WINDOW STORED BEFORE THAT SPLIT EXISTED, which still holds the film
+        under a show key until its TTL turns it over. Without this the title
+        would reappear on Series Premieres for one TTL on every instance that
+        upgrades.
+      - A TITLE THE CALENDAR FILE DOES NOT LABEL but the per-title detail
+        payload does. Measured across five months of live archives every anime
+        entry carried an `anime_type`, so this is a defence against Simkl's
+        shape changing rather than against anything observed — but the field
+        being absent is exactly the case where the fill cannot decide and this
+        can.
+
+    IT RUNS AT READ BECAUSE ITS OWN SIGNAL IS ENRICHMENT'S, arriving once the
+    background drain (app/calendar/enrich.py) has looked the title up, long
+    after the fill stored the window. THE TRANSITIONAL STATE THAT LEAVES, AND
+    IT IS DECLARED RATHER THAN DISCOVERED: for a title in one of those two
+    cases, nothing knows it is a film until enrichment lands, so it renders on
+    the series calendar and NOT on the movies one; and once enrichment does
+    land, this drops it from the series calendar while nothing puts it on the
+    movies one until that month's movies window is next filled. Both halves
+    are one TTL wide and self-healing, and both fail in the honest direction —
+    the same shape the genre/country/certification exemption already accepts
+    elsewhere in this module, not a defect to chase.
     """
     if str(endpoint_media) != "show":
         return list(records)

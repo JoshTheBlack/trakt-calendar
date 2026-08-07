@@ -27,6 +27,7 @@ from app.providers.simkl import titles as simkl_titles
 from tests.support import new_db_path
 
 SHOWS = get_endpoint("shows")
+MOVIES = get_endpoint("movies")
 
 # 2026-07-07T12:00:00Z — inside the aligned window starting 2026-07-06 that
 # the end-to-end tests below store under, and inside their [7/7, 7/7] read
@@ -568,6 +569,120 @@ class FilmPruneThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
             start_date=date(2026, 7, 7), end_date=date(2026, 7, 7), now=1000)
         titles = [i.title for g in grouped for i in g["items"]]
         self.assertIn("The Ribbon Hero", titles)
+
+
+class RoutedAnimeFilmThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
+    """The other end of the fix the prune above left half-done: an anime film
+    Simkl lists on its ANIME calendar is now filled into the MOVIES window
+    (app/providers/simkl/calendar.py's `is_anime_film`), so the title the
+    prune takes off Series Premieres has somewhere to land instead of
+    disappearing.
+
+    These read the movies endpoint the way a viewer does, over a stored
+    window, and they never fetch — the routing itself is tested at the fill,
+    in tests/providers/simkl/test_calendar.py.
+    """
+
+    async def asyncSetUp(self):
+        new_db_path("enrich-anime-film-routing")
+        await db.migrate()
+        self.settings = Settings()
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    def _film_record(self, simkl_id=3157124, title="Shiranuhi"):
+        """What to_anime_film_record produces: MOVIE media, no episode
+        coordinate, unenriched, dated from the anime file's own instant."""
+        return Record(
+            source=Source.SIMKL, media=Media.MOVIE, id=str(simkl_id),
+            ids={"simkl": simkl_id, "slug": "shiranuhi"},
+            detail_url="https://simkl.com", title=title, air_ts=_AIR_TS,
+            enriched=False,
+        )
+
+    async def _stored(self, records, *, endpoint=MOVIES, now=1000):
+        await calendar_cache.store_window(
+            endpoint.key, date(2026, 7, 6), records, 600, now,
+            sources=["trakt", "simkl"], asked=["trakt", "simkl"])
+
+    async def _read(self, endpoint, **kwargs):
+        grouped, meta = await calendar_cache.assemble_range(
+            endpoint, self.settings, tz=ZoneInfo("UTC"),
+            start_date=date(2026, 7, 7), end_date=date(2026, 7, 7),
+            now=1000, **kwargs)
+        return [(g["date"], i.title) for g in grouped for i in g["items"]], meta
+
+    async def _enrich_as_film(self, simkl_id=3157124, media="movie"):
+        await calendar_enrich._upsert_success(simkl_id, media, {
+            **_OK_FIELDS, "genres": ["anime"], "anime_type": "movie",
+        }, now=999)
+
+    async def test_an_enriched_anime_film_renders_on_the_movies_calendar_on_its_own_date(self):
+        await self._enrich_as_film()
+        await self._stored([self._film_record()])
+        items, _meta = await self._read(MOVIES)
+        self.assertEqual(items, [("2026-07-07", "Shiranuhi")])
+
+    async def test_the_prune_never_touches_it_there(self):
+        """`prune_disguised_films` drops a film from a SERIES endpoint only.
+        A film on the movies endpoint is a film where it belongs, so the same
+        enrichment that removes it from one calendar must leave it on this
+        one — otherwise routing it would only move where it vanishes."""
+        await self._enrich_as_film()
+        await self._stored([self._film_record()])
+        items, _meta = await self._read(MOVIES)
+        self.assertIn(("2026-07-07", "Shiranuhi"), items)
+
+    async def test_the_same_film_is_absent_from_every_series_endpoint(self):
+        """Nothing filled it into a show window, and the prune removes it from
+        a window filled before the split existed. Either way no series
+        calendar shows it."""
+        await self._enrich_as_film(media="show")
+        for endpoint in (SHOWS, get_endpoint("shows/new"), get_endpoint("shows/premieres")):
+            with self.subTest(endpoint=endpoint.key):
+                await self._stored([_simkl_record(3157124, title="Shiranuhi")],
+                                   endpoint=endpoint)
+                items, _meta = await self._read(endpoint)
+                self.assertNotIn("Shiranuhi", [t for _d, t in items])
+
+    async def test_an_unenriched_film_still_renders_on_the_movies_calendar(self):
+        """Enrichment decides how a card is DESCRIBED, never whether it is
+        drawn. The routing already happened at the fill, off the calendar
+        file's own field, so a film the drain has not reached yet is still on
+        the right calendar — just without genres or an overview."""
+        await self._stored([self._film_record()])
+        items, meta = await self._read(MOVIES)
+        self.assertEqual(items, [("2026-07-07", "Shiranuhi")])
+        self.assertEqual(meta["unenriched"], 1)
+
+    async def test_a_trakt_movie_is_unaffected(self):
+        """Nothing here may reach a record from another source: `anime_type`
+        is empty on every non-Simkl record and the routing happens inside the
+        Simkl provider."""
+        trakt_film = Record(
+            source=Source.TRAKT, media=Media.MOVIE, id="a-trakt-film",
+            ids={"trakt": 5, "tmdb": 999}, detail_url="https://trakt.tv",
+            title="A Trakt Film", air_ts=_AIR_TS, date_only=True,
+        )
+        await self._stored([trakt_film, self._film_record()])
+        await self._enrich_as_film()
+        items, _meta = await self._read(MOVIES)
+        self.assertIn(("2026-07-07", "A Trakt Film"), items)
+        self.assertIn(("2026-07-07", "Shiranuhi"), items)
+
+    async def test_the_share_path_renders_what_it_has_without_reaching_a_source(self):
+        """allow_fetch=False is the public share page's promise. A routed film
+        already in the stored window draws exactly as it does for a signed-in
+        viewer, and no fill runs to put it there."""
+        await self._enrich_as_film()
+        await self._stored([self._film_record()])
+        with patch.object(calendar_cache, "fetch_window_records",
+                          new=AsyncMock(side_effect=AssertionError(
+                              "the share path must never fill a window"))) as never:
+            items, _meta = await self._read(MOVIES, allow_fetch=False)
+        never.assert_not_awaited()
+        self.assertEqual(items, [("2026-07-07", "Shiranuhi")])
 
 
 class RunDrainLatchTests(EnrichTestCase):

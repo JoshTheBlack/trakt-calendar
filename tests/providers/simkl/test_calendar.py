@@ -145,6 +145,85 @@ class NormalizerTests(unittest.TestCase):
         self.assertNotIn("mal", record.ids)
 
 
+def _anime_entry(simkl_id=7, slug="an-anime", anime_type="tv", episode=1,
+                 when="2026-07-07T00:00:00+09:00", release_date=None):
+    """One anime.json entry. `anime_type` is on the CALENDAR entry itself —
+    measured, all 1605 entries across five months of live archives carry it —
+    and `release_date` defaults to something DIFFERENT from `date` because on
+    this file the two genuinely disagree for a re-listed title."""
+    entry = {
+        "title": "An Anime", "poster": "20/aaa111", "date": when,
+        "release_date": release_date if release_date is not None else "2017-12-09",
+        "ids": {"simkl_id": simkl_id, "slug": slug, "tmdb": None, "mal": "63973"},
+        "url": f"https://simkl.com/anime/{simkl_id}/{slug}",
+        "anime_type": anime_type,
+    }
+    if episode is not None:
+        entry["episode"] = {"episode": episode, "url": "x"}
+    return entry
+
+
+class AnimeFilmRoutingTests(unittest.TestCase):
+    """`is_anime_film` and `to_anime_film_record` — which calendar an anime
+    entry belongs on, decided at the fill from the file's own `anime_type`.
+
+    Simkl files an anime FILM on its anime calendar and never on its movie
+    one, so without this the title is on the series calendar (where a film
+    does not belong) or, once the read-time prune takes it off, on no calendar
+    at all — which is the state these exist to end.
+    """
+
+    def test_the_file_says_which_entries_are_films(self):
+        self.assertTrue(simkl_calendar.is_anime_film(_anime_entry(anime_type="movie")))
+
+    def test_every_serial_anime_type_is_not_a_film(self):
+        """ona (Original Net Animation — a web-released SERIES), ova, tv and
+        special are all episodic formats and must stay on the show endpoints.
+        Only `movie` is a film."""
+        for serial in ("ona", "ova", "tv", "special"):
+            with self.subTest(anime_type=serial):
+                self.assertFalse(simkl_calendar.is_anime_film(_anime_entry(anime_type=serial)))
+
+    def test_an_entry_with_no_anime_type_at_all_is_not_routed(self):
+        """The fill cannot decide what the file does not say, so such an entry
+        stays where it was — on the show endpoints, where the read-time prune
+        in app/calendar/filter.py can still act on it once enrichment answers."""
+        entry = _anime_entry()
+        del entry["anime_type"]
+        self.assertFalse(simkl_calendar.is_anime_film(entry))
+
+    def test_a_film_record_is_movie_media_with_no_episode_coordinate(self):
+        record = simkl_calendar.to_anime_film_record(_anime_entry(anime_type="movie", episode=2))
+        self.assertEqual(record.media, Media.MOVIE)
+        self.assertEqual(record.source, Source.SIMKL)
+        self.assertIsNone(record.season)
+        self.assertIsNone(record.episode_number)
+        self.assertIsNone(record.episode_label)
+        self.assertFalse(record.enriched)
+
+    def test_a_film_is_dated_from_date_not_release_date(self):
+        """THE MEASURED TRAP. On anime.json `release_date` is the title's
+        ORIGINAL release and `date` is the day it is being calendared on;
+        Girls und Panzer das Finale is listed on 2026-10-09 with a
+        release_date of 2017-12-09. Dating it from release_date would put it
+        outside the window that fetched it, `in_window` would trim it away,
+        and the film would vanish again."""
+        from datetime import datetime
+        record = simkl_calendar.to_anime_film_record(_anime_entry(
+            anime_type="movie", when="2026-10-09T00:00:00+09:00", release_date="2017-12-09"))
+        landed = datetime.fromtimestamp(record.air_ts, tz=timezone.utc)
+        self.assertEqual(landed.date().isoformat(), "2026-10-08")  # 00:00 JST is the 8th in UTC
+        # NOT date_only: the anime file's offset is real, unlike the movie
+        # file's fixed -04:00 midnight, so the instant converts correctly and
+        # routing the title does not also move it.
+        self.assertFalse(record.date_only)
+
+    def test_a_film_with_no_date_is_dropped_not_raised_over(self):
+        entry = _anime_entry(anime_type="movie")
+        del entry["date"]
+        self.assertIsNone(simkl_calendar.to_anime_film_record(entry))
+
+
 class DerivationTests(unittest.TestCase):
     """The endpoint-specific filters over the raw tv/anime entries."""
 
@@ -217,8 +296,14 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
             records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].media, Media.MOVIE)
-        self.assertIn("/2026/7/movie_release.json", client.urls[0])
-        self.assertNotIn("?", client.urls[0])  # no cache-buster, no query string at all
+        # Two files, not one: the anime archive is read alongside the movie one
+        # because Simkl files an anime FILM there. Asserted as a set — the two
+        # are fetched concurrently, so their order is not a fact to pin.
+        self.assertEqual({u.rsplit("/", 1)[-1] for u in client.urls},
+                         {"movie_release.json", "anime.json"})
+        for url in client.urls:
+            self.assertIn("/2026/7/", url)
+            self.assertNotIn("?", url)  # no cache-buster, no query string at all
 
     async def test_shows_unions_tv_and_anime(self):
         async def fake_get(url):
@@ -226,6 +311,76 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
             records = await simkl_calendar.fetch_window(SHOWS, SETTINGS, date(2026, 7, 6), 7)
         self.assertEqual({r.id for r in records}, {"a-show", "b"})
+
+    async def test_an_anime_film_lands_on_the_movies_endpoint(self):
+        """Shiranuhi's shape: in anime.json, marked `anime_type: "movie"`, and
+        absent from movie_release.json entirely — measured, no entry any
+        month's anime file marks a movie appears in that month's movie file."""
+        film = _anime_entry(simkl_id=3157124, slug="shiranuhi", anime_type="movie")
+        film["title"] = "Shiranuhi"
+
+        async def fake_get(url):
+            if "anime.json" in url:
+                return [film]
+            return [_movie_entry(simkl_id=11)]
+
+        with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
+            records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
+        by_title = {r.title: r for r in records}
+        self.assertIn("Shiranuhi", by_title)
+        self.assertEqual(by_title["Shiranuhi"].media, Media.MOVIE)
+        # The ordinary movie file's own entries are untouched beside it.
+        self.assertIn("A Movie", by_title)
+
+    async def test_the_same_film_is_kept_off_every_series_endpoint(self):
+        """The other half of one predicate: a film the movies fill claims must
+        leave the show derivations, or one title renders on both calendars."""
+        film = _anime_entry(simkl_id=3157124, slug="shiranuhi", anime_type="movie")
+        film["title"] = "Shiranuhi"
+
+        async def fake_get(url):
+            if "anime.json" in url:
+                return [film, _anime_entry(simkl_id=8, slug="a-series", anime_type="ona")]
+            return [_tv_entry(simkl_id=1)]
+
+        for endpoint in (SHOWS, SHOWS_NEW, PREMIERES):
+            with self.subTest(endpoint=endpoint.key):
+                with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
+                    records = await simkl_calendar.fetch_window(
+                        endpoint, SETTINGS, date(2026, 7, 6), 7)
+                self.assertNotIn("Shiranuhi", [r.title for r in records])
+
+    async def test_a_serial_anime_stays_on_the_series_endpoints_and_off_the_movies_one(self):
+        """ona/ova/tv/special are serial formats. None of them is routed."""
+        async def fake_get(url):
+            if "anime.json" in url:
+                return [_anime_entry(simkl_id=100 + n, slug=f"s{n}", anime_type=serial)
+                        for n, serial in enumerate(("ona", "ova", "tv", "special"))]
+            return []
+
+        with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
+            movies = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
+            series = await simkl_calendar.fetch_window(SHOWS, SETTINGS, date(2026, 7, 6), 7)
+        self.assertEqual(movies, [])
+        self.assertEqual(len(series), 4)
+        self.assertTrue(all(r.media == Media.SHOW for r in series))
+
+    async def test_an_unlabelled_anime_entry_stays_on_the_series_endpoints(self):
+        """THE DECLARED TRANSITIONAL STATE. An entry the file does not label
+        cannot be routed at fill; it stays a series entry and does not error,
+        and app/calendar/filter.py's read-time prune is what still acts on it
+        if enrichment later calls it a film."""
+        unlabelled = _anime_entry(simkl_id=55, slug="unlabelled")
+        del unlabelled["anime_type"]
+
+        async def fake_get(url):
+            return [unlabelled] if "anime.json" in url else []
+
+        with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
+            movies = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
+            series = await simkl_calendar.fetch_window(SHOWS, SETTINGS, date(2026, 7, 6), 7)
+        self.assertEqual(movies, [])
+        self.assertEqual([r.id for r in series], ["unlabelled"])
 
     async def test_shows_finales_is_not_answered(self):
         """Not in Capabilities.endpoints (no such concept exists on the
@@ -240,15 +395,26 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
             "etag": '"cached"', "last_modified": "Mon, 01 Jan 2026 00:00:00 GMT",
             "data": [_movie_entry(simkl_id=42)],
         })
+        # The movies fill reads the anime archive too (an anime film lives
+        # there), so that file gets a stored copy of its own — otherwise this
+        # would be testing the 304 path on one file and the cold path on
+        # another.
+        anime_url = f"{simkl_calendar.CDN_BASE}/2026/7/anime.json"
+        await cache.set(simkl_calendar._cdn_cache_key(anime_url), {
+            "etag": '"cached-anime"', "last_modified": None, "data": [],
+        })
         client = _Client(_Resp(status=304))
         with patch("app.providers.simkl.transport.cdn_client", return_value=client):
             records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
-        self.assertEqual(len(client.urls), 1)  # exactly one request — the 304 itself
+        # One request PER FILE — the 304 itself — and no second request to
+        # fetch a body the 304 said had not changed.
+        self.assertEqual(len(client.urls), 2)
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].ids.get("simkl"), 42)
         # And the conditional headers carried the stored ETag/Last-Modified.
-        self.assertEqual(client.headers[0].get("If-None-Match"), '"cached"')
-        self.assertEqual(client.headers[0].get("If-Modified-Since"),
+        sent = dict(zip((u.rsplit("/", 1)[-1] for u in client.urls), client.headers))
+        self.assertEqual(sent["movie_release.json"].get("If-None-Match"), '"cached"')
+        self.assertEqual(sent["movie_release.json"].get("If-Modified-Since"),
                          "Mon, 01 Jan 2026 00:00:00 GMT")
 
     async def test_a_200_replaces_the_stored_copy(self):
