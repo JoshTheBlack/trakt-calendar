@@ -310,6 +310,8 @@ body.card-poster .card-body,
 body.card-horizontal .card-body { gap: 5px; overflow: hidden; }
 body.card-poster .overview,
 body.card-horizontal .overview { display: block; flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
+body.card-poster .overview-row,
+body.card-horizontal .overview-row { flex: 1 1 auto; min-height: 0; }
 body.card-poster .overview::-webkit-scrollbar,
 body.card-horizontal .overview::-webkit-scrollbar { width: 5px; }
 body.card-poster .overview::-webkit-scrollbar-thumb,
@@ -418,11 +420,45 @@ body.hide-not-watching .card.not-watching { display: none; }
 .chip.cert[data-cert="PG-13"], .chip.cert[data-cert="TV-14"] { background: var(--gold); color: #2b1c02; border-color: var(--gold); }
 .chip.cert[data-cert="R"], .chip.cert[data-cert="NC-17"], .chip.cert[data-cert="TV-MA"] { background: var(--crimson); color: #fff; border-color: var(--crimson); }
 
-/* Description is capped to a uniform height and scrolls on hover (no truncation). */
+/* Description is capped to a uniform height and scrolls on hover (no truncation).
+   The row around it exists only when a second service wrote a different one: the
+   flip control sits beside the text rather than inside it, so it does not move
+   as the description scrolls. */
+.overview-row { display: flex; align-items: flex-start; gap: 6px; flex: 1; min-height: 0; }
 .overview { color: var(--text-dim); font-size: 0.82rem; line-height: 1.45; flex: 1; max-height: 7.4em; overflow: hidden; }
 .card:hover .overview { overflow-y: auto; }
 .overview::-webkit-scrollbar { width: 5px; }
 .overview::-webkit-scrollbar-thumb { background: var(--card-border); border-radius: 3px; }
+/* WHERE TWO SERVICES DISAGREED. Three controls, all of them quiet: a card whose
+   services agreed — which is every card on an instance with one source — draws
+   none of this, so it has to cost nothing to look at when it is there. */
+.source-logo { height: 13px; width: auto; display: block; }
+/* Which service listed this card, on the poster so it survives the poster-only
+   wall, and opposite the rating so the two never collide. */
+.source-badge {
+    position: absolute; top: 10px; left: 10px; z-index: 5; padding: 3px 5px;
+    border-radius: 7px; background: rgba(10,12,16,0.82); border: 1px solid var(--card-border);
+    backdrop-filter: blur(4px); opacity: 0.85;
+}
+.source-badge .source-logo { height: 11px; }
+/* The flip control. A button, because it does something; sized down to the logo
+   so it reads as a mark beside the value rather than as an action bar. */
+.source-swap {
+    flex: 0 0 auto; display: inline-flex; align-items: center; padding: 2px 4px;
+    border-radius: 6px; border: 1px solid var(--card-border);
+    background: rgba(255,255,255,0.04); cursor: pointer; opacity: 0.7;
+    transition: opacity .16s ease, border-color .16s ease;
+}
+.source-swap:hover { opacity: 1; border-color: var(--gold-soft); }
+.source-swap .source-logo { height: 10px; }
+.poster-swap { position: absolute; bottom: 9px; right: 9px; z-index: 6; }
+/* Both numbers side by side, each with the service that reported it. Never an
+   average: two user bases produce two legitimate ratings and a mean is a number
+   nobody gave. */
+.chip.dual { display: inline-flex; align-items: center; gap: 8px; border-color: rgba(232,181,69,0.35); }
+.dual-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.dual-value .source-logo { height: 9px; opacity: 0.8; }
+
 .premiere-info { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--card-border); font-size: 0.82rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
 .premiere-info .time { color: var(--text-faint); font-weight: 400; }
 .links-row { display: flex; gap: 8px; margin-top: 8px; }

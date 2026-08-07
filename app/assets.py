@@ -63,6 +63,7 @@ PAGE_SCRIPTS = {
         "static/js/calendar/arr-buttons.js",
         "static/js/calendar/season-tiles.js",
         "static/js/calendar/details-modal.js",
+        "static/js/calendar/source-swap.js",
         "static/js/calendar/cert-picker.js",
         "static/js/calendar/filters.js",
         "static/js/calendar/settings.js",

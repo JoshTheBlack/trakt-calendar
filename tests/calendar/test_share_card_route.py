@@ -672,3 +672,92 @@ class _FakeRequest:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheOwnersSourcePreferenceReachesBothSurfacesTests(ShareCardTestCase):
+    """A share link is a public view of ONE person's month, so which services
+    fill it is the owner's choice — the same editorial choice as the genres and
+    countries a share page has always read from them. Without this, an owner who
+    had narrowed their own calendar to one service handed strangers a link
+    showing the titles they had narrowed it to exclude.
+
+    IT IS READ IN ONE PLACE FOR BOTH SURFACES, which is what keeps the count
+    invariant: the page and its preview picture go through one month read, so a
+    preference cannot apply to one and not the other."""
+
+    def seed_two_sources(self) -> None:
+        """One window holding one airing from each service, which no matcher
+        would merge — two different titles, two different id spaces."""
+        from app.providers.base import Media, Record, Source
+
+        day = date(2026, 8, 12)
+        records = [
+            Record(source=Source.TRAKT, media=Media.SHOW, id="trakt-only",
+                   ids={"trakt": 55, "slug": "trakt-only"},
+                   detail_url="https://trakt.tv/shows/trakt-only", title="Trakt Only",
+                   air_ts=1786276800.0, season=1, episode_number=1, episode_label="S01E01"),
+            Record(source=Source.SIMKL, media=Media.SHOW, id="simkl-only",
+                   ids={"simkl": 77}, detail_url="https://simkl.com/tv/77",
+                   title="Simkl Only", air_ts=1786276800.0, season=1,
+                   episode_number=1, episode_label="S01E01"),
+        ]
+        asyncio.run(calendar_cache.store_window(
+            "shows/new", calendar_cache.window_start(day), records, 600, db.now(),
+            sources=["trakt", "simkl"]))
+
+    def page_total(self, query: str) -> int:
+        page = self.client.get(f"/s/{self.token}?{query}")
+        self.assertEqual(page.status_code, 200)
+        return int(re.search(r"📊\s*(\d+)", page.text).group(1))
+
+    def card_count(self, query: str) -> int:
+        drawn: list[share_card.Card] = []
+        real = share_card.build_card
+        with patch.object(share_card, "build_card",
+                          side_effect=lambda card: drawn.append(card) or real(card)):
+            resp = self.client.get(f"/s/{self.token}/og.jpg?{query}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(drawn), 1, "the card was not rendered for this request")
+        return drawn[0].count
+
+    def narrow_the_owner_to(self, selection: str) -> None:
+        from app.sources import prefs as source_prefs
+
+        asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
+            user_id=self.user_id, calendar_source=selection)))
+
+    def setUp(self):
+        super().setUp()
+        self.seed_two_sources()
+        self.query = "year=2026&month=8"
+
+    def test_an_owner_who_has_said_nothing_sees_every_service(self):
+        page = self.client.get(f"/s/{self.token}?{self.query}").text
+        self.assertIn("Trakt Only", page)
+        self.assertIn("Simkl Only", page)
+
+    def test_the_owners_narrowing_applies_to_the_public_page(self):
+        self.narrow_the_owner_to("trakt")
+        page = self.client.get(f"/s/{self.token}?{self.query}").text
+        self.assertIn("Trakt Only", page)
+        self.assertNotIn("Simkl Only", page)
+
+    def test_the_picture_narrows_with_the_page_it_previews(self):
+        """The count invariant, under the one preference that can change what a
+        month holds without changing a single view option in the URL."""
+        wide = self.page_total(self.query)
+        self.assertEqual(self.card_count(self.query), wide)
+        self.narrow_the_owner_to("trakt")
+        narrow = self.page_total(self.query)
+        self.assertLess(narrow, wide)
+        self.assertEqual(self.card_count(self.query), narrow)
+
+    def test_narrowing_rewrites_no_stored_window(self):
+        """Applied at read over the shared row, so the next visitor of a
+        different owner's link still finds everything the fill stored."""
+        self.narrow_the_owner_to("trakt")
+        self.page_total(self.query)
+        window, _ = asyncio.run(calendar_cache.read_cached_window(
+            "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
+        self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
+                         ["simkl", "trakt"])

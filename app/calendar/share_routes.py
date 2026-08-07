@@ -41,6 +41,7 @@ from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices,
 from ..media import posters, user_images
 from ..perftrace import span
 from ..providers.base import Item, Media
+from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
 
@@ -216,7 +217,8 @@ def _not_found(request: Request) -> Response:
     return templates.TemplateResponse(request, "share_not_found.html", {"request": request}, status_code=404)
 
 
-async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item], int | None]:
+async def _read_month(view: ShareView, settings, owner_prefs,
+                      owner_id: int) -> tuple[list[Item], int | None]:
     """The month a share request is asking for, out of the local cache and only
     the local cache.
 
@@ -230,6 +232,16 @@ async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item
     they do for the owner's own calendar: genres, countries and certifications
     are the owner's editorial choices about their calendar, not view options a
     visitor gets to set.
+
+    WHICH SERVICES ANSWER IS THE OWNER'S TOO, and it is read HERE rather than by
+    each caller, which is what keeps the count invariant. A share link's page and
+    its preview picture both come through this function, so they cannot resolve a
+    month under different preferences however either of them changes — a card
+    advertising a count the page does not show is exactly the failure a second
+    read of the same fact would produce. Without this the two surfaces admitted
+    every source the stored rows held while the owner's own calendar admitted
+    what they asked for, so a link could show a stranger titles the owner had
+    narrowed their calendar to exclude.
     """
     if not settings.calendar_source_configured:
         return [], None
@@ -238,7 +250,8 @@ async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item
         genres=owner_prefs["genres"], countries=owner_prefs["countries"],
         show_certifications=owner_prefs["show_certifications"],
         movie_certifications=owner_prefs["movie_certifications"],
-        network_filter=view.network_filter, allow_fetch=False,
+        network_filter=view.network_filter,
+        prefs=await source_prefs.load(owner_id), allow_fetch=False,
     )
 
 
@@ -342,7 +355,7 @@ async def _render(request: Request, share_row) -> Response:
     # single total for the request cannot tell them apart.
     with span("share.read_month", ym=f"{view.year}-{view.month:02d}",
               endpoint=view.endpoint.key) as sp:
-        items, as_of = await _read_month(view, settings, owner_prefs)
+        items, as_of = await _read_month(view, settings, owner_prefs, owner_id)
         sp.set(items=len(items))
     with span("share.not_watching"):
         nw_ids = await calendar_state.not_watching_ids(owner_id)
@@ -728,7 +741,7 @@ async def assemble_card(view: ShareView, share_row, settings, *,
     owner_prefs = await auth.get_user_prefs(owner_id)
     with span("card.read_month", ym=f"{view.year}-{view.month:02d}",
               endpoint=view.endpoint.key) as sp:
-        items, _as_of = await _read_month(view, settings, owner_prefs)
+        items, _as_of = await _read_month(view, settings, owner_prefs, owner_id)
         sp.set(items=len(items))
     nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible = _visible_items(items, view, nw_ids)

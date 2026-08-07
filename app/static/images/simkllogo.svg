@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 72 18" role="img" aria-label="Simkl">
+  <!-- A wordmark rather than a picture, and drawn here rather than fetched: the
+       app ships every asset it renders, and the only thing this has to do is
+       tell one service's card apart from the other's at a glance. Sized to sit
+       beside traktlogo.png at the same height.
+
+       On its own tile because it is shown against two very different
+       backgrounds - the card's near-black panel, and the gold the outbound
+       button turns on hover - and a transparent wordmark legible on one of
+       those is invisible on the other. -->
+  <rect x="0" y="0" width="72" height="18" rx="4" fill="#12212e"/>
+  <text x="36" y="13" text-anchor="middle" fill="#ffffff"
+        font-family="Inter, Helvetica, Arial, sans-serif"
+        font-size="11" font-weight="700" letter-spacing="0.6">simkl</text>
+</svg>

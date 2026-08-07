@@ -1,0 +1,28 @@
+{# How each service is SHOWN, in one place.
+
+   Three surfaces need "which service is this, and what does it look like" — the
+   outbound button on a card, the badge saying which service a card came from,
+   and the little logo beside a field two services disagreed about. Written out
+   at each of them, a third service would be three edits and the third one would
+   be forgotten; here it is one.
+
+   THE FILENAMES ARE NAMED HERE AND NOWHERE ELSE, and they are images rather than
+   scripts or stylesheets, so they are not cache-busted assets — an image is
+   fetched once and a changed one is a changed URL. `label` exists for the same
+   reason as the logo: an alt attribute and a tooltip both have to say the
+   service's name, and two spellings of it in two attributes is exactly the drift
+   this file removes. #}
+
+{% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
+
+{# Whether a card sourced from `source` says so. The first service in
+   app/providers/base.py's `Source` declaration is the one this app has always
+   read, and badging every one of its cards would put a badge on every card on
+   an instance that has only ever had it. Named here, with the other two facts
+   about how a service is shown, so the rule is in one place rather than in each
+   template that draws a card. #}
+{% macro badged(source) %}{{ 'yes' if source|string != 'trakt' else '' }}{% endmacro %}
+
+{% macro logo(source, css='') %}<img class="source-logo {{ css }}"
+     src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'traktlogo.png' }}"
+     alt="{{ label(source) }}" loading="lazy">{% endmacro %}

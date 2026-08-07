@@ -1050,7 +1050,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
 async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, month: int,
                      genres: str = "", countries: str = "",
                      show_certifications: str = "", movie_certifications: str = "",
-                     network_filter=None,
+                     network_filter=None, prefs=None,
                      allow_fetch: bool = True, now: int | None = None) -> tuple[list[Item], int | None]:
     """One viewer's normalized, filtered, month-trimmed calendar items, as a flat
     (items, as_of) pair — the shape the calendar route, the share pages, and the
@@ -1061,6 +1061,12 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
     normalize/trim/group. This keeps the well-worn (items, as_of) return; a caller
     that also needs the partial-data flag or the per-span counts calls
     assemble_range directly and reads them off `meta`.
+
+    `prefs` IS WHOSE SOURCE PREFERENCES THIS MONTH IS READ UNDER, passed straight
+    through. It is the OWNER's on a share page — a public page shows one person's
+    month, and which services fill it is the same editorial choice as the genres
+    and countries a share page already reads from them. None is nobody asking,
+    which admits every source the stored rows hold.
     """
     days = _calendar.monthrange(year, month)[1]
     grouped, meta = await assemble_range(
@@ -1068,7 +1074,7 @@ async def read_month(endpoint: Endpoint, settings, *, tz: ZoneInfo, year: int, m
         start_date=date(year, month, 1), end_date=date(year, month, days),
         genres=genres, countries=countries,
         show_certifications=show_certifications, movie_certifications=movie_certifications,
-        network_filter=network_filter, allow_fetch=allow_fetch, now=now,
+        network_filter=network_filter, prefs=prefs, allow_fetch=allow_fetch, now=now,
     )
     items = [item for day in grouped for item in day["items"]]
     return items, meta["as_of"]

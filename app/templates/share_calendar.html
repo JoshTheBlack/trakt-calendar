@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
+{% import '_source_logo.html' as src with context %}
 {# EVERYTHING IN THIS <head> NAMES THE OWNER THROUGH `owner_label` AND NEVER
    THROUGH `owner_username`. The label is the owner's chosen display name, or a
    subject of its own when they have not set one; app/calendar/share_routes.py's
@@ -143,6 +144,10 @@
                         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
                         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
                         {% if item.network %}<div class="network-badge"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
+                        {# Which service listed it, shown only when it is not the
+                           one this app has always read — see _card.html, which
+                           carries the same badge for the same reason. #}
+                        {% if src.badged(item.source) %}<div class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.logo(item.source) }}</div>{% endif %}
                         <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
                     </div>
                     <div class="card-body">
@@ -163,8 +168,11 @@
                             <span class="time">{{ item.air_time }}</span>
                         </div>
                         <div class="links-row">
-                            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" title="View on Trakt">
-                                <img src="/static/images/traktlogo.png" alt="Trakt">
+                            {# The button goes to the service the card came from,
+                               so its logo is that service's rather than always
+                               being the one this app started with. #}
+                            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" title="View on {{ src.label(item.source) }}">
+                                {{ src.logo(item.source) }}
                             </a>
                         </div>
                     </div>
