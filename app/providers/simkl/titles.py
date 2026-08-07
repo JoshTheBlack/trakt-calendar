@@ -70,7 +70,13 @@ _DETAIL_PATHS = {Media.SHOW: "tv", Media.MOVIE: "movies"}
 # still applies whatever an old row happens to carry in the meantime, so a
 # title already enriched under the old shape does not regress to unenriched
 # while it waits its turn to be re-fetched.
-EXTRACT_VERSION = 2
+#
+# 3 IS THE MOVIE FIELDS: language, year, released, director, budget, the
+# audience rating, and the reduced release-country map below. Every row this
+# app has written so far predates all of them, so bumping this is what makes
+# the existing table refresh itself into the wider shape rather than sitting on
+# the narrower one until its 30-day retention window expires.
+EXTRACT_VERSION = 3
 
 # MEASURED ACROSS 300 REAL TITLES, THREE DISJOINT SAMPLES (2026-08-06): Simkl's
 # `ids` map is not a fixed namespace set. Besides the three this app used to
@@ -99,6 +105,104 @@ def _genre_slug(name: str) -> str:
     keep missing that one genre rather than doing anything worse.
     """
     return str(name).strip().lower().replace(" ", "-")
+
+
+# TMDB's release-type numbering, which Simkl reproduces verbatim in each
+# `release_dates[].results[].type`. Named here rather than left as bare
+# integers because the numbers are meaningless on sight and are the whole
+# vocabulary a viewer's release filter is written in — see
+# app/calendar/filter.py, which imports these rather than respelling them.
+RELEASE_PREMIERE = 1
+RELEASE_LIMITED = 2
+RELEASE_THEATRICAL = 3
+RELEASE_DIGITAL = 4
+RELEASE_PHYSICAL = 5
+RELEASE_TV = 6
+
+# In the order a viewer would read them: how a film reaches an audience, from
+# the first screening to the last format. The labels are the ones the filter UI
+# draws, so they live beside the numbers they name.
+RELEASE_TYPE_LABELS = {
+    RELEASE_PREMIERE: "Premiere",
+    RELEASE_LIMITED: "Limited theatrical",
+    RELEASE_THEATRICAL: "Theatrical",
+    RELEASE_DIGITAL: "Digital",
+    RELEASE_PHYSICAL: "Physical",
+    RELEASE_TV: "TV",
+}
+
+
+def _release_types_by_country(release_dates: Any) -> dict[str, list[int]]:
+    """Simkl's per-country `release_dates` list, reduced to {country: [type]}.
+
+    THE DATES ARE DELIBERATELY DROPPED, AND THAT IS THE "REDUCED FORM" THIS IS.
+    What the app does with this is decide WHICH TITLES A VIEWER SEES — a films
+    calendar that lists every release in every market is unusable without a way
+    to say "the ones released here, in the formats I care about" (measured on a
+    live instance: 1314 August titles, 444 of them with a US release block at
+    all). Deciding which DATE a card is drawn on is a different feature
+    entirely, and one the calendar cannot do from here anyway: a film's digital
+    release in September is not in August's stored window, so no amount of
+    per-title detail read during an August read would put it there. Storing the
+    dates would therefore be storing a field nothing can read, on every enriched
+    movie row, forever — and adding them later costs nothing but an
+    EXTRACT_VERSION bump, because `simkl_titles.payload` is an opaque blob.
+
+    THE SHAPE, MEASURED OVER A LIVE MONTH (1314 movies, 2026-08-07): 1150 carry
+    exactly one country block and the rest carry 2 to 13, so the map is small.
+    The commonest blocks are US (444), GB (132), CH (107), AU (84) and BR (76);
+    the commonest types are theatrical (755), premiere (752) and digital (568),
+    with physical (7) and TV (41) genuinely rare.
+
+    Country codes are upper-cased and types are de-duplicated and sorted, so one
+    title's map is one value however Simkl happened to order the payload — the
+    same reason `_genre_slug` exists one function up.
+    """
+    out: dict[str, list[int]] = {}
+    for block in release_dates or []:
+        if not isinstance(block, dict):
+            continue
+        country = str(block.get("iso_3166_1") or "").strip().upper()
+        if not country:
+            continue
+        types = out.setdefault(country, [])
+        for result in block.get("results") or []:
+            if not isinstance(result, dict):
+                continue
+            kind = result.get("type")
+            # Simkl has only ever been observed sending the six TMDB numbers,
+            # but an unknown one is kept rather than dropped: a viewer whose
+            # filter names nothing it recognises still sees the title, which is
+            # the safe direction, and dropping it would make a future seventh
+            # type silently invisible.
+            if isinstance(kind, int) and kind not in types:
+                types.append(kind)
+    return {country: sorted(types) for country, types in out.items() if types}
+
+
+def _simkl_rating(ratings: Any) -> float | None:
+    """Simkl's OWN audience score out of `ratings`, or None.
+
+    ONLY SIMKL'S. The payload also carries imdb's (and, on some titles, a
+    droprate), and `Record.rating` is one number shown under one service's
+    mark — the card draws two services' ratings side by side and never averages
+    them, precisely because two audiences produce two real numbers. Putting
+    imdb's figure in the field labelled Simkl would be the same untruth in a
+    quieter place. imdb's is left in the payload's shadow deliberately: nothing
+    in this app has a surface for a third party's rating yet, and inventing one
+    here would be a field with no reader.
+
+    MEASURED, MOST MOVIES HAVE NONE — 84 of 1314 in a live August, because a
+    global release calendar is mostly small and unreleased titles nobody has
+    voted on. That is Simkl not having the data, not this app discarding it.
+    """
+    if not isinstance(ratings, dict):
+        return None
+    simkl = ratings.get("simkl")
+    if not isinstance(simkl, dict):
+        return None
+    value = simkl.get("rating")
+    return float(value) if isinstance(value, (int, float)) else None
 
 
 def _looks_like_a_title(payload: Any) -> bool:
@@ -133,10 +237,31 @@ def _extract(payload: dict) -> dict[str, Any]:
     cost nothing to keep and round out what a future card/modal can draw on
     without a second lookup — but note total_episodes is NOT a film signal
     (see the filter module's own docstring for the measured counter-example).
-    `airs` (a nested day/time/timezone object) and `ratings` (nested, multi-
-    source) were left out: cheap individually, but nothing shipping in this
-    change reads either, and — like every other field here — adding one later
-    costs no migration, since simkl_titles.payload is an opaque blob.
+    `airs` (a nested day/time/timezone object) was left out: cheap, but nothing
+    reads it, and — like every other field here — adding one later costs no
+    migration, since simkl_titles.payload is an opaque blob.
+
+    THE MOVIE HALF, MEASURED OVER 1314 REAL FILMS FROM ONE LIVE AUGUST rather
+    than assumed, because the coverage is what decides whether a field is worth
+    a line: language 100%, released 100%, year 100%, director 92%, country 67%,
+    certification 10%, budget 9%, ratings 6% — and `release_dates` on every
+    single one. `language`, `year` and the audience `rating` land on Record
+    fields the card already draws, which is why a movie card showed no language
+    and no rating: the fields existed and nothing filled them in. `released`,
+    `director` and `budget` have no Record field and no surface yet, and are
+    kept for the same reason `trailers` and `total_episodes` are — they cost one
+    short scalar each on a row that is being written anyway, and a detail modal
+    that wants them should not have to re-fetch 1300 titles to get them.
+
+    CERTIFICATION IS NOT MISSING AND MUST NOT BE "FIXED". It has been kept since
+    this function was written and it is empty on ~90% of movies because Simkl
+    does not have it (compare shows at 22% and anime at 90%). A blank
+    certification chip on a film is the data, not a defect.
+
+    DELIBERATELY STILL EXCLUDED: `alt_titles`, `relations`,
+    `users_recommendations` and `fanart`. The middle two are the tens-of-
+    kilobytes fields the whitelist exists for; the other two have no reader, and
+    the author declined fanart by name.
     """
     ids = payload.get("ids") or {}
     full_ids = {
@@ -144,6 +269,8 @@ def _extract(payload: dict) -> dict[str, Any]:
     }
     runtime = payload.get("runtime")
     total_episodes = payload.get("total_episodes")
+    year = payload.get("year")
+    budget = payload.get("budget")
     genres = [_genre_slug(g) for g in (payload.get("genres") or []) if g]
     # THE PAYLOAD SAYS WHETHER A TITLE IS ANIME OUTRIGHT ("type": "anime"), SO
     # THIS DOES NOT INFER IT FROM WHICH ENDPOINT ANSWERED OR WHETHER A REDIRECT
@@ -173,6 +300,26 @@ def _extract(payload: dict) -> dict[str, Any]:
         "poster": str(payload.get("poster") or ""),
         "first_aired": str(payload.get("first_aired") or ""),
         "trailers": payload.get("trailers") if isinstance(payload.get("trailers"), list) else [],
+        # The three that land straight on a Record field the card already draws.
+        # `language` arrives as Simkl's own two-letter code ("EN", "RU"), which
+        # is the spelling Trakt uses too, so a merged card's two answers are
+        # comparable without either side being respelled.
+        "language": str(payload.get("language") or ""),
+        "year": int(year) if isinstance(year, (int, float)) else "",
+        "rating": _simkl_rating(payload.get("ratings")),
+        # Which markets have a release and in what formats — the only thing a
+        # viewer can narrow a global release calendar by. See
+        # _release_types_by_country for why the dates themselves are dropped.
+        "release_types_by_country": _release_types_by_country(payload.get("release_dates")),
+        # No Record field and no surface yet; kept because they are one scalar
+        # each on a row already being written. `released` is Simkl's own release
+        # date as a plain YYYY-MM-DD string and is NOT what the calendar is
+        # dated from — the calendar file's own per-month entry is (see
+        # calendar.py's to_movie_record), and a title can carry several
+        # releases while an entry carries one date.
+        "released": str(payload.get("released") or ""),
+        "director": str(payload.get("director") or ""),
+        "budget": int(budget) if isinstance(budget, (int, float)) else None,
     }
 
 

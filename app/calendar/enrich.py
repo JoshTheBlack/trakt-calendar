@@ -324,6 +324,18 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     record.runtime = fields.get("runtime")
     record.status = str(fields.get("status") or "")
     record.overview = str(fields.get("overview") or "")
+    # THE THREE THE CALENDAR FILES NEVER CARRY AND THE CARD ALREADY DRAWS.
+    # Simkl's calendar CDN entries have no language, no year and no rating at
+    # all, so a Simkl card showed none — the fields were there and nothing
+    # filled them in. Each is left at its own default when enrichment has no
+    # answer (a row from the narrower extraction has no key here), which is the
+    # same value the record already held, so an old row applies exactly as much
+    # as it knows and nothing more.
+    record.language = str(fields.get("language") or "")
+    year = fields.get("year")
+    record.year = year if isinstance(year, int) else ""
+    rating = fields.get("rating")
+    record.rating = float(rating) if isinstance(rating, (int, float)) else None
     # Missing on a row written by the older, narrower extraction — reads as ""
     # exactly like an unenriched record, which is the honest answer until the
     # drain re-fetches it under the wider shape (see EXTRACT_VERSION below and

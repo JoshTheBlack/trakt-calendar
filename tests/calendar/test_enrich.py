@@ -98,6 +98,31 @@ class OverlayTests(EnrichTestCase):
         self.assertEqual(got.runtime, 45)
         self.assertEqual(got.ids["tvdb"], "999")
 
+    async def test_the_movie_fields_reach_the_record_the_card_draws(self):
+        """Simkl's calendar CDN entries carry no language, no year and no
+        rating, so those chips were blank on every Simkl card — the fields
+        existed on the Record and nothing filled them in. The overlay is where
+        they arrive, exactly like genres and network."""
+        await calendar_enrich._upsert_success(1, "show", {
+            "language": "EN", "year": 2026, "rating": 6.5,
+        }, now=1000)
+        record = _simkl_record(1)
+        [got] = await calendar_enrich.overlay_records([record])
+        self.assertEqual((got.language, got.year, got.rating), ("EN", 2026, 6.5))
+
+    async def test_a_row_from_before_those_fields_leaves_them_at_their_defaults(self):
+        """A row the narrower extraction wrote has no key for any of them, and
+        must read as "nothing to say" rather than as a value — it is owed a
+        re-fetch (see the extract_version tests below) and still applies
+        everything it does know in the meantime."""
+        await calendar_enrich._upsert_success(1, "show", {
+            "genres": ["drama"], "network": "AMC",
+        }, now=1000)
+        record = _simkl_record(1)
+        [got] = await calendar_enrich.overlay_records([record])
+        self.assertEqual((got.language, got.year, got.rating), ("", "", None))
+        self.assertEqual(got.genres, ["drama"])
+
     async def test_enrichment_upgrades_ids_without_overwriting_ones_already_there(self):
         """The calendar file's own tmdb must survive; enrichment only ADDS a
         namespace the fill never had (tvdb, mal, anidb)."""

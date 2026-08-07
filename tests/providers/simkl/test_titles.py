@@ -192,10 +192,121 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
             "extract_version", "genres", "network", "country", "certification",
             "runtime", "status", "overview", "ids", "type", "anime_type",
             "total_episodes", "poster", "first_aired", "trailers",
+            "language", "year", "rating", "release_types_by_country",
+            "released", "director", "budget",
         })
         self.assertEqual(
             (fields["genres"], fields["runtime"], fields["ids"], fields["trailers"]),
             ([], None, {"simkl": "1"}, []))
+        # Every movie field answers its own "nothing here" value rather than
+        # being absent, so a caller never has to tell "Simkl said nothing" from
+        # "this row predates the field" for a row written under this version.
+        self.assertEqual(
+            (fields["language"], fields["year"], fields["rating"],
+             fields["release_types_by_country"], fields["released"],
+             fields["director"], fields["budget"]),
+            ("", "", None, {}, "", "", None))
+
+
+MOVIE_PAYLOAD = {
+    "title": "Ice Cream Man",
+    "ids": {"simkl": 2777813, "tmdb": "1477712", "imdb": "tt36893729"},
+    "year": 2026,
+    "language": "EN",
+    "released": "2026-08-04",
+    "director": "Michael Russell Gunn",
+    "budget": 4000000,
+    "certification": "",
+    "ratings": {"simkl": {"rating": 6.5, "votes": 2},
+                "imdb": {"rating": 7.9, "votes": 63}},
+    "release_dates": [
+        {"iso_3166_1": "US", "results": [{"type": 3, "release_date": "2026-08-04"},
+                                         {"type": 4, "release_date": "2026-09-02"}]},
+        {"iso_3166_1": "br", "results": [{"type": 1, "release_date": "2026-07-30"}]},
+    ],
+}
+
+
+class MovieFieldsTests(unittest.TestCase):
+    """The movie half of the extraction, driven straight at `_extract` rather
+    than through `fetch_title` — it is a pure function of one payload, and the
+    transport it would otherwise be reached through is already covered above.
+
+    Measured over 1314 real films from one live August (2026-08-07): language,
+    released, year and release_dates are on 100% of them, director 92%, country
+    67%, certification 10%, budget 9%, ratings 6%.
+    """
+
+    def test_the_movie_fields_the_calendar_files_never_carry_are_kept(self):
+        fields = titles._extract(MOVIE_PAYLOAD)
+        self.assertEqual(fields["language"], "EN")
+        self.assertEqual(fields["year"], 2026)
+        self.assertEqual(fields["released"], "2026-08-04")
+        self.assertEqual(fields["director"], "Michael Russell Gunn")
+        self.assertEqual(fields["budget"], 4000000)
+
+    def test_the_rating_is_simkls_own_and_never_imdbs(self):
+        """`Record.rating` is one number shown under one service's mark, and the
+        card draws two services' ratings side by side rather than averaging
+        them. Borrowing imdb's figure into the field labelled Simkl would be the
+        same untruth somewhere quieter."""
+        fields = titles._extract(MOVIE_PAYLOAD)
+        self.assertEqual(fields["rating"], 6.5)
+
+    def test_a_title_with_no_simkl_rating_answers_none_rather_than_imdbs(self):
+        payload = {**MOVIE_PAYLOAD, "ratings": {"imdb": {"rating": 7.9, "votes": 63}}}
+        self.assertIsNone(titles._extract(payload)["rating"])
+
+    def test_release_dates_reduce_to_countries_and_types_with_no_dates(self):
+        """The reduced form: which markets have a release and in what formats.
+        The dates go, because this rule decides WHICH TITLES a viewer sees and
+        not which date a card is drawn on — see _release_types_by_country."""
+        fields = titles._extract(MOVIE_PAYLOAD)
+        self.assertEqual(fields["release_types_by_country"], {"US": [3, 4], "BR": [1]})
+
+    def test_a_country_code_is_upper_cased_and_types_are_deduplicated(self):
+        """One title's map has to be ONE value however Simkl happened to order
+        or spell the payload, or two identical films filter differently."""
+        payload = {**MOVIE_PAYLOAD, "release_dates": [
+            {"iso_3166_1": "gb", "results": [{"type": 4, "release_date": "a"},
+                                             {"type": 3, "release_date": "b"},
+                                             {"type": 4, "release_date": "c"}]},
+        ]}
+        self.assertEqual(titles._extract(payload)["release_types_by_country"], {"GB": [3, 4]})
+
+    def test_a_release_type_this_app_does_not_know_is_kept_not_dropped(self):
+        """A seventh type Simkl adds later must stay visible: a viewer whose
+        filter does not name it simply keeps seeing the title, which is the safe
+        direction. Dropping it would make the title invisible instead."""
+        payload = {**MOVIE_PAYLOAD, "release_dates": [
+            {"iso_3166_1": "US", "results": [{"type": 9, "release_date": "a"}]},
+        ]}
+        self.assertEqual(titles._extract(payload)["release_types_by_country"], {"US": [9]})
+
+    def test_a_malformed_release_block_is_skipped_rather_than_raising(self):
+        payload = {**MOVIE_PAYLOAD, "release_dates": [
+            "nonsense", {"results": [{"type": 3}]}, {"iso_3166_1": "US", "results": None},
+            {"iso_3166_1": "FR", "results": ["nonsense", {"type": 3}]},
+        ]}
+        self.assertEqual(titles._extract(payload)["release_types_by_country"], {"FR": [3]})
+
+    def test_certification_is_still_kept_and_an_empty_one_is_the_data(self):
+        """Roughly 90% of films carry no certification because Simkl does not
+        have it (shows are 22%, anime 90%). Pinned so a blank chip on a movie
+        card is never "fixed" into something invented."""
+        self.assertEqual(titles._extract(MOVIE_PAYLOAD)["certification"], "")
+        self.assertEqual(
+            titles._extract({**MOVIE_PAYLOAD, "certification": "R"})["certification"], "R")
+
+    def test_fanart_and_alt_titles_are_not_stored(self):
+        """The author declined fanart by name; alt_titles has no reader. Both
+        are on a real fraction of films, so the whitelist is the only thing
+        keeping them out."""
+        payload = {**MOVIE_PAYLOAD, "fanart": "abc123",
+                   "alt_titles": [{"name": "x"} for _ in range(50)]}
+        fields = titles._extract(payload)
+        self.assertNotIn("fanart", fields)
+        self.assertNotIn("alt_titles", fields)
 
 
 class AnimeRedirectTests(unittest.IsolatedAsyncioTestCase):
