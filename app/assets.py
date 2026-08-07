@@ -111,6 +111,7 @@ PAGE_SCRIPTS = {
     ),
     "admin": ("static/js/ui.js", "static/js/nav.js"),
     "account": ("static/js/ui.js", "static/js/nav.js", "static/js/plex-auth.js"),
+    "sources": ("static/js/ui.js", "static/js/nav.js"),
     "pick": ("static/js/nav.js",),
     "sign-in": ("static/js/plex-auth.js",),
     "register": ("static/js/plex-auth.js",),

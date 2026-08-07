@@ -71,6 +71,11 @@
                    and reverted: it makes the menu a different length per page,
                    which is the drift this macro exists to end. #}
                 <a href="/me">👤 Account</a>
+                {# No gate, for the same reason "What's new" has none: every
+                   signed-in account has source preferences, whether or not any
+                   feature it can reach is currently reading them, and gating it
+                   would make the menu a different shape per account. #}
+                <a href="/sources">🔀 Sources</a>
                 {% if calendar_available %}
                 <a href="{{ calendar_href }}">📅 Calendar</a>
                 {% endif %}

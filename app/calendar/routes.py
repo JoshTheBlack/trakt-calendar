@@ -264,6 +264,14 @@ class MonthAssembly:
     # which a plain "not configured" error has none of.
     coverage_gap: bool = False
     switch_url: str | None = None
+    # How many of THIS month's cards are still waiting for a source's catalogue
+    # to be read — see app/calendar/enrich.py. They are on the page rather than
+    # filtered out, because the per-viewer genre/country filter exempts a record
+    # nobody has looked up yet rather than judging it on values it cannot answer
+    # for. So a viewer whose filters are narrow can be looking at titles their
+    # own filters would remove, and the honest thing is to say so and let the
+    # count fall to zero on its own as the background drain catches up.
+    unenriched: int = 0
 
 
 async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
@@ -316,6 +324,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # whole month; flag it so the page can say the month is incomplete
         # instead of silently showing a short one.
         assembly.partial = meta["partial"]
+        assembly.unenriched = meta["unenriched"]
         assembly.show_counts = Counter(
             item.id for group in assembly.grouped for item in group["items"])
         # The is-new diff and its baseline commit belong to whoever produced
@@ -503,6 +512,7 @@ async def calendar_page(request: Request):
                                 not_watching, view["hide_not_watching"]),
         "error": month_view.error,
         "partial": month_view.partial,
+        "unenriched": month_view.unenriched,
         # A Simkl-only month outside its declared coverage window renders
         # this explicit state rather than a blank calendar. `switch_url` is
         # the query string to append to THIS page's own URL to preview the

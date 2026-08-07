@@ -190,6 +190,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (CALENDAR, PROVIDERS): Edge("the cache asks a source what airs in a window"),
     (DISTRAKT, PROVIDERS): Edge("the tracker reads the viewer's own history and progress"),
     (RANKER, PROVIDERS): Edge("ratings are imported from the viewer's source account"),
+    (SOURCES, PROVIDERS): Edge(
+        "the Sources screen lists the services themselves — their labels and how "
+        "far each one's calendar reaches — and asks the registry rather than "
+        "naming any of them, so a service added later appears by being registered"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
         "validates settings. Function-local because providers/ reads config, "
@@ -202,6 +206,9 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (DISTRAKT, AUTH): Edge("a tracker month belongs to one signed-in person"),
     (RANKER, AUTH): Edge("a board belongs to one signed-in person"),
     (SETTINGS, AUTH): Edge("the Settings screen is admin-only and links the app's own account"),
+    (SOURCES, AUTH): Edge(
+        "a source preference belongs to one signed-in account, and the screen "
+        "shows which services that account has actually connected"),
     (KERNEL, AUTH): Edge(
         "config.py reaches encryption_flow to refuse writing a secret while the "
         "at-rest key is in a bad state. Function-local because encryption_flow "
@@ -228,6 +235,12 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "which services fill a viewer's calendar is that account's stated "
         "preference, so the route reads it before asking the registry which "
         "sources may fill a window — the same reason the tracker reaches SOURCES"),
+    (SOURCES, CALENDAR): Edge(
+        "the vocabulary a precedence preference is written in is the calendar's "
+        "resolve.FIELDS, imported rather than spelled again so it cannot drift "
+        "from the record. Function-local because the calendar reads this package, "
+        "and naming a calendar module at load time would close that loop",
+        deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
         "links a Discord post at the viewer's own calendar"),

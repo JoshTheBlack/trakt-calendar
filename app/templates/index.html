@@ -194,6 +194,18 @@
 {% elif partial %}
 <div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
 {% endif %}
+{# Quiet on purpose, and separate from the warning above: nothing is wrong. A
+   title one service listed but has not been looked up yet has no genres,
+   country or certification to judge, so this month's filters let it through
+   rather than removing it on values nobody has. The number falls to zero by
+   itself as the background catalogue read catches up, and a reload shows the
+   new answer — so this says which cards are provisional rather than asking for
+   anything to be done. #}
+{% if unenriched %}
+<div class="hint enrichment-note">⏳ {{ unenriched }} item{{ '' if unenriched == 1 else 's' }} here
+  {{ 'is' if unenriched == 1 else 'are' }} still being looked up, so your filters
+  haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
+{% endif %}
 
 <main>
     {% if not grouped %}

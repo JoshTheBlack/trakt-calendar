@@ -54,9 +54,9 @@ def _day(date_iso: str, *item_ids: str) -> dict:
 
 
 def _meta(total: int, watching: int = 0, not_watching: int = 0,
-          partial: bool = False, show_ids=()) -> dict:
+          partial: bool = False, show_ids=(), unenriched: int = 0) -> dict:
     return {"total": total, "watching": watching, "not_watching": not_watching,
-            "partial": partial, "show_ids": list(show_ids)}
+            "partial": partial, "show_ids": list(show_ids), "unenriched": unenriched}
 
 
 class AssembleMonthTests(unittest.TestCase):
@@ -101,6 +101,23 @@ class AssembleMonthTests(unittest.TestCase):
         self.assertEqual(assembly.history, [{"when": "now"}])
         # Counted over the whole month, not per day: "a" airs twice.
         self.assertEqual(dict(assembly.show_counts), {"a": 2, "b": 1})
+
+    def test_how_many_cards_are_still_being_looked_up_reaches_the_page(self):
+        """A title one source listed but nobody has looked up yet has no genres
+        or country to judge, so the per-viewer filter lets it through rather than
+        removing it on values nobody has. The page says so; the number falls to
+        zero by itself as the background catalogue read catches up."""
+        async def fake_range(*a, **kw):
+            return [_day("2026-07-01", "a")], _meta(1, show_ids=["a"], unenriched=1)
+
+        async def fake_view(*a, **kw):
+            return {"new_ids": set(), "delta": {"text": "", "kind": "none"}, "history": []}
+
+        with patch("app.calendar.cache.assemble_range", fake_range), \
+             patch("app.calendar.state.resolve_view", fake_view):
+            assembly = self._run()
+        self.assertEqual(assembly.unenriched, 1)
+        self.assertIsNone(assembly.error)
 
     def test_a_partial_month_is_flagged_without_being_an_error(self):
         async def fake_range(*a, **kw):

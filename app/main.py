@@ -54,6 +54,7 @@ from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, posters
 from .ranker import routes as ranker_routes
+from .sources import routes as sources_routes
 from .auth import AuthLevel
 from .config import load_settings
 from .templating import templates
@@ -288,6 +289,7 @@ app.include_router(share_routes.router)
 app.include_router(ranker_routes.router)
 app.include_router(calendar_routes.router)
 app.include_router(distrakt_routes.router)
+app.include_router(sources_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(integrations_routes.router)
 
