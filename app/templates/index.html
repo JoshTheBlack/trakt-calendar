@@ -74,6 +74,29 @@
                 {% endfor %}
             </select>
         </form>
+        {# WHICH SERVICES FILL THIS VIEW. A view control and not a preference: it
+           sets the same transient `?source=` override the coverage-gap banner's
+           "show it anyway" link does, so it applies to this page and to the days
+           it fetches in, and writes nothing. The account's own answer is stated
+           on /sources — one place, deliberately — and the first option here is
+           that answer, which is also the way to stop overriding.
+
+           A GET form for the same reason the calendar picker beside it is one:
+           boosted it is a body swap with htmx keeping history, and with no
+           JavaScript it degrades to a plain submit of the query the calendar
+           route already reads. The endpoint travels with it because the services
+           offered are the ones that answer THIS calendar. #}
+        <form class="control" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved">
+            <input type="hidden" name="month" value="{{ month }}">
+            <input type="hidden" name="year" value="{{ year }}">
+            <input type="hidden" name="endpoint" value="{{ endpoint.key }}">
+            <label for="sourceSelect">🛰️</label>
+            <select id="sourceSelect" name="source" onchange="this.form.requestSubmit()">
+                {% for choice in source_choices %}
+                <option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
+                {% endfor %}
+            </select>
+        </form>
         <div class="control">
             <label for="cardStyleSelect">🎬</label>
             <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">

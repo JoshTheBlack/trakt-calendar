@@ -184,6 +184,50 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     return saved
 
 
+def _source_choices(endpoint, requested) -> list[dict]:
+    """The toolbar's source control: what it offers, and which option is on.
+
+    A VIEW CONTROL AND NOT A PREFERENCE, which is the whole of why it is built
+    here out of the query string rather than out of the stored row. `?source=`
+    has always been a transient override (see `_viewer_source_selection`); this
+    is the way to reach it without typing one. Choosing something re-reads THIS
+    page and writes nothing — the account's answer is stated on /sources, in one
+    place, and a control on the calendar that quietly rewrote it would change
+    every other view the account has as a side effect of a look.
+
+    THE FIRST OPTION IS THE STORED ANSWER, unnamed, because it is whatever the
+    account said and this control is not the place that says it. It is also the
+    way back: without it, overriding once would leave no way to stop overriding
+    short of editing the address.
+
+    ONLY SERVICES THAT ANSWER THIS CALENDAR ARE OFFERED. Naming one that does not
+    publish this endpoint is legal and simply yields nothing, which on screen is
+    indistinguishable from a service that answered and had nothing to say.
+    """
+    from .. import providers  # deferred: see _coverage_gap, same reason
+
+    chosen = requested if requested and source_prefs.is_selection(requested) else ""
+    choices = [
+        {"value": "", "label": "My sources"},
+        {"value": source_prefs.AUTO, "label": "Every service"},
+    ]
+    offered = {source_prefs.AUTO}
+    for source, provider in providers.registered().items():
+        if not provider.capabilities.answers(endpoint.key):
+            continue
+        offered.add(str(source))
+        choices.append({"value": str(source), "label": f"{provider.label} only"})
+    # An override this calendar does not offer — a named pair, or a service that
+    # answers a different endpoint — is still in force, so it is shown rather
+    # than silently reading as the stored answer it is currently overriding.
+    if chosen and chosen not in offered:
+        choices.append({"value": chosen, "label": chosen.replace(
+            source_prefs.SEPARATOR, " and ").title()})
+    for choice in choices:
+        choice["selected"] = choice["value"] == chosen
+    return choices
+
+
 def _coverage_gap(prefs: source_prefs.SourcePrefs,
                   year: int, month: int, settings, *, endpoint=None,
                   ) -> tuple[str | None, str | None]:
@@ -481,6 +525,9 @@ async def calendar_page(request: Request):
         "view": view,
         "endpoint": endpoint,
         "endpoints": endpoint_choices(),
+        # The toolbar's source control. Built from the query string, applying to
+        # this view alone, and storing nothing — see _source_choices.
+        "source_choices": _source_choices(endpoint, request.query_params.get("source")),
         "timezone_groups": build_timezone_options(settings.timezone),
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,

@@ -1,10 +1,17 @@
 """Where a card's parts are DRAWN, asserted against the stylesheet itself.
 
+Two claims live here, and both are about things that broke once by being nobody's
+to check:
+
 A LONG DESCRIPTION STAYS INSIDE THE CARD: it is capped and it scrolls, and it
 never runs on under the air date and the buttons. The cap is in the stylesheet
 and the markup around it is in the template, so neither file alone says whether
 the description is still bounded — which is exactly how wrapping it in a row lost
 the bound in two of the three layouts while the third kept it and looked fine.
+
+NOTHING DRAWN ON THE POSTER LANDS ON TOP OF ANYTHING ELSE DRAWN ON THE POSTER.
+The overlays are positioned one at a time, each in its own rule, and two of them
+claiming the same corner is invisible until a card happens to carry both.
 
 READING CSS IN A TEST IS DELIBERATE AND ITS LIMIT IS STATED: this checks the
 declarations that decide the layout, not the layout a browser computes. It cannot
@@ -113,6 +120,76 @@ class ALongDescriptionStaysInsideTheCardTests(unittest.TestCase):
         paragraph is a click target nobody aimed at."""
         self.assertEqual(value(declarations(".source-swap"), "align-self"),
                          "flex-start")
+
+
+class NothingOnThePosterIsDrawnOnTopOfAnythingElseTests(unittest.TestCase):
+    """Every overlay is positioned in its own rule, so two of them claiming one
+    place is invisible until a card carries both — which is how the flip control
+    ended up sitting on the network's logo."""
+
+    # Each of these is absolutely positioned inside .poster-wrap. Listed by name
+    # rather than discovered, because "is this drawn on the poster" is a fact
+    # about the markup and a stylesheet scan cannot tell an overlay from a modal.
+    OVERLAYS = (".runtime-badge", ".ep-badge", ".network-badge", ".rating-badge",
+                ".watch-toggle", ".new-badge", ".poster-marks")
+
+    # Two marks anchored this close on both axes will touch: the smallest of them
+    # is a 15px logo in a padded plate and the largest a 30px round button.
+    CLEARANCE_PX = 24
+
+    def _anchor(self, selector: str):
+        """(vertical edge, offset, horizontal edge, offset), in px.
+
+        None when the rule anchors with something other than a px offset — the
+        centred stack is `left: 50%` — which cannot claim a corner by
+        construction and is left out rather than guessed at.
+        """
+        body = declarations(selector)
+        anchor = []
+        for pair in (("top", "bottom"), ("left", "right")):
+            for edge in pair:
+                raw = value(body, edge)
+                if raw is None:
+                    continue
+                found = re.fullmatch(r"(-?[\d.]+)px", raw.strip())
+                if found is None:
+                    return None
+                anchor.extend([edge, float(found.group(1))])
+                break
+        return tuple(anchor) if len(anchor) == 4 else None
+
+    def test_no_two_marks_claim_the_same_place(self):
+        placed = {name: anchor for name, anchor in
+                  ((name, self._anchor(name)) for name in self.OVERLAYS)
+                  if anchor is not None}
+        self.assertTrue(placed, "nothing was read as positioned; the parse is wrong")
+        for name, anchor in placed.items():
+            for other, against in placed.items():
+                if other <= name:
+                    continue
+                with self.subTest(one=name, other=other):
+                    same_edges = anchor[0] == against[0] and anchor[2] == against[2]
+                    apart = (abs(anchor[1] - against[1]) >= self.CLEARANCE_PX
+                             or abs(anchor[3] - against[3]) >= self.CLEARANCE_PX)
+                    self.assertTrue(not same_edges or apart,
+                                    f"{name} and {other} are drawn on top of each other")
+
+    def test_the_service_marks_are_one_stack_rather_than_two_corners(self):
+        """The badge saying which service listed a card and the control that flips
+        one of its fields are the same kind of mark and can both be on one card, so
+        they share one container and cannot be given the same place separately."""
+        self.assertIn('class="poster-marks"', CARD)
+        self.assertIsNone(self._anchor(".source-badge"),
+                          "the source badge positions itself instead of sitting in the stack")
+
+    def test_the_stack_sits_between_the_two_bottom_corners(self):
+        """Both bottom corners are taken — the episode badge on one side, the
+        network's own logo on the other — and the middle is the gap every card
+        has."""
+        marks = declarations(".poster-marks")
+        self.assertEqual(value(marks, "left"), "50%")
+        self.assertIn("translateX(-50%)", value(marks, "transform") or "")
+        self.assertIsNotNone(value(marks, "bottom"))
 
 
 if __name__ == "__main__":

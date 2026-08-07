@@ -29,6 +29,7 @@ from app.calendar import cache as calendar_cache, routes as calendar_routes
 from app.calendar import state as calendar_state
 from app.providers.trakt import TraktError
 from app.config import Settings, save_settings
+from app.sources import prefs as source_prefs
 from app.main import app
 from tests.support import ORIGIN, migrated_db, window_fetch
 
@@ -512,6 +513,91 @@ class CoverageGapTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Show A", resp.text)
         self.assertNotIn("doesn&#39;t reach", resp.text)
+
+
+class SourceSelectorTests(CalendarRouteTestCase):
+    """The toolbar control that reaches `?source=`.
+
+    IT IS A VIEW CONTROL AND THE ASSERTION THAT MATTERS IS WHAT IT DOES NOT DO.
+    The account's answer to "which services fill my calendar" is stated on one
+    screen, and a control on the calendar that quietly rewrote it would change
+    every other view the account has as a side effect of a look — so the stored
+    row is checked to be exactly as it was after the control has been used.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("selector_viewer")
+        self.sign_in_as(self.user_id)
+
+    def _options(self, html: str) -> list[tuple[str, str]]:
+        block = re.search(r'<select id="sourceSelect".*?</select>', html, re.S)
+        self.assertIsNotNone(block, "the toolbar offers no source control")
+        return re.findall(r'<option value="([^"]*)"([^>]*)>', block.group(0))
+
+    def _page(self, url: str) -> str:
+        entries = [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def test_it_offers_the_services_that_answer_this_calendar(self):
+        """Season finales are published by one service, so its control offers one
+        — naming a service for a calendar it does not answer yields nothing, which
+        on screen is indistinguishable from a service that had nothing to say."""
+        shows = [value for value, _ in
+                 self._options(self._page("/calendar?year=2026&month=7&endpoint=shows"))]
+        self.assertEqual(shows, ["", "auto", "trakt", "simkl"])
+        finales = [value for value, _ in self._options(
+            self._page("/calendar?year=2026&month=7&endpoint=shows/finales"))]
+        self.assertEqual(finales, ["", "auto", "trakt"])
+
+    def test_with_nothing_overridden_it_sits_on_the_accounts_own_answer(self):
+        options = self._options(self._page("/calendar?year=2026&month=7"))
+        selected = [value for value, attrs in options if "selected" in attrs]
+        self.assertEqual(selected, [""])
+
+    def test_it_reflects_what_the_query_string_currently_says(self):
+        options = self._options(self._page("/calendar?year=2026&month=7&source=simkl"))
+        selected = [value for value, attrs in options if "selected" in attrs]
+        self.assertEqual(selected, ["simkl"])
+
+    def test_an_override_this_calendar_does_not_offer_is_still_shown(self):
+        """It is in force, so reading as the stored answer it is overriding would
+        be the control disagreeing with the page under it."""
+        options = self._options(
+            self._page("/calendar?year=2026&month=7&source=trakt%2Bsimkl"))
+        self.assertIn(("trakt+simkl", " selected"), options)
+
+    def test_using_it_changes_what_the_page_reads_and_nothing_else(self):
+        """THE WHOLE POINT. The override applies to this view; the stored
+        preference is untouched — including for an account that had no row at
+        all, which must still have none afterwards."""
+        before = asyncio.run(source_prefs.load(self.user_id))
+        row_before = asyncio.run(db.fetch_one(
+            "SELECT * FROM source_prefs WHERE user_id = ?", (self.user_id,)))
+        self._page("/calendar?year=2026&month=7&source=simkl")
+        self._page("/calendar?year=2026&month=7&source=trakt")
+        self.assertIsNone(row_before)
+        self.assertIsNone(asyncio.run(db.fetch_one(
+            "SELECT * FROM source_prefs WHERE user_id = ?", (self.user_id,))))
+        self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), before)
+
+    def test_an_account_that_did_state_a_preference_keeps_it_byte_for_byte(self):
+        asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
+            user_id=self.user_id, calendar_source="simkl",
+            precedence={"default": "simkl"})))
+        stored = asyncio.run(source_prefs.load(self.user_id))
+        self._page("/calendar?year=2026&month=7&source=trakt")
+        self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), stored)
+
+    def test_the_control_sits_between_the_calendar_and_the_card_layout(self):
+        """Where the author asked for it, and where it belongs: the two controls
+        either side of it also decide what this one page shows."""
+        html = self._page("/calendar?year=2026&month=7")
+        self.assertLess(html.index('id="endpointSelect"'), html.index('id="sourceSelect"'))
+        self.assertLess(html.index('id="sourceSelect"'), html.index('id="cardStyleSelect"'))
 
 
 # ---------------------------------------------------------------------------

@@ -332,7 +332,7 @@ body.card-horizontal .links-row { margin-top: 6px; }
 body.card-poster .trakt-btn,
 body.card-horizontal .trakt-btn { padding: 5px 0; }
 body.card-poster .trakt-btn img,
-body.card-horizontal .trakt-btn img { height: 13px; }
+body.card-horizontal .trakt-btn img { height: 12px; }
 
 @media (max-width: 700px) {
     body.pack-packed main { display: block; }
@@ -438,16 +438,32 @@ body.hide-not-watching .card.not-watching { display: none; }
 .overview::-webkit-scrollbar-thumb { background: var(--card-border); border-radius: 3px; }
 /* WHERE TWO SERVICES DISAGREED. Three controls, all of them quiet: a card whose
    services agreed — which is every card on an instance with one source — draws
-   none of this, so it has to cost nothing to look at when it is there. */
-.source-logo { height: 13px; width: auto; display: block; }
-/* Which service listed this card, on the poster so it survives the poster-only
-   wall, and opposite the rating so the two never collide. */
+   none of this, so it has to cost nothing to look at when it is there.
+
+   THE MARK IS A DISC OR A TILE CARRYING ITS OWN BACKGROUND, which is why it needs
+   no plate behind it here: it stays legible over poster art, over the card's
+   near-black panel and over the gold a hover turns on, where a transparent
+   symbol would be readable on one of the three. */
+.source-logo { height: 13px; width: auto; display: block; border-radius: 4px; }
+/* THE SERVICE MARKS ON A POSTER, IN ONE CENTRED STACK ALONG THE BOTTOM EDGE.
+   Every corner of a poster is already claimed — runtime and episode down the
+   left, rating and the watching eye down the right, the network's own logo
+   bottom-right — so a mark given a corner of its own lands on one of them, which
+   is what put the flip control on top of the network. The middle of the bottom
+   edge is the one place free on every card, and putting both marks in ONE
+   container is also what stops them being given the same place separately. */
+.poster-marks {
+    position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%);
+    z-index: 6; display: flex; align-items: center; gap: 6px;
+}
 .source-badge {
-    position: absolute; top: 10px; left: 10px; z-index: 5; padding: 3px 5px;
-    border-radius: 7px; background: rgba(10,12,16,0.82); border: 1px solid var(--card-border);
+    display: inline-flex; padding: 3px; border-radius: 8px;
+    background: rgba(10,12,16,0.82); border: 1px solid var(--card-border);
     backdrop-filter: blur(4px); opacity: 0.85;
 }
-.source-badge .source-logo { height: 11px; }
+.source-badge .source-logo { height: 15px; }
+.poster-marks .source-swap { padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px); }
+.poster-marks .source-logo { height: 15px; }
 /* The flip control. A button, because it does something; sized down to the logo
    so it reads as a mark beside the value rather than as an action bar. */
 /* `align-self` because the row it sits in is told to stretch, and what that
@@ -461,21 +477,29 @@ body.hide-not-watching .card.not-watching { display: none; }
     transition: opacity .16s ease, border-color .16s ease;
 }
 .source-swap:hover { opacity: 1; border-color: var(--gold-soft); }
-.source-swap .source-logo { height: 10px; }
-.poster-swap { position: absolute; bottom: 9px; right: 9px; z-index: 6; }
+.source-swap .source-logo { height: 11px; }
 /* Both numbers side by side, each with the service that reported it. Never an
    average: two user bases produce two legitimate ratings and a mean is a number
    nobody gave. */
 .chip.dual { display: inline-flex; align-items: center; gap: 8px; border-color: rgba(232,181,69,0.35); }
 .dual-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.dual-value .source-logo { height: 9px; opacity: 0.8; }
+.dual-value .source-logo { height: 11px; opacity: 0.85; }
 
 .premiere-info { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--card-border); font-size: 0.82rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
 .premiere-info .time { color: var(--text-faint); font-weight: 400; }
 .links-row { display: flex; gap: 8px; margin-top: 8px; }
-.trakt-btn { flex: 1; display: flex; align-items: center; justify-content: center; padding: 6px 0; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); transition: all .18s ease; }
-.trakt-btn img { height: 16px; }
-.trakt-btn:hover { background: var(--gold); box-shadow: 0 0 14px rgba(232,181,69,0.5); transform: translateY(-2px); }
+/* One per service that has a page for this title, so two of them share the row
+   evenly and one fills it. */
+.trakt-btn { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 6px 0; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); transition: all .18s ease; }
+.trakt-btn img { height: 16px; max-width: 100%; object-fit: contain; }
+/* THE HOVER LIGHTS THE EDGE RATHER THAN FLOODING THE BUTTON, because what it is
+   lighting is a wordmark: both services' names are drawn in white, and a gold
+   fill behind white lettering leaves the name of the place you are about to go
+   the least readable thing on the card. */
+.trakt-btn:hover { background: rgba(232,181,69,0.14); border-color: var(--gold); box-shadow: 0 0 14px rgba(232,181,69,0.35); transform: translateY(-2px); }
+/* The service NAME, on the button that goes there. Height rather than width, so
+   two wordmarks of different proportions sit on one optical line. */
+.source-wordmark { height: 15px; width: auto; max-width: 100%; object-fit: contain; display: block; }
 
 /* Sonarr / Radarr / Seerr add-to-library buttons (official icon + wordmark text) */
 .arr-btn { flex: 1; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); color: var(--text); font-family: inherit; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.2px; cursor: pointer; white-space: nowrap; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, opacity .16s ease; }
@@ -886,18 +910,31 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
     border-radius: 8px; color: var(--text);
 }
-/* Wraps to its own line inside a row whose label sits on the left, so a long
-   calendar name never squeezes the control it belongs to. */
+/* ONE SHAPE FOR EVERY ONE OF THESE ROWS, whatever it offers. The name of what is
+   being chosen goes on its own line above the choice rather than beside it: with
+   the label on the left, a row offering one service fits on a single line while a
+   row offering two wraps onto a second, so rows asking the identical question
+   came out as two different things — which is what made the one calendar only one
+   service publishes look like a mistake. Stacked, how many services there are
+   decides how wide the ticks are and nothing else. */
+.auth-list .row.source-row {
+    flex-direction: column; align-items: stretch; gap: 8px;
+    padding: 11px 12px;
+}
+.auth-list .row.source-row .label { color: var(--text); font-weight: 600; }
 .source-choice { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 0.8rem; }
 .source-mode, .source-tick { display: flex; align-items: center; gap: 5px; color: var(--text-dim); cursor: pointer; }
 .source-mode input, .source-tick input { accent-color: var(--gold); }
 .source-ticks {
     display: flex; align-items: center; gap: 12px; padding: 4px 10px;
-    border: 1px solid var(--card-border); border-radius: 999px; background: var(--card);
+    border: 1px solid var(--card-border); border-radius: 999px; background: var(--bg-panel);
+    margin-left: auto;
 }
-.source-endpoint { flex-wrap: wrap; }
 .source-reach { margin: 0; padding-left: 18px; }
 .source-reach li { margin-top: 2px; }
+/* The prose between the rows of a section explains the rows, so it is indented
+   under them rather than sitting at the same margin as a heading. */
+.auth-list > .auth-sub { margin-top: 0; padding: 0 2px; }
 
 /* Error pages (404 / 403). The same card as the auth screens, with the status
    set as a watermark so the page is identifiable at a glance without the number

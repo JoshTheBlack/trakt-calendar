@@ -53,7 +53,7 @@
 <button type="button" class="source-swap" data-field="{{ field }}"
         onclick="swapCardField(this, event)"
         title="From {{ src.label(won_by(field)) }} — click to see the other">
-{%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.logo(name) }}</span>{% endfor -%}
+{%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.mark(name) }}</span>{% endfor -%}
 </button>
 {%- endmacro -%}
 <div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
@@ -66,13 +66,27 @@
         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
         {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
-        {# WHICH SERVICE THIS CARD IS, shown only when it is not the one this app
+        {# THE SERVICE MARKS, IN ONE STACK ALONG THE BOTTOM EDGE, CENTRED. Both of
+           them are small round marks that say something about which service you
+           are looking at, both can be on one card, and the poster's four corners
+           are already spoken for — runtime and episode, rating and the watching
+           eye, and the network's own logo bottom-right, which is what the flip
+           control was landing on top of when it had a corner of its own. Between
+           the episode badge and the network logo there is a gap on every card,
+           and one container is also what stops these two ever being given the
+           same place separately.
+
+           WHICH SERVICE THIS CARD IS is shown only when it is not the one this app
            has always read. Two services can list the same title without agreeing
            it is the same title, and when they don't you get two cards — this is
            what makes that read as a disagreement between services rather than as
            the app showing something twice. #}
-        {% if src.badged(item.source) %}<div class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.logo(item.source) }}</div>{% endif %}
-        {% if 'poster' in item.alternatives %}<div class="poster-swap">{{ swap('poster') }}</div>{% endif %}
+        {% if src.badged(item.source) or 'poster' in item.alternatives %}
+        <div class="poster-marks">
+            {% if src.badged(item.source) %}<span class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.mark(item.source) }}</span>{% endif %}
+            {% if 'poster' in item.alternatives %}{{ swap('poster') }}{% endif %}
+        </div>
+        {% endif %}
         {# Both eyes reference the <symbol>s defined once per page instead of
            repeating ~800 bytes of path data on every card; which one shows is a
            CSS consequence of the card's not-watching class. #}
@@ -98,10 +112,10 @@
                legitimate ratings and a mean is a number nobody reported; the same
                goes for a runtime or a network the two disagree about. Four short
                values, each shown once per service that gave one. #}
-            {% for field, mark in [('rating', '⭐'), ('network', '📡'), ('runtime', '⏱️'), ('status', '📶')] %}
+            {% for field, glyph in [('rating', '⭐'), ('network', '📡'), ('runtime', '⏱️'), ('status', '📶')] %}
             {% if field in item.alternatives %}
             <span class="chip dual" data-field="{{ field }}" title="{{ field }} — the services disagree">
-                {%- for name, value in item.alternatives[field].items() %}<span class="dual-value">{{ mark }} {{ value }}{% if field == 'runtime' %}m{% endif %}{{ src.logo(name) }}</span>{% endfor -%}
+                {%- for name, value in item.alternatives[field].items() %}<span class="dual-value">{{ glyph }} {{ value }}{% if field == 'runtime' %}m{% endif %}{{ src.mark(name) }}</span>{% endfor -%}
             </span>
             {% endif %}
             {% endfor %}
@@ -120,12 +134,18 @@
         <div class="season-info" data-role="season-info" hidden></div>
         {% endif %}
         <div class="links-row">
-            {# The button goes to the service the card came from, so its logo is
-               that service's. It used to be Trakt's logo on every card,
-               including the ones whose link led somewhere else entirely. #}
-            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on {{ src.label(item.source) }}">
-                {{ src.logo(item.source) }}
-            </a>
+            {# ONE BUTTON PER SERVICE THAT HAS A PAGE FOR THIS TITLE, each wearing
+               that service's own name. A card several services described has
+               several real destinations and they are not competing answers — the
+               card is attributed to one of them, but the other's page exists and
+               is just as good a place to go. Offering only the winner's meant a
+               reader who wanted the other service's page had nowhere to click.
+               `source_links` is empty on a card only one service described, which
+               is every card on an instance with one source, and that card keeps
+               its single button. #}
+            {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
+            {{ src.link(name, url) }}
+            {% endfor %}
             {% if is_admin %}
             {% if item.media == 'movie' and settings.radarr_configured %}
             <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import re
 import unittest
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from app.calendar import cache as calendar_cache, resolve as calendar_resolve
@@ -90,7 +91,13 @@ class ACardOnlyOneServiceDescribedTests(unittest.TestCase):
 
     def test_its_outbound_button_is_its_own_services(self):
         self.assertIn('title="View on Trakt"', self.html)
-        self.assertIn("traktlogo.png", self.html)
+        self.assertEqual(self.html.count("trakt-btn"), 1)
+
+    def test_the_button_wears_the_services_name_rather_than_its_symbol(self):
+        """A button is a promise about where a click goes, and the name says
+        that where a symbol asks to be recognised."""
+        self.assertIn("source-wordmark", self.html)
+        self.assertIn("trakt-logo-dark.svg", self.html)
 
 
 class ACardTheOtherServiceListedTests(unittest.TestCase):
@@ -105,12 +112,16 @@ class ACardTheOtherServiceListedTests(unittest.TestCase):
         self.assertIn("source-badge", self.html)
         self.assertIn('title="Listed by Simkl"', self.html)
 
-    def test_the_outbound_button_wears_the_logo_of_where_it_actually_goes(self):
+    def test_the_outbound_button_wears_the_name_of_where_it_actually_goes(self):
         """It used to be one service's logo on every card, including the ones
         whose link led to the other service entirely."""
         self.assertIn('title="View on Simkl"', self.html)
-        self.assertIn("simkllogo.svg", self.html)
-        self.assertNotIn("traktlogo.png", self.html)
+        self.assertIn("simkl_white_with_shaddow_transparent.png", self.html)
+        self.assertNotIn("trakt-logo-dark.svg", self.html)
+
+    def test_it_offers_the_one_page_there_is(self):
+        """One service listed it, so there is one place to go."""
+        self.assertEqual(self.html.count("trakt-btn"), 1)
 
 
 class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
@@ -195,7 +206,7 @@ class TwoNumbersRatherThanAnAverageTests(unittest.TestCase):
                          self.html, re.S).group(0)
         self.assertIn("8.1", chip)
         self.assertIn("7.9", chip)
-        self.assertIn("traktlogo.png", chip)
+        self.assertIn("trakt-circlemark-dark.svg", chip)
         self.assertIn("simkllogo.svg", chip)
 
     def test_every_conflicting_scalar_it_offers_gets_its_chip(self):
@@ -212,6 +223,84 @@ class TwoNumbersRatherThanAnAverageTests(unittest.TestCase):
 
     def test_a_field_the_two_agreed_on_gets_no_chip(self):
         self.assertNotIn('class="chip dual" data-field="network"', self.html)
+
+
+class AFlipIsAViewFlipAndNothingElseTests(unittest.TestCase):
+    """Clicking a service mark changes one value on one card, on screen, until the
+    page is left. It is not a preference, and the reason is not tidiness: whose
+    value wins is stated once for every card on the Sources screen, so a click
+    that wrote through would change every other card on the page as a side effect
+    of looking at one of them."""
+
+    SCRIPT = (Path(__file__).resolve().parents[2] / "app" / "static" / "js"
+              / "calendar" / "source-swap.js").read_text(encoding="utf-8")
+
+    def test_it_sends_nothing_anywhere(self):
+        for way in ("fetch(", "XMLHttpRequest", "sendBeacon", "new WebSocket"):
+            with self.subTest(way=way):
+                self.assertNotIn(way, self.SCRIPT)
+
+    def test_it_remembers_nothing_across_a_reload(self):
+        """Nowhere to put it is what makes that true, rather than a promise."""
+        for store in ("localStorage", "sessionStorage", "document.cookie", "indexedDB"):
+            with self.subTest(store=store):
+                self.assertNotIn(store, self.SCRIPT)
+
+    def test_both_values_are_already_in_the_page_so_a_flip_needs_no_request(self):
+        html = _card_html(
+            _record(Source.TRAKT),
+            _record(Source.SIMKL, title="Another Title"))
+        carried = json.loads(re.search(r"data-alternatives='([^']*)'", html).group(1))
+        self.assertEqual(carried["title"], {"trakt": "One Title", "simkl": "Another Title"})
+
+
+class BothServicesPagesAreOfferedTests(unittest.TestCase):
+    """A card several services described has several real destinations, and they
+    are not competing answers: the card is attributed to one service, but the
+    other's page for the same title exists and is just as good a place to go."""
+
+    def setUp(self):
+        self.html = _card_html(
+            _record(Source.TRAKT),
+            _record(Source.SIMKL, rating=7.9))
+
+    def _buttons(self) -> list[str]:
+        return re.findall(r'<a class="trakt-btn".*?</a>', self.html, re.S)
+
+    def test_there_is_one_button_per_service_that_has_a_page(self):
+        buttons = self._buttons()
+        self.assertEqual(len(buttons), 2)
+        self.assertIn("https://trakt.test/show", buttons[0])
+        self.assertIn("https://simkl.test/show", buttons[1])
+
+    def test_each_wears_its_own_services_name(self):
+        trakt, simkl = self._buttons()
+        self.assertIn('title="View on Trakt"', trakt)
+        self.assertIn("trakt-logo-dark.svg", trakt)
+        self.assertIn('title="View on Simkl"', simkl)
+        self.assertIn("simkl_white_with_shaddow_transparent.png", simkl)
+
+    def test_they_are_offered_in_declared_service_order_however_the_card_resolved(self):
+        """The order is the app's own, not "whoever won this card" — which would
+        move the buttons around from card to card on one page."""
+        from app.sources import prefs as source_prefs
+
+        html = _card_html(
+            _record(Source.TRAKT),
+            _record(Source.SIMKL, rating=7.9),
+            prefs=source_prefs.SourcePrefs(user_id=1, precedence={"default": "simkl"}))
+        order = re.findall(r'title="View on (\w+)"', html)
+        self.assertEqual(order, ["Trakt", "Simkl"])
+
+    def test_where_a_service_goes_is_never_stored_with_the_window(self):
+        """These are the same kind of fact as the provenance maps: they only
+        exist once several records have been compared, which happens at read over
+        a window filled without knowing who would read it."""
+        groups = calendar_cache.group_records(
+            [_record(Source.TRAKT), _record(Source.SIMKL, rating=7.9)])
+        resolved = calendar_resolve.resolve(groups[0], None)
+        self.assertEqual(set(resolved.source_links), {"trakt", "simkl"})
+        self.assertNotIn("source_links", resolved.to_dict())
 
 
 class TheCardAgreesWithTheResolutionVocabularyTests(unittest.TestCase):

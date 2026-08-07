@@ -118,6 +118,65 @@ class TheScreenRendersWhatIsStoredTests(ScreenTestCase):
         self.assertNotIn('data-field="airing"', html)
 
 
+class EveryChoiceOnTheScreenIsDrawnTheSameWayTests(ScreenTestCase):
+    """The screen asks one question seven times, about different scopes. It has to
+    LOOK like one question asked seven times, or the row that happens to offer one
+    service reads as a different kind of control — or as a mistake."""
+
+    def _rows(self, html: str) -> list[str]:
+        return re.findall(r'<div class="row source-row">.*?data-scope="([^"]+)"',
+                          html, re.S)
+
+    def test_every_calendar_gets_a_row_of_the_same_shape(self):
+        """Including the one only a single service publishes. It offers one tick
+        instead of two and nothing else about it differs."""
+        html = self.page()
+        scopes = self._rows(html)
+        for endpoint in ENDPOINTS:
+            self.assertIn(f"endpoint:{endpoint}", scopes)
+        rows = re.findall(
+            r'<div class="row source-row">\s*<span class="label">.*?'
+            r'<div class="source-choice" data-scope="endpoint:[^"]+">.*?'
+            r'<div class="source-ticks">', html, re.S)
+        self.assertEqual(len(rows), len(ENDPOINTS),
+                         "a calendar row is built differently from its siblings")
+
+    def test_the_one_service_calendar_is_a_row_like_the_others_not_a_line(self):
+        """Season finales are the live case: one source publishes them, so its row
+        offers one tick. The label, the modes and the ticks are still the same
+        three parts in the same order."""
+        html = self.page()
+        finales = re.search(
+            r'<div class="row source-row">\s*<span class="label">Season Finales</span>'
+            r'.*?</div>\s*</div>\s*</div>', html, re.S)
+        self.assertIsNotNone(finales, "the finales calendar is not drawn as a row")
+        block = finales.group(0)
+        self.assertIn('value="inherit"', block)
+        self.assertIn('value="auto"', block)
+        self.assertIn('value="named"', block)
+        self.assertEqual(re.findall(r'data-source="([^"]+)"', block), ["trakt"])
+
+    def test_the_account_wide_calendar_choice_is_a_row_like_the_calendars_below_it(self):
+        """It is the same question about a wider scope, and "same as above" on the
+        rows underneath is a statement about this one."""
+        self.assertIn("calendar", self._rows(self.page()))
+
+    def test_each_section_is_headed_rather_than_starting_with_another_row(self):
+        """A heading drawn as a `.row` is the same box, background and type as the
+        settings under it, so it reads as one more setting and the page reads as
+        one undifferentiated list. These are the settings screens' own heading."""
+        html = self.page()
+        headings = re.findall(r'<div class="settings-section">([^<]+)</div>', html)
+        self.assertEqual(len(headings), 4, headings)
+        labels = set(re.findall(r'<span class="label">([^<]+)</span>', html))
+        for heading in headings:
+            # The glyph leads the heading the way the Settings panel's sections
+            # do; the words after it are what must not also be a row's label.
+            words = heading.split(" ", 1)[-1].strip()
+            with self.subTest(heading=words):
+                self.assertNotIn(words, labels)
+
+
 class AStoredBothRendersAsTwoTicksTests(ScreenTestCase):
     def setUp(self):
         super().setUp()

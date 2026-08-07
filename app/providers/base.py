@@ -193,10 +193,10 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
     return ItemKey(str(media), match_source, match_id)
 
 
-# The two fields on `Record` that resolution writes and storage never does. See
+# The fields on `Record` that resolution writes and storage never does. See
 # `Record.field_sources` for what they hold and `Record.to_dict` for why they are
 # the one thing excluded from a stored record by name.
-PROVENANCE_FIELDS = ("field_sources", "alternatives")
+PROVENANCE_FIELDS = ("field_sources", "alternatives", "source_links")
 
 
 @dataclass
@@ -312,6 +312,21 @@ class Record:
     # the same reason it drops empty genres.
     field_sources: dict[str, list[str]] = field(default_factory=dict)
     alternatives: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    # {source: detail_url} for every service that described this airing.
+    #
+    # WHY IT IS NOT `detail_url` PLURAL AND WHY IT IS NOT A PREFERENCE. Exactly
+    # one service is the card's — see app/calendar/resolve.py's SOURCE_FIELD, and
+    # `detail_url` is one of the three fields that travel with it, because a page
+    # on one service is not an answer another service gave. This is the other
+    # thing a merged card knows and had no way to say: that BOTH services have a
+    # page for this title. It is a set of destinations, not a value anybody won,
+    # so no preference orders it and resolution states no opinion about it — it is
+    # collected, in declared source order, and offered.
+    #
+    # NOT STORED, for the same reason the two maps above are not: it exists only
+    # after several records have been compared, which happens at read.
+    source_links: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         """The JSON-safe form the cache stores.

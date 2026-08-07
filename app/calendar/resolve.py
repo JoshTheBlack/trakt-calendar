@@ -345,6 +345,16 @@ def resolve_records(group, records: list[Record], prefs=None) -> Record | None:
     # all for the accounts that will never see a merged card.
     if len(records) > 1:
         resolved.field_sources, resolved.alternatives = _provenance(records)
+        # WHERE EACH SERVICE'S OWN PAGE FOR THIS TITLE IS, in declared order.
+        # NOT a resolved value and not something a preference can order: the card
+        # is attributed to one service and `detail_url` travels with that
+        # attribution, but both services really do have a page and a reader who
+        # wants the other one is not disagreeing with anybody. So this is
+        # collected rather than won — nothing above chooses between these, and
+        # nothing may be added here that a viewer could state a preference about,
+        # because that is what SCALAR_FIELDS is for.
+        resolved.source_links = {str(r.source): r.detail_url
+                                 for r in records if r.detail_url}
     return resolved
 
 

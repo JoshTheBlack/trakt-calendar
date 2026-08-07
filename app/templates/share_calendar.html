@@ -146,8 +146,13 @@
                         {% if item.network %}<div class="network-badge"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
                         {# Which service listed it, shown only when it is not the
                            one this app has always read — see _card.html, which
-                           carries the same badge for the same reason. #}
-                        {% if src.badged(item.source) %}<div class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.logo(item.source) }}</div>{% endif %}
+                           carries the same mark in the same stack along the
+                           bottom edge, and for the same reasons. #}
+                        {% if src.badged(item.source) %}
+                        <div class="poster-marks">
+                            <span class="source-badge" title="Listed by {{ src.label(item.source) }}">{{ src.mark(item.source) }}</span>
+                        </div>
+                        {% endif %}
                         <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
                     </div>
                     <div class="card-body">
@@ -168,12 +173,16 @@
                             <span class="time">{{ item.air_time }}</span>
                         </div>
                         <div class="links-row">
-                            {# The button goes to the service the card came from,
-                               so its logo is that service's rather than always
-                               being the one this app started with. #}
-                            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" title="View on {{ src.label(item.source) }}">
-                                {{ src.logo(item.source) }}
-                            </a>
+                            {# One button per service that has a page for this
+                               title, each wearing that service's own name — the
+                               same treatment _card.html gives it, drawn from the
+                               same macro so the two cannot drift. The owner's
+                               preferences are what resolved this month, so a
+                               visitor sees the destinations the owner's own
+                               calendar offers. #}
+                            {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
+                            {{ src.link(name, url) }}
+                            {% endfor %}
                         </div>
                     </div>
                 </div>

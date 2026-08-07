@@ -1,28 +1,53 @@
 {# How each service is SHOWN, in one place.
 
-   Three surfaces need "which service is this, and what does it look like" — the
+   Four surfaces need "which service is this, and what does it look like" — the
    outbound button on a card, the badge saying which service a card came from,
-   and the little logo beside a field two services disagreed about. Written out
-   at each of them, a third service would be three edits and the third one would
-   be forgotten; here it is one.
+   the little logo beside a field two services disagreed about, and the same on
+   the public share card. Written out at each of them, a third service would be
+   four edits and one of them would be forgotten; here it is one.
 
    THE FILENAMES ARE NAMED HERE AND NOWHERE ELSE, and they are images rather than
    scripts or stylesheets, so they are not cache-busted assets — an image is
    fetched once and a changed one is a changed URL. `label` exists for the same
-   reason as the logo: an alt attribute and a tooltip both have to say the
+   reason as the picture: an alt attribute and a tooltip both have to say the
    service's name, and two spellings of it in two attributes is exactly the drift
-   this file removes. #}
+   this file removes.
+
+   TWO PICTURES PER SERVICE, AND WHICH ONE IS NOT A MATTER OF TASTE. A MARK is the
+   service's symbol on its own disc or tile — it carries its own background, so it
+   stays legible over poster art, over the near-black card and over anything else
+   it is dropped on, and it reads at 10px where lettering would not. A WORDMARK is
+   the service's NAME, and it is what a button gets: a button is a promise about
+   where a click goes, and the name says that where a symbol asks to be
+   recognised. So marks go on the flip control, the dual chips and the badge;
+   wordmarks go on the outbound buttons and nowhere else. #}
 
 {% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
 
 {# Whether a card sourced from `source` says so. The first service in
    app/providers/base.py's `Source` declaration is the one this app has always
    read, and badging every one of its cards would put a badge on every card on
-   an instance that has only ever had it. Named here, with the other two facts
+   an instance that has only ever had it. Named here, with the other facts
    about how a service is shown, so the rule is in one place rather than in each
    template that draws a card. #}
 {% macro badged(source) %}{{ 'yes' if source|string != 'trakt' else '' }}{% endmacro %}
 
-{% macro logo(source, css='') %}<img class="source-logo {{ css }}"
-     src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'traktlogo.png' }}"
+{% macro mark(source, css='') %}<img class="source-logo {{ css }}"
+     src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'trakt-circlemark-dark.svg' }}"
      alt="{{ label(source) }}" loading="lazy">{% endmacro %}
+
+{% macro wordmark(source) %}<img class="source-wordmark"
+     src="/static/images/{{ 'simkl_white_with_shaddow_transparent.png' if source == 'simkl' else 'trakt-logo-dark.svg' }}"
+     alt="{{ label(source) }}" loading="lazy">{% endmacro %}
+
+{# ONE OUTBOUND BUTTON, wearing the name of where it actually goes. Both card
+   templates draw this and neither spells it: a card several services described
+   gets one per service, and "what a link to a service looks like" then has one
+   answer rather than one per page that happens to draw a card.
+
+   The click is stopped from reaching the card underneath, which opens the
+   details modal — following a link out and opening a panel about the same title
+   are two different things to have asked for. #}
+{% macro link(source, url) %}<a class="trakt-btn" href="{{ url }}" target="_blank"
+   rel="noopener" onclick="event.stopPropagation()"
+   title="View on {{ label(source) }}">{{ wordmark(source) }}</a>{% endmacro %}
