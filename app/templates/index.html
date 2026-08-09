@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{{ page.head('New Shows – ' ~ month_label,
+{{ page.head(product ~ ' – ' ~ month_label,
              scripts=assets.scripts('calendar'),
              site_suffix=false) }}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't

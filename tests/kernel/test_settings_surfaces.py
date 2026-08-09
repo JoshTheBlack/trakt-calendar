@@ -15,7 +15,7 @@ import asyncio
 import re
 from unittest.mock import patch
 
-from app import auth, cache, db
+from app import auth, cache, chrome, db
 from app.main import app
 from app.config import Settings, load_settings, save_settings
 from tests.support import AppTestCase, ORIGIN
@@ -350,7 +350,22 @@ class ErrorPageTests(SettingsSurfaceTestCase):
     def test_the_lobby_page_carries_our_own_favicon(self):
         """The page came from somewhere else. Its own icon did not come with it."""
         resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
-        self.assertIn("/static/images/favicon.ico", resp.text)
+        self.assertIn("/static/images/distrakkl-favicon.ico", resp.text)
+        self.assertIn("/static/images/favicon-32.png", resp.text)
+
+    def test_the_lobby_page_carries_the_wordmark_drained_of_colour(self):
+        """A dead end still says whose app it is. The wordmark is the app's own
+        gold-to-crimson artwork and every other asset on this page is greyscale,
+        so it is desaturated to match rather than left as the one saturated thing
+        on a monochrome stage — asserted because a filter silently dropped in a
+        later edit would not fail anything else."""
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertIn("/static/images/distrakkl-wordmark.svg", resp.text)
+        self.assertIn("grayscale(1)", resp.text)
+
+    def test_the_lobby_page_names_the_product(self):
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertIn(chrome.PRODUCT_NAME, resp.text)
 
     def test_the_lobby_page_stands_up_without_the_stylesheet(self):
         """Styles are inline on purpose: the page that renders when something is

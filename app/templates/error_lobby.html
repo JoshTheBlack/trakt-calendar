@@ -6,8 +6,17 @@
      is the page's own dark rather than the browser's default white. #}
   <meta name="color-scheme" content="dark">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{{ status }} {{ title }} &ndash; Trakt New Shows</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <title>{{ status }} {{ title }} &ndash; {{ product }}</title>
+  {# Spelled out rather than shared with _head.html's macro, for the same reason
+     the styles below are inline: this page has to render when something else is
+     already broken, and it deliberately depends on nothing the rest of the app
+     loads. The cost is that these four lines are a second copy — kept adjacent
+     in the file to the <title> that has the same problem, so a rename touches
+     one place on this page. #}
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png">
+  <link rel="apple-touch-icon" href="/static/images/distrakkl-mark-512.png">
+  <link rel="shortcut icon" href="/static/images/distrakkl-favicon.ico">
   <link rel="preload" href="/static/fonts/bebas-neue-v16-latin-400.woff2" as="font" type="font/woff2" crossorigin>
   {# Styles and behaviour are inline rather than in /static/css. An error page is
      the one page that has to render when something else is already wrong, and a
@@ -130,6 +139,21 @@
       box-shadow: 0 6px 20px rgba(0, 0, 0, 0.6);
     }
 
+    /* DRAINED OF COLOUR ON PURPOSE, and it is the same rule the headline and the
+       button above already follow: every asset on this page is greyscale — the
+       curtain, the parade, the vignette — so the wordmark's gold-to-crimson
+       gradient would be the one saturated thing on a monochrome stage and would
+       read as a mistake rather than as branding. `grayscale(1)` over the shipped
+       artwork rather than a second, desaturated copy of the file: one wordmark
+       means a future change to it cannot leave this page on the old drawing.
+       The brightness lift keeps it legible once the colour that was carrying its
+       contrast is gone. */
+    .lobby-wordmark {
+      position: relative; z-index: 2; height: 30px; width: auto;
+      filter: grayscale(1) brightness(1.45) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.85));
+      opacity: 0.92;
+    }
+
     /* In a corner rather than under the button row: it is a preference, not a
        step, and nobody should read it as the way out of here. */
     .sound {
@@ -160,6 +184,15 @@
   </style>
 </head>
 <body>
+
+{# ABOVE the marquee rather than inside it: the scrim behind that block is sized
+   to keep body text readable, and the wordmark sitting in it would be lit
+   differently from the headline it belongs over. It links home for the same
+   reason error.html's does — a wordmark is the one thing on a dead end that
+   everybody already expects to be clickable. #}
+<a href="/calendar" aria-label="{{ product }} home">
+  <img class="lobby-wordmark" src="/static/images/distrakkl-wordmark.svg" alt="{{ product }}">
+</a>
 
 <div class="marquee">
   <div class="code" aria-hidden="true">{{ status }}</div>

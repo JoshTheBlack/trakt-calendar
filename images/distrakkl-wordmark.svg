@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 110">
+  <defs>
+    <linearGradient id="wordmarkGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f4d385"></stop>
+      <stop offset="40%" stop-color="#e8b545"></stop>
+      <stop offset="100%" stop-color="#e0384d"></stop>
+    </linearGradient>
+  </defs>
+  <text x="66" y="80" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="86" letter-spacing="-2" fill="url(#wordmarkGrad)">DISTRA<tspan letter-spacing="10">KK</tspan>L</text>
+</svg>

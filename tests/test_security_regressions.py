@@ -1189,10 +1189,20 @@ class PlexPopupUrlTests(RegressionTestCase):
 
     def test_spaces_are_percent_encoded_not_plus_encoded(self):
         """`+`-means-space is a form-encoding convention; this is a URL fragment,
-        and every working Plex client builds it with encodeURIComponent."""
+        and every working Plex client builds it with encodeURIComponent.
+
+        THE PRODUCT NAME IS PATCHED RATHER THAN RELIED ON, because it is the only
+        value in this URL that has ever contained a space and it no longer does —
+        the app was renamed to a single word. Left as it was, this test would have
+        gone on passing `assertNotIn("+")` while proving nothing about the
+        encoding, which is the quiet way a regression test stops being one. The
+        rule it guards is about how a value with a space is encoded, so the test
+        supplies one.
+        """
         from app.auth import plex as plex_auth
-        url = plex_auth.popup_url("abc123", "PINCODE")
-        self.assertIn("%20", url)
+        with patch.object(plex_auth, "PRODUCT", "Two Words"):
+            url = plex_auth.popup_url("abc123", "PINCODE")
+        self.assertIn("Two%20Words", url)
         self.assertNotIn("+", url)
 
 

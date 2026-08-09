@@ -259,11 +259,23 @@ def _og_context(settings, path: str) -> dict:
     THE STATIC BANNER HERE IS NOT AN OVERSIGHT. A shared calendar's preview is a
     generated picture of the month it points at (app/calendar/share_routes.py); a
     registration form has no calendar behind it to render, so it advertises the
-    app's own banner. Two different facts that happen to name one file today."""
+    app's own banner. Two different facts that happen to name one file today.
+
+    THE DIMENSIONS TRAVEL WITH THE PICTURE, which they did not before. The og()
+    macro emits og:image:width/height only when a route supplies them, and without
+    them Slack and Discord size a card by guessing — a `summary_large_image` claim
+    with no dimensions renders as a thumbnail often enough to be worth closing.
+    The card is drawn at exactly the 1200x630 those unfurlers want, so the numbers
+    are stated rather than left to be worked out."""
     base = _public_base(settings)
     if not base:
         return {"og_url": None, "og_image": None}
-    return {"og_url": f"{base}{path}", "og_image": f"{base}/static/images/tvbanner.png"}
+    return {
+        "og_url": f"{base}{path}",
+        "og_image": f"{base}/static/images/distrakkl-social-card-1200x630.png",
+        "og_image_w": 1200,
+        "og_image_h": 630,
+    }
 
 
 @guard.get("/register", AuthLevel.PUBLIC)

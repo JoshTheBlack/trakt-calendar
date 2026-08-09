@@ -2,7 +2,7 @@
 <html lang="en">
 {% import '_head.html' as page with context %}
 {% call page.head('Register', scripts=assets.scripts('register'), nav_head=false) %}
-  {{ page.og('Join Trakt New Shows', "You've been invited to track new episode premieres.") }}
+  {{ page.og('Join ' ~ product, "You've been invited to track new episode premieres.") }}
 {% endcall %}
 {%- set body_class %}auth-page{% endset %}
 <body class="{{ body_class }}" hx-boost="true">
@@ -13,7 +13,7 @@
    survive a Back, which htmx serves from its own cache with no request at all. #}
 <div id="pageMeta" hidden data-page="register" data-body-class="{{ body_class }}"></div>
 <div class="auth-shell">
-  <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
+  <img class="auth-logo" src="/static/images/distrakkl-wordmark.svg" alt="{{ product }}">
   <div class="auth-card">
     <h1>Create your account</h1>
     <p class="auth-sub">

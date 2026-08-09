@@ -102,8 +102,12 @@ class StaticCacheHeaderTests(unittest.TestCase):
                          "public, max-age=31536000, immutable")
 
     def test_the_long_cache_is_scoped_to_fonts(self):
-        """Images live one directory over and have no version in their names."""
-        resp = self.client.get("/static/images/trakttop.png")
+        """Images live one directory over and have no version in their names —
+        which is exactly why the brand artwork was given NEW filenames rather
+        than new bytes under the old ones. A ten-minute max-age and no `?v=`
+        token means a replaced-in-place image is served stale for as long as a
+        browser holds it; a new URL cannot be."""
+        resp = self.client.get("/static/images/distrakkl-mark.svg")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers.get("cache-control"), "max-age=600")
 

@@ -151,7 +151,7 @@ class ShareCardRouteTests(ShareCardTestCase):
             asyncio.run(share_links.set_enabled(self.user_id, kind, False))
         resp = self.client.get(f"/s/{self.token}/og.jpg", follow_redirects=False)
         self.assertEqual(resp.status_code, 302)
-        self.assertEqual(resp.headers["location"], "/static/images/tvbanner.png")
+        self.assertEqual(resp.headers["location"], share_routes.STATIC_CARD_URL)
 
     def test_an_unknown_token_serves_the_banner(self):
         resp = self.client.get("/s/nope/og.jpg", follow_redirects=False)

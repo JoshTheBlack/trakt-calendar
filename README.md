@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="images/tvbanner.png" width="280" alt="Trakt New Shows banner">
+  <img src="images/distrakkl-mark.svg" width="150" alt="Distrakkl">
 </p>
 
 <p align="center">
-  <img src="images/title-banner.svg" width="440" alt="Trakt New Shows">
+  <img src="images/distrakkl-wordmark.svg" width="440" alt="Distrakkl">
 </p>
 
 <p align="center">

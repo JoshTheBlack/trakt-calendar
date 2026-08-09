@@ -25,6 +25,20 @@ import os
 
 from . import changelog
 
+# THE PRODUCT'S NAME, IN ONE PLACE. It reached the browser from fifteen separate
+# literals across templates, the ASGI app, the Plex handshake and the console
+# banner — three of them spelling it three different ways ("Trakt New Shows",
+# "New Shows", and the alt text on the logo), which is how a rename leaves a
+# page behind. Templates get it as the `product` global (app/templating.py);
+# Python callers import it from here.
+#
+# IT IS NOT THE NAME OF ANY IDENTIFIER, and that distinction is load-bearing.
+# `distrakt`, TRAKT_DATA_DIR, the provider packages and the settings fields name
+# the FEATURE or the BACKEND, and they are still correct. So is the tracker's
+# "New Shows" category, which means "a series airing its very first season" and
+# has never meant this app.
+PRODUCT_NAME = "Distrakkl"
+
 # Injected at Docker build time (GitHub Actions); "dev" for local runs.
 _BUILD = os.environ.get("APP_BUILD", "dev").strip() or "dev"
 _COMMIT = os.environ.get("APP_COMMIT", "").strip()

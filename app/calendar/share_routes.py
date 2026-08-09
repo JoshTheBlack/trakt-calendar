@@ -902,8 +902,11 @@ async def share_by_token(request: Request, token: str):
 
 
 # The picture this feature degrades to, and the picture it replaced: the app's
-# static banner, which is also what the register and invite pages advertise.
-STATIC_CARD_URL = "/static/images/tvbanner.png"
+# own social card, which is also what the register and invite pages advertise
+# (app/auth/routes.py builds the same URL). Drawn at the 1200x630 unfurlers
+# expect, so a card that falls back to it is still a wide card rather than a
+# thumbnail.
+STATIC_CARD_URL = "/static/images/distrakkl-social-card-1200x630.png"
 
 # DELIBERATELY NOT THE 90 DAYS THE RENDERED FILE IS KEPT FOR, and the two numbers
 # looking like they should match is exactly why this is worth writing down. The

@@ -15,6 +15,7 @@ import re
 import unittest
 
 from app import assets
+from app import chrome
 from app.templating import TEMPLATES_DIR, templates
 
 # error_lobby.html is the one page that deliberately does NOT use the macro: it
@@ -110,12 +111,16 @@ class HeadMacroTests(unittest.TestCase):
                 self.assertIn(" defer", tag)
 
     def test_the_site_name_comes_from_the_macro(self):
-        self.assertIn("<title>Account &ndash; Trakt New Shows</title>",
+        """Asserted against app/chrome.py's constant rather than a literal: the
+        point of this test is that the macro supplies the name, and spelling the
+        name again here would make a rename fail in a test that is not about
+        renaming."""
+        self.assertIn(f"<title>Account &ndash; {chrome.PRODUCT_NAME}</title>",
                       self.render(call="'Account'"))
 
     def test_a_page_carrying_its_own_subject_opts_out_of_the_suffix(self):
-        self.assertIn("<title>New Shows – July</title>",
-                      self.render(call="'New Shows – July', site_suffix=false"))
+        self.assertIn("<title>Distrakkl – July</title>",
+                      self.render(call="product ~ ' – July', site_suffix=false"))
 
     def test_the_tracker_reveal_script_can_be_gated_off(self):
         """The account page must not mention the tracker to an account without

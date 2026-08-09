@@ -269,7 +269,7 @@ class _CachedStaticFiles(StaticFiles):
 # The interactive API docs are off: they are a complete, unauthenticated
 # inventory of every endpoint in the app, and nothing here is a public API that
 # anyone consumes from a schema.
-app = FastAPI(title="Trakt New Shows", lifespan=lifespan,
+app = FastAPI(title=chrome.PRODUCT_NAME, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 # Added before authz.install() below, so it nests INSIDE the authz middleware
 # stack (Starlette's registration order is reversed — see authz.install's own
