@@ -691,10 +691,37 @@ class SourceSelectorTests(CalendarRouteTestCase):
 
     def test_the_control_sits_between_the_calendar_and_the_card_layout(self):
         """Where the author asked for it, and where it belongs: the two controls
-        either side of it also decide what this one page shows."""
+        either side of it also decide what this one page shows. Still true now
+        that three of the four share a panel — the order within it is the order
+        they were in when they were loose."""
         html = self._page("/calendar?year=2026&month=7")
         self.assertLess(html.index('id="endpointSelect"'), html.index('id="sourceSelect"'))
         self.assertLess(html.index('id="sourceSelect"'), html.index('id="cardStyleSelect"'))
+
+    def test_the_device_timezone_button_sits_before_its_select(self):
+        """The 📍 acts ON the timezone control, so it reads as a prefix to it
+        rather than as something trailing the row — and keeping it out of the
+        select's own cell is what lets that select stay the same width as the
+        three above it. Asserted by DOM order because that is what decides it."""
+        html = self._page("/calendar?year=2026&month=7")
+        row = html[html.index('class="view-row tz"'):]
+        row = row[:row.index("</div>")]
+        self.assertLess(row.index("useDeviceTimezone()"), row.index('id="tzSelect"'))
+
+    def test_the_endpoint_picker_stays_out_of_the_view_panel(self):
+        """THE GROUPING RULE, PINNED. The four controls behind 👁️ View answer
+        "how should this be drawn"; the endpoint picker answers "which calendar
+        am I reading", which is navigation and stays in the bar. Asserted because
+        the cheapest future tidy-up of that row is to sweep the picker in too,
+        and that would put the most-used control on the page behind a click."""
+        html = self._page("/calendar?year=2026&month=7")
+        panel = html[html.index('class="nav-menu view-menu"'):]
+        panel = panel[:panel.index("</details>")]
+        self.assertIn('id="sourceSelect"', panel)
+        self.assertIn('id="cardStyleSelect"', panel)
+        self.assertIn('id="dayPackSelect"', panel)
+        self.assertIn('id="tzSelect"', panel)
+        self.assertNotIn('id="endpointSelect"', panel)
 
 
 # ---------------------------------------------------------------------------
@@ -1270,12 +1297,22 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         self.assertLess(head.index("/static/css/style.css"),
                         head.index("/static/fonts/"))
 
-    def test_the_brand_logo_reserves_its_box_in_the_markup(self):
-        """The file is 512x512; with no intrinsic size in the markup the element
-        is zero-wide until it downloads and everything beside it then shifts."""
+    def test_the_brand_wordmark_reserves_its_box_in_the_markup(self):
+        """With no intrinsic size in the markup the element is zero-wide until it
+        downloads and everything beside it then shifts. The header carries the
+        WORDMARK now rather than the square mark, which makes this matter more,
+        not less: it reserves 254px rather than 30, so getting it wrong moves the
+        month heading and the view control most of a column."""
         html = self.client.get(self.PAGE).text
-        self.assertRegex(html, r'<img class="brand-logo"[^>]*\swidth="30"[^>]*>')
-        self.assertRegex(html, r'<img class="brand-logo"[^>]*\sheight="30"[^>]*>')
+        self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\swidth="254"[^>]*>')
+        self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\sheight="34"[^>]*>')
+
+    def test_the_wordmark_links_home(self):
+        """A site's name in a header is the one thing everybody already expects to
+        be clickable, and this is the only place the product is named on a page a
+        signed-in person actually visits."""
+        html = self.client.get(self.PAGE).text
+        self.assertRegex(html, r'<a class="brand-home" href="/calendar"')
 
     def test_the_head_decides_the_optional_nav_link_before_the_body_is_parsed(self):
         """The deciding script must be inline and ahead of the deferred bundle —

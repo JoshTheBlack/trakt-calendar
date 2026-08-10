@@ -92,47 +92,81 @@
            the emptiness is decided in the route, where both halves of "could
            this service fill this calendar" are already known, rather than by the
            template counting options. #}
-        {% if source_choices %}
-        <form class="control" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved">
-            <input type="hidden" name="month" value="{{ month }}">
-            <input type="hidden" name="year" value="{{ year }}">
-            <input type="hidden" name="endpoint" value="{{ endpoint.key }}">
-            <label for="sourceSelect">🛰️</label>
-            <select id="sourceSelect" name="source" onchange="this.form.requestSubmit()">
-                {% for choice in source_choices %}
-                <option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
-                {% endfor %}
-            </select>
-        </form>
-        {% endif %}
-        <div class="control">
-            <label for="cardStyleSelect">🎬</label>
-            <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
-                <option value="vertical"{% if view.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
-                <option value="horizontal"{% if view.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
-                <option value="poster"{% if view.card_style == 'poster' %} selected{% endif %}>Poster only</option>
-            </select>
-        </div>
-        <div class="control">
-            <label for="dayPackSelect">🗓️</label>
-            <select id="dayPackSelect" onchange="setLayout('day_packing', this.value)">
-                <option value="stacked"{% if view.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
-                <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
-            </select>
-        </div>
-        <div class="control tz" title="Your timezone — controls day grouping and air times">
-            <label for="tzSelect">🌐</label>
-            <select id="tzSelect" onchange="setViewerTimezone(this.value)">
-                {% for tzgroup in viewer_timezone_groups %}
-                <optgroup label="{{ tzgroup.group }}">
-                    {% for tz in tzgroup['options'] %}
-                    <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
-                    {% endfor %}
-                </optgroup>
-                {% endfor %}
-            </select>
-            <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
-        </div>
+        {# THE FOUR THAT ARE ABOUT HOW THIS CALENDAR IS SHOWN, BEHIND ONE CONTROL,
+           and the split from the picker above is the whole reason this grouping
+           is defensible. The endpoint picker stays out here because it is
+           NAVIGATION — it changes which calendar you are reading, the way the
+           month arrows change which month — and burying the most-used control on
+           the page behind a click to tidy the row would be paying for the tidying
+           with the thing the row is for. Everything in here answers "how should
+           what I am already reading be drawn", which is a question you ask once
+           and then leave alone.
+
+           `details`/`summary` and the .nav-menu classes rather than anything new:
+           the ☰ Menu at the other end of this bar and the 🔎 Filters panel are
+           both already this, so a third popover that behaved or looked
+           differently would be a third thing to learn for no gain. It also means
+           this works with no JavaScript at all, which the two selects that submit
+           forms below rely on anyway.
+
+           Each row keeps its own id and its own onchange — nothing about what
+           these controls DO moved, only where they sit. app/static/js/calendar/
+           layout.js still finds tzSelect by id. #}
+        <details class="nav-menu view-menu">
+            <summary title="How this calendar is drawn">👁️ View</summary>
+            <div class="nav-menu-items view-menu-items">
+                {% if source_choices %}
+                <form class="view-row" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved">
+                    <input type="hidden" name="month" value="{{ month }}">
+                    <input type="hidden" name="year" value="{{ year }}">
+                    <input type="hidden" name="endpoint" value="{{ endpoint.key }}">
+                    <label for="sourceSelect">🛰️ Sources</label>
+                    <select id="sourceSelect" name="source" onchange="this.form.requestSubmit()">
+                        {% for choice in source_choices %}
+                        <option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
+                        {% endfor %}
+                    </select>
+                </form>
+                {% endif %}
+                <div class="view-row">
+                    <label for="cardStyleSelect">🎬 Cards</label>
+                    <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
+                        <option value="vertical"{% if view.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
+                        <option value="horizontal"{% if view.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
+                        <option value="poster"{% if view.card_style == 'poster' %} selected{% endif %}>Poster only</option>
+                    </select>
+                </div>
+                <div class="view-row">
+                    <label for="dayPackSelect">🗓️ Days</label>
+                    <select id="dayPackSelect" onchange="setLayout('day_packing', this.value)">
+                        <option value="stacked"{% if view.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
+                        <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
+                    </select>
+                </div>
+                {# THE ONE ROW WITH A THIRD ELEMENT, so its control half is
+                   wrapped and the row still has exactly two children like the
+                   other three. That is what keeps all four selects the same
+                   width and their edges aligned: the grid's second column is one
+                   cell either way, and the 📍 hangs to the LEFT of the select
+                   inside it rather than being a third column the other rows
+                   would have to leave empty. #}
+                <div class="view-row tz" title="Your timezone — controls day grouping and air times">
+                    <label for="tzSelect">🌐 Timezone</label>
+                    <span class="view-control">
+                        <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
+                        <select id="tzSelect" onchange="setViewerTimezone(this.value)">
+                            {% for tzgroup in viewer_timezone_groups %}
+                            <optgroup label="{{ tzgroup.group }}">
+                                {% for tz in tzgroup['options'] %}
+                                <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                                {% endfor %}
+                            </optgroup>
+                            {% endfor %}
+                        </select>
+                    </span>
+                </div>
+            </div>
+        </details>
 {% endmacro %}
 
 {# In `distrakt_href` the YEAR travels and the MONTH deliberately does not. The

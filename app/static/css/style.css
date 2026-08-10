@@ -63,6 +63,23 @@ header.hero {
 html.has-distrakt #distraktNav { display: flex; }
 
 .hero-lead img.brand-logo { height: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55)); }
+
+/* THE WORDMARK IN THE HEADER. Taller than the 30px mark it replaced because it
+   is being READ rather than recognised, and the file carries generous padding
+   inside its own box (the glyphs occupy 565 of its 820 units), so a 26px cap
+   height needs a 34px image to land there.
+   `flex-shrink: 0` because this is the one thing in the bar that must not
+   compress: .hero-controls beside it already wraps, so a narrow window drops the
+   controls to a second row, which is the behaviour that was already there and is
+   the right one to keep. */
+.brand-home { display: inline-flex; align-items: center; text-decoration: none; flex-shrink: 0; }
+.hero-lead img.brand-wordmark {
+    height: 34px; width: auto; display: block;
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55));
+}
+/* A wordmark is not a button, so it gets the quietest possible acknowledgement
+   that it is clickable rather than a border or a background. */
+.brand-home:hover img.brand-wordmark { filter: drop-shadow(0 2px 10px rgba(232,181,69,0.45)); }
 .month-nav { display: flex; align-items: center; gap: 8px; }
 .month-nav-btn {
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -124,6 +141,41 @@ html.has-distrakt #distraktNav { display: flex; }
     text-align: left; text-decoration: none; cursor: pointer; white-space: nowrap;
 }
 .nav-menu-items a:hover, .nav-menu-items button:hover { background: rgba(255,255,255,0.07); }
+
+/* THE 👁️ VIEW PANEL. Same pill summary and same popover shell as the ☰ Menu
+   above — that is the point of reusing .nav-menu — with only the two things that
+   genuinely differ overridden here.
+   OPENS TO THE LEFT EDGE, unlike the menu: this control sits at the START of the
+   header row rather than the end, and a panel right-aligned to it would hang off
+   toward the middle of the page away from the thing that opened it. */
+.view-menu > .nav-menu-items { left: 0; right: auto; min-width: 340px; gap: 4px; padding: 8px; }
+/* EVERY ROW IS label | control, EXACTLY TWO CELLS, and the selects are one fixed
+   width rather than sized by their own longest option. Left to themselves the
+   four selects came out four different widths — "My sources", "Poster beside",
+   "Stacked" and a timezone name are nothing like each other — and a column of
+   controls whose right edges step in and out reads as four unrelated things
+   rather than one panel. A fixed width is also what makes the timezone row
+   possible at all: it was `flex: 1; min-width: 0` before, which let it collapse
+   to almost nothing once the label and the button had taken what they wanted. */
+.view-menu-items .view-row {
+    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
+    padding: 5px 6px; border-radius: 7px;
+}
+.view-menu-items .view-row:hover { background: rgba(255,255,255,0.05); }
+.view-menu-items .view-row label {
+    font-size: 0.8rem; font-weight: 600; color: var(--text); white-space: nowrap;
+}
+.view-menu-items .view-row select {
+    background: var(--bg-deep); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 7px; padding: 6px 8px; font: inherit; font-size: 0.78rem;
+    width: 200px; max-width: none;
+}
+/* The control half of a row that has more than a select in it. The 📍 sits to
+   the LEFT of the control it acts on, so the select keeps the same right edge
+   and the same width as the three above it and the button reads as a prefix to
+   it rather than as something trailing the row. */
+.view-menu-items .view-row .view-control { display: flex; align-items: center; gap: 6px; }
+.view-menu-items .view-row .view-control .btn-ghost { flex-shrink: 0; padding: 4px 6px; line-height: 1; }
 .pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }
