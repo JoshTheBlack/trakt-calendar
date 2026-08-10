@@ -202,7 +202,16 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     uuid = ((user.get("ids") or {}).get("uuid") or "").strip()
     if not uuid:
         raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned no account UUID.")
-    return {"id": uuid, "name": user.get("name") or user.get("username")}
+    # `avatar` is DISPLAY-ONLY and is never part of the identity. It is a URL
+    # this app may choose to fetch a picture from, checked against a per-provider
+    # host allowlist before anything goes near the network — see
+    # app/auth/provider_avatars.py, which is where the reasoning lives. Measured
+    # live: Trakt serves these from media.trakt.tv.
+    return {
+        "id": uuid,
+        "name": user.get("name") or user.get("username"),
+        "avatar": ((user.get("images") or {}).get("avatar") or {}).get("full"),
+    }
 
 
 class DevicePending(Exception):

@@ -498,7 +498,10 @@ class IdentityKeyTests(SimklOAuthTestCase):
 
         with patch("app.providers.simkl.transport.send", side_effect=_send):
             account = asyncio.run(simkl_auth.fetch_account("cid", "the-token"))
-        self.assertEqual(account, {"id": str(SIMKL_ID), "name": "Josh"})
+        # By name rather than by whole-dict equality — see the note on the Trakt
+        # equivalent: the shape now also carries a display-only `avatar`.
+        self.assertEqual(account["id"], str(SIMKL_ID))
+        self.assertEqual(account["name"], "Josh")
         # A POST with no body, which is what Simkl documents for this endpoint,
         # on the pool that serializes and paces /users/ traffic.
         self.assertEqual(seen["method"], "POST")

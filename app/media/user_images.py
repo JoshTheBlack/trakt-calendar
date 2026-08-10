@@ -117,6 +117,91 @@ def generated_dir(user_id: int, year: int) -> Path:
     return _user_dir(user_id) / "generated" / str(int(year))
 
 
+# THE PROVIDER SLOTS: one picture per connected service, kept beside the
+# account's own uploads. A CLOSED SET, and that is the whole of the path safety
+# here — a slot's filename is one of these three literals or the call is
+# refused, so no request string ever becomes a path component the way a saved
+# image's uid could (see image_path's warning). It is spelled out here rather
+# than read from the provider registry so that this module needs no feature
+# import to answer "is that a real slot".
+PROVIDER_SLOTS = ("trakt", "plex", "simkl")
+
+
+def provider_dir(user_id: int) -> Path:
+    return _user_dir(user_id) / "provider"
+
+
+def provider_avatar_path(user_id: int, provider: str) -> Path:
+    """Path for one provider's copy of its picture. Raises ValueError for a name
+    outside PROVIDER_SLOTS — callers pass a name that came from a request, and
+    refusing here is what stops it being joined onto a path at all."""
+    if provider not in PROVIDER_SLOTS:
+        raise ValueError(f"Unknown provider slot: {provider!r}")
+    return provider_dir(user_id) / f"{provider}.webp"
+
+
+def has_provider_avatar(user_id: int, provider: str) -> bool:
+    try:
+        return provider_avatar_path(user_id, provider).exists()
+    except ValueError:
+        return False
+
+
+def provider_avatar_is_adopted(user_id: int, provider: str) -> bool:
+    """Whether the account's avatar is currently a copy of this slot.
+
+    Byte equality, for the reason `delete_provider_avatar` gives: adoption is a
+    copy rather than a pointer, so there is no field to consult and the honest
+    question is whether the two files are the same picture."""
+    try:
+        slot = provider_avatar_path(user_id, provider)
+    except ValueError:
+        return False
+    try:
+        return slot.read_bytes() == avatar_path(user_id).read_bytes()
+    except OSError:
+        return False
+
+
+def list_provider_avatars(user_id: int) -> list[str]:
+    """Which slots this account actually has a picture in, in PROVIDER_SLOTS
+    order so the account page draws them the same way every time."""
+    return [name for name in PROVIDER_SLOTS if has_provider_avatar(user_id, name)]
+
+
+def delete_provider_avatar(user_id: int, provider: str) -> bool:
+    """Remove one slot, and the account avatar too if it is a copy of that slot.
+
+    THE AVATAR GOES WITH IT BECAUSE THE BYTES IT WAS COPIED FROM ARE THE ONLY
+    THING THAT MADE KEEPING IT DEFENSIBLE — an account that has disconnected a
+    service, or deleted that service's picture, should not go on wearing it.
+
+    "IS IT A COPY" IS ANSWERED BY COMPARING THE BYTES, not by a stored pointer,
+    and that follows from `adopt_provider_avatar` choosing a copy over a pointer
+    in the first place: there is no "primary provider" field to consult, so the
+    honest test is whether the two files are the same picture. It is exact
+    rather than approximate — both went through the same normalizer, so a copy
+    is byte-identical — and it fails in the safe direction: an avatar that has
+    since been replaced by an upload differs, and is therefore kept.
+    """
+    try:
+        slot = provider_avatar_path(user_id, provider)
+    except ValueError:
+        return False
+    try:
+        adopted = slot.read_bytes()
+    except OSError:
+        return False
+    slot.unlink(missing_ok=True)
+    avatar = avatar_path(user_id)
+    try:
+        if avatar.read_bytes() == adopted:
+            avatar.unlink(missing_ok=True)
+    except OSError:
+        pass  # no avatar to compare against, which is nothing to clean up
+    return True
+
+
 def image_path(user_id: int, image_uid: str) -> Path:
     """Path for a saved custom image. `image_uid` is always server-generated
     (see add_image) except when it arrives back from a client in a DELETE URL,
@@ -312,6 +397,67 @@ def delete_avatar(user_id: int) -> bool:
         return True
     except FileNotFoundError:
         return False
+
+
+async def save_provider_avatar(user_id: int, provider: str, raw: bytes) -> Path:
+    """Store one provider's picture in its slot, replacing whatever was there.
+
+    THE BYTES GO THROUGH THE SAME VALIDATION AN UPLOAD DOES — `_normalize`, the
+    identical function `save_avatar` and `add_image` call, off the event loop the
+    same way. There is deliberately no faster path for an image that arrived from
+    a service "we trust": trusting the provider is not the same as trusting the
+    bytes it served, and the value of that validation is precisely that it has no
+    exceptions. It is the size ceiling, the format allowlist, the dimension check
+    before decoding, the decompression-bomb guard, and the re-encode into a fresh
+    image that leaves EXIF and ICC behind.
+
+    Takes BYTES where save_avatar takes base64, which is the only difference
+    between them: an upload arrives as base64 in JSON and a provider picture
+    arrives as a response body, and turning the second back into base64 purely to
+    hand it to the first would be encoding bytes so that a decoder could decode
+    them again. Both share `_normalize`, so neither can drift from the other's
+    checks.
+    """
+    path = provider_avatar_path(user_id, provider)  # refuses an unknown slot first
+    normalized = await anyio.to_thread.run_sync(_normalize, raw)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(normalized)
+    return path
+
+
+def adopt_provider_avatar(user_id: int, provider: str, *, only_if_missing: bool) -> bool:
+    """Copy a provider slot into `avatar.webp`. Returns whether it did.
+
+    CHOOSING A PRIMARY IS A COPY, NOT A POINTER, and that is the design rather
+    than a shortcut. Every existing reader of an account's picture — the account
+    page, the share pages, `has_avatar`, the ranker header's "avatar" spec —
+    already goes through `avatar_path`. Storing "which provider is primary"
+    beside it would make every one of those readers learn what a provider is, to
+    arrive at the same bytes. One file stays the answer to "what is this
+    account's avatar" and the slots are a palette to fill it from.
+
+    `only_if_missing` IS CHECKED IN HERE, NOT AT THE CALL SITE, and that is the
+    whole reason this is a function. The automatic seeding path must never
+    overwrite a picture somebody uploaded, and two sign-ins completing at once
+    are two callers that would each read `has_avatar` as False before either
+    wrote. Deciding it at the moment of the write is what makes that race
+    harmless. A person explicitly PICKING a slot passes False and always wins.
+
+    The bytes are already normalized — they went through `save_provider_avatar`
+    to get into the slot — so this is a copy and not a second validation pass.
+    """
+    try:
+        source = provider_avatar_path(user_id, provider)
+    except ValueError:
+        return False
+    if not source.exists():
+        return False
+    target = avatar_path(user_id)
+    if only_if_missing and target.exists():
+        return False
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(source.read_bytes())
+    return True
 
 
 async def add_image(user_id: int, image_b64: str, name: str = "") -> str:

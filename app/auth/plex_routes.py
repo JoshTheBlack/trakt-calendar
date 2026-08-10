@@ -182,6 +182,7 @@ async def plex_poll(request: Request):
         # reuse.
         provider_user_id=str(account["id"]),
         display_name=account.get("name"),
+        avatar_url=account.get("avatar"),
         access_token=auth_token,
     )
 

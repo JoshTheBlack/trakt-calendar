@@ -236,6 +236,18 @@ html.has-distrakt #distraktNav { display: flex; }
     display: inline-flex; align-items: center; justify-content: center;
     width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 0.95rem;
 }
+/* The provider picture palette on the account page. Wraps rather than scrolls:
+   there are at most three of these, one per connected service, so a narrow
+   window should stack them rather than hide any behind an edge. */
+.provider-avatars { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.provider-avatar { display: flex; align-items: center; gap: 6px; }
+.provider-avatar .avatar-thumb { width: 40px; height: 40px; }
+.provider-avatar-name { font-size: 0.78rem; font-weight: 600; text-transform: capitalize; }
+/* The one currently in use is marked on the picture itself as well as by its
+   badge — the badge says it and the ring shows it, which is what makes the row
+   readable at a glance rather than needing to be read. */
+.provider-avatar.is-adopted .avatar-thumb { outline: 2px solid var(--gold); outline-offset: 2px; }
+
 .pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }

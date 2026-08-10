@@ -261,6 +261,7 @@ async def simkl_callback(request: Request):
         # with it.
         provider_user_id=str(account["id"]),
         display_name=account.get("name"),
+        avatar_url=account.get("avatar"),
         access_token=token.get("access_token"),
         # BOTH NULL, AND DELIBERATELY SO. Simkl issues no refresh token and the
         # grant it does issue stands until the user revokes the application, so

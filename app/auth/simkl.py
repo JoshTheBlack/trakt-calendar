@@ -152,6 +152,14 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     than falling back to one. The name is display-only and refreshed on each
     sign-in.
 
+    THE AVATAR URL IS ALSO READ, and this docstring used to say nothing else was
+    — which stopped being true when profile pictures began being seeded from the
+    provider, so it is corrected here rather than left to mislead. It is
+    display-only, is never part of the identity, and is checked against a
+    per-provider host allowlist before anything fetches it: see
+    app/auth/provider_avatars.py, which also records why a Simkl avatar is only
+    fetched when Simkl itself hosts it.
+
     Nothing else from this response is read or stored. It also carries the
     account's connections and plan, which have no business in this app's database
     or its logs.
@@ -191,4 +199,5 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     if not account_id:
         raise AccountLookupError(f"Simkl {ACCOUNT_PATH} returned no numeric account id.")
     user = (payload or {}).get("user") or {}
-    return {"id": account_id, "name": user.get("name") or None}
+    return {"id": account_id, "name": user.get("name") or None,
+            "avatar": user.get("avatar")}

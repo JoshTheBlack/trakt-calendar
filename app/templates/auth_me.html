@@ -77,6 +77,40 @@
           <span class="auth-error" id="avatarError" role="alert"></span>
         </div>
       </div>
+
+      {# THE PALETTE. Only drawn when a connected service has actually given us a
+         picture, so an account with none sees the upload control exactly as it
+         was — this is an addition beside that control, never a replacement for
+         it. Each service keeps its own copy; "Use" copies one into the avatar,
+         which is the single file every other reader in the app already looks
+         at. #}
+      {% if provider_avatars %}
+      <div class="row">
+        <span class="label">From your services</span>
+        <div class="row-main provider-avatars">
+          {% for slot in provider_avatars %}
+          <div class="provider-avatar{% if slot.adopted %} is-adopted{% endif %}"
+               data-provider="{{ slot.provider }}">
+            <img class="avatar-thumb" alt="Your {{ slot.provider }} picture"
+                 src="/api/me/avatar/provider/{{ slot.provider }}?size=96">
+            <span class="provider-avatar-name">{{ slot.provider }}</span>
+            {# The one that is already in use says so instead of offering to be
+               used again — a button that cannot change anything reads as broken. #}
+            {% if slot.adopted %}
+            <span class="auth-badge ok">In use</span>
+            {% else %}
+            <button class="btn-ghost tiny" type="button" data-avatar-use="{{ slot.provider }}">Use</button>
+            {% endif %}
+            <button class="btn-ghost tiny" type="button" data-avatar-refresh="{{ slot.provider }}"
+                    title="Ask {{ slot.provider }} for this picture again">↻</button>
+            <button class="btn-ghost tiny" type="button" data-avatar-drop="{{ slot.provider }}"
+                    title="Forget this picture">&times;</button>
+          </div>
+          {% endfor %}
+          <span class="auth-error" id="providerAvatarError" role="alert"></span>
+        </div>
+      </div>
+      {% endif %}
     </div>
 
     {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
@@ -441,6 +475,49 @@ avatarFile.addEventListener('change', async () => {
 avatarRemoveBtn.addEventListener('click', () => {
   confirmInline(avatarRemoveBtn, 'Remove your profile picture?', doRemoveAvatar, {danger: true});
 });
+
+// THE PROVIDER PALETTE. One delegated listener for the three actions rather than
+// a binding per button, because the row is re-rendered by a reload after each
+// one and per-button bindings would have to be re-attached.
+// EVERY ACTION RELOADS ON SUCCESS. The panel shows which picture is in use, and
+// that is derived server-side by comparing bytes — so patching the DOM here
+// would mean re-deriving it in JavaScript and getting a second answer to a
+// question the server already answers.
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-avatar-use],[data-avatar-refresh],[data-avatar-drop]');
+  if (!button) return;
+  const err = document.getElementById('providerAvatarError');
+  const provider = button.dataset.avatarUse || button.dataset.avatarRefresh || button.dataset.avatarDrop;
+
+  if (button.dataset.avatarDrop) {
+    confirmInline(button, 'Forget the picture from ' + provider + '?',
+                  () => providerAvatarAction('DELETE', '/api/me/avatar/provider', provider, button, err),
+                  {danger: true});
+    return;
+  }
+  const path = button.dataset.avatarRefresh
+    ? '/api/me/avatar/provider/refresh' : '/api/me/avatar/provider';
+  await providerAvatarAction('POST', path, provider, button, err);
+});
+
+async function providerAvatarAction(method, path, provider, button, err) {
+  button.disabled = true;
+  if (err) err.textContent = '';
+  try {
+    const resp = await fetch(path, {
+      method,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    if (err) err.textContent = data.error || 'That did not work.';
+  } catch (e) {
+    if (err) err.textContent = 'That did not work.';
+  } finally {
+    button.disabled = false;
+  }
+}
 
 async function doRemoveAvatar() {
   avatarRemoveBtn.disabled = true;

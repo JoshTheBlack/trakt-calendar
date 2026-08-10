@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from .. import db, secrets_box
 from ..config import Settings, load_settings
+from ..media import user_images
 from . import encryption_flow, invites, prefs, users
 
 
@@ -65,6 +66,13 @@ class ProviderIdentity:
     access_token: str | None = None
     refresh_token: str | None = None
     token_expires_at: int | None = None
+    # WHERE THE PROVIDER SAYS ITS PICTURE IS, AND NOTHING MORE. Carried on this
+    # object because it arrives with the account lookup and is consumed by the
+    # shared completion seam, but it is NEVER persisted: no column holds it, the
+    # link and login writes below do not read it, and it is not part of what
+    # makes this identity this identity. Treat it as third-party input all the
+    # way — app/auth/provider_avatars.py decides whether it may be fetched.
+    avatar_url: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,7 +315,18 @@ async def unlink_identity(user_id: int, provider: str, *, force: bool = False) -
         conn.execute("DELETE FROM linked_identities WHERE id = ?", (row["id"],))
         return True
 
-    return await db.transaction(_work)
+    removed = await db.transaction(_work)
+    if removed:
+        # THE SERVICE'S PICTURE GOES WITH THE LINK. An account no longer
+        # connected to a service should not keep serving that service's copy of
+        # its face, and the slot is the only place that copy lives. Deliberately
+        # AFTER the transaction commits: a file delete cannot be rolled back, so
+        # doing it inside would leave the picture gone on a transaction that
+        # later failed. If this half does not happen the row is still gone and
+        # the next link simply overwrites the slot, which is why it is not worth
+        # a compensating step.
+        user_images.delete_provider_avatar(user_id, provider)
+    return removed
 
 
 # ---------------------------------------------------------------------------

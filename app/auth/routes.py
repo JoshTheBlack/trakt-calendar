@@ -45,6 +45,7 @@ from ..media import user_images
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
+from . import provider_avatars
 from . import trakt as trakt_auth
 from .levels import AuthLevel
 
@@ -619,6 +620,16 @@ async def me_page(request: Request):
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": user_images.has_avatar(user.user_id),
+        # WHICH SERVICES HAVE GIVEN US A PICTURE, and which one (if any) the
+        # account is currently wearing. The second is derived by comparing bytes
+        # rather than stored, for the reason user_images.adopt_provider_avatar
+        # gives: the avatar is a COPY, so there is no "primary provider" field
+        # and the honest answer is whether the two files match.
+        "provider_avatars": [
+            {"provider": name,
+             "adopted": user_images.provider_avatar_is_adopted(user.user_id, name)}
+            for name in user_images.list_provider_avatars(user.user_id)
+        ],
     })
 
 
@@ -819,6 +830,105 @@ async def get_avatar(request: Request):
         return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
     resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+
+
+# ---------------------------------------------------------------------------
+# the provider picture palette
+# ---------------------------------------------------------------------------
+# A slot is one connected service's copy of that account's picture. The routes
+# below never take a provider name into a path themselves —
+# user_images.provider_avatar_path refuses anything outside its closed set, and
+# these check membership first so the refusal is a 400 rather than a 500.
+
+
+def _known_slot(provider: object) -> str | None:
+    name = str(provider or "").strip().lower()
+    return name if name in user_images.PROVIDER_SLOTS else None
+
+
+@guard.get("/api/me/avatar/provider/{provider}", AuthLevel.SESSION)
+async def get_provider_avatar(request: Request, provider: str):
+    """One provider slot's picture, for the picker to draw."""
+    user = await auth.require_session(request)
+    name = _known_slot(provider)
+    if name is None:
+        return Response(status_code=404)
+    path = user_images.provider_avatar_path(user.user_id, name)
+    if not path.exists():
+        return Response(status_code=404)
+    size_param = request.query_params.get("size")
+    if size_param is None:
+        return FileResponse(path, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+    try:
+        size = int(size_param)
+    except ValueError:
+        return authz.error("`size` must be a whole number.")
+    if not 16 <= size <= user_images.MASTER_SIZE:
+        return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
+    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+
+
+@guard.post("/api/me/avatar/provider", AuthLevel.SESSION)
+async def use_provider_avatar(request: Request):
+    """Make a provider slot this account's avatar.
+
+    `only_if_missing=False`: this is a person choosing, and a choice overrides
+    whatever is there. That is the whole difference from the automatic seeding
+    at sign-in, which never overwrites — see provider_login.seed_provider_avatar.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    name = _known_slot(data.get("provider"))
+    if name is None:
+        return authz.error("Unknown provider.")
+    if not user_images.adopt_provider_avatar(user.user_id, name, only_if_missing=False):
+        return authz.error("There is no saved picture from that service.")
+    return JSONResponse({"ok": True})
+
+
+@guard.post("/api/me/avatar/provider/refresh", AuthLevel.SESSION)
+async def refresh_provider_avatar(request: Request):
+    """Ask the service for its current picture again and refill the slot.
+
+    THE ONLY WAY A SLOT IS EVER RE-FETCHED, which is what makes "no refetch on an
+    ordinary sign-in" affordable rather than a limitation: a picture that almost
+    never changes is not worth an outbound fetch on every login, and a person who
+    has just changed theirs has somewhere to press.
+
+    THE AVATAR IS NOT TOUCHED unless it was already a copy of this slot. Somebody
+    refreshing a service's picture means "update that picture", not "make it my
+    avatar" — but if they were already wearing it, leaving the old copy on would
+    make the refresh look like it did nothing.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    name = _known_slot(data.get("provider"))
+    if name is None:
+        return authz.error("Unknown provider.")
+    was_adopted = user_images.provider_avatar_is_adopted(user.user_id, name)
+    url = await provider_avatars.current_url(user.user_id, name)
+    raw = await provider_avatars.fetch(name, url)
+    if raw is None:
+        return authz.error("That service did not give us a picture to use.")
+    try:
+        await user_images.save_provider_avatar(user.user_id, name, raw)
+    except user_images.ValidationError as exc:
+        return authz.error(str(exc))
+    if was_adopted:
+        user_images.adopt_provider_avatar(user.user_id, name, only_if_missing=False)
+    return JSONResponse({"ok": True, "adopted": was_adopted})
+
+
+@guard.delete("/api/me/avatar/provider", AuthLevel.SESSION)
+async def remove_provider_avatar(request: Request):
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    name = _known_slot(data.get("provider"))
+    if name is None:
+        return authz.error("Unknown provider.")
+    user_images.delete_provider_avatar(user.user_id, name)
+    return JSONResponse({"ok": True})
 
 
 @guard.post("/api/me/images", AuthLevel.SESSION)

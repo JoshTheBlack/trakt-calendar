@@ -247,6 +247,7 @@ async def trakt_callback(request: Request):
         # else, who would inherit this link along with it.
         provider_user_id=str(account["id"]),
         display_name=account.get("name"),
+        avatar_url=account.get("avatar"),
         access_token=token.get("access_token"),
         refresh_token=token.get("refresh_token") or None,
         token_expires_at=_expires_at(token),

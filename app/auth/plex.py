@@ -175,4 +175,7 @@ async def fetch_account(auth_token: str, client_id: str) -> dict:
     if not isinstance(account_id, int):
         raise AccountLookupError("plex.tv /api/v2/user returned no numeric account id.")
     name = payload.get("username") or payload.get("title") or payload.get("email")
-    return {"id": account_id, "name": name}
+    # See the note in app/auth/trakt.py's fetch_account: display-only, never part
+    # of the identity, and checked against a host allowlist before it is fetched.
+    # Measured live: Plex serves `thumb` from plex.tv.
+    return {"id": account_id, "name": name, "avatar": payload.get("thumb")}

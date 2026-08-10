@@ -58,6 +58,7 @@ in the adapter and not in the substance.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -65,7 +66,11 @@ from fastapi.responses import Response
 
 from .. import auth
 from ..config import Settings
+from ..media import user_images
+from . import provider_avatars
 from .routes import INVALID_CREDENTIALS, INVALID_INVITE
+
+logger = logging.getLogger(__name__)
 
 # The refusal names a route matches on to choose a title, a back link, or an
 # extra JSON field. They are stable strings rather than an enum because that is
@@ -159,6 +164,8 @@ async def complete_provider_login(
     if outcome.kind == "registered":
         await auth.record_registration_attempt(ip, token, True)
 
+    await seed_provider_avatar(outcome.user_id, identity)
+
     session_id = await auth.create_session(
         outcome.user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
     )
@@ -201,7 +208,50 @@ async def complete_provider_link(
         return Refusal(ACCOUNT_UNAVAILABLE, auth.HANDSHAKE_REJECTED, 403)
     except auth.IdentityWritesBlocked:
         return Refusal(KEY_UNHEALTHY, key_unhealthy, 409)
+    await seed_provider_avatar(current.user_id, identity)
     return LinkResult(user_id=current.user_id, redirect_target="/me")
+
+
+async def seed_provider_avatar(user_id: int, identity: auth.ProviderIdentity) -> None:
+    """Fill this provider's picture slot, and the account's avatar if it has none.
+
+    HERE RATHER THAN IN EACH ROUTE, for the reason this whole module exists: one
+    sequence, three providers. Written in one place, a rule about when an avatar
+    may be overwritten is a rule; written in three, it is three near-copies with
+    the drift that follows.
+
+    IT RUNS ON REGISTRATION AND ON LINK, AND ON NOTHING ELSE. An ordinary
+    sign-in is deliberately not a refresh: a slot filled at those two moments,
+    plus an explicit refresh button on the account page, is the difference
+    between paying for one outbound image fetch when a service is connected and
+    paying for one on every sign-in forever, to replace a picture that almost
+    never changed.
+
+    IT CANNOT FAIL A SIGN-IN. The callback that reaches here has already spent a
+    token exchange and an account lookup; a slow or broken image CDN must not be
+    what holds that open or turns it into an error page. `provider_avatars.fetch`
+    already answers None for every failure it can see, and the belt-and-braces
+    catch below covers the rest — including a picture that arrives and turns out
+    not to be an image, which is `save_provider_avatar` raising ValidationError.
+    A person whose avatar did not seed has no idea anything was attempted, which
+    is correct.
+
+    THE ORDER MATTERS. The slot is written first and the avatar is adopted from
+    it second, so `avatar.webp` is only ever a copy of bytes that have already
+    been through the same validation an upload gets. `only_if_missing=True` is
+    what makes this safe to run on every link: it is checked inside the write
+    (see user_images.adopt_provider_avatar) so two completions racing cannot land
+    a provider picture on top of one somebody uploaded.
+    """
+    raw = await provider_avatars.fetch(identity.provider, identity.avatar_url)
+    if raw is None:
+        return
+    try:
+        await user_images.save_provider_avatar(user_id, identity.provider, raw)
+        user_images.adopt_provider_avatar(user_id, identity.provider, only_if_missing=True)
+    except Exception as exc:  # noqa: BLE001 — see the docstring: never fatal
+        logger.debug("Could not store the %s avatar for user %s: %s",
+                     identity.provider, user_id, exc)
 
 
 def attach_session(

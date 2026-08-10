@@ -842,6 +842,12 @@ def _header_bytes(user_id: int, spec: Any) -> bytes | None:
     account actually owns — checked against its own list rather than trusted —
     which also means the bytes were validated and normalized when they were
     uploaded, and this route never has to decode anything a client just sent it.
+
+    A PROVIDER PICTURE IS THE THIRD SHAPE, AND IT IS VALIDATED THE SAME WAY: the
+    name is checked for membership of a FIXED set before it can become a path
+    component, exactly as a uid is checked against this account's own list.
+    Neither one is ever interpolated into a path on the strength of the request
+    alone, which is the property worth stating rather than the mechanism.
     """
     if not spec:
         return None
@@ -851,8 +857,13 @@ def _header_bytes(user_id: int, spec: Any) -> bytes | None:
         if str(uid) not in user_images.list_images(user_id):
             raise ranker_export.ExportError("That saved image is not available.")
         path = user_images.image_path(user_id, str(uid))
+    elif isinstance(spec, dict) and (slot := spec.get("provider")):
+        if str(slot) not in user_images.list_provider_avatars(user_id):
+            raise ranker_export.ExportError("That service picture is not available.")
+        path = user_images.provider_avatar_path(user_id, str(slot))
     else:
-        raise ranker_export.ExportError("Choose the avatar or one of your saved images.")
+        raise ranker_export.ExportError(
+            "Choose the avatar, a service picture, or one of your saved images.")
     try:
         return path.read_bytes()
     except OSError:

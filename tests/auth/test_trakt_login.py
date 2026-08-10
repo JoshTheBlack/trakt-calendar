@@ -579,8 +579,12 @@ class IdentityKeyTests(TraktOAuthTestCase):
         client, seen = self._stub_client(self.SETTINGS_BODY)
         with patch("app.auth.trakt.httpx.AsyncClient", return_value=client):
             account = asyncio.run(trakt_auth.fetch_account("cid", "token"))
-        self.assertEqual(account, {"id": "30ee8617b5f3f670f90d88012b30adf4",
-                                   "name": "JoshTheBlack"})
+        # The IDENTITY keys, asserted by name rather than by comparing the whole
+        # dict: the shape grew an `avatar` key for profile-picture seeding, and a
+        # test of "which id does this read" should not fail because a display-only
+        # field was added beside it.
+        self.assertEqual(account["id"], "30ee8617b5f3f670f90d88012b30adf4")
+        self.assertEqual(account["name"], "JoshTheBlack")
         # /users/me cannot answer this — it returns ids:{slug} and nothing else.
         self.assertTrue(seen["url"].endswith("/users/settings"))
 
