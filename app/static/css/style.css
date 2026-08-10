@@ -148,34 +148,94 @@ html.has-distrakt #distraktNav { display: flex; }
    OPENS TO THE LEFT EDGE, unlike the menu: this control sits at the START of the
    header row rather than the end, and a panel right-aligned to it would hang off
    toward the middle of the page away from the thing that opened it. */
-.view-menu > .nav-menu-items { left: 0; right: auto; min-width: 340px; gap: 4px; padding: 8px; }
-/* EVERY ROW IS label | control, EXACTLY TWO CELLS, and the selects are one fixed
-   width rather than sized by their own longest option. Left to themselves the
-   four selects came out four different widths — "My sources", "Poster beside",
-   "Stacked" and a timezone name are nothing like each other — and a column of
-   controls whose right edges step in and out reads as four unrelated things
-   rather than one panel. A fixed width is also what makes the timezone row
-   possible at all: it was `flex: 1; min-width: 0` before, which let it collapse
-   to almost nothing once the label and the button had taken what they wanted. */
-.view-menu-items .view-row {
-    display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 12px;
-    padding: 5px 6px; border-radius: 7px;
+/* SIZED BY ITS OWN CONTENT, WHICH IS THE ONLY WAY THIS PANEL CANNOT OVERFLOW.
+   It is position:absolute inside a .nav-menu whose width is just the summary
+   pill, so its containing block is about 80px wide. Shrink-to-fit therefore
+   resolves against 80px, and a hand-picked `min-width` pins it to exactly that
+   number — so the moment one row needed more (the timezone row, which carries a
+   button as well as a select) that row overflowed the box and drew its select
+   outside the panel's own background.
+   `width: max-content` sizes the box to the widest row instead, whatever that
+   row turns out to hold, so there is no number here to get wrong and no way for
+   a future row to escape. min-width is now only a floor for looks. */
+/* ONE GRID ON THE PANEL, AND THE ROWS ARE `display: contents` SO THEIR PARTS
+   LAND IN IT DIRECTLY. Three columns — label, the optional button, the control —
+   shared by all four rows.
+   THIS REPLACED TWO ATTEMPTS THAT BOTH FAILED THE SAME WAY, and the reason is
+   worth keeping: while each ROW laid itself out, the timezone row was the only
+   one with three things in it, so it negotiated its own widths differently from
+   the three rows above it however the negotiation was phrased — a `1fr auto`
+   grid, then flex with an auto margin. Both aligned three rows and left the
+   fourth out of line. Columns declared ONCE, on the container, cannot disagree
+   between rows, because there is only one set of them: the button column is
+   simply empty on the rows that have no button.
+   `width: max-content` because this panel is position:absolute inside a
+   .nav-menu whose width is only the summary pill, so shrink-to-fit would resolve
+   against ~80px and any fixed min-width pins it to exactly that number — which
+   is how a row wider than the guess came to draw itself outside the panel's own
+   background. Sized from the columns instead, there is no number to get wrong. */
+.view-menu > .nav-menu-items {
+    left: 0; right: auto; width: max-content;
+    display: grid; grid-template-columns: max-content max-content 210px;
+    align-items: center; column-gap: 10px; row-gap: 2px;
+    padding: 10px; white-space: nowrap;
 }
-.view-menu-items .view-row:hover { background: rgba(255,255,255,0.05); }
+/* The row boxes themselves draw nothing and take no space — they exist to keep
+   the markup readable and to carry the `title` tooltip and the form the sources
+   row needs. `display: contents` is what puts their children in the grid above.
+   A row-wide hover went with it, which is a fair trade for four controls that
+   actually line up. */
+.view-menu-items .view-row { display: contents; }
+/* Explicit columns rather than auto-placement: a row with two children would
+   otherwise put its control in the BUTTON's column and undo the whole point. */
+.view-menu-items .view-row > label { grid-column: 1; }
+.view-menu-items .view-row .btn-ghost { grid-column: 2; justify-self: center; }
+.view-menu-items .view-row select { grid-column: 3; }
+/* The wrapper is structural only — its two children belong to the grid, not to
+   it, so it disappears the same way the row does. */
+.view-menu-items .view-row .view-control { display: contents; }
 .view-menu-items .view-row label {
     font-size: 0.8rem; font-weight: 600; color: var(--text); white-space: nowrap;
 }
+/* ALL FOUR SELECTS ARE ONE SIZE, STATED THREE WAYS ON PURPOSE. `width` alone is
+   not enough to guarantee it: `max-width` beats `width` in the cascade, and this
+   app already sets `max-width: 15ch` on .control select and 11ch on .control.tz
+   select a hundred lines above — the shape these rows were lifted out of. Any of
+   that leaking in here would silently clamp a 210px select down to about 117px
+   and only on some rows, which is precisely the ragged result this is fixing. So
+   the floor, the width and the ceiling are all pinned to the same number and
+   there is nothing left for an inherited rule to win. */
 .view-menu-items .view-row select {
     background: var(--bg-deep); border: 1px solid var(--card-border); color: var(--text);
     border-radius: 7px; padding: 6px 8px; font: inherit; font-size: 0.78rem;
-    width: 200px; max-width: none;
+    width: 210px; min-width: 210px; max-width: 210px;
+    /* A timezone name is longer than the box; truncate rather than let the
+       select ask for more room, which is what would push this row out of line
+       with the other three again. */
+    text-overflow: ellipsis;
 }
-/* The control half of a row that has more than a select in it. The 📍 sits to
-   the LEFT of the control it acts on, so the select keeps the same right edge
-   and the same width as the three above it and the button reads as a prefix to
-   it rather than as something trailing the row. */
-.view-menu-items .view-row .view-control { display: flex; align-items: center; gap: 6px; }
-.view-menu-items .view-row .view-control .btn-ghost { flex-shrink: 0; padding: 4px 6px; line-height: 1; }
+.view-menu-items .view-row select option { background: var(--bg-panel); color: var(--text); }
+/* The 📍 sits in the middle column, so it is to the LEFT of the select it acts
+   on and on the same line as it, without being part of that select's width —
+   which is what lets the timezone select stay identical to the three above it
+   instead of giving up room to make space for a button.
+   ITS OWN SIZE IS STATED, AND THAT IS THE FIX RATHER THAN A TIDY-UP. The menu's
+   own rule ninety lines up — `.nav-menu-items a, .nav-menu-items button` — sets
+   `width: 100%`, because in the ☰ menu every button IS a full-width row. This
+   one is not: it is a glyph beside a control. Inherited, that 100% made the pin
+   as wide as its whole cell and pushed the select clean out of the panel — and
+   it survived every attempt to pin the SELECT's width, because flex-basis:auto
+   defers to `width`, so the button was what was wrong the whole time.
+   A TIGHT SQUARE ALSO MAKES CENTRING THE BOX THE SAME AS CENTRING THE PIN. With
+   the menu rule's roomy `padding: 7px 10px` the box was taller than the glyph,
+   and an emoji does not sit in the middle of its own line box — it hangs off the
+   baseline with the ascent above it — so a box the grid had centred perfectly
+   still read as a pin sitting high. With no padding and no spare line-height
+   there is nothing left between the glyph and the edges to be asymmetric. */
+.view-menu-items .view-row .btn-ghost {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 0.95rem;
+}
 .pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }
