@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from app import auth, db, providers
 from app.calendar import cache as calendar_cache, routes as calendar_routes
 from app.calendar import state as calendar_state
+from app.endpoints import ENDPOINTS
 from app.providers.base import Capabilities
 from app.providers.trakt import TraktError
 from app.config import Settings, save_settings
@@ -1377,9 +1378,23 @@ class SharePanelSourceControlTests(CalendarRouteTestCase):
         state already names it."""
         self.assertEqual(self._ticks(self._page()), ["trakt", "simkl"])
 
+    def _sources_field(self, html: str) -> str:
+        """The attributes on the Sources block, which is always in the markup and
+        hidden when there is nothing to choose — the panel rebuilds it as its own
+        Calendar option moves, so it cannot be conditionally rendered away."""
+        found = re.search(r'<div class="field" id="share_view_sources_field"([^>]*)>', html)
+        self.assertIsNotNone(found, "the Share panel has no source block at all")
+        return found.group(1)
+
+    def _source_map(self, html: str) -> dict:
+        found = re.search(r'window\.SHARE_SOURCE_CHOICES = (\{.*?\});', html)
+        self.assertIsNotNone(found, "the panel was sent no per-calendar source map")
+        return json.loads(found.group(1))
+
     def test_a_calendar_one_service_publishes_gets_no_control_at_all(self):
         html = self._page("/calendar?year=2026&month=7&endpoint=shows/finales")
-        self.assertNotIn('id="share_view_sources"', html)
+        self.assertIn("hidden", self._sources_field(html))
+        self.assertEqual(self._ticks(html), [])
         self.assertIn('id="share_view_endpoint"', html)
 
     def test_a_service_switched_off_for_the_instance_leaves_nothing_to_choose(self):
@@ -1388,8 +1403,33 @@ class SharePanelSourceControlTests(CalendarRouteTestCase):
         save_settings(dataclasses.replace(
             _configured_settings(), simkl_public_calendar_enabled=False))
         html = self._page()
-        self.assertNotIn('id="share_view_sources"', html)
+        self.assertIn("hidden", self._sources_field(html))
         self.assertNotIn('id="sourceSelect"', html)
+
+    def test_the_panel_is_sent_an_answer_for_every_calendar_a_link_may_open_on(self):
+        """THE LINK PICKS ITS OWN CALENDAR. The panel's Calendar option need not
+        be the one being looked at, so the answer to "which services could fill
+        this link" has to be available for all five without another page load —
+        otherwise the block goes on offering a service the link's own calendar
+        cannot use, and stays drawn on the calendar that has nothing to choose."""
+        offered = self._source_map(self._page())
+        self.assertEqual(sorted(offered), sorted(ENDPOINTS))
+        self.assertEqual([c["value"] for c in offered["shows"]], ["trakt", "simkl"])
+        # Empty is the answer the control needs most: it is what tells the panel
+        # to draw nothing at all.
+        self.assertEqual(offered["shows/finales"], [])
+
+    def test_the_map_and_the_rendered_block_agree_on_the_page_s_own_calendar(self):
+        """Two spellings of one answer — the server renders the block for the
+        calendar the page was loaded on and the map re-renders it afterwards. A
+        disagreement would show as the block changing the instant the panel was
+        touched, without anything having been chosen."""
+        for endpoint, expected in (("shows", ["trakt", "simkl"]), ("shows/finales", [])):
+            with self.subTest(endpoint=endpoint):
+                html = self._page(f"/calendar?year=2026&month=7&endpoint={endpoint}")
+                self.assertEqual(self._ticks(html), expected)
+                self.assertEqual([c["value"] for c in self._source_map(html)[endpoint]],
+                                 expected)
 
     def test_it_sits_inside_the_panel_s_own_options_block(self):
         """It is a property of the LINK, so it belongs with the other options

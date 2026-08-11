@@ -36,7 +36,7 @@ from . import (cache as calendar_cache, detail_source, resolve as calendar_resol
 from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
-from ..endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
+from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
@@ -299,6 +299,25 @@ def _share_source_choices(endpoint, settings) -> list[dict]:
     """
     return [{"value": name, "label": label}
             for name, label in _answering_services(endpoint, settings)]
+
+
+def _share_source_choices_by_endpoint(settings) -> dict[str, list[dict]]:
+    """The panel's Sources ticks for EVERY calendar, keyed by endpoint.
+
+    THE PANEL PICKS ITS OWN CALENDAR, which is why one list is not enough. A
+    link's Calendar option is chosen inside the dialog and need not be the
+    calendar the owner is looking at — so the moment that dropdown moves, the
+    question "which services could fill this link" has a different answer, and
+    on Season Finales it has none. Sending the whole map with the page lets the
+    control answer that on the spot rather than on the next page load, which is
+    the difference between a block that disappears when it should and one that
+    lingers offering a service the link's calendar cannot use.
+
+    ONE ENTRY PER CALENDAR, INCLUDING THE EMPTY ONES, because empty is the
+    answer the control needs most: it is what tells the panel to draw nothing.
+    """
+    return {key: _share_source_choices(endpoint, settings)
+            for key, endpoint in ENDPOINTS.items()}
 
 
 def _coverage_gap(prefs: source_prefs.SourcePrefs,
@@ -615,8 +634,11 @@ async def calendar_page(request: Request):
             endpoint, request.query_params.get("source"), settings),
         # The Share panel's own Sources control, which asks a narrower question
         # than the toolbar's — see _share_source_choices — and is likewise absent
-        # when there is nothing to choose between.
+        # when there is nothing to choose between. TWO SHAPES OF THE SAME ANSWER:
+        # the list for THIS calendar renders the panel on arrival, and the map
+        # keeps it right when the panel's own Calendar option is changed.
         "share_source_choices": _share_source_choices(endpoint, settings),
+        "share_source_choices_by_endpoint": _share_source_choices_by_endpoint(settings),
         "timezone_groups": build_timezone_options(settings.timezone),
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,

@@ -863,7 +863,11 @@
                 <div class="two-col">
                     <div class="field">
                         <label for="share_view_endpoint">Calendar</label>
-                        <select id="share_view_endpoint" onchange="saveShareView()">
+                        {# Not saveShareView directly: the calendar a LINK opens on
+                           decides which services could fill it, so the Sources
+                           ticks below have to be rebuilt before the view is
+                           saved — see onShareEndpointChange. #}
+                        <select id="share_view_endpoint" onchange="onShareEndpointChange()">
                             {% for ep in endpoints %}
                             <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                             {% endfor %}
@@ -911,9 +915,11 @@
                    calendar, exactly as the 👁️ View toolbar is not: the emptiness
                    is decided in the route, where both halves of "could this
                    service fill this calendar" are already known. #}
-                {% if share_source_choices %}
-                <div class="field">
+                <div class="field" id="share_view_sources_field"{% if not share_source_choices %} hidden{% endif %}>
                     <label>Sources</label>
+                    {# Rendered here for the calendar the page was loaded on, and
+                       rebuilt by the panel whenever its own Calendar option
+                       moves — the two must agree, so both read the same map. #}
                     <div class="source-ticks" id="share_view_sources">
                         {% for choice in share_source_choices %}
                         <label class="source-tick">
@@ -925,7 +931,6 @@
                     <span class="hint">Tick none and the link opens on whatever your own calendar
                         shows. Ticking can only narrow that, never widen it.</span>
                 </div>
-                {% endif %}
                 <div class="field checkbox">
                     <input type="checkbox" id="share_view_hidenw" onchange="saveShareView()"{% if view.hide_not_watching %} checked{% endif %}>
                     <label for="share_view_hidenw">Hide not-watching items on the shared page</label>
@@ -978,6 +983,10 @@
     // endpoints check the same two conditions server-side, so setting this by
     // hand gets you a refusal rather than a tracker.
     window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
+    // Which services could fill a shared link, per calendar the link may open
+    // on. The Share panel picks its own calendar, so it needs every answer
+    // rather than the one for the page it was opened from.
+    window.SHARE_SOURCE_CHOICES = {{ share_source_choices_by_endpoint | tojson }};
 </script>
 </body>
 </html>

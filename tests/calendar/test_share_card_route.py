@@ -952,3 +952,103 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
         before = asyncio.run(source_prefs.load(self.user_id))
         self.page(f"{self.query}&source=simkl")
         self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), before)
+
+
+class TheGridFillsFromTheRankingTests(ShareCardTestCase):
+    """A title with no artwork costs itself a place on the card, not a tile.
+
+    THE DEFECT THIS PINS, FOUND IN A BROWSER AND THEN MEASURED AGAINST A REAL
+    STORED MONTH: selection took exactly a grid's worth of the strongest titles
+    and the renderer then dropped whichever of them had no poster on disk, so the
+    strip came out six tiles wide on a month holding ninety-eight equally
+    eligible premieres — four of the top ten had no artwork. The ranking decides
+    WHICH titles represent the month and artwork decides which can be drawn;
+    taking the grid before asking the second question spends slots on titles that
+    cannot fill them.
+    """
+
+    def a_month_of(self, count: int, *, artwork_from: int) -> list[str]:
+        """`count` series premieres on consecutive days — so the ranking order is
+        the creation order — with artwork on disk from the `artwork_from`-th
+        onwards. Returns the titles that can actually be drawn."""
+        entries, drawable = [], []
+        for n in range(count):
+            title = f"Ranked {n:02d}"
+            entries.append(self.an_entry(title, 1 + n, tmdb=9000 + n))
+            if n >= artwork_from:
+                drawable.append(title)
+        self.seed(entries)
+        for n in range(artwork_from, count):
+            self.write_poster(9000 + n)
+        return drawable
+
+    def drawn_card(self, query: str = "year=2026&month=8") -> share_card.Card:
+        drawn: list[share_card.Card] = []
+        real = share_card.build_card
+        with patch.object(share_card, "build_card",
+                          side_effect=lambda card: drawn.append(card) or real(card)):
+            resp = self.client.get(f"/s/{self.token}/og.jpg?{query}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(drawn), 1, "the card was not rendered for this request")
+        return drawn[0]
+
+    def setUp(self):
+        super().setUp()
+        # The finished picture is cached by what it contains, on a disk shared by
+        # every test in this process.
+        for path in self.cached_cards():
+            path.unlink()
+
+    def test_a_full_grid_is_drawn_when_the_leading_titles_have_no_artwork(self):
+        """The reported shape: plenty of drawable titles, none of them in the
+        first grid's worth of the ranking."""
+        drawable = self.a_month_of(30, artwork_from=share_routes.MAX_CARD_TILES)
+        card = self.drawn_card()
+        self.assertEqual(len(card.tiles), share_routes.MAX_CARD_TILES)
+        # And they are drawable ones, taken in ranking order from where the
+        # artwork starts rather than from anywhere in the month.
+        self.assertEqual({tile.title for tile in card.tiles},
+                         set(drawable[:share_routes.MAX_CARD_TILES]))
+
+    def test_a_title_with_no_artwork_no_longer_costs_the_card_a_tile(self):
+        """The before/after in one assertion: every other title is drawable, so
+        the old rule would have halved the strip."""
+        entries = [self.an_entry(f"Alternate {n:02d}", 1 + n, tmdb=9500 + n) for n in range(24)]
+        self.seed(entries)
+        for n in range(0, 24, 2):
+            self.write_poster(9500 + n)
+        self.assertEqual(len(self.drawn_card().tiles), share_routes.MAX_CARD_TILES)
+
+    def test_it_reaches_no_further_than_the_candidate_ceiling(self):
+        """The bound is a fixed depth rather than a share of the month, so a busy
+        month cannot become a month's worth of lookups. Artwork beginning past
+        the ceiling leaves the strip short rather than searching on."""
+        self.a_month_of(30, artwork_from=20)
+        with patch.object(share_routes, "TILE_CANDIDATES", 12):
+            self.assertEqual(len(self.drawn_card().tiles), 0)
+
+    def test_only_the_leading_grid_is_ever_warmed(self):
+        """Reaching further must not ask for more. The candidates past the grid
+        cost a stat each and are drawn only if their artwork already landed."""
+        asked: list[int] = []
+
+        async def _count(settings, refs) -> int:
+            asked.append(len(refs))
+            return 0
+
+        self.a_month_of(30, artwork_from=30)
+        with patch.object(posters, "ensure_posters", _count):
+            self.drawn_card()
+        self.assertEqual(asked, [share_routes.MAX_CARD_TILES])
+
+    def test_a_full_grid_is_kept_even_with_artwork_still_on_its_way(self):
+        """A full strip is already the best this month can look, so it caches.
+        Holding it open for a poster that could only displace an equally good
+        tile would re-render on every crawl and never settle."""
+        self.a_month_of(30, artwork_from=share_routes.MAX_CARD_TILES)
+        first = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
+        self.assertEqual(first.status_code, 200)
+        with patch.object(share_card, "build_card",
+                          side_effect=AssertionError("re-rendered a full card")):
+            second = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
+        self.assertEqual(second.content, first.content)

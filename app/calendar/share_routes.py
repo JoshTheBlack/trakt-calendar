@@ -601,6 +601,23 @@ def _card_url(view: ShareView, share_row, base: str) -> str | None:
 # thirty-airing August must not become thirty lookups.
 MAX_CARD_TILES = share_card.MAX_TILES
 
+# How far down the ranking a card may look for a title it can actually DRAW.
+#
+# WHY IT IS MORE THAN THE GRID, which is the whole of this number's reason to
+# exist. Selection ranks titles by how strongly they represent the month; a tile
+# also needs ARTWORK, and those are different questions asked at different times.
+# Taking exactly a grid's worth and then dropping whatever had no poster spends a
+# slot on a title that cannot be drawn — so a month with a hundred candidates
+# rendered a strip of six, while titles with artwork on disk sat just below the
+# cut. Measured on a real August: four of the top ten had no poster.
+#
+# IT IS A CEILING, NOT A MULTIPLE OF THE MONTH. The bound that matters is that a
+# busy month must not become a month's worth of lookups, and this is a fixed
+# thirty however many airings there are. What it costs is a stat each for the
+# twenty beyond the grid: only the first grid's worth is ever WARMED (see
+# `_resolve_tiles`), so the outbound work is exactly what it was.
+TILE_CANDIDATES = MAX_CARD_TILES * 3
+
 # A wall clock on resolving artwork, applied ONLY where a request is waiting on
 # the answer. An unfurler gives up in a handful of seconds, and a card that
 # arrives after Discord stopped listening is not a slower embed, it is no embed
@@ -783,23 +800,31 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     that decided the title was worth a tile in the first place, rather than a
     second spelling of the same rule. The renderer is handed the answers.
 
+    THE GRID IS FILLED FROM THE RANKING, NOT FROM A SLICE OF IT. Candidates run
+    `TILE_CANDIDATES` deep and the first grid's worth that HAVE artwork are the
+    ones drawn, in ranking order — so a title with no poster costs itself a place
+    rather than costing the card a tile. Only the leading grid's worth is warmed,
+    so this reaches further without asking for more.
+
     THE ORDER THE TILES COME BACK IN IS THE DISPLAY ORDER, not the selection
     order — see `arrange_tiles`. The two are sorted separately and the
     arrangement happens LAST, after the titles with no artwork have dropped out,
     so the dates a reader sees run in order across whatever tiles survived
     rather than across the ones that were hoped for.
     """
-    pairs = _poster_refs(select_tile_items(visible))
+    candidates = _poster_refs(select_tile_items(visible, limit=TILE_CANDIDATES))
+    wanted = candidates[:MAX_CARD_TILES]
     # The one place a card request can wait on the network. `budget` is the wall
     # clock it is allowed — a span at or just under it means the budget FIRED and
     # the card that follows is a tile short on purpose, which is a very different
     # story from the same span reading 30ms.
-    with span("share.warm_posters", refs=len(pairs), budget=budget):
-        await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)
+    with span("share.warm_posters", refs=len(wanted), budget=budget):
+        await _warm_posters(settings, [ref for _item, ref in wanted], budget=budget)
 
     drawn: list[tuple[share_card.Tile, float | None]] = []
-    complete = True
-    for item, ref in pairs:
+    for item, ref in candidates:
+        if len(drawn) >= MAX_CARD_TILES:
+            break
         path = posters.cached_poster(*ref)
         if path is not None:
             drawn.append((share_card.Tile(
@@ -807,9 +832,14 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
                 date_label=_tile_date_label(item),
                 is_premiere=tile_tier(item) == _TIER_SERIES_PREMIERE,
             ), _air_moment(item)))
-        elif not posters.is_negative(*ref):
-            complete = False
-    return arrange_tiles(drawn), complete
+    # A FULL GRID IS SETTLED whatever is still resolving behind it: the card is
+    # already the best this month can look, and holding the cache open for a
+    # poster that would only displace an equally good tile would re-render it on
+    # every crawl for nothing. Short of full, anything still on its way is a
+    # reason to render again later — which is what makes a thin card heal.
+    pending = any(posters.cached_poster(*ref) is None and not posters.is_negative(*ref)
+                  for _item, ref in wanted)
+    return arrange_tiles(drawn), len(drawn) >= MAX_CARD_TILES or not pending
 
 
 def _avatar_bytes(owner_id: int) -> bytes | None:

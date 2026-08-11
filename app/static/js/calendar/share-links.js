@@ -33,6 +33,40 @@ function shareSourceTicks() {
     return [...document.querySelectorAll('#share_view_sources input[type=checkbox]')];
 }
 
+// Rebuild the Sources ticks for the calendar the LINK opens on, keeping whatever
+// was ticked that is still on offer.
+//
+// WHICH CALENDAR DECIDES, AND IT IS THE PANEL'S RATHER THAN THE PAGE'S. The
+// link's Calendar option need not be the one being looked at, so a panel that
+// kept the page's answer would go on offering a service the link's own calendar
+// cannot use — and would keep the block drawn on Season Finales, which only one
+// service publishes and which therefore has nothing to choose between.
+//
+// A TICK THAT IS NO LONGER OFFERED IS DROPPED, deliberately. Switching a link to
+// a calendar a service does not publish means that service can no longer be what
+// fills it, and carrying the tick invisibly would leave the link saying
+// something the panel had stopped showing.
+function renderShareSourceTicks(endpointKey, selected) {
+    const field = document.getElementById('share_view_sources_field');
+    const box = document.getElementById('share_view_sources');
+    if (!field || !box) return;
+    const choices = (window.SHARE_SOURCE_CHOICES || {})[endpointKey] || [];
+    field.hidden = !choices.length;
+    box.innerHTML = choices.map(choice => `<label class="source-tick">`
+        + `<input type="checkbox" data-source="${choice.value}"`
+        + `${selected.has(choice.value) ? ' checked' : ''} onchange="saveShareView()">`
+        + `<span>${choice.label}</span></label>`).join('');
+}
+
+// The link's calendar changed: re-ask which services could fill it, then save.
+// In that order — saving first would write the ticks from the calendar the owner
+// has just moved away from.
+function onShareEndpointChange() {
+    const ticked = new Set(shareSourceTicks().filter(cb => cb.checked).map(cb => cb.dataset.source));
+    renderShareSourceTicks(document.getElementById('share_view_endpoint').value, ticked);
+    saveShareView();
+}
+
 // The link's display options. A null link_view means the URL goes out bare, so
 // whoever opens it sees whatever the owner's calendar currently resolves to;
 // otherwise the options below are written into the query string. Neither case
@@ -64,8 +98,12 @@ function renderShareView() {
     // names no services, so under a link that can only narrow it comes out the
     // same as naming none at all. Saving from this panel then writes the ticks,
     // which is what the owner is looking at.
-    const named = new Set((view.source || '').split('+'));
-    shareSourceTicks().forEach(cb => { cb.checked = named.has(cb.dataset.source); });
+    //
+    // REBUILT RATHER THAN JUST RE-TICKED, because the link's own calendar is
+    // what decides which ticks exist at all, and this runs after that select has
+    // been set from the stored view above.
+    renderShareSourceTicks(document.getElementById('share_view_endpoint').value,
+                           new Set((view.source || '').split('+')));
     setSharePinnedMonth(view.month || '', view.year || null);
 }
 
