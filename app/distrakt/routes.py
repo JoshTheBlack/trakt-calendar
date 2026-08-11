@@ -35,6 +35,7 @@ from .. import distrakt as distrakt_store
 from .. import auth, authz, chrome, clock, db, route_params
 from ..auth import simkl_routes, trakt_routes
 from ..auth import AuthLevel
+from ..calendar import detail_source
 from ..calendar import share_links
 # The turn-away marks themselves, written where a tracker verdict has to reach the
 # main calendar. Read back through lifecycle.reconcile_turn_aways rather than here.
@@ -988,30 +989,37 @@ async def api_distrakt_details(request: Request):
     THE WATCHED HALF IS EVERY SERVICE'S ANSWER, NOT ONE OF THEM — see the read
     below for what it used to do and why the union is the honest reply.
 
-    THE DETAIL HALF IS STILL TRAKT'S ALONE, and that is narrower than it should
-    be. It is written down here as a KNOWN GAP rather than as a design, because
-    the reasoning that would justify it is false.
+    THE DETAIL HALF ASKS WHICHEVER SERVICE THE ROW CARRIES AN ID FOR, through the
+    same `detail_source` the calendar's modal uses. It used to ask Trakt and only
+    Trakt, and that was recorded here as a known gap until an account hit it.
 
     A ROSTER ROW DOES NOT NEED A TRAKT ID TO EXIST. The roster keys on the shared
     identity waterfall (app/providers/base.py's MATCH_SOURCES — tmdb, tvdb, imdb,
     mal) and never on a Trakt id, so a season baselined from a Simkl library read
     is filed perfectly well with none: Simkl's id map carries `traktslug` but
     never a numeric `trakt` (0 of 7768 catalogue records measured), and
-    `collect_ids` drops the slug. So the refusal below catches rows the tracker
-    was happy to create, and tells the viewer they are "Not on your roster" about
-    a row that demonstrably is.
+    `collect_ids` drops the slug. The old refusal therefore caught rows the
+    tracker was happy to create and told the viewer they were "Not on your
+    roster" about a row that demonstrably was.
 
-    WHY IT IS NOT FIXED IN THE SAME BREATH AS THE WATCHED READ: the repair is the
-    one the calendar's modal already had — ask whichever service the row carries
-    an id for, which `live.detail_source` on this same page already knows how to
-    choose — and it changes what this route can ANSWER rather than how it reads
-    one column. That is its own piece of work with its own tests, not a rider on
-    a fix to the watched half.
+    TWO REFUSALS NOW, WHERE THERE WAS ONE, because they are different facts and a
+    reader can act on only one of them. A row the page cannot find at all is
+    still "Not on your roster". A row that is on the roster and that no
+    registered, configured source can describe says so instead — the calendar's
+    wording, because it is the calendar's situation.
+
+    THE CHOICE IS NOT GATED ON WHAT THIS VIEWER LINKED, and `detail_source` is
+    where that reasoning lives: a season's description is catalogue data, the
+    same for everyone, so a Simkl-only title is asked of Simkl whether or not
+    this account signed in with it.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    # NO CONFIGURATION GATE OF ITS OWN. Which services can answer is exactly what
+    # `detail_source.choose` decides, and it already treats "no source recognises
+    # this title" and "the ones that do are not configured" as one answer — so a
+    # gate naming Trakt here would refuse, in Trakt's name, a row Simkl could
+    # have described.
     season = route_params.season(request.query_params.get("season"))
     try:
         key = parse_item_key(request.query_params.get("key"))
@@ -1032,13 +1040,24 @@ async def api_distrakt_details(request: Request):
     today = clock.today()
     placed = await lifecycle.find_shown_season(
         user_id, key, season, month=distrakt_store.month_key(today.year, today.month))
-    ids = (placed.record.get("ids") or {}) if placed else {}
-    if not ids.get("trakt"):
+    if placed is None:
         return JSONResponse({"ok": False, "error": "Not on your roster"}, status_code=404)
+    ids = placed.record.get("ids") or {}
+    chosen = detail_source.choose(settings, ids)
+    if chosen is None:
+        return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
+                            status_code=404)
+    source, source_id = chosen
     try:
-        details = await trakt_detail.fetch_details(settings, Media.SHOW, ids["trakt"], season)
+        details = await detail_source.fetch(settings, source, Media.SHOW, source_id, season)
     except TraktError as exc:
+        # Trakt's own error type carries a status worth passing on; every other
+        # source raises something this route has no special reading of, and a
+        # failure to describe a title must not take the modal down with it.
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
+    except Exception:
+        logger.warning("Detail lookup failed for %s", source, exc_info=True)
+        return JSONResponse({"ok": False, "error": "Could not load details."}, status_code=502)
     rows = await db.fetch_all(
         "SELECT source, watched_episodes_json FROM distrakt_show_progress "
         "WHERE user_id = ? AND media = ? AND match_source = ? AND match_id = ? "
@@ -1079,6 +1098,9 @@ async def api_distrakt_details(request: Request):
     return JSONResponse({
         "ok": True,
         **details,
+        # WHO ANSWERED, told to the client the same way the calendar's modal
+        # tells it, because the panel renders a service's name and its links.
+        "source": str(source),
         "slug": str(ids.get("slug") or ""),
         "season": season,
         "watched_episodes": watched,

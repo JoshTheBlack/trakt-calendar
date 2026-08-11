@@ -139,10 +139,11 @@ class DetailsWithoutATraktTokenTests(AppTestCase):
             self.assertNotIn("Authorization", headers)
             self.assertEqual(headers["trakt-api-key"], "cid")
 
-    def test_a_row_with_no_trakt_id_is_still_a_404(self):
-        """Rendering a modal for a title only Simkl knows is a separate piece of
-        work with its own data behind it; until it exists, saying "not on your
-        roster" is the honest answer rather than an empty modal."""
+    def test_a_row_no_configured_source_can_describe_says_so(self):
+        """A Simkl-only row on an instance whose Simkl credentials are not filled
+        in. Nobody can answer, and the refusal names no service — the operator's
+        configuration is not a modal's business, and blaming Trakt for a title
+        Trakt never listed would be a lie the reader cannot act on."""
         asyncio.run(distrakt_store.add_user_record(self.user_id, {
             "ids": {"simkl": 99, "tmdb": 2}, "season": 1, "title": "Simkl Only",
             "media": "show", "kind": distrakt_store.RecordKind.KEEPUP,
@@ -151,6 +152,15 @@ class DetailsWithoutATraktTokenTests(AppTestCase):
                           return_value=_RecordingClient({})):
             resp = self.client.get("/api/distrakt/details?key=show:tmdb:2&season=1")
         self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"], "Nothing here can describe this item.")
+
+    def test_a_row_that_is_not_on_the_roster_at_all_still_says_that(self):
+        """The other refusal, kept apart from the one above: these are different
+        facts and only one of them is something the reader can do anything
+        about."""
+        resp = self.client.get("/api/distrakt/details?key=show:tmdb:404404&season=1")
+        self.assertEqual(resp.status_code, 404)
+        self.assertEqual(resp.json()["error"], "Not on your roster")
 
 
 class _CatalogueFailureTestCase(unittest.IsolatedAsyncioTestCase):
@@ -369,3 +379,114 @@ class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
         resp = self.client.post("/api/distrakt/backfill/survey",
                                 json={"start": "2026-07", "end": "2026-08"})
         self.assertEqual(self.refusal(resp), "Not configured")
+
+
+class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
+    """The tracker modal on a row Trakt has never heard of.
+
+    THE ROSTER HAS ALWAYS BEEN ABLE TO HOLD ONE. It keys on the shared identity
+    waterfall — tmdb, tvdb, imdb, mal — and never on a Trakt id, so a season
+    baselined out of a Simkl library read is filed perfectly well with none:
+    Simkl's id map carries `traktslug` but no numeric `trakt`, and `collect_ids`
+    drops the slug. What could not happen was describing one. The modal asked
+    Trakt, found no Trakt id, and told the viewer the row was "not on your
+    roster" — about a row the page had just drawn.
+
+    IT IS THE CALENDAR'S OWN REPAIR, one page over: ask whichever service the row
+    carries an id for, through the same chooser, so the two modals cannot come to
+    different answers about who can describe a title.
+    """
+
+    SIMKL_DETAIL = {
+        "title": "Simkl Only", "overview": "A show only one service lists.",
+        "status": "airing", "network": "SimklVision", "runtime": 24,
+        "genres": ["Drama"], "certification": "TV-14", "cast": [],
+        "episodes": [{"number": n, "title": f"Ep {n}", "air_display": "12 Jul 2026"}
+                     for n in range(1, 5)],
+    }
+
+    def make_settings(self):
+        # Both services set up by the operator. Which one answers is then decided
+        # by the row, which is the whole point.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        trakt_access_token="operator-token",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("simkl_roster", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        asyncio.run(distrakt_store.add_user_record(self.user_id, {
+            "ids": {"simkl": 2735483, "tmdb": 55}, "season": 1, "title": "Simkl Only",
+            "network": "SimklVision", "media": "show",
+            "kind": distrakt_store.RecordKind.KEEPUP,
+        }))
+        asyncio.run(db.execute(
+            "INSERT OR REPLACE INTO distrakt_show_progress "
+            "(user_id, media, match_source, match_id, season, source, "
+            "watched_episodes_json, simkl_id) VALUES (?,?,?,?,?,?,?,?)",
+            (self.user_id, "show", "tmdb", "55", 1, "simkl",
+             '{"1": "2026-07-12T15:18:00Z", "2": "2026-07-12T16:07:00Z"}', 2735483)))
+        self.sign_in_as(self.user_id)
+
+    def _details(self, asked: list | None = None):
+        async def _fetch(settings, media, source_id, season, *, cache_only=False):
+            if asked is not None:
+                asked.append((str(source_id), season))
+            return dict(self.SIMKL_DETAIL)
+
+        with patch("app.providers.simkl.detail.fetch_details", _fetch):
+            return self.client.get("/api/distrakt/details?key=show:tmdb:55&season=1")
+
+    def test_the_modal_opens(self):
+        """It used to 404 "Not on your roster" about a row that plainly is."""
+        resp = self._details()
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        self.assertTrue(resp.json()["ok"])
+
+    def test_simkl_is_the_one_asked_and_it_is_asked_by_its_own_id(self):
+        """A service cannot look a title up by an id it does not issue, so the
+        chooser hands each one its own namespace."""
+        asked: list = []
+        body = self._details(asked).json()
+        self.assertEqual(asked, [("2735483", 1)])
+        self.assertEqual(body["source"], "simkl")
+
+    def test_it_carries_the_fields_the_panel_draws(self):
+        body = self._details().json()
+        self.assertEqual(body["title"], "Simkl Only")
+        self.assertEqual(body["overview"], "A show only one service lists.")
+        self.assertEqual([e["number"] for e in body["episodes"]], [1, 2, 3, 4])
+
+    def test_this_accounts_own_watched_episodes_come_with_it(self):
+        """The watched half was never Trakt's to answer — it is read out of this
+        app's own storage, written by whichever services the account syncs."""
+        body = self._details().json()
+        self.assertEqual(body["watched_episodes"], [1, 2])
+        self.assertEqual(body["watched_by_source"], {"simkl": [1, 2]})
+
+    def test_a_row_both_services_know_is_still_trakt_s_to_describe(self):
+        """The regression half. Declared source order decides, so nothing moves
+        for the rows that already worked — and a Simkl call on one of those
+        would be a second catalogue read for an answer already in hand."""
+        asyncio.run(distrakt_store.add_user_record(self.user_id, {
+            "ids": {"trakt": 7, "simkl": 99, "tmdb": 56}, "season": 1,
+            "title": "Both", "media": "show",
+            "kind": distrakt_store.RecordKind.KEEPUP,
+        }))
+        trakt_asked: list = []
+
+        async def _trakt(settings, media, source_id, season, *, cache_only=False):
+            trakt_asked.append(str(source_id))
+            return {"title": "Both", "episodes": []}
+
+        async def _simkl(*args, **kwargs):
+            raise AssertionError("Simkl was asked about a title Trakt can describe")
+
+        with patch("app.providers.trakt.detail.fetch_details", _trakt), \
+                patch("app.providers.simkl.detail.fetch_details", _simkl):
+            body = self.client.get("/api/distrakt/details?key=show:tmdb:56&season=1").json()
+        self.assertEqual(trakt_asked, ["7"])
+        self.assertEqual(body["source"], "trakt")
