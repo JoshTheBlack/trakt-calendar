@@ -761,3 +761,176 @@ class TheOwnersSourcePreferenceReachesBothSurfacesTests(ShareCardTestCase):
             "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
         self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
                          ["simkl", "trakt"])
+
+
+class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
+    """A link may say which services fill it, and what that means against the
+    rule that a share page renders the OWNER's source preference.
+
+    IT IS AN OVERRIDE THAT CAN ONLY NARROW. The owner's preference is still what
+    a link resolves with; naming a service on the link picks one of the services
+    that preference already admits, exactly as naming an endpoint or a timezone
+    picks one of the views the owner's calendar already has. Widening is the one
+    thing it cannot do — a link showing titles the owner narrowed their own
+    calendar to exclude is precisely the fault the owner-preference rule was
+    written to fix, and it must not come back through a query param a stranger
+    can retype.
+
+    AND IT NEVER REFUSES. A link naming a service this instance has since
+    switched off has nothing left to narrow to, so it renders on the owner's
+    preference rather than on an error page or an empty month.
+    """
+
+    def seed_two_sources(self) -> None:
+        from app.providers.base import Media, Record, Source
+
+        day = date(2026, 8, 12)
+        records = [
+            Record(source=Source.TRAKT, media=Media.SHOW, id="trakt-only",
+                   ids={"trakt": 91, "slug": "trakt-only"},
+                   detail_url="https://trakt.tv/shows/trakt-only", title="Trakt Only",
+                   air_ts=1786276800.0, season=1, episode_number=1, episode_label="S01E01"),
+            Record(source=Source.SIMKL, media=Media.SHOW, id="simkl-only",
+                   ids={"simkl": 92}, detail_url="https://simkl.com/tv/92",
+                   title="Simkl Only", air_ts=1786276800.0, season=1,
+                   episode_number=1, episode_label="S01E01"),
+        ]
+        asyncio.run(calendar_cache.store_window(
+            "shows/new", calendar_cache.window_start(day), records, 600, db.now(),
+            sources=["trakt", "simkl"]))
+
+    def page(self, query: str) -> str:
+        resp = self.client.get(f"/s/{self.token}?{query}")
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def page_total(self, query: str) -> int:
+        return int(re.search(r"📊\s*(\d+)", self.page(query)).group(1))
+
+    def card_count(self, query: str) -> int:
+        drawn: list[share_card.Card] = []
+        real = share_card.build_card
+        with patch.object(share_card, "build_card",
+                          side_effect=lambda card: drawn.append(card) or real(card)):
+            resp = self.client.get(f"/s/{self.token}/og.jpg?{query}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(drawn), 1, "the card was not rendered for this request")
+        return drawn[0].count
+
+    def set_owner_source(self, selection: str) -> None:
+        from app.sources import prefs as source_prefs
+
+        asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
+            user_id=self.user_id, calendar_source=selection)))
+
+    def setUp(self):
+        super().setUp()
+        self.seed_two_sources()
+        self.query = "year=2026&month=8"
+        # A finished picture is cached by what it CONTAINS, on a disk shared by
+        # every test in this process — so two tests here asking for the same
+        # month under the same narrowing would find the second served off disk
+        # with nothing drawn, and `card_count` reads what was drawn. Each test
+        # starts from an empty one.
+        for path in self.cached_cards():
+            path.unlink()
+
+    def test_a_link_naming_a_service_shows_that_service_alone(self):
+        page = self.page(f"{self.query}&source=simkl")
+        self.assertIn("Simkl Only", page)
+        self.assertNotIn("Trakt Only", page)
+
+    def test_a_link_naming_nothing_still_shows_what_the_owner_admits(self):
+        """The default is untouched: no source in the link means the page
+        resolves the owner's preference, which is what it has always done."""
+        page = self.page(self.query)
+        self.assertIn("Simkl Only", page)
+        self.assertIn("Trakt Only", page)
+
+    def test_the_picture_and_the_page_agree_on_a_link_that_names_a_source(self):
+        """THE COUNT INVARIANT, under the option that changes which airings are
+        in a month without changing anything about how it is drawn."""
+        query = f"{self.query}&source=trakt"
+        total = self.page_total(query)
+        self.assertEqual(total, 1)
+        self.assertEqual(self.card_count(query), total)
+        self.assertLess(total, self.page_total(self.query))
+
+    def test_the_advertised_picture_carries_the_links_source(self):
+        """The URL the page hands an unfurler is built from the resolved view,
+        so the picture is filled from the services the page was filled from
+        rather than resolving the question again when a crawler arrives. Read
+        through the code the URL is written as, which is where the answer lives
+        now that a source has a field in it."""
+        image = re.search(r'property="og:image" content="([^"]+)"',
+                          self.page(f"{self.query}&source=trakt")).group(1)
+        code = re.search(r"[?&]p=([^&]+)", image).group(1)
+        self.assertEqual(share_code.decode(code).get("source"), "trakt")
+
+    def test_a_service_the_instance_switched_off_falls_back_and_renders(self):
+        """Never a refusal and never a blank month. The named service is gone
+        for everybody, so there is nothing left to narrow to and the link
+        renders on the owner's preference — which on this instance is now one
+        service, and it is the one still in play."""
+        from app.config import save_settings
+
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                               trakt_access_token="tok",
+                               simkl_public_calendar_enabled=False))
+        query = f"{self.query}&source=simkl"
+        page = self.page(query)
+        self.assertIn("Trakt Only", page)
+        self.assertNotIn("Simkl Only", page)
+        self.assertEqual(self.page_total(query), 1)
+        self.assertEqual(self.card_count(query), 1)
+
+    def test_a_link_cannot_widen_what_the_owner_narrowed(self):
+        """The whole of why this is safe as a query param. The owner's calendar
+        is Trakt's alone; a link — or a stranger editing one — naming the other
+        service resolves to the owner's preference rather than to titles the
+        owner took off their own calendar."""
+        self.set_owner_source("trakt")
+        page = self.page(f"{self.query}&source=simkl")
+        self.assertIn("Trakt Only", page)
+        self.assertNotIn("Simkl Only", page)
+
+    def test_asking_for_every_service_is_not_a_way_round_that(self):
+        """`auto` names no services, so it is not a narrowing of anything and
+        cannot be used to reopen what the owner closed."""
+        self.set_owner_source("trakt")
+        page = self.page(f"{self.query}&source=auto")
+        self.assertNotIn("Simkl Only", page)
+
+    def test_a_source_the_app_has_never_heard_of_is_ignored_rather_than_refused(self):
+        """These arrive from strangers editing URLs, and the page owes them a
+        month rather than an error."""
+        page = self.page(f"{self.query}&source=netflix")
+        self.assertIn("Trakt Only", page)
+        self.assertIn("Simkl Only", page)
+
+    def test_the_links_source_survives_the_pages_own_controls(self):
+        """The visitor's controls submit a GET form of their own inputs, so
+        without the link's answer travelling with them, clicking any of them
+        would quietly reopen the page on the owner's wider default."""
+        page = self.page(f"{self.query}&source=trakt")
+        controls = page[page.index('class="hero-controls"'):]
+        controls = controls[:controls.index("</form>")]
+        self.assertIn('name="source" value="trakt"', controls)
+
+    def test_narrowing_a_link_rewrites_no_stored_window(self):
+        """Applied at read over the shared row, like every other narrowing: what
+        one link says must never reach what everybody else reads."""
+        self.page(f"{self.query}&source=trakt")
+        window, _ = asyncio.run(calendar_cache.read_cached_window(
+            "shows/new", calendar_cache.window_start(date(2026, 8, 12))))
+        self.assertEqual(sorted(s for g in window.groups for s in g["by_source"]),
+                         ["simkl", "trakt"])
+
+    def test_the_owners_own_row_is_untouched_by_a_link_that_narrows(self):
+        """A link is not a preference. Nothing a visitor opens may rewrite the
+        account's stated answer."""
+        from app.sources import prefs as source_prefs
+
+        before = asyncio.run(source_prefs.load(self.user_id))
+        self.page(f"{self.query}&source=simkl")
+        self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), before)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar as _calendar
+import dataclasses
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -30,8 +31,9 @@ import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, detail_source, share_card, share_card_cache,
-               share_code, share_links, state as calendar_state)
+from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
+               share_card, share_card_cache, share_code, share_links,
+               state as calendar_state)
 from .. import auth, authz, clock, perftrace, route_params
 from ..auth import AuthLevel
 from ..authz import Guard
@@ -39,7 +41,7 @@ from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import posters, user_images
 from ..perftrace import span
-from ..providers.base import Item, Media
+from ..providers.base import Item, Media, Source
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
@@ -61,7 +63,7 @@ SHARE_RATE_WINDOW_SECONDS = 60
 
 # Query params a share request may carry, kept here so the view-option resolvers
 # below and the "carry these into the month-nav links" helper agree on the set.
-_CARRY_PARAMS = ("card", "packing", "hidenw", "tz", "networks", "endpoint")
+_CARRY_PARAMS = ("card", "packing", "hidenw", "tz", "networks", "endpoint", "source")
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,26 @@ def _resolve_networks(params: _Params, share_row, settings) -> list[str] | None:
     return list(settings.network_filter or []) or None
 
 
+def _resolve_source(params: _Params) -> str | None:
+    """Which services this request asks the month be filled from, or None for
+    "whatever the owner's own preference says".
+
+    WHITELISTED HERE, HONOURED ELSEWHERE, and the split is deliberate. All this
+    can say is that the value is a selection the app can act on at all
+    (`is_selection` — the same predicate the calendar's own `?source=` passes
+    through, and the same one that guarded it on the way into the link). Whether
+    it may actually be acted on for THIS share depends on two things a resolver
+    taking nothing but params does not have: what the owner's preference already
+    admits, and what the instance still puts on its calendar. `_narrowed_prefs`
+    owns that, once, where both surfaces reach it.
+
+    Anything unusable reads as None rather than as an error, like every other
+    resolver here: these arrive from strangers editing URLs.
+    """
+    requested = (params.get("source") or "").strip()
+    return requested if source_prefs.is_selection(requested) else None
+
+
 def _resolve_owner_tz(share_row, settings) -> ZoneInfo:
     """The owner's default timezone: their share-specific override if they set
     one, else their account's own saved timezone, else the app-wide default."""
@@ -168,6 +190,14 @@ class ShareView:
     `card_style` and `day_packing` are page layout and mean nothing to the card;
     everything else changes WHICH AIRINGS are in the view and therefore changes
     both.
+
+    `source` IS THE ONE FIELD THAT IS A REQUEST RATHER THAN AN ANSWER, and it
+    says so here so nobody reads it as one. It is the selection this request
+    NAMES, already whitelisted; whether the month is actually narrowed to it is
+    settled by `_narrowed_prefs` inside `_read_month`, because that answer needs
+    the owner's own preference and the instance's admitted set. Carrying the
+    request on the view is still what makes the two surfaces agree: both reach
+    that one decision through this one value.
     """
     year: int
     month: int
@@ -177,6 +207,7 @@ class ShareView:
     network_filter: list[str] | None
     card_style: str
     day_packing: str
+    source: str | None = None
 
     @property
     def month_label(self) -> str:
@@ -205,6 +236,7 @@ def resolve_view(params: _Params, share_row, settings) -> ShareView:
         day_packing=_resolve_choice(
             params.get("packing"), share_row["day_packing"], settings.day_packing, _DAY_PACKINGS,
         ),
+        source=_resolve_source(params),
     )
 
 
@@ -214,6 +246,60 @@ def resolve_view(params: _Params, share_row, settings) -> ShareView:
 
 def _not_found(request: Request) -> Response:
     return templates.TemplateResponse(request, "share_not_found.html", {"request": request}, status_code=404)
+
+
+def _narrowed_prefs(prefs, view: ShareView, settings):
+    """The owner's source preference, narrowed to the services this request
+    named — or the preference untouched, whenever that narrowing cannot be
+    honoured.
+
+    IT CAN ONLY EVER NARROW, NEVER WIDEN, and that is the whole of how a
+    per-link source sits with the rule that a share page renders the OWNER's
+    source preference. A link is the owner saying "open this one on Simkl", the
+    same kind of statement as "open this one on the premieres calendar" — but
+    the set it picks from is the set their own calendar already shows. Honouring
+    a widening would put back exactly the defect that rule was written to fix:
+    an owner who narrowed their calendar to one service handing strangers a link
+    showing the titles they narrowed out. It is also what makes the value's
+    arrival by query string harmless, and it does arrive that way — a `p=` code
+    expands into the address bar, so `source` is a param a visitor can retype,
+    and the most a retyped one can do is show them a subset of a page they were
+    already being shown.
+
+    THE INTERSECTION IS TAKEN AGAINST BOTH ADMISSIONS, the owner's and the
+    operator's, and the second is what answers "the instance switched that
+    service off after the link went out". The named services simply fall out of
+    the intersection, nothing is left to narrow to, and the month renders on the
+    owner's preference — a link degrading to the default rather than to an error
+    page, which is how an unreadable `p=` and an unknown timezone already behave
+    on these routes. NEVER A REFUSAL AND NEVER AN EMPTY MONTH: narrowing to a
+    service the calendar cannot fill would render a blank page that says nothing
+    about why.
+
+    `auto` names no services at all — it is "whatever there is" — so it is not a
+    narrowing of anything and is left alone here, resolving as the owner's
+    preference does.
+    """
+    named = source_prefs.named_sources(view.source or "")
+    if named is None:
+        return prefs
+    instance = calendar_resolve.instance_sources(settings)
+    surviving = [
+        str(source) for source in Source
+        if str(source) in named
+        and prefs.admits_calendar(source, view.endpoint.key)
+        and (instance is None or str(source) in instance)
+    ]
+    if not surviving:
+        return prefs
+    # The per-endpoint overrides go with it, for the reason the calendar's own
+    # `?source=` clears them: a link that says "open this on Simkl" has to mean
+    # that on the calendar it opens, and a stored override for that endpoint
+    # would quietly win over the thing the link asked for.
+    return dataclasses.replace(
+        prefs, calendar_source=source_prefs.SEPARATOR.join(surviving),
+        endpoint_sources={},
+    )
 
 
 async def _read_month(view: ShareView, settings, owner_prefs,
@@ -241,6 +327,9 @@ async def _read_month(view: ShareView, settings, owner_prefs,
     every source the stored rows held while the owner's own calendar admitted
     what they asked for, so a link could show a stranger titles the owner had
     narrowed their calendar to exclude.
+
+    A LINK MAY NARROW THAT FURTHER — see `_narrowed_prefs`, which is applied here
+    for the same one-place reason the preference is loaded here.
     """
     if not settings.calendar_source_configured:
         return [], None
@@ -252,7 +341,8 @@ async def _read_month(view: ShareView, settings, owner_prefs,
         movie_release_countries=owner_prefs["movie_release_countries"],
         movie_release_types=owner_prefs["movie_release_types"],
         network_filter=view.network_filter,
-        prefs=await source_prefs.load(owner_id), allow_fetch=False,
+        prefs=_narrowed_prefs(await source_prefs.load(owner_id), view, settings),
+        allow_fetch=False,
     )
 
 
@@ -412,6 +502,9 @@ async def _render(request: Request, share_row) -> Response:
         "not_watching": nw_ids,
         "total": len(visible),
         "view": {"card_style": view.card_style, "day_packing": view.day_packing},
+        # Carried through this page's own controls rather than offered by one:
+        # the visitor sets how the month is DRAWN, never which services fill it.
+        "source": view.source,
         "as_of": as_of_label,
         "query_extra": _carry_query(request),
         # The visitor's own view controls. Everything they drive is a GET with
@@ -470,6 +563,12 @@ def _card_view_params(view: ShareView) -> dict[str, str]:
         "hidenw": "1" if view.hide_not_watching else "0",
         "tz": view.tz.key,
     }
+    if view.source:
+        # Pinned like everything else here: the picture must be filled from the
+        # services the page it previews was filled from, and leaving it to be
+        # resolved again from whatever an unfurler happened to fetch is how a
+        # card ends up advertising a count its page does not show.
+        params["source"] = view.source
     if view.network_filter:
         # The one view param the compact code has no field for, which is why
         # share_links.link_query decides between the short and long spellings

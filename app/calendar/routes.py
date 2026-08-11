@@ -259,6 +259,31 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     return choices
 
 
+def _share_source_choices(endpoint, settings) -> list[dict]:
+    """The Share panel's Sources control: what a generated link may say about
+    which services fill it. An empty list means the panel draws nothing.
+
+    THE SAME LIST AS THE TOOLBAR'S, ASKED THROUGH THE SAME FUNCTION, so the two
+    controls cannot disagree about which services could fill this calendar — and
+    so the panel disappears on a one-service instance by the same rule that
+    empties the toolbar, rather than by a second count of the same thing. A
+    dialog offering a control that can only say one thing would be advertising a
+    choice this instance does not have.
+
+    MINUS "EVERY SERVICE", WHICH IS THE ONE ANSWER A LINK CANNOT MEAN. A link
+    opens on the owner's own calendar narrowed no wider than the owner already
+    narrowed it (app/calendar/share_routes.py's `_narrowed_prefs` says why), so
+    "every service" either means exactly what the first option already means or
+    means something that will not be honoured — two labels for one outcome in
+    the good case and a lie in the other.
+
+    Nothing is marked selected: which option a link is on is stored per link and
+    the panel sets it from that, not from the calendar being looked at.
+    """
+    return [choice for choice in _source_choices(endpoint, None, settings)
+            if choice["value"] != source_prefs.AUTO]
+
+
 def _coverage_gap(prefs: source_prefs.SourcePrefs,
                   year: int, month: int, settings, *, endpoint=None,
                   ) -> tuple[str | None, str | None]:
@@ -571,6 +596,10 @@ async def calendar_page(request: Request):
         # draws nothing at all rather than an inert control.
         "source_choices": _source_choices(
             endpoint, request.query_params.get("source"), settings),
+        # The Share panel's own Sources control, which asks a narrower question
+        # than the toolbar's — see _share_source_choices — and is likewise absent
+        # when there is nothing to choose between.
+        "share_source_choices": _share_source_choices(endpoint, settings),
         "timezone_groups": build_timezone_options(settings.timezone),
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,

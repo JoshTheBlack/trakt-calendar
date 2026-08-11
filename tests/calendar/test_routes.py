@@ -1340,5 +1340,71 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         self.assertIn('<a id="distraktNav"', plain)
 
 
+class SharePanelSourceControlTests(CalendarRouteTestCase):
+    """The Sources control inside the Share panel — what a generated LINK may
+    say about which services fill it, as against the toolbar control beside it,
+    which says what THIS page shows and stores nothing.
+
+    The two are drawn from one function for one reason: an instance where the
+    toolbar has nothing to offer is an instance where the panel has nothing to
+    offer either, and a dialog growing a control that can only say one thing
+    would be advertising a choice this instance does not have.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("panel_viewer")
+        self.sign_in_as(self.user_id)
+
+    def _page(self, url: str = "/calendar?year=2026&month=7") -> str:
+        entries = [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def _options(self, html: str) -> list[str]:
+        block = re.search(r'<select id="share_view_source".*?</select>', html, re.S)
+        self.assertIsNotNone(block, "the Share panel offers no source control")
+        return re.findall(r'<option value="([^"]*)"', block.group(0))
+
+    def test_it_offers_my_sources_and_one_entry_per_service(self):
+        """"Every service" is deliberately absent: a link narrows the owner's
+        own calendar and can never widen it, so that option would either mean
+        exactly what the first one means or mean something the page will not
+        honour."""
+        self.assertEqual(self._options(self._page()), ["", "trakt", "simkl"])
+
+    def test_a_calendar_one_service_publishes_gets_no_control_at_all(self):
+        html = self._page("/calendar?year=2026&month=7&endpoint=shows/finales")
+        self.assertNotIn('id="share_view_source"', html)
+        self.assertIn('id="share_view_endpoint"', html)
+
+    def test_a_service_switched_off_for_the_instance_leaves_nothing_to_choose(self):
+        """One service left, so the panel says nothing about sources — by the
+        same admission that empties the toolbar, not by a second count of it."""
+        save_settings(dataclasses.replace(
+            _configured_settings(), simkl_public_calendar_enabled=False))
+        html = self._page()
+        self.assertNotIn('id="share_view_source"', html)
+        self.assertNotIn('id="sourceSelect"', html)
+
+    def test_it_sits_inside_the_panel_s_own_options_block(self):
+        """It is a property of the LINK, so it belongs with the other options
+        the link carries rather than beside the link box itself."""
+        html = self._page()
+        block = html[html.index('id="share_view_options"'):]
+        block = block[:block.index('class="modal-foot"')]
+        self.assertIn('id="share_view_source"', block)
+
+    def test_nothing_is_preselected_from_the_calendar_being_looked_at(self):
+        """Which option a link is on is stored per link and set from that. A
+        server-marked selection would fight the panel's own render and could
+        write a source into a link whose owner never chose one."""
+        block = re.search(r'<select id="share_view_source".*?</select>',
+                          self._page("/calendar?year=2026&month=7&source=simkl"), re.S)
+        self.assertNotIn("selected", block.group(0))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -13,6 +13,7 @@ import unittest
 from app.calendar import share_code
 from app.endpoints import ENDPOINTS
 from app.calendar.share_links import CARD_STYLES, DAY_PACKINGS
+from app.sources import prefs as source_prefs
 from app.timezones import CANONICAL
 
 
@@ -31,6 +32,28 @@ class ShareCodeRoundTripTests(unittest.TestCase):
             "hidenw": "1", "tz": "America/New_York", "year": "2026", "month": "8"})
         self.assertEqual(len(code), 12)
 
+    def test_a_view_naming_a_source_survives_the_round_trip(self):
+        view = {"endpoint": "shows", "card": "vertical", "packing": "packed",
+                "hidenw": "0", "tz": "Europe/London", "year": "2026", "month": "9",
+                "source": "simkl"}
+        self.assertEqual(share_code.decode(share_code.encode(view)), view)
+
+    def test_the_same_view_without_a_source_carries_none(self):
+        """Presence is the whole of what "my sources" means here: a link that
+        names no service must not come back naming one, or every link that never
+        asked would start overriding the owner's preference."""
+        view = {"endpoint": "shows", "card": "vertical", "packing": "packed",
+                "hidenw": "0", "tz": "Europe/London", "year": "2026", "month": "9"}
+        decoded = share_code.decode(share_code.encode(view))
+        self.assertEqual(decoded, view)
+        self.assertNotIn("source", decoded)
+
+    def test_a_named_set_of_services_has_no_code_and_goes_out_verbose(self):
+        """The codebook holds single-word selections only, because the spellings
+        of a SET are combinatorial. Rule 2 covers it: no code, so the caller
+        writes the long query string, which says the same thing."""
+        self.assertIsNone(share_code.encode({"source": "trakt+simkl"}))
+
     def test_only_the_options_that_were_set_come_back(self):
         """Presence is meaningful: "use my current display" writes no params, so
         a code must not invent defaults for the ones it wasn't given."""
@@ -40,7 +63,8 @@ class ShareCodeRoundTripTests(unittest.TestCase):
     def test_every_single_option_round_trips_alone(self):
         for view in ({"endpoint": "movies"}, {"card": "poster"}, {"packing": "packed"},
                      {"hidenw": "0"}, {"hidenw": "1"}, {"tz": "Pacific/Chatham"},
-                     {"year": "1970", "month": "1"}, {"year": "2100", "month": "12"}):
+                     {"year": "1970", "month": "1"}, {"year": "2100", "month": "12"},
+                     {"source": "trakt"}, {"source": "simkl"}, {"source": "auto"}):
             with self.subTest(view=view):
                 self.assertEqual(share_code.decode(share_code.encode(view)), view)
 
@@ -78,6 +102,28 @@ class ShareCodeRoundTripTests(unittest.TestCase):
         self.assertEqual(share_code.decode(code.lower()), share_code.decode(code))
 
 
+class PublishedCodeTests(unittest.TestCase):
+    """Codes that were handed out before a layout grew, decoded literally.
+
+    A ROUND TRIP CANNOT CATCH WHAT THIS CATCHES. Encoding and decoding move
+    together, so a change that repositioned a field or repointed an index would
+    round-trip perfectly and still resolve every link already pasted into
+    somebody's channel to a different month, a different calendar or a different
+    timezone. The only test that sees that is a literal string somebody's link
+    actually carries, written down here and compared against what it meant on
+    the day it was copied. Every string below came off a real instance.
+
+    A code added here is never edited afterwards. If one of these fails, the
+    layout it was written under has been changed rather than added to.
+    """
+
+    def test_a_code_written_under_the_first_layout_still_means_what_it_meant(self):
+        self.assertEqual(share_code.decode("13F11010E2A7"), {
+            "endpoint": "shows/premieres", "card": "horizontal", "packing": "stacked",
+            "hidenw": "1", "tz": "America/New_York", "year": "2026", "month": "8",
+        })
+
+
 class ShareCodebookStabilityTests(unittest.TestCase):
     """A codebook index is a promise about what that number means, kept by every
     link already in the wild. These tests fail on the change that would break it.
@@ -91,6 +137,7 @@ class ShareCodebookStabilityTests(unittest.TestCase):
         "CARD_CODES": "00da7eb36be7dd5c30773b9870d9badf30dc6ea3d218117c241f668d1fcaa321",
         "PACKING_CODES": "e4d06ca823d3c3b0f6d14bb61c00520cf778bb6a5441ce99a205e0856b205f87",
         "TZ_CODES": "72f4bf6274384a16ce9325a6457dcc2b427b143a9d3508c02176408eb97539e2",
+        "SOURCE_CODES": "87448c259ef0e128d783b013dfc561c08ed23571c25f6dc4a05462fad0b44dc4",
     }
 
     def _digest(self, book) -> str:
@@ -104,7 +151,8 @@ class ShareCodebookStabilityTests(unittest.TestCase):
 
     # The length each codebook had when its digest was taken. Appending past this
     # is fine and needs no new digest; the digest covers only the frozen prefix.
-    LENGTHS = {"ENDPOINT_CODES": 5, "CARD_CODES": 3, "PACKING_CODES": 2, "TZ_CODES": 101}
+    LENGTHS = {"ENDPOINT_CODES": 5, "CARD_CODES": 3, "PACKING_CODES": 2, "TZ_CODES": 101,
+               "SOURCE_CODES": 4}
 
     def test_no_codebook_has_lost_entries(self):
         for name, length in self.LENGTHS.items():
@@ -119,6 +167,11 @@ class ShareCodebookStabilityTests(unittest.TestCase):
         self.assertEqual(set(DAY_PACKINGS) - set(share_code.PACKING_CODES), set())
         zones = {tz for group in CANONICAL.values() for tz in group}
         self.assertEqual(zones - set(share_code.TZ_CODES), set())
+        # Registering a third service widens SELECTIONS by one word without
+        # anything here being touched, and this is what says so: without the
+        # append, every link naming that service would silently go out in the
+        # long form.
+        self.assertEqual(set(source_prefs.SELECTIONS) - set(share_code.SOURCE_CODES), set())
 
     def test_no_codebook_has_duplicates(self):
         """Two indexes for one value is a link that decodes to the right place

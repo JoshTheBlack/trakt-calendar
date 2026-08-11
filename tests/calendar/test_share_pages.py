@@ -143,7 +143,8 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         ignore is a link that quietly does not do what its author set."""
         for view in ({"endpoint": "shows/imaginary"}, {"card": "hologram"},
                      {"packing": "sideways"}, {"hidenw": "yes"},
-                     {"tz": "Mars/Olympus_Mons"}, {"nonsense": "1"}):
+                     {"tz": "Mars/Olympus_Mons"}, {"nonsense": "1"},
+                     {"source": "netflix"}, {"source": ""}, {"source": "trakt "}):
             with self.subTest(view=view):
                 resp = self.client.post("/api/me/share/view", json={"view": view})
                 self.assertEqual(resp.status_code, 400)
@@ -156,6 +157,33 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         for kind in ("token", "username"):
             with self.subTest(kind=kind):
                 self.assertEqual(self._link_view_of(urls[kind]), {"endpoint": "shows/premieres"})
+
+    def test_a_named_source_is_written_into_the_link(self):
+        """The one view option the panel was missing, and it travels the same
+        way every other one does — short code included."""
+        resp = self.client.post("/api/me/share/view",
+                                json={"view": {"endpoint": "shows", "source": "simkl"}})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        url = resp.json()["urls"]["token"]
+        self.assertIn("?p=", url)
+        self.assertEqual(self._link_view_of(url), {"endpoint": "shows", "source": "simkl"})
+
+    def test_a_link_naming_no_source_says_nothing_about_sources(self):
+        """"My sources" is the ABSENCE of the param, so the page resolves the
+        owner's own preference — the standing behaviour of a share page, which a
+        link that opted out of choosing must not change."""
+        self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
+        self.assertNotIn("source", self._link_view_of(self._share()["urls"]["token"]))
+
+    def test_a_source_the_code_cannot_say_still_reaches_the_link(self):
+        """A named SET has no codebook entry, so the URL goes out verbose rather
+        than going out short and missing the option its author set."""
+        resp = self.client.post("/api/me/share/view",
+                                json={"view": {"source": "trakt+simkl"}})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        url = resp.json()["urls"]["token"]
+        self.assertNotIn("?p=", url)
+        self.assertEqual(self._link_view_of(url), {"source": "trakt+simkl"})
 
     def test_a_pinned_month_is_written_into_the_link(self):
         resp = self.client.post("/api/me/share/view", json={"view": {"year": "2026", "month": "8"}})
@@ -254,6 +282,14 @@ class ShareCodeArrivalTests(SharePageTestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn("card-poster", resp.text)
         self.assertIn("August 2026", resp.text)
+
+    def test_a_coded_source_arrives_as_the_ordinary_param(self):
+        """The field the code grew last, through the same expansion as the rest:
+        after arrival nothing on the page knows the short form exists."""
+        code = share_code.encode({"source": "simkl", "year": "2026", "month": "8"})
+        resp = self._arrive(f"p={code}")
+        self.assertEqual(dict(parse_qsl(urlsplit(resp.headers["location"]).query)),
+                         {"source": "simkl", "year": "2026", "month": "8"})
 
     def test_a_long_link_still_works_untouched(self):
         """Every link handed out before the short form existed stays valid."""

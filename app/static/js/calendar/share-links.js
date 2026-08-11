@@ -50,6 +50,11 @@ function renderShareView() {
     if (view.card) document.getElementById('share_view_card').value = view.card;
     if (view.packing) document.getElementById('share_view_packing').value = view.packing;
     document.getElementById('share_view_hidenw').checked = view.hidenw === '1';
+    // Absent on an instance where fewer than two services could fill this
+    // calendar — the template draws no control at all there, so every read and
+    // write of it is guarded rather than assuming one is on the page.
+    const source = document.getElementById('share_view_source');
+    if (source) source.value = view.source || '';
     setSharePinnedMonth(view.month || '', view.year || null);
 }
 
@@ -106,6 +111,11 @@ function saveShareView() {
         packing: document.getElementById('share_view_packing').value,
         hidenw: document.getElementById('share_view_hidenw').checked ? '1' : '0',
     };
+    // Empty means "my sources": the link carries no source at all and the page
+    // resolves the owner's own preference, so the key is left out rather than
+    // written as a blank the server would have to read as absent.
+    const source = document.getElementById('share_view_source');
+    if (source && source.value) view.source = source.value;
     // Both or neither — a month pinned without its year would mean a different
     // month once the year turned over, and the server rejects the half of a pair.
     if (month) {

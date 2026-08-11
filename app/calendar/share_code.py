@@ -19,6 +19,7 @@ vocabulary, and the indexes are packed together as hex.
         hidenw    1 hex   0 or 1
         tz        2 hex   index into TZ_CODES
         year+month 3 hex  months since January 1970, the pair being one choice
+        source    1 hex   index into SOURCE_CODES
 
 A code is only ever a way to HAND a link out: the public page expands it back
 into ordinary query params and redirects there on arrival, so nothing else in
@@ -80,6 +81,16 @@ TZ_CODES = (
     "Pacific/Port_Moresby", "Pacific/Tongatapu", "Pacific/Chatham",
 )
 
+# Append-only, like the rest, and it holds the SINGLE-WORD selections only —
+# app/sources/prefs.py's SELECTIONS, which is "auto", the legacy "both", and one
+# entry per registered service. A selection naming a SET of services ("trakt+simkl")
+# is deliberately absent and always will be: the spellings of a set are
+# combinatorial in the number of services, so enumerating them would be a
+# codebook that has to grow by powers of two every time one is registered. Rule 2
+# already covers it — a set makes `encode` return None and the link goes out as
+# the long query string, which says exactly the same thing in more characters.
+SOURCE_CODES = ("auto", "trakt", "simkl", "both")
+
 # The epoch the packed year+month counts from. Moving it would repoint every
 # existing code at a different month, so it is as fixed as the codebooks.
 _YM_EPOCH_YEAR = 1970
@@ -95,11 +106,18 @@ _LAYOUTS: dict[str, tuple[tuple[int, str, int], ...]] = {
         (0x08, "hidenw", 1),
         (0x10, "tz", 2),
         (0x20, "ym", 3),
+        # APPENDED, which is the only reason this needed no new layout version.
+        # A code written before this field existed cannot have 0x40 in its mask,
+        # so a decoder skips it; and because the entry is last, every field ahead
+        # of it sits at the character it always sat at. Both halves are pinned by
+        # tests/calendar/test_share_code.py's PublishedCodeTests, against a string
+        # off a real instance rather than against a round trip.
+        (0x40, "source", 1),
     ),
 }
 
 _CODEBOOKS = {"endpoint": ENDPOINT_CODES, "card": CARD_CODES, "packing": PACKING_CODES,
-              "tz": TZ_CODES}
+              "tz": TZ_CODES, "source": SOURCE_CODES}
 
 
 def _index_of(field: str, value: str) -> int | None:

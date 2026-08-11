@@ -46,6 +46,13 @@
     <form class="hero-controls" method="get">
         <input type="hidden" name="year" value="{{ year }}">
         <input type="hidden" name="month" value="{{ month }}">
+        {# Carried, not offered. Which services fill this link is the owner's
+           statement about it and there is no control here to change it — but a
+           GET form submits only its own inputs, so without this, clicking any
+           control beside it would drop the link's own answer and quietly reopen
+           the page on the owner's wider default. Same job the month arrows do
+           with `query_extra`. #}
+        {% if source %}<input type="hidden" name="source" value="{{ source }}">{% endif %}
         <div class="control" title="Which calendar to show">
             <label for="shareEndpoint">📡</label>
             <select id="shareEndpoint" name="endpoint" onchange="this.form.submit()">

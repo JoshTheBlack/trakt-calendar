@@ -899,6 +899,25 @@
                         </select>
                     </div>
                 </div>
+                {# WHICH SERVICES FILL THE LINK, and only ever a narrowing of the
+                   owner's own calendar — "My sources" is no source in the link at
+                   all, which is the page's standing behaviour. NOT DRAWN when
+                   fewer than two services could fill this calendar, exactly as
+                   the 👁️ View toolbar is not: the emptiness is decided in the
+                   route, where both halves of "could this service fill this
+                   calendar" are already known. #}
+                {% if share_source_choices %}
+                <div class="field">
+                    <label for="share_view_source">Sources</label>
+                    <select id="share_view_source" onchange="saveShareView()">
+                        {% for choice in share_source_choices %}
+                        <option value="{{ choice.value }}">{{ choice.label }}</option>
+                        {% endfor %}
+                    </select>
+                    <span class="hint">A link can narrow to one service, never widen past what your
+                        own calendar shows.</span>
+                </div>
+                {% endif %}
                 <div class="field checkbox">
                     <input type="checkbox" id="share_view_hidenw" onchange="saveShareView()"{% if view.hide_not_watching %} checked{% endif %}>
                     <label for="share_view_hidenw">Hide not-watching items on the shared page</label>
