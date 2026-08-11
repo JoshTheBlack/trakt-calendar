@@ -894,6 +894,24 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
         self.assertIn("Trakt Only", page)
         self.assertNotIn("Simkl Only", page)
 
+    def test_a_link_may_name_a_combination_rather_than_one_service(self):
+        """A selection is a SET everywhere else in the app, and a link is not the
+        place that stops being true — the day there are three services, "these
+        two of the three" has to be a link somebody can hand out."""
+        page = self.page(f"{self.query}&source=trakt%2Bsimkl")
+        self.assertIn("Trakt Only", page)
+        self.assertIn("Simkl Only", page)
+
+    def test_a_combination_is_narrowed_to_the_part_the_owner_admits(self):
+        """The rule is an INTERSECTION, not an all-or-nothing test, so a link
+        naming more than the owner shows keeps the part they do show rather than
+        falling back to everything. Two services here; the same expression is
+        what makes "two of the next three" behave."""
+        self.set_owner_source("trakt")
+        page = self.page(f"{self.query}&source=trakt%2Bsimkl")
+        self.assertIn("Trakt Only", page)
+        self.assertNotIn("Simkl Only", page)
+
     def test_asking_for_every_service_is_not_a_way_round_that(self):
         """`auto` names no services, so it is not a narrowing of anything and
         cannot be used to reopen what the owner closed."""

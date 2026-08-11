@@ -28,6 +28,11 @@ function renderShare() {
     renderShareView();
 }
 
+// The Sources ticks, or an empty list on an instance that draws none of them.
+function shareSourceTicks() {
+    return [...document.querySelectorAll('#share_view_sources input[type=checkbox]')];
+}
+
 // The link's display options. A null link_view means the URL goes out bare, so
 // whoever opens it sees whatever the owner's calendar currently resolves to;
 // otherwise the options below are written into the query string. Neither case
@@ -50,11 +55,17 @@ function renderShareView() {
     if (view.card) document.getElementById('share_view_card').value = view.card;
     if (view.packing) document.getElementById('share_view_packing').value = view.packing;
     document.getElementById('share_view_hidenw').checked = view.hidenw === '1';
-    // Absent on an instance where fewer than two services could fill this
-    // calendar — the template draws no control at all there, so every read and
-    // write of it is guarded rather than assuming one is on the page.
-    const source = document.getElementById('share_view_source');
-    if (source) source.value = view.source || '';
+    // The ticked services, from the set the link names. Absent entirely on an
+    // instance where fewer than two services could fill this calendar — the
+    // template draws no control there — so every read and write of these is
+    // guarded rather than assuming they are on the page.
+    //
+    // A stored 'auto' ticks nothing, which is correct rather than a gap: it
+    // names no services, so under a link that can only narrow it comes out the
+    // same as naming none at all. Saving from this panel then writes the ticks,
+    // which is what the owner is looking at.
+    const named = new Set((view.source || '').split('+'));
+    shareSourceTicks().forEach(cb => { cb.checked = named.has(cb.dataset.source); });
     setSharePinnedMonth(view.month || '', view.year || null);
 }
 
@@ -111,11 +122,13 @@ function saveShareView() {
         packing: document.getElementById('share_view_packing').value,
         hidenw: document.getElementById('share_view_hidenw').checked ? '1' : '0',
     };
-    // Empty means "my sources": the link carries no source at all and the page
-    // resolves the owner's own preference, so the key is left out rather than
-    // written as a blank the server would have to read as absent.
-    const source = document.getElementById('share_view_source');
-    if (source && source.value) view.source = source.value;
+    // Nothing ticked means "my sources": the link carries no source at all and
+    // the page resolves the owner's own preference, so the key is left out
+    // rather than written as a blank the server would have to read as absent.
+    // Several ticked is spelled the way every other part of the app spells a set
+    // of services, joined — see app/sources/prefs.py.
+    const ticked = shareSourceTicks().filter(cb => cb.checked).map(cb => cb.dataset.source);
+    if (ticked.length) view.source = ticked.join('+');
     // Both or neither — a month pinned without its year would mean a different
     // month once the year turned over, and the server rejects the half of a pair.
     if (month) {

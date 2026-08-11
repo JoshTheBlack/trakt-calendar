@@ -175,14 +175,16 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
         self.assertNotIn("source", self._link_view_of(self._share()["urls"]["token"]))
 
-    def test_a_source_the_code_cannot_say_still_reaches_the_link(self):
-        """A named SET has no codebook entry, so the URL goes out verbose rather
-        than going out short and missing the option its author set."""
+    def test_a_link_may_name_a_combination_of_services(self):
+        """The vocabulary is a SET, so a link has to be able to say one — and to
+        say it in the short form, since the number of combinations grows with
+        every service registered and none of them may be the one that quietly
+        stops fitting."""
         resp = self.client.post("/api/me/share/view",
                                 json={"view": {"source": "trakt+simkl"}})
         self.assertEqual(resp.status_code, 200, resp.text)
         url = resp.json()["urls"]["token"]
-        self.assertNotIn("?p=", url)
+        self.assertIn("?p=", url)
         self.assertEqual(self._link_view_of(url), {"source": "trakt+simkl"})
 
     def test_a_pinned_month_is_written_into_the_link(self):

@@ -19,7 +19,7 @@ vocabulary, and the indexes are packed together as hex.
         hidenw    1 hex   0 or 1
         tz        2 hex   index into TZ_CODES
         year+month 3 hex  months since January 1970, the pair being one choice
-        source    1 hex   index into SOURCE_CODES
+        source    2 hex   BITMASK over SOURCE_CODES, 0 meaning "auto"
 
 A code is only ever a way to HAND a link out: the public page expands it back
 into ordinary query params and redirects there on arrival, so nothing else in
@@ -28,9 +28,10 @@ the app has to know this format exists (see share_routes._expanded_from_code).
 Design rules, all three of which exist because these codes end up in links other
 people hold on to:
 
-1. The codebooks below are APPEND-ONLY. An index is a promise about what that
-   number means; reordering or removing an entry silently repoints every link
-   already in the wild at a different timezone or a different calendar.
+1. The codebooks below are APPEND-ONLY. A position in one is a promise about what
+   that number means — an index for most fields, a bit for `source` — and
+   reordering or removing an entry silently repoints every link already in the
+   wild at a different timezone, a different calendar or a different service.
    tests/calendar/test_share_code.py fails if a codebook is reordered or shortened, or if
    a vocabulary elsewhere in the app grows an entry that was never appended here.
 2. Nothing here ever raises or half-decodes. A value this module cannot encode
@@ -46,6 +47,8 @@ people hold on to:
    rule 2 covers the overflow on its own: the link just goes out verbose.
 """
 from __future__ import annotations
+
+from ..sources import prefs as source_prefs
 
 # What `encode` writes. `decode` reads this and every older layout in _LAYOUTS.
 VERSION = "1"
@@ -81,15 +84,30 @@ TZ_CODES = (
     "Pacific/Port_Moresby", "Pacific/Tongatapu", "Pacific/Chatham",
 )
 
-# Append-only, like the rest, and it holds the SINGLE-WORD selections only —
-# app/sources/prefs.py's SELECTIONS, which is "auto", the legacy "both", and one
-# entry per registered service. A selection naming a SET of services ("trakt+simkl")
-# is deliberately absent and always will be: the spellings of a set are
-# combinatorial in the number of services, so enumerating them would be a
-# codebook that has to grow by powers of two every time one is registered. Rule 2
-# already covers it — a set makes `encode` return None and the link goes out as
-# the long query string, which says exactly the same thing in more characters.
-SOURCE_CODES = ("auto", "trakt", "simkl", "both")
+# Append-only, like the rest — but a list of SERVICE NAMES rather than of
+# selections, because the field over it is a BITMASK: bit i is SOURCE_CODES[i],
+# and a selection is the OR of the services it names.
+#
+# A BITMASK RATHER THAN AN INDEX, and this is the one place in the file where the
+# choice of representation is doing real work. A selection is a SET of services
+# ("trakt", "simkl", "trakt+simkl"), so an index would need one entry per
+# spelling — and the spellings of a set are combinatorial in the number of
+# services, so registering a fourth would mean appending fifteen entries and
+# every combination anybody had not thought to append would silently send its
+# link out in the long form. One bit per service is linear instead: a new service
+# is one name appended here, and every combination it takes part in is encodable
+# the same day, without a decision.
+#
+# NAMES, NOT SELECTIONS, is also why the legacy "both" has no entry. It is a
+# spelling of exactly {trakt, simkl} (app/sources/prefs.py says why it survives),
+# so it packs as those two bits and comes back spelled as the set it always
+# meant — which is what the Sources screen already rewrites it to on the next
+# save. Nothing in the wire format has to remember an era.
+#
+# ZERO IS `auto`, which is the one selection that is not a set: it names no
+# services, now or later. A named set always has at least one bit, so the two
+# cannot be confused.
+SOURCE_CODES = ("trakt", "simkl")
 
 # The epoch the packed year+month counts from. Moving it would repoint every
 # existing code at a different month, so it is as fixed as the codebooks.
@@ -112,12 +130,65 @@ _LAYOUTS: dict[str, tuple[tuple[int, str, int], ...]] = {
         # of it sits at the character it always sat at. Both halves are pinned by
         # tests/calendar/test_share_code.py's PublishedCodeTests, against a string
         # off a real instance rather than against a round trip.
-        (0x40, "source", 1),
+        #
+        # TWO HEX FOR ONE BIT PER SERVICE, which is eight of them. The width is
+        # what rule 3 is about, and the reason to buy the headroom now rather
+        # than at the fourth registration is that widening it later is not a
+        # widening at all — it is a new layout version and a second decoder path,
+        # for a field one character short.
+        (0x40, "source", 2),
     ),
 }
 
 _CODEBOOKS = {"endpoint": ENDPOINT_CODES, "card": CARD_CODES, "packing": PACKING_CODES,
-              "tz": TZ_CODES, "source": SOURCE_CODES}
+              "tz": TZ_CODES}
+
+
+def _pack_source(value: str) -> int | None:
+    """A source selection as its bitmask, or None when this layout cannot say it.
+
+    THE GRAMMAR IS ASKED FOR RATHER THAN REIMPLEMENTED. Which strings are
+    selections, and which services a selection names, belong to
+    app/sources/prefs.py; splitting on the separator here would be a second
+    spelling of that grammar, in the one module whose answers are promises to
+    links other people hold.
+
+    A service with no bit yet — registered but never appended to SOURCE_CODES —
+    yields None, so the link goes out as the long query string saying exactly
+    what it means. That is rule 2 doing its job, and it is the failure the
+    codebook growth test in tests/calendar/test_share_code.py exists to turn into
+    a red suite rather than a silently longer URL.
+    """
+    text = str(value)
+    if not source_prefs.is_selection(text):
+        return None
+    named = source_prefs.named_sources(text)
+    if named is None:
+        return 0  # `auto` — "whatever there is", which names nothing
+    bits = 0
+    for name in named:
+        if name not in SOURCE_CODES:
+            return None
+        bits |= 1 << SOURCE_CODES.index(name)
+    return bits
+
+
+def _unpack_source(value: int) -> str | None:
+    """A bitmask back into a selection, or None to drop the field entirely.
+
+    A BIT THIS VERSION HAS NO SERVICE FOR DROPS THE WHOLE FIELD rather than
+    decoding to the services it did recognize. A link naming three services
+    read back as two would be a narrowing its author never asked for, applied
+    silently — worse than the alternative, which is that the field goes missing
+    and the page falls back to the owner's own preference and renders wider.
+    Same instinct as an index naming nothing being dropped rather than guessed.
+    """
+    if value == 0:
+        return source_prefs.AUTO
+    if value >> len(SOURCE_CODES):
+        return None
+    names = [name for index, name in enumerate(SOURCE_CODES) if value & (1 << index)]
+    return source_prefs.SEPARATOR.join(names)
 
 
 def _index_of(field: str, value: str) -> int | None:
@@ -153,6 +224,10 @@ def encode(params: dict) -> str | None:
             if "hidenw" not in params:
                 continue
             value = {"0": 0, "1": 1}.get(str(params["hidenw"]))
+        elif field == "source":
+            if "source" not in params:
+                continue
+            value = _pack_source(str(params["source"]))
         else:
             if field not in params:
                 continue
@@ -199,6 +274,9 @@ def decode(code: str | None) -> dict:
         elif field == "hidenw":
             if value in (0, 1):
                 out["hidenw"] = str(value)
+        elif field == "source":
+            if (selection := _unpack_source(value)) is not None:
+                out["source"] = selection
         else:
             book = _CODEBOOKS[field]
             if value < len(book):

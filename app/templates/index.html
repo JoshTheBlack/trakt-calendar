@@ -900,22 +900,30 @@
                     </div>
                 </div>
                 {# WHICH SERVICES FILL THE LINK, and only ever a narrowing of the
-                   owner's own calendar — "My sources" is no source in the link at
-                   all, which is the page's standing behaviour. NOT DRAWN when
-                   fewer than two services could fill this calendar, exactly as
-                   the 👁️ View toolbar is not: the emptiness is decided in the
-                   route, where both halves of "could this service fill this
-                   calendar" are already known. #}
+                   owner's own calendar. TICKS, and the same ones the Sources
+                   screen uses for the account-wide version of this question — a
+                   selection is a SET, so a control that could only name one
+                   service would have to be redrawn the day a third is
+                   registered. Nothing ticked writes no source at all, which is
+                   the page's standing behaviour.
+
+                   NOT DRAWN when fewer than two services could fill this
+                   calendar, exactly as the 👁️ View toolbar is not: the emptiness
+                   is decided in the route, where both halves of "could this
+                   service fill this calendar" are already known. #}
                 {% if share_source_choices %}
                 <div class="field">
-                    <label for="share_view_source">Sources</label>
-                    <select id="share_view_source" onchange="saveShareView()">
+                    <label>Sources</label>
+                    <div class="source-ticks" id="share_view_sources">
                         {% for choice in share_source_choices %}
-                        <option value="{{ choice.value }}">{{ choice.label }}</option>
+                        <label class="source-tick">
+                            <input type="checkbox" data-source="{{ choice.value }}" onchange="saveShareView()">
+                            <span>{{ choice.label }}</span>
+                        </label>
                         {% endfor %}
-                    </select>
-                    <span class="hint">A link can narrow to one service, never widen past what your
-                        own calendar shows.</span>
+                    </div>
+                    <span class="hint">Tick none and the link opens on whatever your own calendar
+                        shows. Ticking can only narrow that, never widen it.</span>
                 </div>
                 {% endif %}
                 <div class="field checkbox">

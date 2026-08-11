@@ -192,6 +192,37 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     return saved
 
 
+def _answering_services(endpoint, settings) -> list[tuple[str, str]]:
+    """(name, label) for every service that could actually fill THIS calendar on
+    THIS instance, in declared order — or an empty list when there is nothing to
+    choose between. The two source controls are both built out of this, so they
+    cannot come to different answers about what this calendar has to offer.
+
+    IT IS TWO QUESTIONS AND NEITHER OF THEM IS ASKED HERE. Whether a service is
+    on this INSTANCE's calendar at all belongs to `providers.calendar_sources`,
+    and it is asked through `resolve.instance_sources` so that an operator
+    switching a service off empties these controls by the same rule that empties
+    the calendar underneath them — a second spelling of that question living here
+    is a copy that answers differently the first time either is edited. Whether
+    it publishes THIS calendar is `capabilities.answers`. No service is named in
+    either check, so a third one is offered the day it is registered.
+
+    AND WITH FEWER THAN TWO THERE IS NOTHING TO OFFER, which is returned as an
+    empty list rather than as one entry. One service that can answer means every
+    label a control could carry names the same outcome, and drawing it makes the
+    page look as though a choice is available when none is. Nothing else on
+    either surface is drawn to be inert either.
+    """
+    from .. import providers  # deferred: see _coverage_gap, same reason
+
+    admitted = calendar_resolve.instance_sources(settings)
+    services = [(str(source), provider.label)
+                for source, provider in providers.registered().items()
+                if provider.capabilities.answers(endpoint.key)
+                and (admitted is None or str(source) in admitted)]
+    return services if len(services) >= 2 else []
+
+
 def _source_choices(endpoint, requested, settings) -> list[dict]:
     """The toolbar's source control: what it offers, which option is on, and
     whether it is drawn at all. An empty list means the toolbar draws nothing.
@@ -209,21 +240,10 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     way back: without it, overriding once would leave no way to stop overriding
     short of editing the address.
 
-    IT OFFERS EXACTLY THE SERVICES THAT COULD ACTUALLY FILL THIS CALENDAR, which
-    is two questions and neither of them is asked here. Whether a service is on
-    this INSTANCE's calendar at all belongs to `providers.calendar_sources`, and
-    it is asked through `resolve.instance_sources` so that an operator switching
-    a service off empties this control by the same rule that empties the
-    calendar underneath it — a second spelling of that question living here is a
-    copy that answers differently the first time either is edited. Whether it
-    publishes THIS calendar is `capabilities.answers`. No service is named in
-    either check, so a third one is offered the day it is registered.
-
-    AND WITH FEWER THAN TWO IT IS NOT DRAWN. One service that can answer means
-    "my sources", "every service" and "that one only" are three labels for one
-    outcome, and offering them makes the page look as though a choice is
-    available when none is. Nothing else on the toolbar is drawn to be inert
-    either.
+    IT OFFERS EXACTLY THE SERVICES THAT COULD ACTUALLY FILL THIS CALENDAR, and
+    which those are is `_answering_services`' question rather than this
+    function's — including the rule that fewer than two of them is no control at
+    all.
 
     THE COST OF NOT DRAWING IT, taken deliberately: a `?source=` in the address
     on a single-service calendar has no control to clear it with. That override
@@ -232,15 +252,9 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     a control whose whole purpose on that page would be to undo something the
     reader did not do.
     """
-    from .. import providers  # deferred: see _coverage_gap, same reason
-
-    admitted = calendar_resolve.instance_sources(settings)
     chosen = requested if requested and source_prefs.is_selection(requested) else ""
-    services = [(str(source), provider.label)
-                for source, provider in providers.registered().items()
-                if provider.capabilities.answers(endpoint.key)
-                and (admitted is None or str(source) in admitted)]
-    if len(services) < 2:
+    services = _answering_services(endpoint, settings)
+    if not services:
         return []
     choices = [
         {"value": "", "label": "My sources"},
@@ -260,28 +274,31 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
 
 
 def _share_source_choices(endpoint, settings) -> list[dict]:
-    """The Share panel's Sources control: what a generated link may say about
-    which services fill it. An empty list means the panel draws nothing.
+    """The Share panel's Sources control: one TICK per service a generated link
+    may be narrowed to. An empty list means the panel draws nothing, by
+    `_answering_services`' rule rather than by a second count of the same thing,
+    so the panel and the toolbar disappear together.
 
-    THE SAME LIST AS THE TOOLBAR'S, ASKED THROUGH THE SAME FUNCTION, so the two
-    controls cannot disagree about which services could fill this calendar — and
-    so the panel disappears on a one-service instance by the same rule that
-    empties the toolbar, rather than by a second count of the same thing. A
-    dialog offering a control that can only say one thing would be advertising a
-    choice this instance does not have.
+    TICKS RATHER THAN A LIST OF ANSWERS, because a source selection is a SET.
+    It is what the Sources screen already draws for the account-wide version of
+    this same question, and it is the shape that survives a service being
+    registered: a list of answers would have to enumerate the combinations, and
+    those double per service.
 
-    MINUS "EVERY SERVICE", WHICH IS THE ONE ANSWER A LINK CANNOT MEAN. A link
-    opens on the owner's own calendar narrowed no wider than the owner already
-    narrowed it (app/calendar/share_routes.py's `_narrowed_prefs` says why), so
-    "every service" either means exactly what the first option already means or
-    means something that will not be honoured — two labels for one outcome in
-    the good case and a lie in the other.
+    NOTHING TICKED IS THE DEFAULT AND MEANS "MY SOURCES" — the link carries no
+    source at all and the page resolves the owner's own preference, which is
+    what a share page has always done. That is also why there is no "every
+    service" tick to draw: a link narrows the owner's calendar and can never
+    widen it (app/calendar/share_routes.py's `_narrowed_prefs` says why), so
+    "all of them" and "none of them" are one outcome, and the empty state
+    already names it.
 
-    Nothing is marked selected: which option a link is on is stored per link and
-    the panel sets it from that, not from the calendar being looked at.
+    Nothing is pre-ticked here: which services a link names is stored per link,
+    and the panel sets the ticks from that rather than from whichever calendar
+    the owner happens to be looking at.
     """
-    return [choice for choice in _source_choices(endpoint, None, settings)
-            if choice["value"] != source_prefs.AUTO]
+    return [{"value": name, "label": label}
+            for name, label in _answering_services(endpoint, settings)]
 
 
 def _coverage_gap(prefs: source_prefs.SourcePrefs,

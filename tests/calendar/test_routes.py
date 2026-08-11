@@ -1363,21 +1363,23 @@ class SharePanelSourceControlTests(CalendarRouteTestCase):
         self.assertEqual(resp.status_code, 200)
         return resp.text
 
-    def _options(self, html: str) -> list[str]:
-        block = re.search(r'<select id="share_view_source".*?</select>', html, re.S)
+    def _ticks(self, html: str) -> list[str]:
+        block = re.search(r'id="share_view_sources".*?</div>', html, re.S)
         self.assertIsNotNone(block, "the Share panel offers no source control")
-        return re.findall(r'<option value="([^"]*)"', block.group(0))
+        return re.findall(r'data-source="([^"]*)"', block.group(0))
 
-    def test_it_offers_my_sources_and_one_entry_per_service(self):
-        """"Every service" is deliberately absent: a link narrows the owner's
-        own calendar and can never widen it, so that option would either mean
-        exactly what the first one means or mean something the page will not
-        honour."""
-        self.assertEqual(self._options(self._page()), ["", "trakt", "simkl"])
+    def test_it_offers_one_tick_per_service_and_no_all_or_nothing_entry(self):
+        """A selection is a SET, so the control is ticks — the same shape the
+        Sources screen uses for the account-wide version of this question, and
+        the one that does not have to be redrawn when a third service is
+        registered. There is no "every service" tick because a link can only
+        narrow: all of them and none of them are one outcome, and the empty
+        state already names it."""
+        self.assertEqual(self._ticks(self._page()), ["trakt", "simkl"])
 
     def test_a_calendar_one_service_publishes_gets_no_control_at_all(self):
         html = self._page("/calendar?year=2026&month=7&endpoint=shows/finales")
-        self.assertNotIn('id="share_view_source"', html)
+        self.assertNotIn('id="share_view_sources"', html)
         self.assertIn('id="share_view_endpoint"', html)
 
     def test_a_service_switched_off_for_the_instance_leaves_nothing_to_choose(self):
@@ -1386,7 +1388,7 @@ class SharePanelSourceControlTests(CalendarRouteTestCase):
         save_settings(dataclasses.replace(
             _configured_settings(), simkl_public_calendar_enabled=False))
         html = self._page()
-        self.assertNotIn('id="share_view_source"', html)
+        self.assertNotIn('id="share_view_sources"', html)
         self.assertNotIn('id="sourceSelect"', html)
 
     def test_it_sits_inside_the_panel_s_own_options_block(self):
@@ -1395,15 +1397,27 @@ class SharePanelSourceControlTests(CalendarRouteTestCase):
         html = self._page()
         block = html[html.index('id="share_view_options"'):]
         block = block[:block.index('class="modal-foot"')]
-        self.assertIn('id="share_view_source"', block)
+        self.assertIn('id="share_view_sources"', block)
 
-    def test_nothing_is_preselected_from_the_calendar_being_looked_at(self):
-        """Which option a link is on is stored per link and set from that. A
-        server-marked selection would fight the panel's own render and could
-        write a source into a link whose owner never chose one."""
-        block = re.search(r'<select id="share_view_source".*?</select>',
+    def test_nothing_is_preticked_from_the_calendar_being_looked_at(self):
+        """Which services a link names is stored per link and the panel ticks
+        from that. A server-marked tick would fight the panel's own render and
+        could write a source into a link whose owner never chose one."""
+        block = re.search(r'id="share_view_sources".*?</div>',
                           self._page("/calendar?year=2026&month=7&source=simkl"), re.S)
-        self.assertNotIn("selected", block.group(0))
+        self.assertNotIn("checked", block.group(0))
+
+    def test_the_ticks_are_the_services_and_never_a_list_of_names(self):
+        """The rule has to keep working for a service nobody has written yet, so
+        this asks the function with a registry that has one."""
+        from app.endpoints import get_endpoint
+
+        settings = _configured_settings()
+        with patch("app.providers.registered", return_value=dict(
+                providers.registered(), **{"mercury": _third_source()})):
+            widened = calendar_routes._share_source_choices(get_endpoint("shows"), settings)
+        self.assertEqual([choice["value"] for choice in widened],
+                         ["trakt", "simkl", "mercury"])
 
 
 if __name__ == "__main__":  # pragma: no cover
