@@ -280,3 +280,92 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
                 f"/api/distrakt/month?year={today.year}&month={today.month}").json()
 
         self.assertEqual(body["sources_unreadable"], [])
+
+
+class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
+    """The five actions an account signed in with Simkl alone could not take.
+
+    THE FAULT AND WHY IT LOOKED LIKE A CONFIGURATION PROBLEM.
+    `_distrakt_settings` swaps every source's credential for THIS account's own,
+    which is what makes the tracker read the viewer's history rather than the
+    operator's. `settings.trakt_configured` therefore stops meaning "this
+    instance has Trakt set up" and starts meaning "this VIEWER linked Trakt" —
+    so five routes that spend no Trakt credential at all refused the whole
+    action, and said "Not configured" about an instance that was configured
+    fine. Reported from a real account: import from calendar and add a show both
+    refused.
+
+    EACH ONE NOW ASKS WHAT IT ACTUALLY NEEDS. Importing needs a calendar to
+    import from; looking a season up needs the instance's client id, which is
+    what /search and /seasons already ask for; surveying a backfill needs some
+    service that can be asked for a history, which is the question the month
+    list already asks. The repair is the one already made to the month list in
+    this same file, applied to the routes it was not applied to.
+
+    HOW THESE ARE WRITTEN, AND WHY THEY TOUCH NO NETWORK: each body is chosen to
+    fail the check immediately AFTER the gate. Getting that second refusal is
+    proof the gate let the request through, and it costs no lookup, no history
+    sweep and no month build — so what is pinned here is the gate itself rather
+    than the whole action behind it.
+    """
+
+    def make_settings(self):
+        # An instance whose operator set BOTH services up, which is the shape
+        # this whole build is for. What the viewer has linked is a separate
+        # fact, and the one every test below turns on.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        trakt_access_token="operator-token",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("simkl_only_actor", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        self.sign_in_as(self.user_id)
+
+    def refusal(self, resp) -> str:
+        return (resp.json() or {}).get("error", "")
+
+    def test_import_from_calendar_is_not_refused_for_a_missing_trakt_token(self):
+        """It reads the month's premieres out of the instance's own calendar
+        cache and this account's marks. No viewer's credential is spent."""
+        resp = self.client.post("/api/distrakt/import", json={"year": 2020, "month": 1})
+        self.assertNotEqual(self.refusal(resp), "Not configured")
+        # A month with nothing cached for it imports nothing and says so
+        # politely, which is the ordinary answer and not a refusal.
+        self.assertEqual(resp.status_code, 200, resp.text[:200])
+
+    def test_adding_a_show_by_hand_is_not_refused(self):
+        resp = self.client.post("/api/distrakt/add", json={"ids": {}, "season": "x"})
+        self.assertNotEqual(self.refusal(resp), "Not configured")
+
+    def test_filling_in_a_past_month_by_hand_is_not_refused(self):
+        resp = self.client.post("/api/distrakt/add-completed",
+                                json={"year": 2020, "month": 1, "ids": {}})
+        self.assertNotEqual(self.refusal(resp), "Not configured")
+        self.assertIn("season", self.refusal(resp).lower())
+
+    def test_surveying_a_backfill_is_not_refused(self):
+        """This one genuinely reads a history — but from whichever service can be
+        asked, and this account has one."""
+        resp = self.client.post("/api/distrakt/backfill/survey",
+                                json={"start": "2026-7", "end": "2026-08"})
+        self.assertNotEqual(self.refusal(resp), "Not configured")
+        self.assertIn("YYYY-MM", self.refusal(resp))
+
+    def test_saying_yes_to_an_unknown_episode_is_not_refused(self):
+        resp = self.client.post("/api/distrakt/unknown-add", json={})
+        self.assertNotEqual(self.refusal(resp), "Not configured")
+
+    def test_an_account_with_nothing_to_ask_is_still_refused_a_backfill(self):
+        """The other half of the survey's gate: it is not that nothing is
+        checked now, it is that the right thing is. An account whose only linked
+        service holds no usable token has no history to sweep."""
+        empty = self.make_user("no_tokens", distrakt_approved=True, calendar_approved=True)
+        self.link_identity(empty, "simkl", 4343, "")
+        self.sign_in_as(empty)
+        resp = self.client.post("/api/distrakt/backfill/survey",
+                                json={"start": "2026-07", "end": "2026-08"})
+        self.assertEqual(self.refusal(resp), "Not configured")

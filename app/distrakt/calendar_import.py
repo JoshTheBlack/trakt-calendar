@@ -84,6 +84,17 @@ async def premiere_records(user_id: int, settings, year: int, month: int) -> lis
     place). The instance-wide content floor still applies underneath this for
     free — it is enforced where the cache is populated, before any reader,
     including this one, ever sees the excluded show.
+
+    `settings` IS THE INSTANCE'S, NOT THE IMPORTING VIEWER'S, and every caller
+    owes that. A calendar window is fetched under the instance's own client id,
+    stored once and served to everybody, so whose token is on the object decides
+    nothing about what a month holds — while a viewer's token on it decides
+    whether the fetch can happen at all. Handing this the per-viewer Settings the
+    tracker builds for its history reads made importing a month hinge on whether
+    that particular person had linked Trakt, which is how an account signed in
+    with Simkl alone came to be refused a calendar the instance was reading
+    perfectly well. The PREFS above are the importer's and stay so: which titles
+    they may keep is theirs, who is asked is not.
     """
     from zoneinfo import ZoneInfo
 

@@ -582,8 +582,14 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # A PREVIEW month (before the 1st) keeps auto-populating from premieres so it
     # tracks the calendar (and un-turning-away re-adds a previously excluded
     # premiere). A COMMITTED month is stable — premieres only re-import on demand.
-    if not committed and settings.trakt_configured:
-        await distrakt_store.import_premieres(user_id, month_key, settings)
+    # THE INSTANCE'S SETTINGS FOR THE CALENDAR HALF, not the per-viewer ones this
+    # function is working with: a calendar window is fetched under the instance's
+    # own credentials and served to everybody, so a viewer who has not linked
+    # Trakt must not be the reason a preview month stops tracking the calendar.
+    # calendar_import.premiere_records states that contract.
+    instance_settings = load_settings()
+    if not committed and instance_settings.calendar_source_configured:
+        await distrakt_store.import_premieres(user_id, month_key, instance_settings)
         doc = await distrakt_store.load_month(user_id, month_key) or doc
 
     # BEFORE the records are read, because it changes them: a title turned away on
@@ -908,7 +914,15 @@ async def api_distrakt_import(request: Request):
     left — see rollover.can_initialize for why that one stays."""
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_configured:
+    # WHETHER THERE IS A CALENDAR TO IMPORT FROM, asked of the INSTANCE's own
+    # settings rather than of `settings`, which carries this viewer's tokens.
+    # The import reads the month's premieres out of the shared calendar cache and
+    # this account's not-watching marks, spending no viewer's credential — so
+    # asking either "did this viewer link Trakt" or "can this viewer's tokens
+    # fill a calendar" refused the button to somebody signed in with Simkl alone
+    # over a token the import never uses. calendar_import.premiere_records reads
+    # under the same instance settings, for the same reason.
+    if not load_settings().calendar_source_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
     today = clock.today()
@@ -920,7 +934,8 @@ async def api_distrakt_import(request: Request):
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
         return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
-    doc = await distrakt_store.import_premieres(user_id, month_key, settings)
+    # The instance's settings, for the reason the gate above gives.
+    doc = await distrakt_store.import_premieres(user_id, month_key, load_settings())
     await _register_networks(user_id, [s.get("network") for s in (doc or {}).get("shows", [])])
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     return JSONResponse(payload, status_code=status)
@@ -1386,7 +1401,12 @@ async def api_distrakt_add(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_configured:
+    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
+    # instance's client id, exactly as /search and /seasons ask for the same
+    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
+    # `trakt_configured` here asked whether this account had linked Trakt — and
+    # refused the whole action to somebody signed in with Simkl alone.
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
     today = clock.today()
@@ -1467,7 +1487,12 @@ async def api_distrakt_add_completed(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_configured:
+    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
+    # instance's client id, exactly as /search and /seasons ask for the same
+    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
+    # `trakt_configured` here asked whether this account had linked Trakt — and
+    # refused the whole action to somebody signed in with Simkl alone.
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
     today = clock.today()
@@ -1566,7 +1591,11 @@ async def api_distrakt_backfill_survey(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_configured:
+    # WHETHER ANY SERVICE CAN BE ASKED FOR A HISTORY, which is the same question
+    # the month list asks and for the same reason — a survey with nothing to
+    # sweep has nothing to report. Naming one service refused the whole backfill
+    # to an account whose history is perfectly readable from the other.
+    if not await watch_history.tracker_ports(settings, user_id):
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     data = await authz.json_body(request)
     default_start, default_end = backfill.default_range()
@@ -1717,7 +1746,12 @@ async def api_distrakt_unknown_add(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    if not settings.trakt_configured:
+    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
+    # instance's client id, exactly as /search and /seasons ask for the same
+    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
+    # `trakt_configured` here asked whether this account had linked Trakt — and
+    # refused the whole action to somebody signed in with Simkl alone.
+    if not settings.trakt_catalogue_configured:
         return authz.error("Not configured")
     data = await authz.json_body(request)
     try:
