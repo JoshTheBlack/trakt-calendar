@@ -27,7 +27,7 @@ from datetime import date
 from unittest.mock import AsyncMock, patch
 
 from app import db, distrakt as distrakt_store
-from app.config import Settings
+from app.config import Settings, save_settings
 from app.distrakt import live
 from app.providers.base import PlayCounts
 from app.providers.trakt import TraktError
@@ -67,6 +67,24 @@ SHOW = {"title": "Silo", "year": 2026, "overview": "Down the silo.",
 PEOPLE = {"cast": [{"person": {"name": "Rebecca"}, "character": "Juliette"}]}
 EPISODES = [{"number": n, "title": f"Ep {n}", "first_aired": "2026-07-15T20:00:00.000Z"}
             for n in range(1, 6)]
+
+
+def _quiet_sources():
+    """Every outbound call a month build can make, stubbed at its own module.
+
+    The calendar supplies a month's premieres and the services supply the
+    history. Neither is what the tests using this are about — they are about
+    whether the month is built and kept at all — and the suite refuses a test
+    that reaches the network. The history is stubbed at the TRACKER's own
+    boundary rather than at each provider call, so it stays true whatever the
+    ports go on to do.
+    """
+    from contextlib import ExitStack
+    stack = ExitStack()
+    stack.enter_context(patch("app.calendar.cache.read_month", return_value=([], None)))
+    stack.enter_context(patch("app.distrakt.watch_history.tracker_ports",
+                              AsyncMock(return_value=[])))
+    return stack
 
 
 class DetailsWithoutATraktTokenTests(AppTestCase):
@@ -341,7 +359,8 @@ class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
     def test_import_from_calendar_is_not_refused_for_a_missing_trakt_token(self):
         """It reads the month's premieres out of the instance's own calendar
         cache and this account's marks. No viewer's credential is spent."""
-        resp = self.client.post("/api/distrakt/import", json={"year": 2020, "month": 1})
+        with _quiet_sources():
+            resp = self.client.post("/api/distrakt/import", json={"year": 2020, "month": 1})
         self.assertNotEqual(self.refusal(resp), "Not configured")
         # A month with nothing cached for it imports nothing and says so
         # politely, which is the ordinary answer and not a refusal.
@@ -490,3 +509,111 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
             body = self.client.get("/api/distrakt/details?key=show:tmdb:56&season=1").json()
         self.assertEqual(trakt_asked, ["7"])
         self.assertEqual(body["source"], "trakt")
+
+
+class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
+    """The month document itself, for an account signed in with Simkl alone.
+
+    THE REPORTED SYMPTOM WAS THE STRANGEST KIND: importing from the calendar said
+    it had worked and imported nothing, and adding a show by hand said it had
+    been added and never showed it. Both were telling the truth about what they
+    did. Rollover asked `trakt_configured` before it would CREATE a month, and on
+    the per-account Settings the tracker builds that reads as "did this viewer
+    link Trakt" — so for this account the answer was no, no month was ever
+    persisted, and every write landed in a transient document that was discarded
+    on the way out. A roster row was left behind with no month to appear on,
+    which is exactly what the live database showed: one season stored, zero
+    months.
+
+    A MONTH IS BUILT FROM A CALENDAR, so that is what is asked now.
+    `_initialize_month` fills a new month with that month's premieres and nothing
+    else — whose token is on the request decides nothing about whether those
+    exist.
+    """
+
+    def make_settings(self):
+        # No Trakt access token at all: nothing on this instance or this account
+        # can read anybody's private Trakt data, and Simkl is what fills the
+        # calendar. The month must still be built.
+        return Settings(public_base_url=ORIGIN, timezone="UTC",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("simkl_month", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        self.sign_in_as(self.user_id)
+        self.today = date.today()
+
+    def stored_months(self) -> list[str]:
+        rows = asyncio.run(db.fetch_all(
+            "SELECT month FROM distrakt_months WHERE user_id = ? ORDER BY month",
+            (self.user_id,)))
+        return [row["month"] for row in rows]
+
+    def open_the_month(self):
+        """What the page actually does. /distrakt is a shell; the month is built
+        by the call the page then makes, which is where every gate below sits.
+
+        The build reads the calendar for its premieres and nothing here is about
+        what it finds there — an unpatched read would reach the network the suite
+        refuses."""
+        with _quiet_sources():
+            return self.client.get(
+                f"/api/distrakt/month?year={self.today.year}&month={self.today.month}")
+
+    def test_opening_the_month_persists_it(self):
+        """It used to hand back an unpersisted empty document every time, so
+        nothing the account did to that month could survive the response."""
+        self.assertEqual(self.stored_months(), [])
+        self.assertEqual(self.open_the_month().status_code, 200)
+        self.assertEqual(self.stored_months(),
+                         [f"{self.today.year}-{self.today.month:02d}"])
+
+    def test_importing_writes_into_a_month_that_is_still_there_afterwards(self):
+        """The reported case. The import itself had nothing wrong with it — it
+        merged premieres into a document nobody kept."""
+        with _quiet_sources():
+            resp = self.client.post("/api/distrakt/import", json={
+                "year": self.today.year, "month": self.today.month})
+        self.assertEqual(resp.status_code, 200, resp.text[:200])
+        self.assertEqual(self.stored_months(),
+                         [f"{self.today.year}-{self.today.month:02d}"])
+
+    def test_the_month_build_reads_the_calendar_as_the_instance(self):
+        """THE 401 THIS REPAIRS, and it is the half a gate-only fix leaves behind.
+        Past every gate, the build still read the calendar with the per-account
+        Settings — so for an account with no Trakt token it asked Trakt's
+        calendar with no bearer and the whole month failed on Trakt's own 401,
+        reported from a browser as "Trakt rejected the credentials" while adding
+        a film. A calendar window is fetched under the INSTANCE's credentials and
+        served to everybody; whose token is on the request decides nothing about
+        what a month holds."""
+        save_settings(Settings(
+            public_base_url=ORIGIN, timezone="UTC",
+            trakt_client_id="cid", trakt_access_token="instance-token",
+            simkl_client_id="scid", simkl_client_secret="ssecret",
+            simkl_access_token="operator-simkl-token"))
+        seen: list = []
+
+        async def _read(endpoint, settings, **kwargs):
+            seen.append(settings)
+            return ([], None)
+
+        with patch("app.calendar.cache.read_month", _read),              patch("app.distrakt.watch_history.tracker_ports", AsyncMock(return_value=[])):
+            resp = self.client.get(
+                f"/api/distrakt/month?year={self.today.year}&month={self.today.month}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(seen, "the month was built without reading a calendar at all")
+        for settings in seen:
+            self.assertEqual(settings.trakt_access_token, "instance-token")
+
+    def test_an_instance_with_no_calendar_source_still_builds_nothing(self):
+        """The other half, unchanged: with nobody able to supply a calendar there
+        are no premieres to build a month out of, and baking an empty one in
+        would stop a proper build happening once a source is configured."""
+        save_settings(Settings(public_base_url=ORIGIN, timezone="UTC"))
+        self.assertEqual(self.open_the_month().status_code, 200)
+        self.assertEqual(self.stored_months(), [])

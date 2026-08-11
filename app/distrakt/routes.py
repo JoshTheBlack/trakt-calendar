@@ -808,9 +808,18 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     existing = await distrakt_store.load_month(user_id, month_key)
     if existing is None:
         blocked = await distrakt_store.is_backfill_blocked(user_id, month_key, today)
-        if blocked or not settings.trakt_configured:
-            # Backward/gap past month (blocked) OR no Trakt yet: empty, NOT
-            # persisted, no Trakt call. `readonly` hides the add/edit affordances.
+        # WHETHER A MONTH CAN BE BUILT IS WHETHER THERE IS A CALENDAR TO BUILD IT
+        # FROM, the same question rollover.ensure_month asks before creating one —
+        # and it has to be the same question, because this decides whether that
+        # one is ever reached. Asking `trakt_configured` of the per-account
+        # Settings the tracker builds reads as "did this viewer link Trakt", so an
+        # account signed in with Simkl alone was handed an unpersisted empty month
+        # on every load and everything it then imported or added went into a
+        # document nobody kept.
+        if blocked or not settings.calendar_source_configured:
+            # Backward/gap past month (blocked) OR nothing to build from: empty,
+            # NOT persisted, nothing fetched. `readonly` hides the add/edit
+            # affordances.
             return _empty_month_payload(
                 month_key, emojis, default_emoji, standing,
                 readonly=blocked, link_url=link_url,

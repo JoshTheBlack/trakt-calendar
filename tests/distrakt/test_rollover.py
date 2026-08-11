@@ -27,11 +27,15 @@ from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, PlayCounts, Source, SourceUnavailable
 from tests.support import new_db_path
 
-# The two credential flags the tracker's source selection reads. A fake
-# settings object has to answer both, because the selector asks every
-# registered source whether this request carries a usable credential for it
-# — see app/distrakt/routes.py's _distrakt_settings.
+# The credential flags the tracker reads, all of which a fake settings object has
+# to answer. The first two are the source selection's: it asks every registered
+# source whether this request carries a usable credential for it — see
+# app/distrakt/routes.py's _distrakt_settings. The third is a different question
+# and belongs to the instance rather than to the account: whether there is a
+# CALENDAR to build a month's premieres from, which is what rollover asks before
+# it will create one.
 SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
+                           calendar_source_configured=True,
                            network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 
