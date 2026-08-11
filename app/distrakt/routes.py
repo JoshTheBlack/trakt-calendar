@@ -963,6 +963,30 @@ async def api_distrakt_backfill_networks(request: Request):
     })
 
 
+def _source_ids(services: list[str], ids: dict, progress_rows) -> dict[str, str]:
+    """The id each service knows this title by, for the links its ticks carry.
+
+    THE ROSTER ROW IS NOT THE ONLY PLACE THEY LIVE, and taking it as such is what
+    left half the ticks unlinked. A row is filed under the shared identity
+    waterfall and keeps whichever service ids it happened to arrive with — a
+    season added from Trakt carries a Trakt id and no Simkl one, for ever, even
+    on an account that syncs both. But the PROGRESS rows beside it are written by
+    each service's own sync, and each one records the id that service knows the
+    title by. Measured on a real roster: 41 of 46 seasons had no Simkl id on the
+    roster row while their progress rows carried one.
+
+    So the roster row is asked first and the progress rows fill the gaps. A
+    service still missing after both simply has no link, and its tick is drawn as
+    text rather than pointing somewhere unhelpful.
+    """
+    found = {name: str(ids[name]) for name in services if str(ids.get(name) or "")}
+    for row in progress_rows:
+        for name, column in (("trakt", "trakt_id"), ("simkl", "simkl_id")):
+            if name in services and name not in found and str(row[column] or ""):
+                found[name] = str(row[column])
+    return found
+
+
 @guard.get("/api/distrakt/details", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_details(request: Request):
     """The calendar's detail payload for one roster show, plus what THIS user has
@@ -1059,7 +1083,8 @@ async def api_distrakt_details(request: Request):
         logger.warning("Detail lookup failed for %s", source, exc_info=True)
         return JSONResponse({"ok": False, "error": "Could not load details."}, status_code=502)
     rows = await db.fetch_all(
-        "SELECT source, watched_episodes_json FROM distrakt_show_progress "
+        "SELECT source, watched_episodes_json, trakt_id, simkl_id "
+        "FROM distrakt_show_progress "
         "WHERE user_id = ? AND media = ? AND match_source = ? AND match_id = ? "
         "AND season = ? ORDER BY source",
         (user_id, key.media, key.match_source, key.match_id, season),
@@ -1095,6 +1120,14 @@ async def api_distrakt_details(request: Request):
     # scrobbles and the other was linked last week), and a tick with no
     # attribution turns that disagreement into what looks like a bug in the count.
     watched = sorted({episode for episodes in by_source.values() for episode in episodes})
+    # EVERY SERVICE THIS ACCOUNT SYNCS, not only the ones with something to say
+    # about this season. A tick per service is only readable if a service that
+    # recorded NOTHING still gets one — that hollow mark is the whole answer to
+    # "which of them is missing it", and a service that dropped out of the list
+    # for having no episodes would leave the reader unable to tell "Simkl has
+    # not seen this" from "this account has no Simkl".
+    services = [str(source) for source, _port in
+                await watch_history.tracker_ports(settings, user_id)]
     return JSONResponse({
         "ok": True,
         **details,
@@ -1105,6 +1138,13 @@ async def api_distrakt_details(request: Request):
         "season": season,
         "watched_episodes": watched,
         "watched_by_source": by_source,
+        "services": services,
+        # WHAT EACH SERVICE'S TICK LINKS TO. A tick is where you go to correct a
+        # record, so it has to open the service that holds the wrong one — every
+        # one of them pointing at Trakt was the reported fault. Only the ids this
+        # row actually carries travel; a service with none gets no link and its
+        # tick is drawn as plain text.
+        "source_ids": _source_ids(services, ids, rows),
     })
 
 

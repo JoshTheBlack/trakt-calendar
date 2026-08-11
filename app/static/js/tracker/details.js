@@ -44,6 +44,59 @@ function traktEpisodeUrl(slug, season, number) {
         + `?season=${encodeURIComponent(season)}&view=episode&episode=${encodeURIComponent(number)}`;
 }
 
+// Where a tick goes: the service that holds the record, on the title it is a
+// record OF. A tick is what you press to go and correct a count, so it has to
+// open the service holding the wrong one — every tick opening Trakt, whichever
+// service had recorded the episode, is the fault this replaced.
+//
+// Trakt can be addressed down to the episode; Simkl is opened at the title,
+// which is as deep as an id from a roster row reaches. A service the row carries
+// no id for gets no link at all and its tick is drawn as plain text rather than
+// as a link somewhere unhelpful.
+function serviceEpisodeUrl(service, d, number) {
+    const ids = d.source_ids || {};
+    if (service === 'trakt') return traktEpisodeUrl(d.slug, d.season, number);
+    if (service === 'simkl' && ids.simkl) return `https://simkl.com/tv/${encodeURIComponent(ids.simkl)}`;
+    return '';
+}
+
+// ONE TICK PER SERVICE THIS ACCOUNT SYNCS — filled where that service recorded
+// the episode, hollow where it did not, and each one a link to that service.
+//
+// WITH ONE SERVICE IT IS EXACTLY WHAT IT ALWAYS WAS: a single tick, no mark, no
+// attribution. Naming the only service there is would put a logo on every row of
+// a checklist that has nothing to disambiguate — the same rule the note above
+// this list follows, and the one the calendar's cards follow for a field only one
+// service filled in.
+//
+// WITH TWO IT CARRIES EACH SERVICE'S MARK, because the tick is now a control that
+// goes somewhere specific and the reader has to know where before pressing it.
+// That is the test _source_logo.html sets for drawing a mark at all, and it is
+// why the note beside this one is still text: a caption is not something you can
+// act on, and this is.
+function episodeChecks(d, ep, bySource) {
+    const number = Number(ep.number);
+    const services = (d.services && d.services.length)
+        ? d.services
+        : Object.keys(bySource).sort();
+    const marks = window.SOURCE_MARKS || {};
+    const single = services.length < 2;
+    return `<span class="ep-checks">` + (services.length ? services : ['trakt']).map(service => {
+        const name = SERVICE_NAMES[service] || service;
+        const seen = (bySource[service] || []).map(Number).includes(number);
+        const url = serviceEpisodeUrl(service, d, ep.number);
+        const glyph = seen ? '✓' : '○';
+        const body = single ? glyph : `${marks[service] || ''}${glyph}`;
+        const label = `${name} ${seen ? 'recorded this' : 'has not recorded this'}`
+            + ` — open on ${name}`;
+        const cls = `ep-check svc-${service}` + (seen ? '' : ' unseen');
+        return url
+            ? `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener"
+                  title="${esc(label)}">${body}</a>`
+            : `<span class="${cls}" title="${esc(label)}">${body}</span>`;
+    }).join('') + `</span>`;
+}
+
 function renderDistraktDetails(d) {
     const chips = [];
     if (d.status) chips.push(`<span class="chip">${esc(d.status)}</span>`);
@@ -129,22 +182,9 @@ function renderDistraktDetails(d) {
             const number = Number(ep.number);
             const seen = watched.has(number);
             const recorders = seenBy.get(number) || [];
-            const url = traktEpisodeUrl(d.slug, d.season, ep.number);
-            // Every episode gets a marker: a solid tick when this user has watched
-            // it, a hollow one when they haven't. Both open that episode on Trakt,
-            // so the unwatched ones are the useful link — that is where you go to
-            // mark it off.
-            const glyph = seen ? '✓' : '○';
-            const by = recorders.length ? ` (${recorders.join(', ')})` : '';
-            const label = (seen ? 'Watched' : 'Not watched') + by + ' — open on Trakt';
-            const cls = 'ep-check' + (seen ? '' : ' unseen');
-            const mark = url
-                ? `<a class="${cls}" href="${esc(url)}" target="_blank" rel="noopener"
-                      title="${esc(label)}">${glyph}</a>`
-                : `<span class="${cls}" title="${esc(label)}">${glyph}</span>`;
             return `
                 <div class="ep-row${seen ? ' watched' : ''}">
-                    ${mark}
+                    ${episodeChecks(d, ep, bySource)}
                     <span class="ep-num">E${String(ep.number).padStart(2, '0')}</span>
                     <span class="ep-title">${esc(ep.title)}</span>
                     ${(disagree && recorders.length) ? `<span class="ep-source">${esc(recorders.join(' · '))}</span>` : ''}

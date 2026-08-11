@@ -1245,6 +1245,21 @@ a.ep-check:hover { background: rgba(76,175,80,0.2); }
    click to go and mark it off. */
 .ep-check.unseen { color: var(--text-faint); font-weight: 400; }
 a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+/* ONE TICK PER SERVICE, side by side, when the account syncs more than one. The
+   row still has a single tick column so the episode numbers stay in line — the
+   ticks share it rather than each taking one. */
+.ep-checks { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
+.ep-checks .ep-check { display: inline-flex; align-items: center; gap: 2px; width: auto; padding: 0 3px; }
+/* The mark rides at the tick's own size: it says WHOSE record this is, and the
+   glyph beside it says what that record holds. A mark large enough to read as a
+   logo would make a checklist look like a row of buttons. */
+.ep-check .ep-mark { height: 11px; width: auto; border-radius: 3px; }
+/* A service that has not recorded the episode is drawn back rather than hidden:
+   the empty slot is the useful half of the answer, and its mark is what says
+   which service is missing it. */
+.ep-check.unseen .ep-mark { opacity: 0.4; filter: grayscale(1); }
+a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
+
 /* WHOSE TICKS THESE ARE, drawn only where the services disagree about the
    season. Quiet on purpose: nothing is wrong when two services hold different
    records of the same viewing, and styling the note as a warning would make an

@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+from datetime import date
 from unittest.mock import patch
 
 from app import db, distrakt as distrakt_store
@@ -224,3 +226,138 @@ class WhoseTicksTheseAreTests(_DetailsRouteTestCase):
         body = self._details().json()
         self.assertEqual(body["watched_episodes"], [])
         self.assertEqual(body["watched_by_source"], {})
+
+
+class ATickPerServiceTests(_DetailsRouteTestCase):
+    """What the checklist needs in order to draw a tick for each service and send
+    each one somewhere useful.
+
+    THE FAULT, REPORTED FROM A TWO-SERVICE ACCOUNT: every tick opened Trakt, even
+    the episodes only the other service had recorded. A tick is what you press to
+    go and correct a count, so one that always opens the same service is a
+    control pointing at the wrong place for half the rows it is drawn on — and
+    the panel had no way to say which half.
+
+    TWO THINGS TRAVEL FOR IT, and neither can be worked out from the watched
+    lists. WHICH SERVICES THIS ACCOUNT SYNCS, because a service that recorded
+    nothing at all still needs a hollow tick — that empty mark is the whole
+    answer to "which of them is missing this", and a service that fell out of the
+    payload for having no episodes would leave "Simkl has not recorded this"
+    indistinguishable from "this account has no Simkl". And WHICH ID EACH SERVICE
+    KNOWS THE TITLE BY, since a service cannot be opened on a title by an id it
+    does not issue.
+    """
+
+    def make_settings(self):
+        # BOTH SERVICES SET UP BY THE OPERATOR, which the base class does not do
+        # because its own subject is the catalogue half. Whether a service can be
+        # asked for a history is an instance question before it is an account
+        # one: a linked identity whose service the instance holds no credentials
+        # for is nobody to ask, and must not be given a tick.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
+    def setUp(self):
+        super().setUp()
+        self._settle(_month_back(0))
+
+    def test_every_service_the_account_syncs_is_named(self):
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self._progress("trakt", {1: "2026-08-01"})
+        self.assertEqual(sorted(self._details().json()["services"]), ["simkl", "trakt"])
+
+    def test_a_service_that_recorded_nothing_is_still_named(self):
+        """The case the watched lists cannot express. Simkl has a row for this
+        account and nothing for this season; its tick has to be drawn hollow
+        rather than left off."""
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self._progress("trakt", {1: "2026-08-01"})
+        body = self._details().json()
+        self.assertNotIn("simkl", body["watched_by_source"])
+        self.assertIn("simkl", body["services"])
+
+    def test_one_linked_service_names_only_itself(self):
+        """A one-service account must come out of this unchanged: one service
+        named, so the checklist draws exactly the single tick it always did with
+        no attribution on it."""
+        self._progress("trakt", {1: "2026-08-01"})
+        self.assertEqual(self._details().json()["services"], ["trakt"])
+
+    def test_each_service_travels_with_the_id_it_knows_the_title_by(self):
+        """What a tick's link is built from. A service cannot look a title up
+        under a namespace it does not issue, so one id is not enough."""
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self.assertEqual(self._details().json()["source_ids"], {"trakt": "7"})
+
+    def test_a_service_the_row_has_no_id_for_gets_none(self):
+        """Rather than a blank or a guess: the checklist draws that tick as plain
+        text instead of as a link somewhere unhelpful."""
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self.assertNotIn("simkl", self._details().json()["source_ids"])
+
+    def test_an_id_the_roster_row_lacks_is_taken_off_the_progress_row(self):
+        """WHERE THE MISSING HALF OF THE LINKS WAS. A season added from Trakt
+        keeps a Trakt id and no Simkl one for ever, even on an account syncing
+        both — but Simkl's own sync writes the id IT knows the title by onto the
+        progress row it stores. Measured on a real roster: 41 of 46 seasons had
+        no Simkl id upstairs and one downstairs. Without this, every Simkl tick
+        on that roster was drawn as dead text."""
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        asyncio.run(db.execute(
+            "INSERT OR REPLACE INTO distrakt_show_progress "
+            "(user_id, media, match_source, match_id, season, source, "
+            "watched_episodes_json, trakt_id, simkl_id) VALUES (?,?,?,?,?,?,?,?,?)",
+            (self.user_id, "show", "tmdb", "1", 2, "simkl",
+             json.dumps({"1": "2026-08-01T00:00:00Z"}), 7, 55512)))
+        self.assertEqual(self._details().json()["source_ids"],
+                         {"trakt": "7", "simkl": "55512"})
+
+    def test_the_roster_row_wins_where_both_hold_an_id(self):
+        """The progress rows fill gaps; they do not overrule the record. A row's
+        own ids are what every other part of the tracker reads it by."""
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        asyncio.run(db.execute(
+            "INSERT OR REPLACE INTO distrakt_show_progress "
+            "(user_id, media, match_source, match_id, season, source, "
+            "watched_episodes_json, trakt_id) VALUES (?,?,?,?,?,?,?,?)",
+            (self.user_id, "show", "tmdb", "1", 2, "trakt",
+             json.dumps({"1": "2026-08-01T00:00:00Z"}), 999999)))
+        self.assertEqual(self._details().json()["source_ids"]["trakt"], "7")
+
+
+class TheChecklistsMarksAreServedToItTests(AppTestCase):
+    """The tracker page hands the checklist each service's mark.
+
+    RENDERED BY THE MACRO THAT OWNS THE FILENAMES rather than spelled again in
+    JavaScript, which is the rule that file states — a third service is one edit
+    there and the checklist picks it up. This asserts the wiring, because a
+    missing map degrades silently to ticks with no marks on them.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid")
+
+    def test_the_page_carries_a_mark_for_each_service(self):
+        user_id = self.make_user("marks_viewer", distrakt_approved=True,
+                                 calendar_approved=True)
+        self.link_identity(user_id, "trakt", 902, "user-token")
+        self.sign_in_as(user_id)
+        # With no month named, /distrakt draws the month PICKER rather than a
+        # tracker — the checklist lives on the month page.
+        today = date.today()
+        html = self.client.get(f"/distrakt?year={today.year}&month={today.month}").text
+        block = re.search(r"window\.SOURCE_MARKS = \{(.*?)\};", html, re.S)
+        self.assertIsNotNone(block, "the checklist was sent no service marks")
+        # Parsed rather than pattern-matched, because what the checklist needs is
+        # a map the browser can read — a block that looked right and did not
+        # parse would fail there and nowhere else.
+        marks = json.loads("{" + block.group(1).strip().rstrip(",") + "}")
+        self.assertEqual(sorted(marks), ["simkl", "trakt"])
+        for source, markup in marks.items():
+            with self.subTest(source=source):
+                # The macro's own markup, so a third service appears here by
+                # being added there. What is asserted is that each one arrived
+                # and is a mark, not what its file is called.
+                self.assertIn("<img", markup)
+                self.assertIn("source-logo", markup)

@@ -1,3 +1,4 @@
+{% import '_source_logo.html' as src with context %}
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
@@ -266,6 +267,17 @@
     // to these emoji for any network with no logo, on the first paint.
     window.NETWORK_EMOJIS = {{ network_emojis | tojson }};
     window.DEFAULT_NETWORK_EMOJI = {{ default_network_emoji | tojson }};
+    // EACH SERVICE'S MARK, RENDERED BY THE MACRO THAT OWNS THE FILENAMES rather
+    // than spelled again in JavaScript. The episode checklist draws one tick per
+    // service and every tick is a link to that service, so a mark there is part
+    // of a control — which is the test _source_logo.html sets for drawing one at
+    // all. Markup rather than a path, so the class list and the alt text come
+    // from the same macro as everywhere else.
+    window.SOURCE_MARKS = {
+        {% for name in ("trakt", "simkl") %}
+        {{ name | tojson }}: {{ src.mark(name, "ep-mark") | string | tojson }},
+        {% endfor %}
+    };
 </script>
 </body>
 </html>
