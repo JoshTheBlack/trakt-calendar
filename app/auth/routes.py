@@ -620,15 +620,38 @@ async def me_page(request: Request):
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": user_images.has_avatar(user.user_id),
+        # THE PICTURE'S OWN VERSION, SO A RELOAD CANNOT SHOW THE OLD ONE. These
+        # images are served `private, max-age=86400`, which is right for a file
+        # that rarely changes and wrong for the moment it does: the URL is
+        # identical either side of a change, so a browser that has one cached
+        # goes on drawing it for a day. The upload path already worked around
+        # this by cache-busting in JavaScript; carrying the file's mtime in the
+        # template fixes it for every path at once — upload, adopt, refresh —
+        # rather than each call site remembering.
+        "avatar_version": user_images.picture_version(
+            user_images.avatar_path(user.user_id)),
         # WHICH SERVICES HAVE GIVEN US A PICTURE, and which one (if any) the
         # account is currently wearing. The second is derived by comparing bytes
-        # rather than stored, for the reason user_images.adopt_provider_avatar
+        # rather than stored, for the reason user_images.adopt_avatar_source
         # gives: the avatar is a COPY, so there is no "primary provider" field
         # and the honest answer is whether the two files match.
-        "provider_avatars": [
-            {"provider": name,
-             "adopted": user_images.provider_avatar_is_adopted(user.user_id, name)}
-            for name in user_images.list_provider_avatars(user.user_id)
+        "avatar_sources": [
+            {"source": name,
+             "label": "Uploaded" if name == user_images.UPLOAD_SOURCE else name.title(),
+             # Refresh means "ask them again", which only a service can answer.
+             "refreshable": name != user_images.UPLOAD_SOURCE,
+             "adopted": user_images.avatar_source_is_adopted(user.user_id, name),
+             "version": user_images.picture_version(
+                 user_images.avatar_source_path(user.user_id, name))}
+            for name in user_images.list_avatar_sources(user.user_id)
+        ],
+        # WHICH SERVICES COULD BE ASKED, as opposed to which have already
+        # answered. An account linked before pictures were ever fetched has a
+        # connection and no slot, and without this it would have no way to get
+        # one but to disconnect and reconnect — which is a destructive action
+        # standing in for "fetch that, please".
+        "avatar_fetchable": [
+            name for name in user_images.PROVIDER_SLOTS if name in linked
         ],
     })
 
@@ -841,19 +864,28 @@ async def get_avatar(request: Request):
 # these check membership first so the refusal is a 400 rather than a 500.
 
 
-def _known_slot(provider: object) -> str | None:
-    name = str(provider or "").strip().lower()
+def _known_source(value: object) -> str | None:
+    """A name from a request, or None. Membership of the closed set is what keeps
+    it from becoming a path component."""
+    name = str(value or "").strip().lower()
+    return name if name in user_images.AVATAR_SOURCES else None
+
+
+def _known_slot(value: object) -> str | None:
+    """A CONNECTED SERVICE only. Refresh is the one action that means "ask them
+    again", and the account's own upload has nobody to ask."""
+    name = str(value or "").strip().lower()
     return name if name in user_images.PROVIDER_SLOTS else None
 
 
-@guard.get("/api/me/avatar/provider/{provider}", AuthLevel.SESSION)
-async def get_provider_avatar(request: Request, provider: str):
-    """One provider slot's picture, for the picker to draw."""
+@guard.get("/api/me/avatar/source/{source}", AuthLevel.SESSION)
+async def get_avatar_source(request: Request, source: str):
+    """One source's picture — the upload, or a service's — for the picker."""
     user = await auth.require_session(request)
-    name = _known_slot(provider)
+    name = _known_source(source)
     if name is None:
         return Response(status_code=404)
-    path = user_images.provider_avatar_path(user.user_id, name)
+    path = user_images.avatar_source_path(user.user_id, name)
     if not path.exists():
         return Response(status_code=404)
     size_param = request.query_params.get("size")
@@ -869,9 +901,9 @@ async def get_provider_avatar(request: Request, provider: str):
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
-@guard.post("/api/me/avatar/provider", AuthLevel.SESSION)
-async def use_provider_avatar(request: Request):
-    """Make a provider slot this account's avatar.
+@guard.post("/api/me/avatar/source", AuthLevel.SESSION)
+async def use_avatar_source(request: Request):
+    """Make one source's picture this account's avatar.
 
     `only_if_missing=False`: this is a person choosing, and a choice overrides
     whatever is there. That is the whole difference from the automatic seeding
@@ -879,15 +911,15 @@ async def use_provider_avatar(request: Request):
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    name = _known_slot(data.get("provider"))
+    name = _known_source(data.get("source"))
     if name is None:
-        return authz.error("Unknown provider.")
-    if not user_images.adopt_provider_avatar(user.user_id, name, only_if_missing=False):
-        return authz.error("There is no saved picture from that service.")
+        return authz.error("Unknown picture.")
+    if not user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
+        return authz.error("There is no saved picture of that kind.")
     return JSONResponse({"ok": True})
 
 
-@guard.post("/api/me/avatar/provider/refresh", AuthLevel.SESSION)
+@guard.post("/api/me/avatar/source/refresh", AuthLevel.SESSION)
 async def refresh_provider_avatar(request: Request):
     """Ask the service for its current picture again and refill the slot.
 
@@ -903,10 +935,10 @@ async def refresh_provider_avatar(request: Request):
     """
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    name = _known_slot(data.get("provider"))
+    name = _known_slot(data.get("source") or data.get("provider"))
     if name is None:
-        return authz.error("Unknown provider.")
-    was_adopted = user_images.provider_avatar_is_adopted(user.user_id, name)
+        return authz.error("Unknown service.")
+    was_adopted = user_images.avatar_source_is_adopted(user.user_id, name)
     url = await provider_avatars.current_url(user.user_id, name)
     raw = await provider_avatars.fetch(name, url)
     if raw is None:
@@ -916,18 +948,18 @@ async def refresh_provider_avatar(request: Request):
     except user_images.ValidationError as exc:
         return authz.error(str(exc))
     if was_adopted:
-        user_images.adopt_provider_avatar(user.user_id, name, only_if_missing=False)
+        user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
     return JSONResponse({"ok": True, "adopted": was_adopted})
 
 
-@guard.delete("/api/me/avatar/provider", AuthLevel.SESSION)
-async def remove_provider_avatar(request: Request):
+@guard.delete("/api/me/avatar/source", AuthLevel.SESSION)
+async def remove_avatar_source(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
-    name = _known_slot(data.get("provider"))
+    name = _known_source(data.get("source"))
     if name is None:
-        return authz.error("Unknown provider.")
-    user_images.delete_provider_avatar(user.user_id, name)
+        return authz.error("Unknown picture.")
+    user_images.delete_avatar_source(user.user_id, name)
     return JSONResponse({"ok": True})
 
 
@@ -954,11 +986,20 @@ async def upload_saved_image(request: Request):
 @guard.get("/api/me/images", AuthLevel.SESSION)
 async def list_saved_images(request: Request):
     """This account's saved images as {uid, name}, oldest first — enough for a
-    picker to render a named thumbnail of each through the route below."""
+    picker to render a named thumbnail of each through the route below.
+
+    `provider_avatars` TRAVELS BESIDE THEM RATHER THAN AMONG THEM. The export
+    picker offers both, but they are different things: a saved image is one of
+    five an account may upload, and a provider picture is a copy of a connected
+    service's, owned by the server and counting against no quota. Folding them
+    into one list would have meant `max` describing a count that included things
+    it does not cap.
+    """
     user = await auth.require_session(request)
     return JSONResponse({
         "ok": True,
         "images": user_images.describe_images(user.user_id),
+        "provider_avatars": user_images.list_provider_avatars(user.user_id),
         "max": user_images.MAX_IMAGES_PER_USER,
         "max_name": user_images.MAX_IMAGE_NAME,
     })

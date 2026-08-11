@@ -63,7 +63,7 @@
         <span class="label">Profile picture</span>
         <div class="row-main">
           <img id="avatarPreview" class="avatar-thumb" alt="Your profile picture"
-               src="{% if has_avatar %}/api/me/avatar?size=96{% endif %}"
+               src="{% if has_avatar %}/api/me/avatar?size=96&amp;v={{ avatar_version }}{% endif %}"
                {% if not has_avatar %}style="display:none"{% endif %}>
           <div id="avatarPlaceholder" class="avatar-thumb avatar-placeholder"
                {% if has_avatar %}style="display:none"{% endif %}>🙂</div>
@@ -78,32 +78,34 @@
         </div>
       </div>
 
-      {# THE PALETTE. Only drawn when a connected service has actually given us a
-         picture, so an account with none sees the upload control exactly as it
-         was — this is an addition beside that control, never a replacement for
-         it. Each service keeps its own copy; "Use" copies one into the avatar,
-         which is the single file every other reader in the app already looks
-         at. #}
-      {% if provider_avatars %}
+      {# THE PICKER. Every picture this account could wear, its own upload
+         included — `avatar.webp` is the FACE and each of these is a SOURCE it is
+         copied from, so the upload belongs in the list beside the services
+         rather than being the odd one out. Without it, the only way back to your
+         own picture after trying a service's was to REMOVE the service's, which
+         is a destructive action standing in for a choice. #}
+      {% if avatar_sources %}
       <div class="row">
-        <span class="label">From your services</span>
+        <span class="label">Avatar</span>
         <div class="row-main provider-avatars">
-          {% for slot in provider_avatars %}
+          {% for slot in avatar_sources %}
           <div class="provider-avatar{% if slot.adopted %} is-adopted{% endif %}"
-               data-provider="{{ slot.provider }}">
-            <img class="avatar-thumb" alt="Your {{ slot.provider }} picture"
-                 src="/api/me/avatar/provider/{{ slot.provider }}?size=96">
-            <span class="provider-avatar-name">{{ slot.provider }}</span>
-            {# The one that is already in use says so instead of offering to be
-               used again — a button that cannot change anything reads as broken. #}
+               data-source="{{ slot.source }}">
+            <img class="avatar-thumb" alt="Your {{ slot.label }} picture"
+                 src="/api/me/avatar/source/{{ slot.source }}?size=96&amp;v={{ slot.version }}">
+            <span class="provider-avatar-name">{{ slot.label }}</span>
+            {# The one already in use says so instead of offering to be used
+               again — a button that cannot change anything reads as broken. #}
             {% if slot.adopted %}
             <span class="auth-badge ok">In use</span>
             {% else %}
-            <button class="btn-ghost tiny" type="button" data-avatar-use="{{ slot.provider }}">Use</button>
+            <button class="btn-ghost tiny" type="button" data-avatar-use="{{ slot.source }}">Use</button>
             {% endif %}
-            <button class="btn-ghost tiny" type="button" data-avatar-refresh="{{ slot.provider }}"
-                    title="Ask {{ slot.provider }} for this picture again">↻</button>
-            <button class="btn-ghost tiny" type="button" data-avatar-drop="{{ slot.provider }}"
+            {% if slot.refreshable %}
+            <button class="btn-ghost tiny" type="button" data-avatar-refresh="{{ slot.source }}"
+                    title="Ask {{ slot.label }} for this picture again">↻</button>
+            {% endif %}
+            <button class="btn-ghost tiny" type="button" data-avatar-drop="{{ slot.source }}"
                     title="Forget this picture">&times;</button>
           </div>
           {% endfor %}
@@ -216,9 +218,22 @@
         <span class="label">Trakt</span>
         {% if 'trakt' in linked %}
         <span class="auth-badge ok">{{ linked.get('trakt') or "Linked" }}</span>
-        {% if can_unlink %}
-        <button class="btn-ghost tiny" type="button" data-unlink="trakt">Unlink</button>
-        {% endif %}
+        {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+           arrives on its own when an account registers with a service or links
+           one, so an account linked before any of that existed has a connection
+           and no picture — and the only way to get one was to unlink and link
+           again, which is a destructive action standing in for "fetch that,
+           please". It is also the way to pick up a picture you have just changed
+           on the service's own site. #}
+        <span class="row-actions">
+          {% if 'trakt' in avatar_fetchable %}
+          <button class="btn-ghost tiny" type="button" data-avatar-pull="trakt"
+                  title="Use this account's picture">Get picture</button>
+          {% endif %}
+          {% if can_unlink %}
+          <button class="btn-ghost tiny" type="button" data-unlink="trakt">Unlink</button>
+          {% endif %}
+        </span>
         {% elif trakt_login_configured %}
         {# Leaves the app — see the same link on the sign-in page. #}
         <a class="btn-ghost tiny" href="/auth/trakt/link" hx-boost="false">Connect</a>
@@ -232,9 +247,22 @@
         <span class="label">Simkl</span>
         {% if 'simkl' in linked %}
         <span class="auth-badge ok">{{ linked.get('simkl') or "Linked" }}</span>
-        {% if can_unlink %}
-        <button class="btn-ghost tiny" type="button" data-unlink="simkl">Unlink</button>
-        {% endif %}
+        {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+           arrives on its own when an account registers with a service or links
+           one, so an account linked before any of that existed has a connection
+           and no picture — and the only way to get one was to unlink and link
+           again, which is a destructive action standing in for "fetch that,
+           please". It is also the way to pick up a picture you have just changed
+           on the service's own site. #}
+        <span class="row-actions">
+          {% if 'simkl' in avatar_fetchable %}
+          <button class="btn-ghost tiny" type="button" data-avatar-pull="simkl"
+                  title="Use this account's picture">Get picture</button>
+          {% endif %}
+          {% if can_unlink %}
+          <button class="btn-ghost tiny" type="button" data-unlink="simkl">Unlink</button>
+          {% endif %}
+        </span>
         {% elif simkl_login_configured %}
         {# Leaves the app — see the same link on the sign-in page. #}
         <a class="btn-ghost tiny" href="/auth/simkl/link" hx-boost="false">Connect</a>
@@ -248,9 +276,22 @@
         <span class="label">Plex</span>
         {% if 'plex' in linked %}
         <span class="auth-badge ok">{{ linked.get('plex') or "Linked" }}</span>
-        {% if can_unlink %}
-        <button class="btn-ghost tiny" type="button" data-unlink="plex">Unlink</button>
-        {% endif %}
+        {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+           arrives on its own when an account registers with a service or links
+           one, so an account linked before any of that existed has a connection
+           and no picture — and the only way to get one was to unlink and link
+           again, which is a destructive action standing in for "fetch that,
+           please". It is also the way to pick up a picture you have just changed
+           on the service's own site. #}
+        <span class="row-actions">
+          {% if 'plex' in avatar_fetchable %}
+          <button class="btn-ghost tiny" type="button" data-avatar-pull="plex"
+                  title="Use this account's picture">Get picture</button>
+          {% endif %}
+          {% if can_unlink %}
+          <button class="btn-ghost tiny" type="button" data-unlink="plex">Unlink</button>
+          {% endif %}
+        </span>
         {% else %}
         <button class="btn-ghost tiny" type="button" id="plexConnect">Connect</button>
         {% endif %}
@@ -484,30 +525,35 @@ avatarRemoveBtn.addEventListener('click', () => {
 // would mean re-deriving it in JavaScript and getting a second answer to a
 // question the server already answers.
 document.addEventListener('click', async (event) => {
-  const button = event.target.closest('[data-avatar-use],[data-avatar-refresh],[data-avatar-drop]');
+  const button = event.target.closest(
+    '[data-avatar-use],[data-avatar-refresh],[data-avatar-drop],[data-avatar-pull]');
   if (!button) return;
   const err = document.getElementById('providerAvatarError');
-  const provider = button.dataset.avatarUse || button.dataset.avatarRefresh || button.dataset.avatarDrop;
+  const d = button.dataset;
+  const source = d.avatarUse || d.avatarRefresh || d.avatarDrop || d.avatarPull;
 
-  if (button.dataset.avatarDrop) {
-    confirmInline(button, 'Forget the picture from ' + provider + '?',
-                  () => providerAvatarAction('DELETE', '/api/me/avatar/provider', provider, button, err),
+  if (d.avatarDrop) {
+    confirmInline(button, 'Forget the ' + source + ' picture?',
+                  () => providerAvatarAction('DELETE', '/api/me/avatar/source', source, button, err),
                   {danger: true});
     return;
   }
-  const path = button.dataset.avatarRefresh
-    ? '/api/me/avatar/provider/refresh' : '/api/me/avatar/provider';
-  await providerAvatarAction('POST', path, provider, button, err);
+  // Pull and refresh are the same request. They differ only in where you press
+  // it: refresh sits on a picture you already have, pull sits beside a service
+  // you are connected to and have none from yet.
+  const path = (d.avatarRefresh || d.avatarPull)
+    ? '/api/me/avatar/source/refresh' : '/api/me/avatar/source';
+  await providerAvatarAction('POST', path, source, button, err);
 });
 
-async function providerAvatarAction(method, path, provider, button, err) {
+async function providerAvatarAction(method, path, source, button, err) {
   button.disabled = true;
   if (err) err.textContent = '';
   try {
     const resp = await fetch(path, {
       method,
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({provider}),
+      body: JSON.stringify({source}),
     });
     const data = await resp.json().catch(() => ({}));
     if (resp.ok && data.ok) { window.location.reload(); return; }

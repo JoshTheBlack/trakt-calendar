@@ -15,8 +15,10 @@ THE RULE, AND IT HAS NO EXCEPTIONS:
      lower-cased, never by suffix. A suffix test (`endswith("plex.tv")`) is
      defeated by `evilplex.tv` and by `plex.tv.attacker.com`, which is exactly
      the shape of bug this list exists to prevent.
-  3. NO REDIRECTS FOLLOWED. A redirect relocates the request to a host the
-     allowlist never saw, which would hand rule 2 straight back.
+  3. A REDIRECT IS FOLLOWED ONLY TO A HOST THAT PASSES RULE 2 AGAIN, and at most
+     MAX_REDIRECTS times. Never blindly: each hop is re-checked by the same
+     function that checked the first URL, so a redirect can only ever move the
+     request between hosts already on this provider's list.
   4. THE SIZE CAP IS ENFORCED WHILE READING, not from Content-Length — a header
      is a claim, and a body that keeps coming is what actually fills memory.
   5. ANY FAILURE IS A NON-EVENT. No avatar is the ordinary case; this never
@@ -27,9 +29,18 @@ payloads on 2026-08-09, because a wrong allowlist fails silently in both
 directions — too narrow and every avatar is dropped while looking like the
 feature simply does nothing, too broad and the list is the vulnerability.
 
-    trakt   user.images.avatar.full   -> media.trakt.tv
-    plex    thumb                     -> plex.tv
-    simkl   user.avatar               -> depends, and that is the interesting one
+    trakt   user.images.avatar.full   -> media.trakt.tv, 200 directly
+    simkl   user.avatar               -> depends, see below; 200 directly
+    plex    thumb                     -> plex.tv, which 302s to secure.gravatar.com
+
+PLEX NAMES ONE HOST AND SERVES FROM ANOTHER, and this was found the hard way: an
+earlier version of this module recorded the host each provider NAMES and stopped
+there, which is not the same question as whether fetching it yields bytes. Plex's
+`thumb` is a plex.tv URL that redirects to Gravatar for any account that has not
+uploaded a picture to Plex itself, so with redirects refused outright the fetch
+saw a 302, called it a non-200, and Plex silently never seeded. Measuring a URL
+is not measuring a retrieval; both hosts are on Plex's list below and rule 3 is
+what makes following the hop safe.
 
 SIMKL SERVES TWO DIFFERENT HOSTS DEPENDING ON WHERE THE PICTURE CAME FROM, which
 was established by measuring the SAME account twice, before and after uploading a
@@ -83,11 +94,19 @@ MAX_BYTES = 5 * 1024 * 1024
 # decision rather than an omission — no provider is in that state today.
 ALLOWED_HOSTS: dict[str, tuple[str, ...]] = {
     "trakt": ("media.trakt.tv",),
-    "plex": ("plex.tv",),
+    # BOTH ENDS OF PLEX'S REDIRECT. plex.tv is what the account payload names;
+    # secure.gravatar.com is where it sends us for an account with no picture
+    # uploaded to Plex itself. Gravatar is on PLEX's list and nobody else's,
+    # because it is Plex's redirect target and not a general permission.
+    "plex": ("plex.tv", "secure.gravatar.com"),
     # NOT the social CDNs Simkl also hands back for an imported picture. See the
     # module docstring: this covers an avatar Simkl itself hosts and nothing else.
     "simkl": ("simkl.in",),
 }
+
+# One hop covers every case measured (only Plex redirects, and only once). The
+# bound is what stops a redirect loop between two allowed hosts spinning here.
+MAX_REDIRECTS = 3
 
 
 def allowed_url(provider: str, url: str | None) -> str | None:
@@ -174,24 +193,44 @@ async def fetch(provider: str, url: str | None) -> bytes | None:
         return None
     try:
         client = POOL.client()
-        # follow_redirects is FALSE and is stated rather than left to the
-        # client's default, because this is the one call in the app where the
-        # default changing would silently undo a security rule.
-        async with client.stream("GET", target, timeout=TIMEOUT_SECONDS,
-                                 follow_redirects=False) as response:
-            if response.status_code != 200:
-                return None
-            chunks: list[bytes] = []
-            total = 0
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                # ABANDONED MID-READ. The connection is dropped by leaving the
-                # stream context, so a body that keeps coming costs this much
-                # and no more, whatever Content-Length claimed.
-                if total > MAX_BYTES:
-                    logger.debug("%s avatar exceeded %d bytes; abandoned.", provider, MAX_BYTES)
+        for _hop in range(MAX_REDIRECTS + 1):
+            # follow_redirects is FALSE and is stated rather than left to the
+            # client's default, because the following is done HERE, one hop at a
+            # time, with the allowlist re-applied to each target. Handing that to
+            # httpx would follow wherever it was pointed.
+            async with client.stream("GET", target, timeout=TIMEOUT_SECONDS,
+                                     follow_redirects=False) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        return None
+                    # Resolved against the URL that issued it, so a relative
+                    # Location cannot be mistaken for a bare hostname, and then
+                    # put through the SAME check the first URL had to pass.
+                    target = allowed_url(provider, str(response.url.join(location)))
+                    if target is None:
+                        logger.debug("%s avatar redirected somewhere this app will "
+                                     "not follow; dropped.", provider)
+                        return None
+                    continue
+                if response.status_code != 200:
                     return None
-                chunks.append(chunk)
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    # ABANDONED MID-READ. The connection is dropped by leaving
+                    # the stream context, so a body that keeps coming costs this
+                    # much and no more, whatever Content-Length claimed.
+                    if total > MAX_BYTES:
+                        logger.debug("%s avatar exceeded %d bytes; abandoned.",
+                                     provider, MAX_BYTES)
+                        return None
+                    chunks.append(chunk)
+                break
+        else:
+            # Ran out of hops without reaching a body.
+            return None
     except (httpx.HTTPError, ValueError, OSError) as exc:
         # DEBUG, not WARNING: a provider picture that did not arrive is not a
         # fault anybody needs to act on, and this runs on every registration.

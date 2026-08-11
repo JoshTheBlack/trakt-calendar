@@ -163,8 +163,16 @@ async def complete_provider_login(
 
     if outcome.kind == "registered":
         await auth.record_registration_attempt(ip, token, True)
-
-    await seed_provider_avatar(outcome.user_id, identity)
+        # INSIDE THIS BRANCH, NOT BESIDE IT, AND THE DIFFERENCE IS TWO RULES AT
+        # ONCE. A REGISTRATION is a new account with no picture; an ordinary
+        # sign-in is the same person arriving again, and seeding there would
+        # spend an outbound image fetch on every login forever to replace a
+        # picture that almost never changed — and would quietly bring back an
+        # avatar its owner had deleted, since deleting it is exactly what makes
+        # `only_if_missing` true again. Linking a service seeds too (see
+        # complete_provider_link); refreshing on demand is the account page's
+        # button. Signing in does neither.
+        await seed_provider_avatar(outcome.user_id, identity)
 
     session_id = await auth.create_session(
         outcome.user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
@@ -240,7 +248,7 @@ async def seed_provider_avatar(user_id: int, identity: auth.ProviderIdentity) ->
     it second, so `avatar.webp` is only ever a copy of bytes that have already
     been through the same validation an upload gets. `only_if_missing=True` is
     what makes this safe to run on every link: it is checked inside the write
-    (see user_images.adopt_provider_avatar) so two completions racing cannot land
+    (see user_images.adopt_avatar_source) so two completions racing cannot land
     a provider picture on top of one somebody uploaded.
     """
     raw = await provider_avatars.fetch(identity.provider, identity.avatar_url)
@@ -248,7 +256,7 @@ async def seed_provider_avatar(user_id: int, identity: auth.ProviderIdentity) ->
         return
     try:
         await user_images.save_provider_avatar(user_id, identity.provider, raw)
-        user_images.adopt_provider_avatar(user_id, identity.provider, only_if_missing=True)
+        user_images.adopt_avatar_source(user_id, identity.provider, only_if_missing=True)
     except Exception as exc:  # noqa: BLE001 — see the docstring: never fatal
         logger.debug("Could not store the %s avatar for user %s: %s",
                      identity.provider, user_id, exc)

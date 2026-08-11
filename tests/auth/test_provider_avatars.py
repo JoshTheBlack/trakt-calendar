@@ -9,7 +9,10 @@ rather than left to a fetch test to stumble into.
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import httpx
 
 from app.auth import provider_avatars
 
@@ -113,6 +116,93 @@ class AllowedUrlTests(unittest.TestCase):
         the Trakt path may be sent."""
         self.assertIsNone(provider_avatars.allowed_url("trakt", self.PLEX))
         self.assertIsNone(provider_avatars.allowed_url("plex", self.TRAKT))
+
+
+class RedirectTests(unittest.IsolatedAsyncioTestCase):
+    """Plex names plex.tv and serves from Gravatar, so a redirect has to be
+    followed — but only ever to a host that passes the same check the first URL
+    did. Driven through a real httpx.AsyncClient over MockTransport, so the
+    redirect handling under test is the actual code path and not a stub's idea
+    of one."""
+
+    PLEX = "https://plex.tv/users/30019358b2ffe534/avatar?c=1"
+    GRAVATAR = "https://secure.gravatar.com/avatar/895729d2?s=80"
+    PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+
+    def _client(self, handler):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+    async def _fetch(self, provider, url, handler):
+        client = self._client(handler)
+        with patch.object(provider_avatars, "POOL", SimpleNamespace(client=lambda: client)):
+            try:
+                return await provider_avatars.fetch(provider, url)
+            finally:
+                await client.aclose()
+
+    async def test_plexs_real_redirect_to_gravatar_is_followed(self):
+        """THE DEFECT THIS PINS: refusing redirects outright meant Plex saw a 302,
+        called it a non-200, and silently never seeded."""
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            if request.url.host == "plex.tv":
+                return httpx.Response(302, headers={"location": self.GRAVATAR})
+            return httpx.Response(200, content=self.PNG)
+
+        self.assertEqual(await self._fetch("plex", self.PLEX, handler), self.PNG)
+        self.assertEqual(len(seen), 2)  # the named URL, then the one it pointed at
+
+    async def test_a_redirect_off_the_allowlist_is_not_followed(self):
+        """The rule that makes following one safe at all. Gravatar is on PLEX's
+        list; a hop to anywhere else — including somewhere internal — stops."""
+        for evil in ("http://169.254.169.254/latest/meta-data/",
+                     "https://evil.example/x.png",
+                     "https://media.trakt.tv/x.png"):  # another provider's host
+            with self.subTest(evil=evil):
+                def handler(request, evil=evil):
+                    if request.url.host == "plex.tv":
+                        return httpx.Response(302, headers={"location": evil})
+                    raise AssertionError(f"followed a redirect to {request.url}")
+
+                self.assertIsNone(await self._fetch("plex", self.PLEX, handler))
+
+    async def test_a_relative_redirect_is_resolved_against_its_own_host(self):
+        """A bare "/avatars/x.png" must not be read as a hostname, and resolving
+        it keeps it on plex.tv, which is allowed."""
+        def handler(request):
+            if request.url.path.startswith("/users/"):
+                return httpx.Response(302, headers={"location": "/avatars/BC9BB7/4a/3"})
+            self.assertEqual(request.url.host, "plex.tv")
+            return httpx.Response(200, content=self.PNG)
+
+        self.assertEqual(await self._fetch("plex", self.PLEX, handler), self.PNG)
+
+    async def test_a_redirect_loop_between_allowed_hosts_is_bounded(self):
+        """Both hosts are allowed, so the allowlist alone would never stop this."""
+        calls = []
+
+        def handler(request):
+            calls.append(str(request.url))
+            other = self.GRAVATAR if request.url.host == "plex.tv" else self.PLEX
+            return httpx.Response(302, headers={"location": other})
+
+        self.assertIsNone(await self._fetch("plex", self.PLEX, handler))
+        self.assertLessEqual(len(calls), provider_avatars.MAX_REDIRECTS + 1)
+
+    async def test_gravatar_is_plexs_permission_and_nobody_elses(self):
+        """It is on Plex's list because it is Plex's redirect target, not because
+        the app is generally willing to fetch from it."""
+        self.assertIsNone(provider_avatars.allowed_url("trakt", self.GRAVATAR))
+        self.assertIsNone(provider_avatars.allowed_url("simkl", self.GRAVATAR))
+        self.assertIsNotNone(provider_avatars.allowed_url("plex", self.GRAVATAR))
+
+    async def test_a_body_over_the_cap_is_abandoned(self):
+        def handler(request):
+            return httpx.Response(200, content=b"x" * (provider_avatars.MAX_BYTES + 1))
+
+        self.assertIsNone(await self._fetch("trakt", AllowedUrlTests.TRAKT, handler))
 
 
 class FetchRefusesBeforeAnyRequestTests(unittest.IsolatedAsyncioTestCase):
