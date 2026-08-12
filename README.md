@@ -31,6 +31,7 @@ title for cast, an embedded trailer, and the full episode list.
 
 - 📅 Browse premieres for any month/year, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
+- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, and a **Sources** screen decides which services fill each calendar and whose answer you see when they describe a title differently. Simkl needs no credentials to fill a calendar
 - 🖼️ Rich poster tiles — rating, runtime, network, and episode (SxxEyy) badges, plus language, country, day-of-week, and a lazily-loaded current-season summary (episode count, latest / next air date)
 - 🔍 **Details modal** on click — full overview, an embedded trailer, cast (headshots + characters), and the season's episode list with air dates
 - ✅ Mark shows **watching / not watching** — saved server-side, so it follows you across devices — plus a one-click filter to hide the ones you're not watching
@@ -63,6 +64,9 @@ both work with no configuration:
 Then click **⚙️ Settings** and paste your Trakt **Client ID** and **Access Token** (create
 a free API app at [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications)).
 That's it — pick a month and browse.
+
+Simkl is optional and adds a second source for the calendar; see
+[Simkl — an optional second source](#simkl--an-optional-second-source).
 
 > `run.py` starts the app under Hypercorn with auto-reload. Override `HOST`, `PORT`, or
 > set `RELOAD=0` via environment variables.
@@ -219,6 +223,8 @@ for why it's split that way and what's still in the file.
 | Setting | What it does |
 |---|---|
 | **Trakt Client ID / Access Token** | Your Trakt API credentials |
+| **Simkl Client ID / Secret / Access Token** | Optional — see [Simkl](#simkl--an-optional-second-source) for which of the three each feature needs |
+| **Include Simkl results on the calendar** | Instance-wide, on by default. Untick and Simkl leaves the calendar immediately, including months already cached; tick it again and they come back without clearing anything |
 | **Timezone** | Air times are converted to this zone (grouped IANA dropdown) |
 | **Default endpoint** | Which calendar to show by default |
 | **Pagination limit** | Max items fetched per request |
@@ -275,6 +281,49 @@ fields; read it before setting them on an instance other people use.
 Changing the floor doesn't take effect instantly: a window already cached keeps serving
 until its TTL lapses (`calendar_cache_ttl_minutes`, 10 minutes by default) and gets
 refetched — not worth a dedicated invalidation sweep for a 10-minute window.
+
+## Simkl — an optional second source
+
+Simkl fills the calendar alongside Trakt, can sign people in, and can read a linked
+account's own watch history. **None of it is required**, and an instance that never
+touches these fields behaves exactly as it did before Simkl existed.
+
+The unusual part, and the thing worth reading before you create anything: **Simkl's three
+capabilities are gated separately**, so how much you set up depends on how much you want.
+
+| What you want | What it needs |
+|---|---|
+| Simkl titles on the calendar | **Nothing.** The calendar comes from public CDN files that take no id and no token |
+| Details for a Simkl-only title (overview, episodes, trailer) | **Client ID** — Simkl's per-title endpoints take it as a query parameter |
+| **Log in with Simkl** / linking a Simkl account | **Client ID + Secret + Public base URL** |
+| Reading a linked account's own Simkl history | **Client ID + Access Token** |
+
+To create the application, go to [simkl.com/settings/developer](https://simkl.com/settings/developer)
+and add one. The **redirect URI must match byte for byte** — Simkl compares it exactly, and
+unlike Trakt there is no device-code flow to fall back on if it is wrong. It is:
+
+```
+<your public base URL>/auth/simkl/callback
+```
+
+Settings ▸ **Simkl** shows the exact string to paste once a public base URL is saved, so
+copy it from there rather than typing it. Then paste the client id and secret back into the
+same tab. Simkl issues no refresh tokens, so an access token here is entered once and
+stays until you change it.
+
+### What Simkl's calendar does and does not cover
+
+- It reaches roughly **three years back and three months forward**. Ask for a month outside
+  that and the app says the source does not go there, rather than drawing an empty month
+  that reads as "nothing airs then".
+- It has **no season-finale listing** — nothing in Simkl's calendar flags a finale — so the
+  Season Finales calendar is Trakt's alone. The other four take both services.
+- Simkl records arrive without genres, countries, certifications or networks; the app looks
+  those up afterwards and the calendar says how many titles are still waiting. Until a
+  title has them it is shown rather than quietly filtered out, so a filter never hides
+  something for lack of information. The number falls to zero on its own.
+- Simkl lists anime films on its anime feed rather than its movie one; the app files them
+  onto the movies calendar where they belong.
 
 ## At-rest encryption of stored secrets
 
@@ -346,6 +395,8 @@ Hypercorn directly and never reads `.env`.
 
 - Python 3.11+ (3.12 recommended)
 - A free [Trakt API](https://trakt.tv/oauth/applications) application (Client ID + Access Token)
+- Optionally, a [Simkl](https://simkl.com/settings/developer) application — see
+  [Simkl](#simkl--an-optional-second-source) for which parts need one and which need nothing
 
 ## Project layout
 
@@ -382,8 +433,13 @@ app/
                      lockout, prefs, users, levels, admin
     routes.py         Onboarding, register, sign in/out, account page
     admin_routes.py   Admin screen: accounts, invites, retired identifiers
+    provider_login.py The sign-in/register/link completion every provider shares,
+                       so the policy is stated once rather than once per service
+    provider_avatars.py  Seeding an account's picture from the service it signed in with
     trakt.py          The Trakt OAuth flows and refresh-token renewal
     trakt_routes.py   "Log in with Trakt" (OAuth redirect flow)
+    simkl.py          The Simkl OAuth flow (no refresh tokens — Simkl issues none)
+    simkl_routes.py   "Log in with Simkl"
     plex.py           The Plex PIN flow
     plex_routes.py    "Log in with Plex" (PIN flow)
     encryption_flow.py   Enable/verify/encrypt lifecycle, key-health canary, recovery
@@ -393,6 +449,9 @@ app/
   calendar/
     routes.py         The calendar, the month picker, and the tile/detail endpoints
     cache.py          Global UTC window cache + the read path over it
+    resolve.py        Which source answers each field of a card two services describe
+    enrich.py         Filling in what a source does not publish (genres, network, …)
+    detail_source.py  Which service a detail modal asks about a given title
     filter.py         The read-time genre/country/certification/network filter
     state.py          Per-user not-watching marks (all views) + change detection
     share_routes.py   Public read-only calendars (/s/, /u/, /c/)
@@ -427,8 +486,14 @@ app/
     routes.py         Sonarr / Radarr / Seerr: status, options, add-to-library
     arr.py            Sonarr / Radarr
     seer.py           Overseerr / Jellyseerr
-  providers/        The calendar-source seam: the Item record, capabilities, the
-                     registry — and trakt/ (transport, calendar, detail, sync)
+  sources/          Whose answer you see: the per-account source preferences and
+                     the Sources screen that sets them
+    prefs.py          The stored preference and the vocabulary it is written in
+    routes.py         The Sources screen and its API
+  providers/        The calendar-source seam: the Record, capabilities, the registry
+    base.py           What a source produces and what every source must implement
+    trakt/            transport, calendar, detail, sync, releases
+    simkl/            transport, calendar, detail, sync, titles
   templates/        Jinja2 templates
   static/           CSS (one bundled stylesheet), JS (one directory per page), images
 run.py              Dev runner (Hypercorn)
