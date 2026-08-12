@@ -140,10 +140,28 @@ DRAIN_BATCH_SIZE = 300
 # so ordinary traffic re-queues and re-fetches it — no separate un-sweep path
 # is needed.
 # How many Trakt films one tick may look up. Smaller than the Simkl batch beside
-# it, and deliberately: Trakt gates every call behind one semaphore and the set
-# owed is tiny — about 25 films a month against the other service's thousand —
-# so a small batch still clears a month's worth within a few ticks.
-RELEASE_DRAIN_BATCH_SIZE = 10
+# it because these go out ONE AT A TIME — see drain_releases for why — but not as
+# small as caution alone would make it, because the arithmetic is knowable.
+#
+# MEASURED, 2026-08-11, twelve sequential live calls through this app's own
+# transport with the cache read skipped: 57ms fastest, 64ms median, 455ms
+# slowest, 127ms mean — about eight calls a second. So a full batch of fifty
+# costs roughly SIX SECONDS of one of the four outbound slots, inside a
+# sixty-second heartbeat, and the backlog one instance actually had (86 films
+# across every window it holds) clears in two ticks rather than nine.
+#
+# AGAINST WHAT BUDGET: Trakt's documented average is around a thousand requests
+# per five minutes. Fifty a tick, every tick, would be a quarter of that — and
+# every tick is never full for long, because the set owed is what the calendar
+# NAMES and not what it holds. Once a backlog is gone this is a handful of films
+# a day, and most ticks fetch nothing at all.
+#
+# WHY NOT LARGER STILL: the ceiling is not the rate limit, it is that this shares
+# a connection pool with work somebody is waiting on — a tracker refresh, a
+# calendar window. A pass holds one slot of four for as long as it runs, so the
+# number worth minimising is SECONDS PER PASS rather than calls per day, and six
+# is comfortably inside the tick that triggered it.
+RELEASE_DRAIN_BATCH_SIZE = 50
 
 RETENTION_SECONDS = 30 * 24 * 60 * 60
 
