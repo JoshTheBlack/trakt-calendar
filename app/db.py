@@ -2104,6 +2104,42 @@ ALTER TABLE user_prefs ADD COLUMN movie_release_types TEXT NOT NULL DEFAULT '';
 # Ordered and forward-only. APPEND ONLY: new work adds entries here; an entry
 # that has shipped is never edited, because instances in the field have already
 # applied it and will never apply it again.
+MIGRATION_27 = """
+-- WHERE A FILM IS RELEASED, ACCORDING TO TRAKT.
+--
+-- WHY A SECOND TABLE AND NOT A ROW IN simkl_titles: that one is keyed on a
+-- Simkl id and holds a Simkl payload, and a film both services list has one of
+-- each. Widening it to hold either service's answer would make its primary key
+-- a (source, id) pair and every reader ask which source a row came from before
+-- trusting a field — for a table whose whole shape is "what does Simkl say
+-- about this id". Two narrow tables keyed on their own service's id stay
+-- readable, and neither has to know the other exists.
+--
+-- WHY IT EXISTS AT ALL. Trakt's CALENDAR payload carries no release schedule —
+-- a film record arrives with a production country and nothing about where or
+-- how it is released — so the release filter could never judge a film Trakt
+-- listed. Trakt's per-title /movies/{id}/releases endpoint does carry it, in
+-- exactly the shape the filter reads (measured on three live titles
+-- 2026-08-11: 7, 28 and 54 release rows, each naming a country and a type).
+-- This is where that answer is kept so it is fetched once per title rather
+-- than once per read.
+--
+-- `payload` IS NEVER NULL, EVEN FOR A FAILED LOOKUP, for the reason
+-- simkl_titles gives: the row's existence is what stops the same id being
+-- queued again on every read, and failed_at/fail_count are what say whether
+-- what it holds is real.
+CREATE TABLE trakt_releases (
+    trakt_id    INTEGER NOT NULL PRIMARY KEY,
+    payload     BLOB    NOT NULL,
+    fetched_at  INTEGER NOT NULL,
+    failed_at   INTEGER,
+    fail_count  INTEGER NOT NULL DEFAULT 0
+);
+-- The retention sweep and the backoff check both judge age off this column.
+CREATE INDEX ix_trakt_releases_fetched ON trakt_releases(fetched_at);
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2131,6 +2167,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (24, MIGRATION_24),
     (25, MIGRATION_25),
     (26, MIGRATION_26),
+    (27, MIGRATION_27),
 ]
 
 

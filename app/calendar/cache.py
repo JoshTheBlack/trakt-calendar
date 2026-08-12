@@ -1008,7 +1008,15 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # `record.enriched` is worth asking about here at all. Still one call
         # over one flat list, so splitting resolution around it costs no
         # additional query.
-        await calendar_enrich.overlay_records([r for _, rs in parsed for r in rs])
+        flat = [r for _, rs in parsed for r in rs]
+        await calendar_enrich.overlay_records(flat)
+        # AND THE OTHER SERVICE'S HALF OF THE SAME QUESTION. Trakt's calendar
+        # payload carries no release schedule either, so without this a film
+        # Trakt listed reached the release rule below with nothing to be judged
+        # on — and a record that cannot answer is kept, which meant the filter
+        # could never drop a film Trakt also listed. Same promise as the overlay
+        # above: it reads what is stored and fetches nothing.
+        await calendar_enrich.overlay_releases(flat)
         # THE RELEASE NARROWING RUNS HERE, BEFORE THE PICK, AND ON THE GROUP.
         # A films calendar that lists every release in every market needs a way
         # to say "the ones out here, in the formats I watch"; the per-country

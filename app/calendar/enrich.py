@@ -86,6 +86,7 @@ from . import cache as calendar_cache
 from .. import db
 from ..providers.base import Media, Record, Source
 from ..providers.simkl import titles as simkl_titles
+from ..providers.trakt import releases as trakt_releases
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,12 @@ DRAIN_BATCH_SIZE = 300
 # happen. A swept row is simply "never attempted" again to `overlay_records`,
 # so ordinary traffic re-queues and re-fetches it — no separate un-sweep path
 # is needed.
+# How many Trakt films one tick may look up. Smaller than the Simkl batch beside
+# it, and deliberately: Trakt gates every call behind one semaphore and the set
+# owed is tiny — about 25 films a month against the other service's thousand —
+# so a small batch still clears a month's worth within a few ticks.
+RELEASE_DRAIN_BATCH_SIZE = 10
+
 RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 # How long a failed id is left alone before it is worth asking about again,
@@ -504,6 +511,209 @@ async def drain(settings, *, now: int | None = None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# the other service's half: where a film is RELEASED, according to Trakt
+# ---------------------------------------------------------------------------
+# WHY IT IS IN THIS MODULE AND NOT ITS OWN. This file is the calendar's
+# enrichment layer — "what does a catalogue know about a record that its
+# calendar payload did not carry" — and that question now has two services to
+# ask. The alternative was a second module with its own copy of the same four
+# shapes (a batched read, a success/failure upsert pair, a backoff, a bounded
+# drain), which is how two halves of one idea come to disagree about how long a
+# failure backs off for.
+#
+# WHAT IS DELIBERATELY NOT SHARED: the STORES. simkl_titles is keyed on a Simkl
+# id and holds a Simkl payload; trakt_releases is keyed on a Trakt id and holds
+# one field. A film both services list has a row in each, and neither table has
+# to know the other exists — see migration 27 for why that beat widening one
+# table to hold either service's answer.
+#
+# AND THE OVERLAY STAYS PER SOURCE. A Trakt record is filled in from Trakt's
+# answer and a Simkl record from Simkl's; neither service's catalogue is ever
+# allowed to speak for the other's record, which would make a card's provenance
+# a lie. It is the same rule `_simkl_candidates` follows, applied to the other
+# side.
+
+
+async def _read_release_rows(trakt_ids) -> dict[int, dict]:
+    """The stored `trakt_releases` rows for `trakt_ids`, keyed by id. ONE query,
+    never one per id — the same batching `_read_rows` does above and for the
+    same reason: this runs on every movie-calendar read."""
+    ids = [int(i) for i in trakt_ids]
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = await db.fetch_all(
+        f"SELECT trakt_id, payload, fetched_at, failed_at, fail_count "
+        f"FROM trakt_releases WHERE trakt_id IN ({placeholders})",
+        tuple(ids),
+    )
+    return {
+        int(row["trakt_id"]): {
+            "fields": _decompress(row["payload"]),
+            "fetched_at": int(row["fetched_at"]),
+            "failed_at": int(row["failed_at"]) if row["failed_at"] is not None else None,
+            "fail_count": int(row["fail_count"]),
+        }
+        for row in rows
+    }
+
+
+async def _upsert_release_success(trakt_id: int, releases: dict, now: int) -> None:
+    """Store one film's release map. AN EMPTY MAP IS A REAL ANSWER — a film Trakt
+    knows and has announced no releases for — and is stored as one, which is what
+    stops it being asked about again on every tick. It is told apart from a
+    stored FAILURE by `failed_at` being NULL, exactly as on the Simkl side."""
+    await db.execute(
+        "INSERT INTO trakt_releases (trakt_id, payload, fetched_at, failed_at, fail_count) "
+        "VALUES (?, ?, ?, NULL, 0) "
+        "ON CONFLICT(trakt_id) DO UPDATE SET "
+        "payload = excluded.payload, fetched_at = excluded.fetched_at, "
+        "failed_at = NULL, fail_count = 0",
+        (trakt_id, _compress({"release_types_by_country": dict(releases)}), now),
+    )
+
+
+async def _upsert_release_failure(trakt_id: int, now: int) -> None:
+    """Record an attempt that found nothing usable, leaving any previous answer
+    in place — a transient failure says "this attempt did not confirm it", not
+    "forget what you knew"."""
+    await db.execute(
+        "INSERT INTO trakt_releases (trakt_id, payload, fetched_at, failed_at, fail_count) "
+        "VALUES (?, ?, ?, ?, 1) "
+        "ON CONFLICT(trakt_id) DO UPDATE SET "
+        "failed_at = excluded.failed_at, fail_count = trakt_releases.fail_count + 1",
+        (trakt_id, _compress({}), now, now),
+    )
+
+
+def _trakt_film_candidates(records: list[Record]) -> dict[int, list[Record]]:
+    """The records `trakt_releases` could have something to say about, indexed by
+    trakt id: a TRAKT record, for a FILM, carrying a usable numeric id.
+
+    MOVIES ONLY, unlike the Simkl overlay beside it, because a release schedule
+    is a thing only films have — Trakt's endpoint is /movies/{id}/releases and
+    there is no episode equivalent. Asking it about a show would be a call that
+    could only ever 404.
+    """
+    candidates: dict[int, list[Record]] = {}
+    for record in records:
+        if record.source != Source.TRAKT or record.media != Media.MOVIE:
+            continue
+        try:
+            trakt_id = int((record.ids or {}).get("trakt"))
+        except (TypeError, ValueError):
+            continue
+        candidates.setdefault(trakt_id, []).append(record)
+    return candidates
+
+
+async def overlay_releases(records: list[Record]) -> list[Record]:
+    """Fill in what `trakt_releases` already knows about the Trakt films in
+    `records`, mutating them in place.
+
+    NO NETWORK CALL HAPPENS HERE, EVER — the same promise `overlay_records`
+    makes. A film with no stored answer is left with an empty map, which
+    app/calendar/filter.py reads as "this record cannot answer" and keeps, so a
+    film waiting on its first lookup is never dropped by a filter.
+    """
+    candidates = _trakt_film_candidates(records)
+    if not candidates:
+        return records
+    rows = await _read_release_rows(candidates.keys())
+    for trakt_id, group in candidates.items():
+        row = rows.get(trakt_id)
+        if row is None or not row["fields"]:
+            continue
+        releases = row["fields"].get("release_types_by_country")
+        if not isinstance(releases, dict):
+            continue
+        for record in group:
+            record.release_types_by_country = dict(releases)
+    return records
+
+
+async def _owed_films() -> dict[int, str]:
+    """Every Trakt FILM any currently-stored calendar window names, mapped to its
+    title. The same "what does the cache currently name" question `_owed_titles`
+    asks, on the other service's records, and it leaves the same filtering —
+    already answered, still backing off — to the drain.
+
+    IT IS A MUCH SMALLER SET THAN THE SIMKL SIDE, which is what makes this
+    affordable: measured on a live instance, one August held 1693 film groups of
+    which about 25 came from Trakt. This costs tens of calls a month, not
+    thousands.
+    """
+    groups = await calendar_cache.cached_calendar_groups()
+    owed: dict[int, str] = {}
+    for group in groups:
+        record = (group.get("by_source") or {}).get(str(Source.TRAKT))
+        if not isinstance(record, dict) or record.get("media") != str(Media.MOVIE):
+            continue
+        try:
+            trakt_id = int((record.get("ids") or {}).get("trakt"))
+        except (TypeError, ValueError):
+            continue
+        if trakt_id not in owed:
+            owed[trakt_id] = str(record.get("title") or "")
+    return owed
+
+
+async def _fetch_one_release(settings, trakt_id: int, now: int) -> bool:
+    releases = await trakt_releases.fetch_releases(settings, trakt_id)
+    if releases is None:
+        await _upsert_release_failure(trakt_id, now)
+        return False
+    await _upsert_release_success(trakt_id, releases, now)
+    return True
+
+
+async def drain_releases(settings, *, now: int | None = None) -> int:
+    """One heartbeat's worth of Trakt release lookups, bounded exactly as the
+    Simkl drain above is bounded and for the same reason.
+
+    SEQUENTIALLY, WHICH IS THE ONE REAL DIFFERENCE FROM THE SIMKL DRAIN. That one
+    fans its batch out concurrently because its pool allows parallel requests;
+    Trakt's transport gates every call behind one semaphore sized under its
+    connection pool (app/providers/trakt/transport.py's _SEND_CONCURRENCY), so
+    firing a batch at it would queue on that gate rather than go faster, while
+    making a 429 storm harder to read. The batch is small and nobody is waiting
+    on it.
+    """
+    if not settings.trakt_catalogue_configured:
+        return 0
+    ts = db.now() if now is None else now
+    owed = await _owed_films()
+    if not owed:
+        return 0
+    rows = await _read_release_rows(owed.keys())
+    batch: list[tuple[int, str]] = []
+    for trakt_id, title in owed.items():
+        if len(batch) >= RELEASE_DRAIN_BATCH_SIZE:
+            break
+        row = rows.get(trakt_id)
+        if row is not None:
+            if row["failed_at"] is None:
+                continue  # answered, even if the answer was "no releases announced"
+            if not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
+                continue  # failed recently; not worth asking again yet
+        batch.append((trakt_id, title))
+    if not batch:
+        return 0
+    fetched = 0
+    for trakt_id, title in batch:
+        try:
+            if await _fetch_one_release(settings, trakt_id, ts):
+                fetched += 1
+                logger.debug("Trakt release drain: read %r (trakt id %s).", title, trakt_id)
+        except Exception:
+            # One film's lookup failing must not end the pass — the next tick
+            # asks again, and the row it wrote records the attempt.
+            logger.debug("Trakt release lookup failed for %s", trakt_id, exc_info=True)
+    logger.info("Trakt release drain: read %d of %d queued film(s).", fetched, len(batch))
+    return fetched
+
+
+# ---------------------------------------------------------------------------
 # the coalescing latch — a fill can ask for a pass sooner than the heartbeat
 # ---------------------------------------------------------------------------
 #
@@ -590,6 +800,25 @@ async def run_drain(settings) -> int:
         while _drain_rerun_requested:
             _drain_rerun_requested = False
             fetched = await drain(settings)
+        # THE OTHER SERVICE'S PASS RIDES THE SAME LATCH rather than carrying one
+        # of its own. Both derive their work from the stored calendar cache and
+        # both are bounded per pass, so what the latch protects — one drain at a
+        # time, however many callers ask — is exactly as true of the pair as of
+        # either. A second latch would also let a fill start a Trakt pass while a
+        # Simkl one was running, which is the concurrency this exists to refuse.
+        #
+        # AFTER, NOT BEFORE: the Simkl half is what a fill is usually waiting on
+        # (a card with no genres is visible; a film's release map is only read by
+        # a filter), so it goes first and this follows on the same tick.
+        # ITS COUNT IS NOT ADDED TO THE RETURN, which is the Simkl drain's own
+        # number and is what the latch's callers and its tests are written
+        # against. This one reports itself in its own log line.
+        try:
+            await drain_releases(settings)
+        except Exception:
+            # Never let the other service's pass fail this one's answer — the
+            # heartbeat asks again in a minute and nothing is waiting on it.
+            logger.error("Trakt release drain failed.", exc_info=True)
         return fetched
     finally:
         _drain_active = False
