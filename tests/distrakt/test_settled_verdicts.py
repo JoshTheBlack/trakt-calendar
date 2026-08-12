@@ -814,3 +814,123 @@ class ReAddDecidesFromAFreshReadTests(AppTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ASettledRowLearnsACountThatWentUpTests(AppTestCase):
+    """A completed verdict in an OPEN month, and a service that has since caught
+    up with it.
+
+    THE CASE, FROM A REAL MONTH: House of the Dragon settled as completed with
+    Trakt at 8 of 8 and Simkl at 7. Simkl then caught up. The row went on reading
+    `8/8 · 7/8` while the panel behind it — which reads the watch state directly
+    — showed eight ticks from both, because a settled record does not recompute
+    itself. Neither surface was lying; they were reading different things, and
+    the row was simply behind.
+
+    UPWARD ONLY, WHICH IS WHY THIS CAN COEXIST WITH THE QUESTION ABOVE. A count
+    that has grown is a service catching up with something already done and there
+    is nothing to ask anybody. A count that has shrunk is a claim being withdrawn,
+    and that stays the question's business — the record must stand while it is
+    put, which is what the class above pins.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="simkl-cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "trakt-token")
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self.sign_in_as(self.user_id)
+        self.month = _month_back(0)
+        # Settled while Simkl was one episode behind, which is the state the row
+        # was found in.
+        asyncio.run(distrakt_store.add_month_record(
+            self.user_id, self.month, _verdict({"trakt": 10, "simkl": 9})))
+        state = asyncio.run(wh.load_state(self.user_id))
+        wh._set_show_baseline(state, KEY, {"trakt": 7, "tmdb": 1},
+                              {SEASON: _episodes(*range(1, 11))}, "trakt",
+                              unlisted=UnlistedSeasons.ZERO)
+        asyncio.run(wh._save(self.user_id, state))
+
+    def _month(self, simkl_watched=range(1, 11), simkl_fails=False):
+        library = LibraryRead(
+            entries={KEY: LibraryEntry(ids={"simkl": 5, "tmdb": 1},
+                                       seasons={SEASON: _episodes(*simkl_watched)},
+                                       unlisted_seasons=UnlistedSeasons.ZERO)},
+            events=[], complete=True)
+        with patch("app.calendar.cache.read_month",
+                   new=AsyncMock(return_value=([], None))), \
+             patch("app.providers.trakt.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)), \
+             patch("app.providers.trakt.sync.fetch_history",
+                   new=AsyncMock(return_value=[])), \
+             patch("app.providers.trakt.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={})), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))), \
+             patch("app.providers.simkl.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)), \
+             patch("app.providers.simkl.sync.fetch_library",
+                   new=AsyncMock(side_effect=SourceUnavailable("simkl is down"))
+                   if simkl_fails else AsyncMock(return_value=library)), \
+             patch("app.providers.simkl.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={})):
+            day = today()
+            return self.client.get(
+                f"/api/distrakt/month?year={day.year}&month={day.month}")
+
+    def stored(self) -> dict:
+        record, = asyncio.run(distrakt_store.month_records(self.user_id, self.month))
+        return record
+
+    def test_the_row_catches_up_with_the_service(self):
+        """The reported symptom, gone: the label the row draws now agrees with
+        the ticks in the panel behind it."""
+        self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 9})
+        resp = self._month()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 10})
+
+    def test_it_is_written_rather_than_drawn(self):
+        """The breakdown is read by the row, by the freeze that will keep it and
+        by the withdrawal check. Correcting only what the page draws would leave
+        those three disagreeing, which is the shape of the defect."""
+        self._month()
+        self.assertEqual(self.stored()["watched"], 10)
+        # And it survives a load that asks nothing of the services.
+        self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 10})
+
+    def test_agreement_stops_the_row_naming_services_at_all(self):
+        """What the viewer actually sees change: two numbers become one, because
+        the services now agree — counts.py's rule, reached by the row catching
+        up rather than by anything about how it is drawn."""
+        row, = self._month().json()["shows"]
+        self.assertEqual(row["counts"], "10/10")
+
+    def test_a_count_that_went_down_is_not_written_over_the_record(self):
+        """THE BOUNDARY. Simkl retracting is a withdrawal, and the record must
+        stand while the question is put — silently rewriting it is exactly what
+        unbacked_verdicts exists to refuse."""
+        resp = self._month(simkl_watched=range(1, 4))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 9})
+
+    def test_a_service_that_could_not_be_read_moves_nothing(self):
+        """Silence is neither a retraction nor a catch-up, which is the same rule
+        the withdrawal check follows."""
+        self._month(simkl_fails=True)
+        self.assertEqual(self.stored()["watched_by_source"]["simkl"], 9)
+
+    def test_a_frozen_month_is_left_alone(self):
+        """A month that is over answers what it decided, and today's watch state
+        cannot make that wrong. The caller applies this, so it is asserted
+        through the page rather than against the function."""
+        asyncio.run(db.execute(
+            "UPDATE distrakt_months SET closed = 1 WHERE user_id = ? AND month = ?",
+            (self.user_id, self.month)))
+        self._month()
+        self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 9})

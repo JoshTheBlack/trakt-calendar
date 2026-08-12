@@ -609,6 +609,64 @@ async def reconcile_history(user_id: int,
     return HistoryQuestions(unknown, given_up)
 
 
+async def catch_up_settled(user_id: int, month: str, settled: Sequence[dict],
+                           live_counts: LiveCounts) -> int:
+    """Let a settled record in an OPEN month learn a count that has gone UP.
+
+    THE CASE, REPORTED FROM A REAL MONTH: a season was finished and settled while
+    one service had seen seven of eight; that service then caught up, and the row
+    went on reading `8/8 · 7/8` while the panel behind it showed eight ticks from
+    both. The two were reading different things — the row its own frozen
+    breakdown, the panel the watch state — and the row was simply behind.
+
+    UPWARD ONLY, AND THAT IS THE WHOLE OF THE RULE. A count that has GROWN is a
+    service catching up with something the viewer had already done, and there is
+    nothing to ask them about it. A count that has SHRUNK is a service withdrawing
+    a claim, which is `unbacked_verdicts`' business and must never be written
+    silently over a record somebody deliberately settled — see its docstring,
+    which requires the completed row to stand unchanged while the question is
+    put. So this can only ever move a number toward what the services now
+    report, never away from it.
+
+    ONLY THE SERVICES THAT ANSWERED THIS PASS, for the same reason no_longer_finished
+    ignores the rest: one that could not be read said nothing, and silence is
+    neither a retraction nor a catch-up.
+
+    ONLY WHILE THE MONTH IS OPEN. Its caller applies that; a frozen month answers
+    "what did that month decide" and today's watch state cannot make it wrong.
+
+    IT WRITES, rather than patching what the page happens to draw. The breakdown
+    is read by the row, by the freeze that will eventually keep it, and by the
+    withdrawal check above — a display-only correction would leave those three
+    disagreeing, which is the shape of the defect being fixed. Returns how many
+    records moved, which is zero on essentially every load.
+    """
+    moved = 0
+    for record in settled:
+        if record["kind"] != RecordKind.COMPLETED:
+            continue
+        recorded = dict(record.get("watched_by_source") or {})
+        now = dict(live_counts(record, int(record["season"])) or {})
+        caught_up = {
+            name: count for name, count in now.items()
+            if int(count or 0) > int(recorded.get(name) or 0)
+        }
+        if not caught_up:
+            continue
+        merged = {**recorded, **caught_up}
+        total = int(record.get("total") or 0)
+        await store.add_month_record(user_id, month, {
+            **record,
+            "watched_by_source": merged,
+            # The one number follows the breakdown it is drawn from, by the same
+            # rule as everywhere else — see counts.primary_count. Every entry it
+            # reads has only risen, so this cannot lower what the month recorded.
+            "watched": counts.primary_count(merged, live.source_order(), total),
+        })
+        moved += 1
+    return moved
+
+
 async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
                             live_counts: LiveCounts) -> list[UnbackedVerdict]:
     """The COMPLETED verdicts among `settled` that the services no longer back.

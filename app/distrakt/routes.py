@@ -707,13 +707,28 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     if under_way and ports:
         answered = [str(source) for source, _port in ports
                     if str(source) not in unreadable]
+        live_counts = (lambda record, season: watch_history.season_counts(
+            state, record["key"], season, answered))
+        # A SETTLED ROW MAY STILL LEARN A COUNT THAT WENT UP, while its month is
+        # open. A season finished at 8/8 by one service and 7/8 by the other goes
+        # on reading 7 for the second long after it caught up, because a settled
+        # record does not recompute itself — and the panel behind the row, which
+        # reads the watch state directly, showed the eight ticks all along. The
+        # two were reading different things. Upward only: a count going DOWN is a
+        # withdrawal and belongs to the question below, never to a silent rewrite.
+        #
+        # BEFORE THE WITHDRAWAL CHECK, deliberately. A service that has caught up
+        # is one the verdict now credits with finishing, so a later retraction by
+        # that service is a real withdrawal and this is what makes it visible.
+        if await lifecycle.catch_up_settled(user_id, month_key, shape.settled, live_counts):
+            shape = lifecycle.shape_of(
+                await distrakt_store.month_records(user_id, month_key), shape.listed)
         unbacked = await lifecycle.unbacked_verdicts(
             user_id, month_key, shape.settled,
             # The record's own flat identity, which is the key the watch state
             # files everything under — not re-resolved from its ids, which would
             # be a second answer to a question the record already carries.
-            lambda record, season: watch_history.season_counts(
-                state, record["key"], season, answered))
+            live_counts)
 
     shows = _rows_for(shape, standing)
     if premieres and season_fresh:
