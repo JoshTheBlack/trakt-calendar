@@ -293,6 +293,26 @@ class Settings:
         # redirect URI instead of one with a doubled separator in it.
         if isinstance(clean.get("public_base_url"), str):
             clean["public_base_url"] = clean["public_base_url"].strip().rstrip("/")
+        # THE CLIENT IDS ARE STRIPPED HERE BECAUSE NOTHING ELSE STRIPS THEM.
+        # apply_update trims every SECRET_FIELDS value on the way to storage, and
+        # these two are deliberately not in that set (see the note beside it):
+        # they are not secret. That left them the only credentials an operator
+        # pastes that keep whatever whitespace came with the paste — and a
+        # trailing newline is what a paste out of a terminal or a password
+        # manager carries.
+        #
+        # WHAT THAT COSTS, WHICH IS WHY IT IS NORMALIZED RATHER THAN VALIDATED:
+        # every `*_configured` predicate below asks `.strip()`, so a padded id
+        # reads as configured, and the value that then goes ON THE WIRE is the
+        # padded one — Simkl takes its client id as a query parameter, so the
+        # space is percent-encoded into the URL and the id becomes one Simkl has
+        # never issued. It answers 412, which this app correctly treats as an
+        # instance-wide refusal and stops calling on for 900 seconds, sign-in and
+        # account linking included. An invisible character at the end of a
+        # settings field should not be able to do that.
+        for field in ("trakt_client_id", "simkl_client_id"):
+            if isinstance(clean.get(field), str):
+                clean[field] = clean[field].strip()
         return cls(**clean)
 
     def to_dict(self) -> dict:

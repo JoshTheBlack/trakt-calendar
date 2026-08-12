@@ -177,6 +177,38 @@ CDN_POOL = http_pool.Pool("simkl-cdn", max_connections=6, timeout=45, concurrenc
 # coin flip by theirs.
 POST_MIN_INTERVAL = 1.05
 
+# AND THE CATALOGUE GETS ARE PACED TOO, which they were not, and the gap is what
+# took a fresh deployment off Simkl entirely.
+#
+# WHAT HAPPENED, because the reasoning that left these unpaced was not silly and
+# should not be repeated. Simkl's docs name the catalogue paths as parallel-safe,
+# so this pool was sized for throughput (concurrency=6) and left to run: a
+# semaphore bounds what is IN FLIGHT, and "parallel allowed" was read as "rate
+# does not apply here". A settled instance never tested that reading, because its
+# enrichment table is full and the drain trickles. A FRESH one owes a lookup for
+# every Simkl title in every cached window and fires DRAIN_BATCH_SIZE of them per
+# heartbeat, six at a time, as fast as they come back — measured at 23.5 requests
+# per second sequentially, and higher than that in parallel. Simkl answered 412,
+# which is an instance-wide refusal, and the app then correctly stopped calling
+# Simkl at all for fifteen minutes: no enrichment, no detail modals, and no
+# signing in or linking a Simkl account, on a deployment whose credentials were
+# perfectly good. Verified from the other side, from inside that container: one
+# hand-made request to the same URL answered 200 while the app was being refused.
+#
+# 8 PER SECOND, UNDER THE 10 THE DOCS NAME. Pacing to the published ceiling is
+# what the ceiling is for; the margin is because the cap is enforced on Simkl's
+# clock rather than ours, the same reasoning POST_MIN_INTERVAL carries. A batch
+# of 300 then costs ~38s of a 60-second heartbeat and a backlog still clears in
+# minutes, while the only interactive caller — a detail modal, one or two
+# lookups, usually cached — waits at worst a beat behind whatever the drain has
+# already queued.
+CATALOG_MIN_INTERVAL = 0.125
+
+# The monotonic instant the next catalogue GET may leave. Module state for the
+# same reason _post_ready_at is: the budget belongs to the instance, not to a
+# caller, and a second copy of this number is a second way to spend it.
+_catalog_ready_at = 0.0
+
 # The monotonic instant the next POST may leave. Module state rather than
 # per-pool state because the cap is per client id: it is one budget however many
 # callers there are, and a second copy of this number would let two of them
@@ -348,8 +380,14 @@ def redirect_pool(origin_url: str, target_url: str) -> http_pool.Pool | None:
 # The circuit breaker.
 # ---------------------------------------------------------------------------
 
-def _blocked_seconds_remaining() -> float:
-    """How long the breaker stays open, or 0.0 when Simkl may be called."""
+def blocked_seconds_remaining() -> float:
+    """How long the breaker stays open, or 0.0 when Simkl may be called.
+
+    PUBLIC because a caller about to spend a whole batch needs to ask before it
+    starts, not discover it one failure at a time: app/calendar/enrich.py's
+    drain reads this so a blocked pass costs nothing and — the part that
+    matters — records nothing against the titles it would have looked up.
+    """
     return max(0.0, _blocked_until - _time.monotonic())
 
 
@@ -360,10 +398,21 @@ def _open_breaker(path: str) -> None:
     # Simkl — every user on this box has just lost the source for a quarter of
     # an hour — and not a timing detail. The same reasoning the 429 line below
     # carries, one step more serious.
+    #
+    # AND IT NO LONGER BLAMES THE CLIENT ID, because measurement says that is
+    # not what a 412 means here. Against the live endpoint, GET /tv/{id}
+    # answered 200 with a valid client id, with a plainly invalid one, and with
+    # no client_id parameter at all — the parallel-safe catalogue paths do not
+    # authenticate on it. A message naming the credential sent an operator (and
+    # the agent helping them) hunting through settings while the real trigger
+    # was request RATE. Say what is known — Simkl refused this call — and let
+    # the reader look at what the instance was doing.
     logger.warning(
-        "Simkl refused this instance's client id on %s (HTTP 412). Every Simkl "
-        "call is refused locally for the next %.0fs rather than retried, because "
-        "retrying into a block extends it.", path, BLOCK_COOLDOWN_SECONDS)
+        "Simkl refused this call: %s (HTTP 412). Every Simkl call is refused "
+        "locally for the next %.0fs rather than retried, because retrying into "
+        "a block extends it. A 412 here is not about the client id — it is "
+        "Simkl declining to serve this instance for a while, usually after too "
+        "many requests too quickly.", path, BLOCK_COOLDOWN_SECONDS)
 
 
 def _close_breaker() -> None:
@@ -414,6 +463,30 @@ def _post_sent() -> None:
     """Record that a POST has just been issued, so the next one waits."""
     global _post_ready_at
     _post_ready_at = _time.monotonic() + POST_MIN_INTERVAL
+
+
+async def _pace_catalog() -> None:
+    """Hold until this catalogue GET is allowed to leave under CATALOG_MIN_INTERVAL.
+
+    A TICKET, NOT A CHECK-THEN-SLEEP, and the difference is the whole reason this
+    reads differently from `_pace_post` above. That one serves a pool of
+    concurrency 1, where the caller waiting IS the only caller. This pool admits
+    six at once, and six coroutines that each read the deadline, decide to sleep,
+    and then leave together would pace nothing at all — they would agree on the
+    same instant and burst exactly as before.
+
+    So the slot is CLAIMED before any await: the deadline is advanced
+    synchronously, which under asyncio cannot interleave, and each caller then
+    sleeps until the instant it claimed. Concurrency still overlaps the requests;
+    what is spaced is when each one LEAVES, which is what a rate limit measures.
+    """
+    global _catalog_ready_at
+    now = _time.monotonic()
+    leave_at = max(now, _catalog_ready_at)
+    _catalog_ready_at = leave_at + CATALOG_MIN_INTERVAL
+    wait = leave_at - now
+    if wait > 0:
+        await asyncio.sleep(wait)
 
 
 async def send(client: httpx.AsyncClient, method: str, url: str, *,
@@ -510,7 +583,7 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
     impossible rather than merely unlikely.
     """
     path = url.split("?", 1)[0].replace(API_BASE, "") or url
-    remaining_block = _blocked_seconds_remaining()
+    remaining_block = blocked_seconds_remaining()
     if remaining_block > 0:
         # Refused HERE, before the gate and before any socket: the whole point
         # of the breaker is that this request never reaches Simkl.
@@ -533,6 +606,12 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                     f"Simkl rate limit not cleared within {_SEND_MAX_ELAPSED:.0f}s for {path}.", 429)
             attempt_timeout = remaining if timeout is None else min(timeout, remaining)
             if method_up == "GET":
+                # Paced only on the API host's catalogue pool. The CDN pool is
+                # deliberately exempt: those files are static, edge-served, and
+                # carry no client id, so they are not spending the budget this
+                # paces — and a month's calendar fill would crawl for no reason.
+                if pool is CATALOG_POOL:
+                    await _pace_catalog()
                 resp = await client.get(url, headers=headers, timeout=attempt_timeout)
             elif method_up == "POST":
                 await _pace_post()

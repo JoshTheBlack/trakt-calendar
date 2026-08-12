@@ -86,6 +86,7 @@ from . import cache as calendar_cache
 from .. import db
 from ..providers.base import Media, Record, Source
 from ..providers.simkl import titles as simkl_titles
+from ..providers.simkl import transport as simkl_transport
 from ..providers.trakt import releases as trakt_releases
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,19 @@ logger = logging.getLogger(__name__)
 # cache-HIT case, and a title nobody has fetched before — everything on a
 # fresh instance's first drain — is likelier to MISS; and each title here
 # also costs a database write, which the benchmark did not measure at all.
+#
+# AND PRODUCTION CORRECTED THE PARAGRAPH ABOVE, so read it with this attached.
+# "Declared parallel-safe" turned out not to mean "no rate applies": the first
+# fresh deployment to run this batch against a full calendar and an empty
+# simkl_titles was answered 412 — an instance-wide refusal — within the first
+# burst, taking Simkl's calendar enrichment, the detail modals, and signing in
+# with Simkl down for fifteen minutes at a time. The benchmark that produced 300
+# was run on a SETTLED instance, where the drain trickles and never approaches
+# its own batch size; nothing about it was wrong, it simply could not observe the
+# case it was sizing for. The batch stays 300 because the bound that matters is
+# work per tick; what changed is that the requests are now PACED as they leave —
+# see CATALOG_MIN_INTERVAL in app/providers/simkl/transport.py, which is where a
+# rate belongs, since it is the instance's budget rather than this caller's.
 #
 # Bounded per tick regardless of size so a heartbeat that finds a large
 # backlog (a fresh install, or a long-stopped instance whose enrichment table
@@ -453,6 +467,18 @@ async def _owed_titles() -> dict[tuple[int, str], str]:
 async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
     fields = await simkl_titles.fetch_title(settings, simkl_id, Media(media))
     if fields is None:
+        # AN INSTANCE-WIDE REFUSAL IS NOT A FACT ABOUT THIS TITLE, and recording
+        # it as one is how a single 412 poisoned an entire table. `fetch_title`
+        # answers None for every failure it meets — that is deliberate, since a
+        # missing title and an unreachable service are indistinguishable from a
+        # status code there — but the breaker knows which of those just happened,
+        # and a blocked call never reached Simkl to have an opinion about this id.
+        # Written down because the shape was observed: a fresh deployment ended
+        # up with 372 of its 388 rows marked failed, every one of them a title
+        # Simkl would have answered for, each carrying a backoff it had not
+        # earned.
+        if simkl_transport.blocked_seconds_remaining() > 0:
+            return False
         await _upsert_failure(simkl_id, media, now)
         return False
     await _upsert_success(simkl_id, media, fields, now)
@@ -477,7 +503,27 @@ async def drain(settings, *, now: int | None = None) -> int:
     RUNS THROUGH CATALOG_POOL, WHICH ALLOWS PARALLEL REQUESTS — see
     app/providers/simkl/transport.py — so the batch is fetched concurrently
     rather than one title at a time.
+
+    AND IT ASKS WHETHER IT MAY CALL AT ALL FIRST, exactly as `drain_releases`
+    does below. Simkl's calendar needs no credential, so an instance can have a
+    month full of Simkl titles — and therefore a full queue here — while holding
+    no client id at all. Without this gate that instance fires a whole batch of
+    lookups carrying an empty id, Simkl answers 412 to every one of them, and
+    the transport's breaker then refuses EVERY Simkl call for the next 900
+    seconds: the drain, the detail modals, and signing in or linking a Simkl
+    account, none of which had anything wrong with them. A missing credential
+    must degrade to "this cannot be enriched", never to a quarter-hour outage of
+    a service the instance is otherwise configured for.
     """
+    if not settings.simkl_catalogue_configured:
+        return 0
+    # AND IT ASKS THE BREAKER BEFORE IT DERIVES ANY WORK. Every call in the pass
+    # would be refused locally anyway; asking once here means a blocked instance
+    # spends no database scan per heartbeat either, and — the part that was
+    # actually costing something — cannot write a batch of failure rows against
+    # titles that were never asked about. See `_fetch_one` for the other half.
+    if simkl_transport.blocked_seconds_remaining() > 0:
+        return 0
     ts = db.now() if now is None else now
     owed = await _owed_titles()
     if not owed:

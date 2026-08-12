@@ -73,14 +73,27 @@ def _patch_sleep(recorder: RecordingSleep):
     return patch("app.providers.simkl.transport.asyncio.sleep", new=recorder)
 
 
+def _no_catalog_pacing():
+    """Suppress the catalogue GET pacer for tests that are about something else.
+
+    The pacer sleeps between catalogue GETs, and a test asserting the 429
+    backoff arithmetic would otherwise be reading two mechanisms' sleeps out of
+    one list. Pacing has its own tests below; these have theirs."""
+    async def _immediately():
+        return None
+    return patch("app.providers.simkl.transport._pace_catalog", new=_immediately)
+
+
 class TransportStateTestCase(unittest.IsolatedAsyncioTestCase):
-    """Leaves the transport's two deadlines as it found them."""
+    """Leaves the transport's three deadlines as it found them."""
 
     def setUp(self):
         transport._close_breaker()
         transport._post_ready_at = 0.0
+        transport._catalog_ready_at = 0.0
         self.addCleanup(transport._close_breaker)
         self.addCleanup(setattr, transport, "_post_ready_at", 0.0)
+        self.addCleanup(setattr, transport, "_catalog_ready_at", 0.0)
 
 
 class PostPacerTests(TransportStateTestCase):
@@ -113,13 +126,17 @@ class PostPacerTests(TransportStateTestCase):
         not ours."""
         self.assertGreater(transport.POST_MIN_INTERVAL, 1.0)
 
-    async def test_a_get_is_never_paced(self):
+    async def test_a_get_is_not_paced_by_the_post_interval(self):
+        """GETs are paced, but on their own far smaller interval — see
+        CatalogPacerTests. What must never happen is a GET waiting out the one
+        POST per second the SYNC pool is capped at."""
         sleep = RecordingSleep()
         client = FakeClient([_resp(200), _resp(200)])
         with _patch_sleep(sleep):
             await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
             await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
-        self.assertEqual(sleep.durations, [])
+        self.assertNotIn(transport.POST_MIN_INTERVAL, sleep.durations)
+        self.assertTrue(all(d <= transport.CATALOG_MIN_INTERVAL for d in sleep.durations))
 
     async def test_a_failed_post_still_counts_against_the_cap(self):
         """The cap counts requests Simkl RECEIVED, and a call that failed on our
@@ -133,13 +150,74 @@ class PostPacerTests(TransportStateTestCase):
         self.assertEqual(len(sleep.durations), 1)
 
 
+class CatalogPacerTests(TransportStateTestCase):
+    """Catalogue GETs leave at a bounded rate.
+
+    THE FAILURE THIS EXISTS FOR, because the reasoning that left GETs unpaced was
+    documented and still wrong: Simkl names these paths parallel-safe, which was
+    read as "no rate applies", and a settled instance never disproved it because
+    its drain trickles. A fresh deployment's first drain — a full batch against
+    an empty enrichment table — was answered 412, an instance-wide refusal that
+    took the calendar's enrichment, the detail modals and signing in with Simkl
+    down together for fifteen minutes.
+    """
+
+    async def test_the_first_catalogue_get_is_not_delayed(self):
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(200)])
+        with _patch_sleep(sleep):
+            await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+        self.assertEqual(sleep.durations, [])
+
+    async def test_a_second_catalogue_get_waits_out_the_interval(self):
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(200), _resp(200)])
+        with _patch_sleep(sleep):
+            await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+            await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+        self.assertEqual(len(sleep.durations), 1)
+        self.assertAlmostEqual(sleep.durations[0], transport.CATALOG_MIN_INTERVAL, places=2)
+
+    async def test_a_burst_claims_distinct_slots_rather_than_agreeing_on_one(self):
+        """The property a check-then-sleep pacer would NOT have. This pool admits
+        six at once; six coroutines that each read the deadline and then slept
+        would wake together and burst exactly as before. Each claims its slot
+        before awaiting, so the waits are staggered — 0, then one interval, then
+        two, and so on."""
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(200) for _ in range(5)])
+        with _patch_sleep(sleep):
+            await asyncio.gather(*(
+                transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+                for _ in range(5)))
+        self.assertEqual(len(sleep.durations), 4)
+        for i, waited in enumerate(sorted(sleep.durations), start=1):
+            self.assertAlmostEqual(waited, i * transport.CATALOG_MIN_INTERVAL, places=2)
+
+    async def test_the_interval_stays_under_the_published_ceiling(self):
+        """10 GET/second is what Simkl publishes; the margin is because the cap is
+        enforced on their clock rather than ours."""
+        self.assertGreater(transport.CATALOG_MIN_INTERVAL, 1 / 10)
+
+    async def test_the_cdn_is_not_paced(self):
+        """The calendar files are static, edge-served and carry no client id, so
+        they do not spend the budget this paces — and a month's fill would crawl
+        for no reason."""
+        sleep = RecordingSleep()
+        client = FakeClient([_resp(200), _resp(200)])
+        with _patch_sleep(sleep):
+            await transport.send(client, "GET", URL, pool=transport.CDN_POOL)
+            await transport.send(client, "GET", URL, pool=transport.CDN_POOL)
+        self.assertEqual(sleep.durations, [])
+
+
 class RetryTests(TransportStateTestCase):
     """429: back off within a bounded budget, then raise rather than fabricate."""
 
     async def test_honors_retry_after_then_succeeds(self):
         sleep = RecordingSleep()
         client = FakeClient([_resp(429, {"Retry-After": "2"}), _resp(200)])
-        with _patch_sleep(sleep):
+        with _patch_sleep(sleep), _no_catalog_pacing():
             resp = await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [2.0])  # the header wins over the 1s step
@@ -148,7 +226,7 @@ class RetryTests(TransportStateTestCase):
     async def test_exponential_backoff_when_no_retry_after(self):
         sleep = RecordingSleep()
         client = FakeClient([_resp(429), _resp(429), _resp(200)])
-        with _patch_sleep(sleep):
+        with _patch_sleep(sleep), _no_catalog_pacing():
             resp = await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(sleep.durations, [1.0, 2.0])  # 2**0, 2**1
@@ -156,7 +234,7 @@ class RetryTests(TransportStateTestCase):
     async def test_exhausted_budget_raises_rate_limit_not_none(self):
         sleep = RecordingSleep()
         client = FakeClient([_resp(429), _resp(429), _resp(429)])
-        with _patch_sleep(sleep):
+        with _patch_sleep(sleep), _no_catalog_pacing():
             with self.assertRaises(SimklRateLimitError):
                 await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(sleep.durations, [1.0, 2.0])  # slept twice, then gave up
@@ -180,7 +258,7 @@ class RetryTests(TransportStateTestCase):
         with _patch_sleep(sleep):
             with self.assertRaises(SimklRateLimitError):
                 await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
-        self.assertEqual(transport._blocked_seconds_remaining(), 0.0)
+        self.assertEqual(transport.blocked_seconds_remaining(), 0.0)
 
     async def test_a_non_429_comes_back_untouched(self):
         for status in (200, 401, 404, 500):
@@ -231,7 +309,7 @@ class BreakerTests(TransportStateTestCase):
         with patch.object(transport, "BLOCK_COOLDOWN_SECONDS", 0.0):
             with self.assertRaises(SimklBlockedError):
                 await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
-        self.assertEqual(transport._blocked_seconds_remaining(), 0.0)
+        self.assertEqual(transport.blocked_seconds_remaining(), 0.0)
         resp = await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(len(client.requests), 2)
@@ -240,7 +318,7 @@ class BreakerTests(TransportStateTestCase):
         client = FakeClient([_resp(412)])
         with self.assertRaises(SimklBlockedError):
             await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
-        remaining = transport._blocked_seconds_remaining()
+        remaining = transport.blocked_seconds_remaining()
         self.assertGreater(remaining, 60.0)
         self.assertLessEqual(remaining, transport.BLOCK_COOLDOWN_SECONDS)
 

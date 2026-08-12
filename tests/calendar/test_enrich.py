@@ -24,6 +24,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.providers.simkl import titles as simkl_titles
+from app.providers.simkl import transport as simkl_transport
 from tests.support import new_db_path
 
 SHOWS = get_endpoint("shows")
@@ -235,10 +236,50 @@ class OwedTitlesTests(EnrichTestCase):
 
 
 class DrainTests(EnrichTestCase):
-    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="")
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
 
     async def test_nothing_owed_fetches_nothing(self):
         self.assertEqual(await calendar_enrich.drain(self.SETTINGS), 0)
+
+    async def test_a_blocked_instance_records_nothing_against_its_titles(self):
+        """The defect this closes, observed on a live deployment: a 412 is an
+        instance-wide refusal, `fetch_title` answers None for every failure it
+        meets, and the drain wrote that None down as "this title failed" — 372 of
+        one instance's 388 rows, every one a title Simkl would have answered for,
+        each carrying a backoff it had not earned. A blocked call never reached
+        Simkl to have an opinion about any id."""
+        await self._stored([_simkl_record(9001, title="Moonshadow")])
+        simkl_transport._open_breaker("/tv/9001")
+        self.addCleanup(simkl_transport._close_breaker)
+
+        with patch("app.providers.simkl.titles.fetch_title", AsyncMock(return_value=None)):
+            self.assertEqual(await calendar_enrich.drain(self.SETTINGS), 0)
+
+        row = await db.fetch_one(
+            "SELECT failed_at FROM simkl_titles WHERE simkl_id = 9001 AND media = 'show'")
+        self.assertIsNone(row, "a blocked pass wrote a failure row against a good title")
+
+    async def test_an_instance_with_no_client_id_asks_for_nothing(self):
+        """Simkl's calendar takes no credential, so an instance can hold a full
+        queue of Simkl titles and no client id at all. Firing that queue anyway
+        sends an empty id, and Simkl answers 412 — which this app honours as an
+        instance-wide refusal by refusing EVERY Simkl call for 900 seconds, the
+        detail modals and signing in with Simkl included. A missing credential
+        has to degrade to "cannot enrich", not to a quarter-hour outage.
+
+        The fetch is patched to fail loudly rather than asserted about
+        afterwards: the point is that nothing is called, not that nothing is
+        stored."""
+        await self._stored([_simkl_record(9001, title="Moonshadow")])
+        unconfigured = SimpleNamespace(simkl_client_id="", simkl_access_token="",
+                                       simkl_catalogue_configured=False)
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("the drain called Simkl with no client id")
+
+        with patch("app.providers.simkl.titles.fetch_title", _explode):
+            self.assertEqual(await calendar_enrich.drain(unconfigured), 0)
 
     async def test_owed_work_survives_a_restart_with_nothing_in_memory(self):
         """The stored calendar window and simkl_titles are the only things
@@ -398,7 +439,8 @@ class DrainTests(EnrichTestCase):
 
 
 class SweepTests(EnrichTestCase):
-    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="")
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
 
     async def test_a_row_past_retention_is_deleted(self):
         await calendar_enrich._upsert_success(1, "show", {
@@ -691,7 +733,8 @@ class RunDrainLatchTests(EnrichTestCase):
     one more is remembered to run after it — see the module note above
     `run_drain` in app/calendar/enrich.py for why a queue is the wrong shape
     given what `drain` itself costs to run redundantly."""
-    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="")
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
 
     async def asyncSetUp(self):
         await super().asyncSetUp()

@@ -48,6 +48,35 @@ class TestDerivedCoercion:
         assert Settings.from_dict({"timezone": "Europe/Athens"}).timezone == "Europe/Athens"
 
 
+class TestCredentialNormalization:
+    """The two client ids are stripped on the way in, because nothing else
+    strips them and what they are pasted into is a browser field."""
+
+    def test_a_pasted_client_id_loses_the_whitespace_that_came_with_it(self):
+        s = Settings.from_dict({"simkl_client_id": "abc123\n", "trakt_client_id": " def456 "})
+        assert s.simkl_client_id == "abc123"
+        assert s.trakt_client_id == "def456"
+
+    def test_a_padded_id_does_not_reach_the_wire(self):
+        """The failure this prevents, stated as the thing that actually broke: a
+        padded id passes every `*_configured` predicate, because those ask
+        `.strip()` — and then the PADDED value is what goes into the query
+        string Simkl authenticates on. Simkl answers 412 to an id it never
+        issued, which the transport correctly reads as an instance-wide refusal
+        and honours by refusing every Simkl call for 900 seconds, sign-in and
+        account linking included."""
+        from app.providers.simkl import transport
+
+        s = Settings.from_dict({"simkl_client_id": "abc123\n"})
+        assert s.simkl_catalogue_configured
+        assert transport.api_params(s)["client_id"] == "abc123"
+
+    def test_a_whitespace_only_id_reads_as_absent_rather_than_present(self):
+        s = Settings.from_dict({"simkl_client_id": "   "})
+        assert s.simkl_client_id == ""
+        assert not s.simkl_catalogue_configured
+
+
 class TestConfiguredProperties:
     def test_trakt_configured_needs_both_halves_of_the_credential(self):
         assert not Settings().trakt_configured
