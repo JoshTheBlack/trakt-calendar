@@ -238,6 +238,24 @@ def keep_release(record, c_inc: set[str], c_exc: set[str],
     return keep_release_blocks(blocks, c_inc, c_exc, t_inc, t_exc)
 
 
+def keep_release_group(records, c_inc: set[str], c_exc: set[str],
+                       t_inc: set[int], t_exc: set[int]) -> bool:
+    """Whether a group of records for ONE film survives the release specs.
+
+    The records that carry a release map are the ones asked; a group where none
+    does is kept, because there is nothing to judge it on. See
+    filter_release_groups for why the two halves are not the same question, and
+    keep_release for the record-level rule this narrows.
+    """
+    known = [record for record in records
+             if getattr(record, "release_types_by_country", None)]
+    if not known:
+        return True
+    return any(keep_release_blocks(record.release_types_by_country,
+                                   c_inc, c_exc, t_inc, t_exc)
+               for record in known)
+
+
 def filter_release_groups(parsed, endpoint_media, countries_spec: str,
                           types_spec: str) -> list:
     """Keep the (group, records) pairs holding at least one record whose release
@@ -251,11 +269,31 @@ def filter_release_groups(parsed, endpoint_media, countries_spec: str,
     could answer, quietly changing what the card says about its own provenance
     to enforce a filter about something else entirely.
 
-    A GROUP SURVIVES IF ANY OF ITS RECORDS DOES, which follows from the same
-    place: a record that cannot answer is kept (see keep_release), so a merged
-    group always survives on its uninformed side. That is the honest reading —
-    one service saying nothing about release formats is not evidence against
-    what the other one said.
+    A GROUP IS JUDGED ON THE RECORDS THAT CAN ANSWER, and kept whole when none
+    of them can. That is a correction to the rule this shipped with, which kept a
+    group if ANY record survived and so let a record with no map keep a title
+    whatever the record beside it said.
+
+    WHY THAT WAS WRONG, AND IT LOOKED RIGHT. Only a Simkl record ever carries a
+    release map — the overlay that attaches one skips every other source by
+    design (app/calendar/enrich.py's `_simkl_candidates`) — so on a film both
+    services listed, the Trakt record is always silent and the group always
+    survived. Measured on one real August: 19 of the 29 films surviving a filter
+    for a market with nothing in it were merged films whose Simkl record named
+    their release countries exactly, and said none of them matched.
+
+    THE DISTINCTION THE OLD RULE MISSED: "one service saying nothing is not
+    evidence against what the other said" is true when nobody knows, and this
+    still honours it — a group no record can judge is kept. But a film's release
+    schedule is a fact about the TITLE, not about which service happened to list
+    it, so where one record holds that fact the other's silence is not a second
+    opinion to be weighed against it. It is just an absence.
+
+    WHAT STILL SURVIVES EVERY FILTER: a film only Trakt lists. Nothing carries a
+    release map for one, because Trakt's calendar payload has no release schedule
+    in it — and its per-title `/movies/:id/releases` endpoint, which does, is not
+    read by this app. Until it is, those films are genuinely unjudgeable and are
+    kept, which is the same promise as before.
 
     RUNS AT READ, LIKE EVERY OTHER PER-VIEWER NARROWING HERE, and for the extra
     reason `prune_disguised_films` gives: the release map arrives only once the
@@ -269,8 +307,7 @@ def filter_release_groups(parsed, endpoint_media, countries_spec: str,
     if not (c_inc or c_exc or t_inc or t_exc):
         return list(parsed)
     return [pair for pair in parsed
-            if any(keep_release(record, c_inc, c_exc, t_inc, t_exc)
-                   for record in pair[1])]
+            if keep_release_group(pair[1], c_inc, c_exc, t_inc, t_exc)]
 
 
 def prune_disguised_films(records, endpoint_media) -> list:

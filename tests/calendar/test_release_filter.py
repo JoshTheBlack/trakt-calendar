@@ -19,6 +19,12 @@ THE TWO CLAIMS THIS FILE IS HERE TO KEEP TRUE:
     all, a film enrichment has not reached yet, and a row written before the
     schedule was extracted must all survive, or a filter deletes titles it
     knows nothing about.
+  - BUT A GROUP IS JUDGED ON THE RECORDS THAT CAN. Only a Simkl record ever
+    carries a release map, so while a silent record kept its whole group, the
+    filter could not drop any film the other service also listed — 19 of 29
+    survivors on one real August. A release schedule is a fact about the TITLE,
+    so where one record holds it the other's silence is an absence rather than
+    a second opinion. A group NO record can judge is still kept whole.
 """
 from __future__ import annotations
 
@@ -177,14 +183,41 @@ class FilterReleaseGroupsTests(unittest.TestCase):
         kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
         self.assertEqual([r.id for _, rs in kept for r in rs], ["2"])
 
-    def test_a_group_survives_on_a_record_that_cannot_answer(self):
-        """A merged card keeps BOTH its records: one service saying nothing
-        about release formats is not evidence against what the other said, and
-        dropping the record instead of the group would rewrite what a card says
-        about its own provenance to enforce a rule about something else."""
+    def test_a_group_no_record_can_judge_is_kept(self):
+        """The promise that survives: a film nothing carries a release map for is
+        never dropped. Trakt's calendar publishes no release schedule at all, so
+        a film only Trakt lists is genuinely unjudgeable and stays."""
+        trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="t", ids={},
+                       detail_url="", title="A Film", air_ts=_AIR_TS)
+        pairs = self._pairs([trakt])
+        kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
+        self.assertEqual(len(kept), 1)
+
+    def test_a_record_that_cannot_answer_no_longer_keeps_the_group(self):
+        """THE CORRECTION, AND IT WAS FOUND IN A BROWSER. Only a Simkl record
+        ever carries a release map, so on a film both services listed the Trakt
+        record is always silent — and while silence counted as survival, the
+        filter could not drop any film Trakt also listed. Measured on one real
+        August: 19 of 29 films surviving a filter for an empty market were merged
+        films whose Simkl record named their countries and matched none of them.
+
+        A film's release schedule is a fact about the TITLE. Where one record
+        holds it, the other's silence is an absence rather than a second
+        opinion."""
         trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="t", ids={},
                        detail_url="", title="A Film", air_ts=_AIR_TS)
         pairs = self._pairs([trakt, _film(1, releases={"BR": [PREMIERE]})])
+        kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
+        self.assertEqual(kept, [])
+
+    def test_a_group_that_survives_keeps_both_its_records(self):
+        """The half of the old rule that stands. The question is which TITLES a
+        viewer sees, so it is asked once per group — dropping the silent record
+        and keeping the informed one would quietly rewrite what a card says about
+        its own provenance to enforce a rule about release formats."""
+        trakt = Record(source=Source.TRAKT, media=Media.MOVIE, id="t", ids={},
+                       detail_url="", title="A Film", air_ts=_AIR_TS)
+        pairs = self._pairs([trakt, _film(1, releases={"US": [THEATRICAL]})])
         kept = calendar_filter.filter_release_groups(pairs, MOVIES.media, "us", "")
         self.assertEqual(len(kept), 1)
         self.assertEqual(len(kept[0][1]), 2)
