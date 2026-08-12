@@ -19,7 +19,7 @@ from pathlib import Path
 
 import anyio.to_thread
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
@@ -350,6 +350,23 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
          **chrome.page_context(None)},
         status_code=exc.status_code,
     )
+
+
+# PUBLIC because the clients that ask for this one never carry a session: a
+# bookmark manager, a feed reader, a chat unfurler, a phone adding the site to a
+# home screen. They ask for /favicon.ico at the ROOT and ignore what the page
+# declared, which is the whole reason the .ico exists — and until this route
+# there was nothing at that address. The declared <link>s in _head.html cover a
+# browser rendering the page; they do not cover a client that never parsed it,
+# and one of those is what still hands back the pre-rename icon.
+#
+# It is not enough to leave the old app/static/images/favicon.ico in place: that
+# file is the OLD brand, and it is still reachable at its own URL for anything
+# that cached the address. This route answers with the current one.
+@guard.get("/favicon.ico", AuthLevel.PUBLIC)
+async def favicon():
+    return FileResponse(BASE_DIR / "static" / "images" / "distrakkl-favicon.ico",
+                        media_type="image/x-icon", headers=_STATIC_CACHE_HEADERS)
 
 
 # Deliberately reachable by anyone: a container orchestrator's liveness probe

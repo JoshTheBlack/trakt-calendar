@@ -26,7 +26,7 @@ from fastapi import Request
 from app import auth, authz, config, db, distrakt
 from app.auth import AuthLevel
 from app.config import Settings, save_settings
-from app.main import app
+from app.main import BASE_DIR, app
 from tests.support import AppTestCase, ORIGIN
 
 # A distinctive value per credential, so a leak is unmistakable in a response
@@ -130,6 +130,36 @@ class UnauthenticatedTests(GatingTestCase):
     def test_public_routes_are_served(self):
         self.assertEqual(self.client.get("/healthz").status_code, 200)
         self.assertEqual(self.client.get("/login").status_code, 200)
+
+    def test_the_root_favicon_is_served_to_a_stranger_and_is_the_current_one(self):
+        """The clients that ask for /favicon.ico — bookmark managers, feed
+        readers, unfurlers, a phone saving the site to a home screen — carry no
+        session and never parsed the page, so the <link>s in _head.html do not
+        reach them. Serving them the file the page declares is the only way they
+        see the current brand rather than whatever they cached first. The bytes
+        are asserted, not the status: the OLD brand's icon is still on disk under
+        its own name, and answering with that would look like a pass."""
+        resp = self.client.get("/favicon.ico")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers["content-type"], "image/x-icon")
+        declared = BASE_DIR / "static" / "images" / "distrakkl-favicon.ico"
+        self.assertEqual(resp.content, declared.read_bytes())
+
+    def test_the_pre_rename_icon_address_answers_with_the_current_icon(self):
+        """A favicon is stored by ASSOCIATION, not by what a page declares today:
+        a browser that bookmarked this app before the rename keeps asking for
+        /static/images/favicon.ico — the only icon the old head declared — and
+        revalidating it. While that address held the old brand's artwork, no
+        amount of new filenames could reach that bookmark, because it never asks
+        for them. Held to the declared icon byte for byte so the two cannot drift
+        apart, and so restoring the old artwork there fails here rather than
+        quietly resurrecting the old brand in somebody's bookmarks."""
+        old_address = BASE_DIR / "static" / "images" / "favicon.ico"
+        declared = BASE_DIR / "static" / "images" / "distrakkl-favicon.ico"
+        self.assertEqual(old_address.read_bytes(), declared.read_bytes())
+        resp = self.client.get("/static/images/favicon.ico")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.content, declared.read_bytes())
 
     def test_session_level_is_refused(self):
         resp = self.client.get("/me")

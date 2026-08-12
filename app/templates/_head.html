@@ -42,7 +42,19 @@
      computed from the stylesheet and scripts only, and url() refuses anything
      outside that list — so replacing favicon.ico in place would have left every
      browser that had already cached it showing the old brand for as long as it
-     held it. A new URL is never stale. #}
+     held it. A new URL is never stale.
+
+     AND THE OLD URL GETS THE NEW BYTES ANYWAY, which is not a contradiction of
+     that: the new NAME is what a browser reading this page picks up, and the old
+     one is for the readers that are not reading this page. A favicon is stored
+     by ASSOCIATION — Firefox keeps page-to-icon associations in favicons.sqlite
+     and refetches the icon URL it already has — so a bookmark made before the
+     rename keeps asking for /static/images/favicon.ico, the single icon the
+     pre-rename head declared, revalidates it happily, and gets the old brand
+     back forever. New filenames cannot reach that client; only the old address
+     answering correctly can. So app/static/images/favicon.ico is now a copy of
+     distrakkl-favicon.ico, and tests/kernel/test_route_gating.py holds the two
+     to each other so they cannot drift back apart. #}
   <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
   <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png">
   <link rel="apple-touch-icon" href="/static/images/distrakkl-mark-512.png">
