@@ -1,9 +1,10 @@
 // What a row's own buttons do: forget a show, forget a film, abandon or
-// un-abandon a season, and acknowledge a season that came back.
+// un-abandon a season, acknowledge a season that came back, and answer the
+// questions the page raises above the list.
 //
-// The first three are destructive-ish and all three confirm first; each ends by
-// handing the recomputed month back to applyMonthResponse. Acknowledging is the
-// odd one out — it destroys nothing, so it neither confirms nor redraws.
+// The destructive-ish ones confirm first; each ends by handing the recomputed
+// month back to applyMonthResponse. Acknowledging is the odd one out — it
+// destroys nothing, so it neither confirms nor redraws.
 
 // Delete a show from the tracker entirely (cleanup mistakes, incl. abandoned ones).
 // A row the calendar put here is also marked not-watching there — otherwise a
@@ -144,6 +145,36 @@ async function resumeGivenUpSeason(key, season, button) {
     } catch (e) {
         toast(e.message || 'Could not add that back', false);
     }
+}
+
+// "Yes, work it out again." The month's verdict that this season was finished is
+// withdrawn and the season goes back onto the list, derived from what the services
+// say now — the same move a season that turned out to have grown makes, because it
+// is the same thing happening: a completed record that has stopped being true.
+// It confirms first, unlike the other two ✓ buttons: those ADD something and the
+// ✕ undoes them, while this one takes a verdict apart, and the month's record of
+// having finished that season does not survive it.
+async function readdSettledSeason(key, season, button) {
+    confirmInline(button,
+        'Work this season out again from what your accounts say now? This month stops recording that you finished it.',
+        async () => {
+            try {
+                const res = await fetch('/api/distrakt/verdict-readd', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        key, season,
+                        year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+                    }),
+                });
+                const d = await res.json();
+                if (!d.ok) throw new Error(d.error || 'failed');
+                toast('Worked out again', true);
+                applyMonthResponse(d);
+            } catch (e) {
+                toast(e.message || 'Could not re-add that season', false);
+            }
+        }, { danger: true });
 }
 
 // "No, and stop asking." The row is derived from viewing every time viewing is

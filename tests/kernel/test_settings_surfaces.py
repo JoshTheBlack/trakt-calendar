@@ -15,7 +15,7 @@ import asyncio
 import re
 from unittest.mock import patch
 
-from app import auth, cache, db
+from app import auth, cache, chrome, db
 from app.main import app
 from app.config import Settings, load_settings, save_settings
 from tests.support import AppTestCase, ORIGIN
@@ -232,8 +232,54 @@ class PrewarmSettingWidgetTests(SettingsSurfaceTestCase):
         self.assertIn("calendar_prewarm_enabled", payload)
 
 
+class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
+    """simkl_public_calendar_enabled: the checkbox on the Simkl tab and its
+    round trip through /api/settings, defaulting to True the way an instance
+    that never opens this tab needs it to.
+
+    THE STORED KEY KEEPS ITS ORIGINAL SPELLING while the label says something
+    different, and that is deliberate: the key is what the value is saved under
+    in app_settings, so renaming it would orphan every operator's existing
+    choice and quietly reset it to the default."""
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self.admin_id)
+
+    def test_the_settings_screen_renders_the_toggle(self):
+        body = self.client.get("/?month=1&year=2026").text
+        self.assertIn('name="simkl_public_calendar_enabled"', body)
+
+    def test_the_label_says_what_the_setting_does(self):
+        """It governs whether Simkl contributes to the calendar, full stop —
+        not only whether an unconfigured Simkl may be reached, which was a
+        qualifier that almost never failed to apply and so said nothing."""
+        body = self.client.get("/?month=1&year=2026").text
+        self.assertIn("Include Simkl results on the calendar", body)
+
+    def test_it_defaults_on(self):
+        """An instance that never saves this field must read it back as True —
+        the whole point of the default is that nobody has to go find it."""
+        payload = self.client.get("/api/settings").json()
+        self.assertIs(payload["simkl_public_calendar_enabled"], True)
+
+    def test_saving_it_persists_as_a_bool(self):
+        resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": False})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        settings = load_settings()
+        self.assertIs(settings.simkl_public_calendar_enabled, False)
+
+        resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": True})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIs(load_settings().simkl_public_calendar_enabled, True)
+
+    def test_it_is_readable_back_through_the_settings_endpoint(self):
+        payload = self.client.get("/api/settings").json()
+        self.assertIn("simkl_public_calendar_enabled", payload)
+
+
 class SettingsTabsTests(SettingsSurfaceTestCase):
-    """Settings is four tabbed groups in one form."""
+    """Settings is a handful of tabbed groups in one form."""
 
     def setUp(self):
         super().setUp()
@@ -246,11 +292,12 @@ class SettingsTabsTests(SettingsSurfaceTestCase):
         body = self._body()
         tabs = re.findall(r'data-tab="([\w-]+)"', body)
         panels = re.findall(r'data-tab-panel="([\w-]+)"', body)
-        self.assertEqual(tabs, ["server", "trakt", "calendar", "integrations"])
+        self.assertEqual(tabs, ["server", "trakt", "simkl", "calendar", "integrations"])
         self.assertEqual(panels, tabs)
-        # Three of the four start hidden; the CSS cannot be relied on to hide
-        # them, so the attribute has to be in the markup.
-        self.assertEqual(len(re.findall(r'data-tab-panel="\w+" role="tabpanel" hidden', body)), 3)
+        # Every tab but the first starts hidden; the CSS cannot be relied on to
+        # hide them, so the attribute has to be in the markup.
+        self.assertEqual(len(re.findall(r'data-tab-panel="\w+" role="tabpanel" hidden', body)),
+                         len(tabs) - 1)
 
     def test_no_field_was_dropped_on_the_way_into_the_tabs(self):
         """The regrouping moved markup around every input the save path reads by
@@ -260,7 +307,8 @@ class SettingsTabsTests(SettingsSurfaceTestCase):
                          "s_access_token", "s_timezone", "s_endpoint", "s_limit", "s_cache",
                          "s_calcache", "s_cachecap", "s_hide", "s_sonarr_url", "s_sonarr_key",
                          "s_radarr_url", "s_radarr_key", "s_seer_url", "s_seer_key",
-                         "s_tmdb_key"):
+                         "s_tmdb_key", "s_simkl_client_id", "s_simkl_client_secret",
+                         "s_simkl_access_token", "s_simkl_public_calendar"):
             with self.subTest(field=field_id):
                 self.assertIn(f'id="{field_id}"', body)
 
@@ -302,7 +350,22 @@ class ErrorPageTests(SettingsSurfaceTestCase):
     def test_the_lobby_page_carries_our_own_favicon(self):
         """The page came from somewhere else. Its own icon did not come with it."""
         resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
-        self.assertIn("/static/images/favicon.ico", resp.text)
+        self.assertIn("/static/images/distrakkl-favicon.ico", resp.text)
+        self.assertIn("/static/images/favicon-32.png", resp.text)
+
+    def test_the_lobby_page_carries_the_wordmark_drained_of_colour(self):
+        """A dead end still says whose app it is. The wordmark is the app's own
+        gold-to-crimson artwork and every other asset on this page is greyscale,
+        so it is desaturated to match rather than left as the one saturated thing
+        on a monochrome stage — asserted because a filter silently dropped in a
+        later edit would not fail anything else."""
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertIn("/static/images/distrakkl-wordmark.svg", resp.text)
+        self.assertIn("grayscale(1)", resp.text)
+
+    def test_the_lobby_page_names_the_product(self):
+        resp = self.client.get("/no-such-page", headers={"Accept": "text/html"})
+        self.assertIn(chrome.PRODUCT_NAME, resp.text)
 
     def test_the_lobby_page_stands_up_without_the_stylesheet(self):
         """Styles are inline on purpose: the page that renders when something is

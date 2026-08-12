@@ -5,17 +5,92 @@
    entry), `not_watching` and `new_ids` (sets, tested by membership rather than
    queried per card), `is_admin` and `settings` (which action buttons exist).
 
+   ONE data- ATTRIBUTE PER SERVICE'S OWN ID, and both are drawn whenever the
+   group carried them. The details modal hands them all to /api/details and the
+   SERVER picks who to ask, because only the server can see whose credentials
+   this instance has (see app/calendar/detail_source.py). A card carrying only
+   `data-simkl-id` is a title no other service listed, and it opens on Simkl's
+   own answer rather than refusing.
+
    The not-watching and is-new classes are decided HERE, on the server. They used
    to be added by the client after /api/state resolved, which meant hidden items
-   painted and then popped out and the badges arrived a frame late. #}
-<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}" onclick="openDetails(this, event)">
+   painted and then popped out and the badges arrived a frame late.
+
+   WHEN TWO SERVICES DESCRIBED THE SAME AIRING, this card is the one place that
+   shows. `item.alternatives` is {field: {service: value}} for the fields they
+   filled in DIFFERENTLY — and only those, so a field they agreed on draws
+   nothing and a card only one service described carries none of this at all.
+   Two things are done with it, and which one depends on where there is room:
+
+     A SMALL LOGO, on the poster, the title and the overview. It says whose
+     value you are looking at, and clicking it swaps that one field in place
+     from values already in the page. That is a VIEW FLIP and nothing else: it
+     writes nothing back, because a preference is stated on the Sources screen
+     and a card that quietly rewrote one would be changing every other card too.
+
+     A DUAL CHIP, in the meta row, for the short scalar values where showing
+     both is cheaper than making anybody click. It is deliberately in the CARD
+     BODY rather than on the poster: the poster-only wall is the poster and
+     nothing else until it is hovered, and its badges are the winner alone —
+     which is the degrade that layout needs and gets for free by the chips
+     living where they do.
+   Any field named below has to be one app/calendar/resolve.py can actually put
+   in `alternatives`; tests/calendar/test_card_provenance.py holds that.
+
+   `data-alternatives` IS SINGLE-QUOTED, and that is not a style choice: `tojson`
+   returns markup Jinja will not escape again, and it escapes `'` (along with
+   `<`, `>` and `&`) but leaves `"` alone — so the same value in a double-quoted
+   attribute closes it on the first key and ships broken markup. #}
+{% import '_source_logo.html' as src with context %}
+
+{# Which service supplied the value currently on screen for `field`. It is the
+   one whose stored value the resolved record ended up equal to — asked rather
+   than passed in, so the two places that need it (the element and the button
+   that flips it) cannot disagree. #}
+{%- macro won_by(field) -%}
+{%- for name, value in (item.alternatives.get(field) or {}).items() -%}
+{%- if value == item|attr(field) %}{{ name }}{% endif -%}
+{%- endfor -%}
+{%- endmacro -%}
+
+{# The flip control: one logo per service, all but the current one hidden, so the
+   swap is a class change on markup already here rather than a round trip. #}
+{%- macro swap(field) -%}
+{%- set values = item.alternatives.get(field) or {} -%}
+<button type="button" class="source-swap" data-field="{{ field }}"
+        onclick="swapCardField(this, event)"
+        title="From {{ src.label(won_by(field)) }} — click to see the other">
+{%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.mark(name) }}</span>{% endfor -%}
+</button>
+{%- endmacro -%}
+<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>
+        {# The winner alone, always: these three sit ON the poster, which is the
+           whole card in poster-only mode and has no room for two of anything. #}
         {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
         {% if item.network %}<div class="network-badge" title="{{ item.network }}"><img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
+        {# THE FLIP CONTROL, CENTRED ALONG THE BOTTOM EDGE, AND ONLY WHERE THERE IS
+           SOMETHING TO FLIP TO. A mark on the poster is a CONTROL, so it is drawn
+           only when `alternatives` names the poster — that is, only when another
+           service supplied a different one. Drawn on every card it read as an
+           offer of a choice that could not be made, and a control that cannot do
+           anything is worse than no control: the reader clicks it and nothing
+           happens. WHICH service a card came from is still on the card — the
+           outbound button below wears that service's own name — so nothing about
+           attribution depends on a mark up here.
+
+           The middle of the bottom edge, because the poster's four corners are
+           already spoken for: runtime and episode down the left, rating and the
+           watching eye down the right, the network's own logo bottom-right, which
+           is what this control was landing on top of when it had a corner of its
+           own. #}
+        {% if 'poster' in item.alternatives %}
+        <div class="poster-marks">{{ swap('poster') }}</div>
+        {% endif %}
         {# Both eyes reference the <symbol>s defined once per page instead of
            repeating ~800 bytes of path data on every card; which one shows is a
            CSS consequence of the card's not-watching class. #}
@@ -23,11 +98,12 @@
             <svg class="icon-open" width="16" height="16" aria-hidden="true"><use href="#eye-open"></use></svg>
             <svg class="icon-closed" width="16" height="16" aria-hidden="true"><use href="#eye-closed"></use></svg>
         </button>
-        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
+        <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy"{% if 'poster' in item.alternatives %} data-field="poster" data-source="{{ won_by('poster') }}"{% endif %}>
     </div>
     <div class="card-body">
         <div class="title-row">
-            <div class="show-title">{{ item.title }}</div>
+            <div class="show-title"{% if 'title' in item.alternatives %} data-field="title" data-source="{{ won_by('title') }}"{% endif %}>{{ item.title }}</div>
+            {% if 'title' in item.alternatives %}{{ swap('title') }}{% endif %}
             {% if item.year %}<div class="show-year">{{ item.year }}</div>{% endif %}
         </div>
         <div class="meta-row">
@@ -36,8 +112,24 @@
             {% if item.language %}<span class="chip lang">🗣️ {{ item.language }}</span>{% endif %}
             <span class="chip day">📆 {{ item.day_of_week }}</span>
             {% for g in item.genres %}<span class="chip">{{ g }}</span>{% endfor %}
+            {# BOTH NUMBERS, NEVER AN AVERAGE. Two services' user bases produce two
+               legitimate ratings and a mean is a number nobody reported; the same
+               goes for a runtime or a network the two disagree about. Four short
+               values, each shown once per service that gave one. #}
+            {% for field, glyph in [('rating', '⭐'), ('network', '📡'), ('runtime', '⏱️'), ('status', '📶')] %}
+            {% if field in item.alternatives %}
+            <span class="chip dual" data-field="{{ field }}" title="{{ field }} — the services disagree">
+                {%- for name, value in item.alternatives[field].items() %}<span class="dual-value">{{ glyph }} {{ value }}{% if field == 'runtime' %}m{% endif %}{{ src.mark(name) }}</span>{% endfor -%}
+            </span>
+            {% endif %}
+            {% endfor %}
         </div>
-        {% if item.overview %}<div class="overview">{{ item.overview }}</div>{% endif %}
+        {% if item.overview %}
+        <div class="overview-row">
+            <div class="overview"{% if 'overview' in item.alternatives %} data-field="overview" data-source="{{ won_by('overview') }}"{% endif %}>{{ item.overview }}</div>
+            {% if 'overview' in item.alternatives %}{{ swap('overview') }}{% endif %}
+        </div>
+        {% endif %}
         <div class="premiere-info">
             <span class="date">{{ item.air_display }}</span>
             <span class="time">{{ item.air_time }}</span>
@@ -46,9 +138,18 @@
         <div class="season-info" data-role="season-info" hidden></div>
         {% endif %}
         <div class="links-row">
-            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" onclick="event.stopPropagation()" title="View on Trakt">
-                <img src="/static/images/traktlogo.png" alt="Trakt">
-            </a>
+            {# ONE BUTTON PER SERVICE THAT HAS A PAGE FOR THIS TITLE, each wearing
+               that service's own name. A card several services described has
+               several real destinations and they are not competing answers — the
+               card is attributed to one of them, but the other's page exists and
+               is just as good a place to go. Offering only the winner's meant a
+               reader who wanted the other service's page had nowhere to click.
+               `source_links` is empty on a card only one service described, which
+               is every card on an instance with one source, and that card keeps
+               its single button. #}
+            {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
+            {{ src.link(name, url) }}
+            {% endfor %}
             {% if is_admin %}
             {% if item.media == 'movie' and settings.radarr_configured %}
             <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>

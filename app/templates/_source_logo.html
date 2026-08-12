@@ -1,0 +1,54 @@
+{# How each service is SHOWN, in one place.
+
+   Three surfaces need "which service is this, and what does it look like" — the
+   outbound button on a card, the little logo beside a field two services
+   disagreed about, and the same on the public share card. Written out at each of
+   them, a third service would be three edits and one of them would be forgotten;
+   here it is one.
+
+   THE FILENAMES ARE NAMED HERE AND NOWHERE ELSE, and they are images rather than
+   scripts or stylesheets, so they are not cache-busted assets — an image is
+   fetched once and a changed one is a changed URL. `label` exists for the same
+   reason as the picture: an alt attribute and a tooltip both have to say the
+   service's name, and two spellings of it in two attributes is exactly the drift
+   this file removes.
+
+   TWO PICTURES PER SERVICE, AND WHICH ONE IS NOT A MATTER OF TASTE. A MARK is the
+   service's symbol on its own disc or tile — it carries its own background, so it
+   stays legible over poster art, over the near-black card and over anything else
+   it is dropped on, and it reads at 10px where lettering would not. A WORDMARK is
+   the service's NAME, and it is what a button gets: a button is a promise about
+   where a click goes, and the name says that where a symbol asks to be
+   recognised. So marks go on the flip control and the dual chips; wordmarks go
+   on the outbound buttons and nowhere else.
+
+   A MARK IS ALWAYS PART OF A CONTROL, and that is the rule that decides whether
+   one is drawn at all. There used to be a third use — a badge naming the service
+   that listed a card, drawn on every card from any service but the first. It
+   looked exactly like the flip control it sat beside, so most posters carried
+   something that asked to be clicked and did nothing when it was. The outbound
+   button already names the service a card came from, so removing it cost no
+   attribution. Anything new that wants to draw a mark has to be something a
+   reader can act on. #}
+
+{% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
+
+{% macro mark(source, css='') %}<img class="source-logo {{ css }}"
+     src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'trakt-circlemark-dark.svg' }}"
+     alt="{{ label(source) }}" loading="lazy">{% endmacro %}
+
+{% macro wordmark(source) %}<img class="source-wordmark"
+     src="/static/images/{{ 'simkl_white_with_shaddow_transparent.png' if source == 'simkl' else 'trakt-logo-dark.svg' }}"
+     alt="{{ label(source) }}" loading="lazy">{% endmacro %}
+
+{# ONE OUTBOUND BUTTON, wearing the name of where it actually goes. Both card
+   templates draw this and neither spells it: a card several services described
+   gets one per service, and "what a link to a service looks like" then has one
+   answer rather than one per page that happens to draw a card.
+
+   The click is stopped from reaching the card underneath, which opens the
+   details modal — following a link out and opening a panel about the same title
+   are two different things to have asked for. #}
+{% macro link(source, url) %}<a class="trakt-btn" href="{{ url }}" target="_blank"
+   rel="noopener" onclick="event.stopPropagation()"
+   title="View on {{ label(source) }}">{{ wordmark(source) }}</a>{% endmacro %}

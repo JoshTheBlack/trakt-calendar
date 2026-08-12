@@ -53,15 +53,41 @@ degrades.
 
 **The HTTP response cache is URL-keyed and GLOBAL.** A response that depended on
 whose token asked must never be written to it — that is what `private=True` on
-`app/providers/trakt/transport.py`'s `cached_get` is for, and why a provider
-package separates public per-title lookups (`detail.py`) from per-user reads
-(`sync.py`): "does this module cache?" then has one answer per module.
+`cached_get` is for, and why a provider package separates public per-title
+lookups (`detail.py`) from per-user reads (`sync.py`): "does this module cache?"
+then has one answer per module. THERE ARE NOW TWO IMPLEMENTATIONS OF THIS RULE,
+one per provider transport (`app/providers/trakt/transport.py` and
+`app/providers/simkl/transport.py`), and they are two because the services
+differ in what a request carries, not because the rule does. A change to what
+`private` MEANS belongs in both; `tests/providers/test_protocol_conformance.py`
+is what holds the two packages to one shape.
 
-**The calendar cache stores the UNFILTERED window once per (endpoint, 7 days).**
-Per-viewer filtering happens at READ time, so one viewer excluding a genre does
-not poison what another sees from the same rows (`app/calendar/cache.py`). The
-one thing filtered BEFORE storage is the instance-wide content floor, which is
-deliberate and documented there.
+**The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
+holding EVERY source's records under a v2 envelope.** Per-viewer filtering — and
+per-viewer source selection — happen at READ time, so one viewer excluding a
+genre or narrowing to one service does not poison what another sees from the
+same rows (`app/calendar/cache.py` owns the envelope and the read path;
+`app/calendar/resolve.py` owns which source answers each field). The envelope
+records who was ASKED as well as who ANSWERED, which is what lets a source
+switched on later refill a window that legitimately has none of its records,
+and what keeps "partial" meaning a source that failed rather than one nobody
+asked. Two things are decided BEFORE storage rather than at read: the
+instance-wide content floor and the instance-wide "include Simkl results"
+switch, both operator decisions taken once for every viewer, and both also
+applied at read so unticking is immediate over windows already stored. A
+PER-VIEWER preference reaching a fill is the bug this shape exists to prevent
+(`tests/calendar/test_resolve.py`'s `TwoViewersOneWindowTests`).
+
+**A source's calendar records may arrive incomplete, and `simkl_titles` is the
+one place that completes them.** The schema is `app/db.py`'s like every other
+table's, but what goes into it, the read-time overlay and the background drain
+are all `app/calendar/enrich.py`'s; Simkl's CDN calendar carries no
+genres, network, country, certification, runtime, status or overview, so its
+Records land with `enriched=False` and are filled in afterwards. Nothing on the
+fill path may do that lookup inline — a busy window names hundreds of titles
+against a 10 GET/second ceiling — and a record the overlay cannot answer for is
+SHOWN rather than filtered out, because a filter that hides what it has not
+learned yet reads as "nothing matched" instead of "not known yet".
 
 **A share link's preview picture renders the SAME view its page does.** Both
 resolve it through `resolve_view` and read the month through `_read_month`, both

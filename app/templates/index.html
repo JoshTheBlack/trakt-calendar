@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
-{{ page.head('New Shows – ' ~ month_label,
+{{ page.head(product ~ ' – ' ~ month_label,
              scripts=assets.scripts('calendar'),
              site_suffix=false) }}
 {# Body classes are per-account view prefs (card style, packing, hide) that don't
@@ -74,34 +74,99 @@
                 {% endfor %}
             </select>
         </form>
-        <div class="control">
-            <label for="cardStyleSelect">🎬</label>
-            <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
-                <option value="vertical"{% if view.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
-                <option value="horizontal"{% if view.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
-                <option value="poster"{% if view.card_style == 'poster' %} selected{% endif %}>Poster only</option>
-            </select>
-        </div>
-        <div class="control">
-            <label for="dayPackSelect">🗓️</label>
-            <select id="dayPackSelect" onchange="setLayout('day_packing', this.value)">
-                <option value="stacked"{% if view.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
-                <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
-            </select>
-        </div>
-        <div class="control tz" title="Your timezone — controls day grouping and air times">
-            <label for="tzSelect">🌐</label>
-            <select id="tzSelect" onchange="setViewerTimezone(this.value)">
-                {% for tzgroup in viewer_timezone_groups %}
-                <optgroup label="{{ tzgroup.group }}">
-                    {% for tz in tzgroup['options'] %}
-                    <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
-                    {% endfor %}
-                </optgroup>
-                {% endfor %}
-            </select>
-            <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
-        </div>
+        {# WHICH SERVICES FILL THIS VIEW. A view control and not a preference: it
+           sets the same transient `?source=` override the coverage-gap banner's
+           "show it anyway" link does, so it applies to this page and to the days
+           it fetches in, and writes nothing. The account's own answer is stated
+           on /sources — one place, deliberately — and the first option here is
+           that answer, which is also the way to stop overriding.
+
+           A GET form for the same reason the calendar picker beside it is one:
+           boosted it is a body swap with htmx keeping history, and with no
+           JavaScript it degrades to a plain submit of the query the calendar
+           route already reads. The endpoint travels with it because the services
+           offered are the ones that answer THIS calendar.
+
+           NOT DRAWN AT ALL when there is nothing to choose between — one service
+           able to fill this calendar, or none. `source_choices` is empty then;
+           the emptiness is decided in the route, where both halves of "could
+           this service fill this calendar" are already known, rather than by the
+           template counting options. #}
+        {# THE FOUR THAT ARE ABOUT HOW THIS CALENDAR IS SHOWN, BEHIND ONE CONTROL,
+           and the split from the picker above is the whole reason this grouping
+           is defensible. The endpoint picker stays out here because it is
+           NAVIGATION — it changes which calendar you are reading, the way the
+           month arrows change which month — and burying the most-used control on
+           the page behind a click to tidy the row would be paying for the tidying
+           with the thing the row is for. Everything in here answers "how should
+           what I am already reading be drawn", which is a question you ask once
+           and then leave alone.
+
+           `details`/`summary` and the .nav-menu classes rather than anything new:
+           the ☰ Menu at the other end of this bar and the 🔎 Filters panel are
+           both already this, so a third popover that behaved or looked
+           differently would be a third thing to learn for no gain. It also means
+           this works with no JavaScript at all, which the two selects that submit
+           forms below rely on anyway.
+
+           Each row keeps its own id and its own onchange — nothing about what
+           these controls DO moved, only where they sit. app/static/js/calendar/
+           layout.js still finds tzSelect by id. #}
+        <details class="nav-menu view-menu">
+            <summary title="How this calendar is drawn">👁️ View</summary>
+            <div class="nav-menu-items view-menu-items">
+                {% if source_choices %}
+                <form class="view-row" action="/calendar" method="get" title="Which services fill this view — this page only, nothing saved">
+                    <input type="hidden" name="month" value="{{ month }}">
+                    <input type="hidden" name="year" value="{{ year }}">
+                    <input type="hidden" name="endpoint" value="{{ endpoint.key }}">
+                    <label for="sourceSelect">🛰️ Sources</label>
+                    <select id="sourceSelect" name="source" onchange="this.form.requestSubmit()">
+                        {% for choice in source_choices %}
+                        <option value="{{ choice.value }}"{% if choice.selected %} selected{% endif %}>{{ choice.label }}</option>
+                        {% endfor %}
+                    </select>
+                </form>
+                {% endif %}
+                <div class="view-row">
+                    <label for="cardStyleSelect">🎬 Cards</label>
+                    <select id="cardStyleSelect" onchange="setLayout('card_style', this.value)">
+                        <option value="vertical"{% if view.card_style == 'vertical' %} selected{% endif %}>Poster on top</option>
+                        <option value="horizontal"{% if view.card_style == 'horizontal' %} selected{% endif %}>Poster beside</option>
+                        <option value="poster"{% if view.card_style == 'poster' %} selected{% endif %}>Poster only</option>
+                    </select>
+                </div>
+                <div class="view-row">
+                    <label for="dayPackSelect">🗓️ Days</label>
+                    <select id="dayPackSelect" onchange="setLayout('day_packing', this.value)">
+                        <option value="stacked"{% if view.day_packing == 'stacked' %} selected{% endif %}>Stacked</option>
+                        <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Packed beside</option>
+                    </select>
+                </div>
+                {# THE ONE ROW WITH A THIRD ELEMENT, so its control half is
+                   wrapped and the row still has exactly two children like the
+                   other three. That is what keeps all four selects the same
+                   width and their edges aligned: the grid's second column is one
+                   cell either way, and the 📍 hangs to the LEFT of the select
+                   inside it rather than being a third column the other rows
+                   would have to leave empty. #}
+                <div class="view-row tz" title="Your timezone — controls day grouping and air times">
+                    <label for="tzSelect">🌐 Timezone</label>
+                    <span class="view-control">
+                        <button type="button" class="btn-ghost small" onclick="useDeviceTimezone()" title="Use my device's timezone">📍</button>
+                        <select id="tzSelect" onchange="setViewerTimezone(this.value)">
+                            {% for tzgroup in viewer_timezone_groups %}
+                            <optgroup label="{{ tzgroup.group }}">
+                                {% for tz in tzgroup['options'] %}
+                                <option value="{{ tz.value }}"{% if tz.selected %} selected{% endif %}>{{ tz.label }}</option>
+                                {% endfor %}
+                            </optgroup>
+                            {% endfor %}
+                        </select>
+                    </span>
+                </div>
+            </div>
+        </details>
 {% endmacro %}
 
 {# In `distrakt_href` the YEAR travels and the MONTH deliberately does not. The
@@ -186,9 +251,37 @@
 </nav>
 
 {% if error %}
-<div class="error-banner">⚠️ {{ error }}</div>
+{# A coverage gap (a stated single calendar source that doesn't reach
+   this month) is not a failure — it renders the same banner shape so it is
+   never mistaken for a blank calendar, but offers the other source's view
+   instead of a bare warning triangle. #}
+<div class="{{ 'warning-banner' if coverage_gap else 'error-banner' }}">⚠️ {{ error }}{% if coverage_gap and switch_url %} <a href="{{ switch_url }}">Show it anyway</a>{% endif %}</div>
 {% elif partial %}
 <div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
+{% endif %}
+{# Quiet on purpose, and separate from the warning above: nothing is wrong. A
+   title one service listed but has not been looked up yet has no genres,
+   country or certification to judge, so this month's filters let it through
+   rather than removing it on values nobody has. The number falls to zero by
+   itself as the background catalogue read catches up, and a reload shows the
+   new answer — so this says which cards are provisional rather than asking for
+   anything to be done. #}
+{% if unenriched %}
+<div class="hint enrichment-note">⏳ {{ unenriched }} item{{ '' if unenriched == 1 else 's' }} here
+  {{ 'is' if unenriched == 1 else 'are' }} still being looked up, so your filters
+  haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
+{% endif %}
+{# A release filter REMOVES films rather than moving them: a film out only in
+   Brazil does not match a filter asking for American releases at all. So this
+   one can empty a month completely, which is exactly the state that reads as a
+   broken calendar if the page says nothing. It is said whether or not the month
+   came out empty, because a month showing twelve films out of thirteen hundred
+   is just as much a filter's doing and just as worth being able to undo. #}
+{% if release_filtered %}
+<div class="hint enrichment-note">🎬 {{ release_filtered }} film{{ '' if release_filtered == 1 else 's' }}
+  {{ 'is' if release_filtered == 1 else 'are' }} hidden by your release filter — they have no release
+  in the countries or formats you picked.
+  <a href="#" onclick="openFilters(); return false;">Change it</a>.</div>
 {% endif %}
 
 <main>
@@ -238,6 +331,13 @@
                         data-tab="server" onclick="showSettingsTab('server')">🖥️ Server</button>
                 <button type="button" class="tab-btn" role="tab" aria-selected="false"
                         data-tab="trakt" onclick="showSettingsTab('trakt')">🎟️ Trakt</button>
+                {# Its own group rather than more fields under Trakt: these are a
+                   DIFFERENT service's credentials, and filing them beside
+                   Trakt's would invite pasting one service's client id into the
+                   other's field — the failure that then reads as "the source is
+                   broken" rather than "that value belongs elsewhere". #}
+                <button type="button" class="tab-btn" role="tab" aria-selected="false"
+                        data-tab="simkl" onclick="showSettingsTab('simkl')">🟡 Simkl</button>
                 <button type="button" class="tab-btn" role="tab" aria-selected="false"
                         data-tab="calendar" onclick="showSettingsTab('calendar')">📅 Calendar</button>
                 <button type="button" class="tab-btn" role="tab" aria-selected="false"
@@ -401,6 +501,59 @@
                     <div class="hint">Device pairing — needs no redirect URI, so it still works if
                         the registered one is wrong. This authorizes the app-wide connection used
                         for calendar data, not any one person's login.</div>
+                </div>
+                </div>
+
+                <div class="tab-panel" data-tab-panel="simkl" role="tabpanel" hidden>
+                {# Simkl's calendar files are public — no id, no token — so these
+                   credentials are only about the parts that belong to a PERSON:
+                   signing in with Simkl, and reading your own library. An
+                   instance can leave all three blank and still read Simkl's
+                   calendar. #}
+                <p class="hint">A developer application at
+                    <a href="https://simkl.com/settings/developer/" target="_blank" rel="noopener">simkl.com/settings/developer</a>
+                    — free, and approved on the spot.</p>
+                <div class="field">
+                    <label for="s_simkl_client_id">Simkl Client ID</label>
+                    <input type="text" id="s_simkl_client_id" name="simkl_client_id" autocomplete="off" spellcheck="false">
+                    <span class="hint">From your Simkl developer application.</span>
+                </div>
+                <div class="field">
+                    <label for="s_simkl_client_secret">Simkl Client Secret</label>
+                    <input type="password" id="s_simkl_client_secret" data-secret="1" name="simkl_client_secret" autocomplete="off" spellcheck="false">
+                    <span class="hint">Same page as the Client ID — it is what the sign-in exchange is authenticated with.</span>
+                </div>
+                {# Simkl compares the redirect URI byte for byte, exactly as Trakt
+                   does, and registering the ORIGIN instead of this callback path
+                   is the mistake that costs an afternoon. Shown as a copyable
+                   value rather than described. #}
+                <div class="field" id="s_simkl_redirect_field" hidden>
+                    <label for="s_simkl_redirect_uri">Simkl redirect URI</label>
+                    <div class="share-link-box">
+                        <input type="text" id="s_simkl_redirect_uri" readonly>
+                        <button type="button" class="btn-ghost small" onclick="copySimklRedirectUri()">Copy</button>
+                    </div>
+                    <span class="hint">Paste this <strong>exactly</strong> into your Simkl application's
+                        Redirect URI field — the whole path, not just the site address.</span>
+                </div>
+                <div class="field">
+                    <label for="s_simkl_access_token">Simkl Access Token</label>
+                    <input type="password" id="s_simkl_access_token" data-secret="1" name="simkl_access_token" autocomplete="off" spellcheck="false">
+                    {# Simkl issues no refresh token: the value stands until the
+                       user revokes the application on Simkl's side, at which
+                       point it has to be replaced rather than renewed. #}
+                    <span class="hint">The instance-wide token, for anything read with nobody signed in.
+                        It does not expire, and there is nothing to refresh — if Simkl starts refusing it,
+                        authorize the application again.</span>
+                </div>
+                <div class="field checkbox">
+                    <input type="checkbox" id="s_simkl_public_calendar" name="simkl_public_calendar_enabled">
+                    <label for="s_simkl_public_calendar">Include Simkl results on the calendar</label>
+                    <span class="hint">On by default, and it applies whether or not the credentials above
+                        are filled in. Simkl's calendar files sit on a public CDN and need none of them,
+                        so this instance reads them even with this tab left blank — turn this off if you
+                        would rather it never asked. It does not affect the watch tracker, which reads
+                        each person's own Simkl account through their own link.</span>
                 </div>
                 </div>
 
@@ -604,6 +757,37 @@
                         <div class="chip-picker" id="f_movie_certifications" data-vocab="G,PG,PG-13,R,NC-17,NR"></div>
                     </div>
                 </div>
+                {# FILMS ONLY, and the label says so rather than leaving somebody
+                   to discover it by setting one and watching nothing happen on
+                   Season Premieres. This is a different question from the
+                   Countries field above: that one is where a title was MADE,
+                   this one is where and how it is being RELEASED, and one
+                   service's film calendar is every release in every market —
+                   over a thousand titles in a month — which is unreadable
+                   without it. A film released nowhere you picked is REMOVED,
+                   not moved to another date; the calendar says how many, so a
+                   month this empties can be undone. #}
+                <p class="hint">Film releases: these narrow the movie calendars only, and
+                    they are about where a film is being <em>released</em> rather than where
+                    it was made.</p>
+                <div class="field">
+                    <label for="f_release_countries">Release countries</label>
+                    <input type="text" id="f_release_countries" name="movie_release_countries"
+                           spellcheck="false" autocomplete="off" placeholder="us, gb, -br">
+                    <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code>
+                        to exclude. Blank means every market. A film with no release in any of
+                        these disappears from the calendar rather than moving.</span>
+                </div>
+                <div class="field">
+                    <label>Release types</label>
+                    <div class="chip-picker" id="f_release_types"
+                         data-vocab="1,2,3,4,5,6"
+                         data-labels="Premiere,Limited theatrical,Theatrical,Digital,Physical,TV"></div>
+                    <span class="hint">Same three-state chips as above. A country and a type are
+                        matched <strong>together</strong>: "us" plus "Theatrical" means a film in
+                        American cinemas, not one that premiered elsewhere and opened in cinemas
+                        somewhere else. Leave every chip grey to keep every format.</span>
+                </div>
                 <div class="field">
                     <label for="f_networks">Networks</label>
                     <textarea id="f_networks" name="network_filter" spellcheck="false"
@@ -679,7 +863,11 @@
                 <div class="two-col">
                     <div class="field">
                         <label for="share_view_endpoint">Calendar</label>
-                        <select id="share_view_endpoint" onchange="saveShareView()">
+                        {# Not saveShareView directly: the calendar a LINK opens on
+                           decides which services could fill it, so the Sources
+                           ticks below have to be rebuilt before the view is
+                           saved — see onShareEndpointChange. #}
+                        <select id="share_view_endpoint" onchange="onShareEndpointChange()">
                             {% for ep in endpoints %}
                             <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                             {% endfor %}
@@ -714,6 +902,34 @@
                             <option value="packed"{% if view.day_packing == 'packed' %} selected{% endif %}>Days packed beside each other</option>
                         </select>
                     </div>
+                </div>
+                {# WHICH SERVICES FILL THE LINK, and only ever a narrowing of the
+                   owner's own calendar. TICKS, and the same ones the Sources
+                   screen uses for the account-wide version of this question — a
+                   selection is a SET, so a control that could only name one
+                   service would have to be redrawn the day a third is
+                   registered. Nothing ticked writes no source at all, which is
+                   the page's standing behaviour.
+
+                   NOT DRAWN when fewer than two services could fill this
+                   calendar, exactly as the 👁️ View toolbar is not: the emptiness
+                   is decided in the route, where both halves of "could this
+                   service fill this calendar" are already known. #}
+                <div class="field" id="share_view_sources_field"{% if not share_source_choices %} hidden{% endif %}>
+                    <label>Sources</label>
+                    {# Rendered here for the calendar the page was loaded on, and
+                       rebuilt by the panel whenever its own Calendar option
+                       moves — the two must agree, so both read the same map. #}
+                    <div class="source-ticks" id="share_view_sources">
+                        {% for choice in share_source_choices %}
+                        <label class="source-tick">
+                            <input type="checkbox" data-source="{{ choice.value }}" onchange="saveShareView()">
+                            <span>{{ choice.label }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <span class="hint">Tick none and the link opens on whatever your own calendar
+                        shows. Ticking can only narrow that, never widen it.</span>
                 </div>
                 <div class="field checkbox">
                     <input type="checkbox" id="share_view_hidenw" onchange="saveShareView()"{% if view.hide_not_watching %} checked{% endif %}>
@@ -767,6 +983,10 @@
     // endpoints check the same two conditions server-side, so setting this by
     // hand gets you a refusal rather than a tracker.
     window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
+    // Which services could fill a shared link, per calendar the link may open
+    // on. The Share panel picks its own calendar, so it needs every answer
+    // rather than the one for the page it was opened from.
+    window.SHARE_SOURCE_CHOICES = {{ share_source_choices_by_endpoint | tojson }};
 </script>
 </body>
 </html>

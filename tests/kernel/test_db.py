@@ -9,6 +9,7 @@ No network.
 """
 from __future__ import annotations
 
+import json
 import re
 import unittest
 
@@ -34,6 +35,8 @@ EXPECTED_TABLES = {
     "app_secrets", "app_settings",
     # Migration 19 — month facts and viewer facts, stored apart.
     "distrakt_month_records", "distrakt_user_seasons", "distrakt_prompt_dismissals",
+    # Migration 22 — which services answer for an account.
+    "source_prefs",
 }
 
 
@@ -194,6 +197,318 @@ class MigrationTests(DbTestCase):
                     "VALUES ('bogus_type', '7', ?, 1)", (now,))
         finally:
             conn.close()
+
+    async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
+        """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
+        which made admitting a third service a table rebuild.
+
+        Two things have to hold at once. The name set must genuinely be open
+        afterwards — that is the whole point of the rebuild — and every existing
+        row must come across, because a linked identity is how somebody signs in
+        and an account created through a provider has no password to fall back
+        on. `purpose` stays constrained: that set is this app's own and really
+        is closed.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-21-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 20]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                "display_name, access_token, created_at, last_login_at) "
+                "VALUES (1, 'trakt', 'uuid-1', 'Viewer', 'tok', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO auth_handshakes (state, provider, purpose, created_at, expires_at) "
+                "VALUES ('st-1', 'plex', 'login', ?, ?)", (now, now + 600))
+            # The constraint this migration exists to remove, still in force.
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                    "created_at) VALUES (1, 'simkl', 'acct-9', ?)", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            identity = conn.execute("SELECT * FROM linked_identities").fetchall()
+            self.assertEqual(len(identity), 1)
+            self.assertEqual(identity[0]["provider"], "trakt")
+            self.assertEqual(identity[0]["provider_user_id"], "uuid-1")
+            self.assertEqual(identity[0]["display_name"], "Viewer")
+            self.assertEqual(identity[0]["access_token"], "tok")
+            self.assertEqual(identity[0]["created_at"], now)
+            handshake = conn.execute("SELECT * FROM auth_handshakes").fetchall()
+            self.assertEqual(len(handshake), 1)
+            self.assertEqual(handshake[0]["state"], "st-1")
+            self.assertEqual(handshake[0]["provider"], "plex")
+
+            # A third service now writes to both tables with no schema change.
+            conn.execute(
+                "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                "created_at) VALUES (1, 'simkl', 'acct-9', ?)", (now,))
+            conn.execute(
+                "INSERT INTO auth_handshakes (state, provider, purpose, created_at, expires_at) "
+                "VALUES ('st-2', 'simkl', 'link', ?, ?)", (now, now + 600))
+            # ...but the identity is still unique per (provider, account).
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO linked_identities (user_id, provider, provider_user_id, "
+                    "created_at) VALUES (1, 'simkl', 'acct-9', ?)", (now,))
+            # ...and `purpose` is still a closed set, because that one is ours.
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO auth_handshakes (state, provider, purpose, created_at, "
+                    "expires_at) VALUES ('st-3', 'simkl', 'sideways', ?, ?)", (now, now + 600))
+
+            # The rebuild drops the old table's indexes with it. A missing one
+            # here is invisible until every account page full-scans.
+            indexes = {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'")}
+            self.assertIn("ix_linked_identities_user", indexes)
+            self.assertIn("ix_auth_handshakes_expires", indexes)
+        finally:
+            conn.close()
+
+    async def test_migration_21_refuses_rather_than_dropping_an_orphaned_identity(self):
+        """An identity row whose account is gone cannot be carried across, and
+        the migration says which rows and why instead of failing on a bare
+        foreign key error — or, far worse, quietly copying fewer rows than it
+        found. Nothing is changed when it refuses."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-21-orphan-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 20]):
+                db.migrate_sync(conn)
+            now = db.now()
+            # Written with the enforcement off, which is how a hand-repaired or
+            # partially restored database acquires one in the first place.
+            conn.execute("PRAGMA foreign_keys = OFF")
+            conn.execute(
+                "INSERT INTO linked_identities (user_id, provider, provider_user_id, created_at) "
+                "VALUES (404, 'trakt', 'uuid-orphan', ?)", (now,))
+            conn.commit()
+            conn.execute("PRAGMA foreign_keys = ON")
+
+            with self.assertRaises(RuntimeError) as caught:
+                db.migrate_sync(conn)
+            self.assertIn("no longer exists", str(caught.exception))
+
+            # Rolled back whole: the row is still there and so is the old version.
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM linked_identities").fetchone()[0], 1)
+            self.assertEqual(conn.execute("SELECT version FROM schema_version").fetchone()[0], 20)
+        finally:
+            conn.close()
+
+
+    async def test_migration_22_gives_the_tracker_s_cached_rows_a_source(self):
+        """The two cache tables gain `source` INSIDE their primary key, so two
+        services' answers about one season are two rows.
+
+        Everything already stored came from the one service that has ever written
+        these tables, and the migration must say so on every row: a progress row
+        that came out with no source, or with the wrong one, is somebody's viewing
+        history filed under a service that never reported it. The rebuild is also
+        the moment rows can silently vanish, which is why the counts are checked
+        rather than the shape alone.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-22-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 21]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO distrakt_show_progress (user_id, media, match_source, "
+                "match_id, season, watched_episodes_json, trakt_id) "
+                "VALUES (1, 'show', 'tmdb', '1399', 2, '{\"1\": \"2026-03-04\"}', 601)")
+            conn.execute(
+                "INSERT INTO distrakt_movie_watches (user_id, media, match_source, "
+                "match_id, watched_at, title, year, trakt_id) "
+                "VALUES (1, 'movie', 'tmdb', '55', '2026-03-04T00:00:00Z', 'A Film', 1999, 55)")
+            conn.execute(
+                "INSERT INTO distrakt_watch_state (user_id, last_synced, beacons_json) "
+                "VALUES (1, '2026-03-20', '{\"ep_watched\": \"2026-03-20T00:00:00Z\"}')")
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            progress = conn.execute("SELECT * FROM distrakt_show_progress").fetchall()
+            self.assertEqual(len(progress), 1)
+            self.assertEqual(progress[0]["source"], "trakt")
+            self.assertEqual(progress[0]["match_id"], "1399")
+            self.assertEqual(progress[0]["watched_episodes_json"], '{"1": "2026-03-04"}')
+            self.assertEqual(progress[0]["trakt_id"], 601)
+            movie = conn.execute("SELECT * FROM distrakt_movie_watches").fetchone()
+            self.assertEqual(movie["source"], "trakt")
+            self.assertEqual(movie["title"], "A Film")
+            self.assertEqual(movie["watched_at"], "2026-03-04T00:00:00Z")
+
+            # The cursor and the beacon are nested under the service that set them.
+            state = conn.execute("SELECT * FROM distrakt_watch_state").fetchone()
+            self.assertEqual(json.loads(state["cursors_json"]), {"trakt": "2026-03-20"})
+            self.assertEqual(json.loads(state["beacons_json"]),
+                             {"trakt": {"ep_watched": "2026-03-20T00:00:00Z"}})
+            self.assertNotIn("last_synced", state.keys())
+
+            # A second service's answer about the SAME season is a second row, not
+            # a conflict — which is the whole reason `source` is in the key.
+            conn.execute(
+                "INSERT INTO distrakt_show_progress (user_id, media, match_source, "
+                "match_id, season, source, watched_episodes_json, simkl_id) "
+                "VALUES (1, 'show', 'tmdb', '1399', 2, 'simkl', '{\"1\": \"\"}', 77)")
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM distrakt_show_progress").fetchone()[0], 2)
+            # ...but one service still cannot say two things about it.
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO distrakt_show_progress (user_id, media, match_source, "
+                    "match_id, season, source, watched_episodes_json) "
+                    "VALUES (1, 'show', 'tmdb', '1399', 2, 'simkl', '{}')")
+
+            # The frozen-month columns are additive: the single numbers stay.
+            columns = {r["name"] for r in conn.execute(
+                "PRAGMA table_info(distrakt_month_records)")}
+            self.assertTrue({"watched", "total", "watched_by_source", "total_by_source"}
+                            <= columns)
+        finally:
+            conn.close()
+
+    async def test_migration_22_carries_a_beacon_it_cannot_read_no_further(self):
+        """A stored beacon is a cache of one service's "something changed" marker.
+        One that will not parse cannot be nested by source, and the honest answer
+        is to drop it — the next tracker load fetches a fresh one — rather than
+        wrap an unreadable string in a shape the loader would have to guess about.
+        Nothing about what was watched lives in that column."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-22-beacon-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 21]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO distrakt_watch_state (user_id, last_synced, beacons_json) "
+                "VALUES (1, NULL, 'not json at all')")
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            state = conn.execute("SELECT * FROM distrakt_watch_state").fetchall()
+            # The ROW survives — it is one per user and dropping it would be a
+            # different thing entirely — with both columns empty.
+            self.assertEqual(len(state), 1)
+            self.assertIsNone(state[0]["cursors_json"])
+            self.assertIsNone(state[0]["beacons_json"])
+        finally:
+            conn.close()
+
+    async def test_migration_22_source_prefs_default_to_having_no_opinion(self):
+        """An account that has never stated a preference gets 'auto' for both
+        halves — every service it has linked — and an empty precedence map. The
+        row is only written when somebody states something, so the defaults are
+        what almost every account will ever read."""
+        now = db.now()
+        await db.execute(
+            "INSERT INTO users (username, created_at, updated_at) "
+            "VALUES ('prefs-user', ?, ?)", (now, now))
+        user_id = await db.fetch_value("SELECT id FROM users WHERE username = 'prefs-user'")
+        await db.execute("INSERT INTO source_prefs (user_id) VALUES (?)", (user_id,))
+        row = await db.fetch_one("SELECT * FROM source_prefs WHERE user_id = ?", (user_id,))
+        self.assertEqual(row["calendar_source"], "auto")
+        self.assertEqual(row["tracker_source"], "auto")
+        self.assertEqual(row["precedence_json"], "{}")
+
+        # It belongs to the account and goes with it.
+        await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.assertEqual(
+            await db.fetch_value("SELECT COUNT(*) FROM source_prefs WHERE user_id = ?",
+                                 (user_id,)), 0)
+
+
+    async def test_migration_23_adds_a_place_for_the_play_count_sweep(self):
+        """The column is additive and NULLABLE, and NULL is what every existing
+        row gets — which reads as "no sweep has been stored", falls back to asking
+        about every title once, and fills itself in on that pass. Nothing about
+        what was watched lives here: it is a cache of one service's per-title play
+        counts, kept only to work out which of them have moved."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-23-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 22]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO distrakt_watch_state (user_id, cursors_json, beacons_json) "
+                "VALUES (1, '{\"trakt\": \"2026-08-01\"}', '{\"trakt\": {}}')")
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            row = conn.execute("SELECT * FROM distrakt_watch_state").fetchone()
+            self.assertEqual(row["cursors_json"], '{"trakt": "2026-08-01"}')
+            self.assertIsNone(row["play_counts_json"],
+                              "an existing row must read as having no stored sweep")
+            conn.execute("UPDATE distrakt_watch_state SET play_counts_json = ? "
+                         "WHERE user_id = 1", (json.dumps({"trakt": {"202341": 20}}),))
+            self.assertEqual(
+                json.loads(conn.execute(
+                    "SELECT play_counts_json FROM distrakt_watch_state").fetchone()[0]),
+                {"trakt": {"202341": 20}})
+        finally:
+            conn.close()
+
+    async def test_migration_23_leaves_the_tracker_s_export_alone(self):
+        """The sweep is deliberately NOT exported. It costs one sweep to rebuild,
+        and a map restored beside older progress rows could only claim that
+        nothing had changed when everything might have — so a restore starts with
+        no stored sweep and asks about every title once, which is correct."""
+        from app.distrakt import backup
+
+        columns = dict(backup._EXPORT_TABLES)["distrakt_watch_state"]
+        self.assertNotIn("play_counts_json", columns)
 
 
 class PragmaTests(DbTestCase):

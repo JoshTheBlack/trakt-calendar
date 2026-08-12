@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
+{% import '_source_logo.html' as src with context %}
 {# EVERYTHING IN THIS <head> NAMES THE OWNER THROUGH `owner_label` AND NEVER
    THROUGH `owner_username`. The label is the owner's chosen display name, or a
    subject of its own when they have not set one; app/calendar/share_routes.py's
@@ -27,7 +28,7 @@
 
 <header class="hero">
     <div class="hero-lead">
-        <img class="brand-logo" src="/static/images/trakttop.png" alt="Trakt" width="30" height="30">
+        <img class="brand-logo" src="/static/images/distrakkl-mark.svg" alt="{{ product }}" width="30" height="30">
         <div class="month-nav">
             <a class="month-nav-btn prev" href="?month={{ nav.prev_month }}&amp;year={{ nav.prev_year }}{{ query_extra }}" title="Previous month" aria-label="Previous month">
                 <img src="/static/images/arrow-left.png" alt="Previous month">
@@ -45,6 +46,13 @@
     <form class="hero-controls" method="get">
         <input type="hidden" name="year" value="{{ year }}">
         <input type="hidden" name="month" value="{{ month }}">
+        {# Carried, not offered. Which services fill this link is the owner's
+           statement about it and there is no control here to change it — but a
+           GET form submits only its own inputs, so without this, clicking any
+           control beside it would drop the link's own answer and quietly reopen
+           the page on the owner's wider default. Same job the month arrows do
+           with `query_extra`. #}
+        {% if source %}<input type="hidden" name="source" value="{{ source }}">{% endif %}
         <div class="control" title="Which calendar to show">
             <label for="shareEndpoint">📡</label>
             <select id="shareEndpoint" name="endpoint" onchange="this.form.submit()">
@@ -132,6 +140,7 @@
                    Trakt link still reaches the full details. #}
                 <div class="card{% if item.id in not_watching %} not-watching{% endif %}"
                      data-trakt-id="{{ item.ids.get('trakt') or '' }}"
+                     data-simkl-id="{{ item.ids.get('simkl') or '' }}"
                      data-media="{{ item.media }}"
                      data-season="{{ item.season if item.season is not none else '' }}"
                      data-title="{{ item.title }}"
@@ -143,6 +152,12 @@
                         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
                         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
                         {% if item.network %}<div class="network-badge"><span class="network-fallback">📡 {{ item.network }}</span></div>{% endif %}
+                        {# NOTHING IS DRAWN ON THIS POSTER TO NAME A SERVICE. The
+                           calendar's own card puts a mark here only where a field
+                           can be flipped to another service's answer, and a
+                           visitor has no flip (see _card.html). Which service a
+                           card came from is said by the outbound button below,
+                           which wears that service's own name. #}
                         <img src="{{ item.poster or '/static/images/nopostertv.png' }}" alt="{{ item.title }} poster" loading="lazy">
                     </div>
                     <div class="card-body">
@@ -163,9 +178,16 @@
                             <span class="time">{{ item.air_time }}</span>
                         </div>
                         <div class="links-row">
-                            <a class="trakt-btn" href="{{ item.detail_url }}" target="_blank" rel="noopener" title="View on Trakt">
-                                <img src="/static/images/traktlogo.png" alt="Trakt">
-                            </a>
+                            {# One button per service that has a page for this
+                               title, each wearing that service's own name — the
+                               same treatment _card.html gives it, drawn from the
+                               same macro so the two cannot drift. The owner's
+                               preferences are what resolved this month, so a
+                               visitor sees the destinations the owner's own
+                               calendar offers. #}
+                            {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
+                            {{ src.link(name, url) }}
+                            {% endfor %}
                         </div>
                     </div>
                 </div>

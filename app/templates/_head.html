@@ -30,8 +30,35 @@
   {# The site name is the macro's, not each page's: ten templates spelled out the
      same suffix by hand. The five whose title already carries its own subject —
      a month, a board, a share owner — pass site_suffix=false instead. #}
-  <title>{{ title }}{% if site_suffix %} &ndash; Trakt New Shows{% endif %}</title>
-  <link rel="shortcut icon" href="/static/images/favicon.ico">
+  <title>{{ title }}{% if site_suffix %} &ndash; {{ product }}{% endif %}</title>
+  {# THE PNGs ARE LISTED FIRST AND THE .ico LAST, which is the order that gets a
+     modern browser the sharp one: a browser picks the best MATCH from the sizes
+     declared, and only falls back to the .ico when it understands none of them.
+     The .ico is built from the same 32px artwork and exists for bookmarks and
+     older clients that ask for /favicon.ico regardless of what is declared here.
+
+     NEW FILENAMES RATHER THAN NEW BYTES UNDER THE OLD ONES. Static images are
+     served with no cache-busting token at all — app/assets.py's ASSET_VERSION is
+     computed from the stylesheet and scripts only, and url() refuses anything
+     outside that list — so replacing favicon.ico in place would have left every
+     browser that had already cached it showing the old brand for as long as it
+     held it. A new URL is never stale.
+
+     AND THE OLD URL GETS THE NEW BYTES ANYWAY, which is not a contradiction of
+     that: the new NAME is what a browser reading this page picks up, and the old
+     one is for the readers that are not reading this page. A favicon is stored
+     by ASSOCIATION — Firefox keeps page-to-icon associations in favicons.sqlite
+     and refetches the icon URL it already has — so a bookmark made before the
+     rename keeps asking for /static/images/favicon.ico, the single icon the
+     pre-rename head declared, revalidates it happily, and gets the old brand
+     back forever. New filenames cannot reach that client; only the old address
+     answering correctly can. So app/static/images/favicon.ico is now a copy of
+     distrakkl-favicon.ico, and tests/kernel/test_route_gating.py holds the two
+     to each other so they cannot drift back apart. #}
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16.png">
+  <link rel="apple-touch-icon" href="/static/images/distrakkl-mark-512.png">
+  <link rel="shortcut icon" href="/static/images/distrakkl-favicon.ico">
   {# ORDER MATTERS: the stylesheet is the only resource that gates first paint,
      so it is requested before the font preloads rather than after them. The
      three woff2 files are ~86 KB and preload at high priority; ahead of the
@@ -96,7 +123,8 @@
      Written HERE and only here, like every other tag in this macro: a page
      spelling one out for itself is the second copy that drifts. #}
   <meta property="og:type" content="website">
-  <meta property="og:site_name" content="New Shows">
+  {# One name, not the third spelling this tag used to carry. #}
+  <meta property="og:site_name" content="{{ product }}">
   <meta property="og:title" content="{{ title }}">
   <meta property="og:description" content="{{ description }}">
   {% if og_url %}<meta property="og:url" content="{{ og_url }}">{% endif %}

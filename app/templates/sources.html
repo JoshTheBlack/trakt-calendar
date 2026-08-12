@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+{% import '_head.html' as page with context %}
+{{ page.head('Sources', scripts=assets.scripts('sources')) }}
+{%- set body_class %}auth-page has-nav{% endset %}
+<body class="{{ body_class }}" hx-boost="true">
+{# What a boosted arrival cannot work out for itself — see auth_me.html. #}
+<div id="pageMeta" hidden data-page="sources" data-body-class="{{ body_class }}"></div>
+
+{% import '_nav.html' as site_nav %}
+{% call site_nav.navbar(title='Sources',
+                        calendar_available=calendar_available,
+                        ranker_available=ranker_available, is_admin=is_admin) %}
+{% endcall %}
+
+{# ONE CONTROL SHAPE, USED SEVEN TIMES. The account-wide calendar source, the
+   tracker source and each calendar's own override are the same question asked
+   about different scopes, so they are the same control — a radio group choosing
+   between "whatever there is" and "these, and only these", plus a tick per
+   service for the second case.
+
+   `both` IS NOT AN OPTION AND MUST NOT BECOME ONE. A stored `both` arrives here
+   already expanded into two ticks (see routes.py's `_selection_state`), and
+   saving writes the named set. Offering the word itself would mean handing a
+   third service to somebody who chose from a menu of two the moment one is
+   registered. #}
+{# ONE ROW SHAPE FOR ALL SEVEN, and the label sits on its own line above the
+   control rather than beside it. A row laid out as "label, then control on the
+   same line" changes shape with the number of services offered: the calendar only
+   one service publishes fits on one line while the four offering two wrap onto a
+   second, so five rows that ask the identical question rendered as two different
+   things. Stacked, the count of services decides how wide the ticks are and
+   nothing else. #}
+{% macro selector(scope, label, state, inherit_label=None, choices=None) %}
+<div class="row source-row">
+  <span class="label">{{ label }}</span>
+  <div class="source-choice" data-scope="{{ scope }}">
+  {% if inherit_label %}
+  <label class="source-mode">
+    <input type="radio" name="mode-{{ scope }}" value="inherit"
+           {% if state.mode == 'inherit' %}checked{% endif %}>
+    <span>{{ inherit_label }}</span>
+  </label>
+  {% endif %}
+  <label class="source-mode">
+    <input type="radio" name="mode-{{ scope }}" value="auto"
+           {% if state.mode == 'auto' %}checked{% endif %}>
+    <span>Automatic</span>
+  </label>
+  <label class="source-mode">
+    <input type="radio" name="mode-{{ scope }}" value="named"
+           {% if state.mode == 'named' %}checked{% endif %}>
+    <span>Only the services I tick</span>
+  </label>
+  {# A service is only offered for a calendar it actually publishes. Naming one
+     that does not answer this endpoint is legal and simply yields nothing, which
+     from the screen is indistinguishable from a service that answered and had
+     nothing to say — so the tick is not offered rather than being offered and
+     inert. #}
+  <div class="source-ticks">
+    {% for source in sources %}{% if choices is none or source.name in choices %}
+    <label class="source-tick">
+      <input type="checkbox" data-source="{{ source.name }}"
+             {% if state.names and source.name in state.names %}checked{% endif %}>
+      <span>{{ source.label }}</span>
+    </label>
+    {% endif %}{% endfor %}
+  </div>
+  </div>
+</div>
+{% endmacro %}
+
+<div class="auth-page-inner">
+<div class="auth-shell wide">
+  <div class="auth-card">
+    <h1>Sources</h1>
+    <p class="auth-sub">Which services answer for you, and whose answer wins when
+      two of them describe the same title differently. Everything here is applied
+      when a page is read, so a change costs nothing and shows up the next time
+      you open your calendar.</p>
+
+    {# EVERY SECTION IS A HEADING AND THEN ITS ROWS, and the heading is the
+       settings screens' own — bold, gold, ruled off above. It used to be a `.row`
+       holding one word, which is the same box, the same background and the same
+       type as the settings underneath it, so a heading read as one more setting
+       and the whole page read as one undifferentiated list. Nothing here is a new
+       visual language: it is the heading the Settings and Share panels already
+       use, applied to a screen that had none. #}
+
+    {# LINKED ACCOUNTS, READ ONLY. Linking and unlinking live on the account page
+       and stay there: they are one implementation of a credential operation, and
+       a second copy of the buttons here would be a second copy of the rules
+       about which link may be the last one removed. This is the view — who each
+       service is answering as — with a way through to change it. #}
+    <div class="settings-section">🔗 Connected accounts</div>
+    <div class="auth-list">
+      {% for source in sources %}
+      <div class="row">
+        <span class="label">{{ source.label }}</span>
+        <span class="auth-badge {{ 'ok' if source.linked_as else 'off' }}">
+          {{ source.linked_as or ("Not connected" if source.tracks else "No sign-in needed") }}
+        </span>
+      </div>
+      {% endfor %}
+      <p class="auth-sub">Connect or disconnect an account on your
+        <a href="/me">account page</a>. A calendar needs no connection at all —
+        it is read with this instance's own credentials, or with none — so a
+        service you have not connected can still fill it.</p>
+    </div>
+
+    <div class="settings-section">📅 Calendar sources</div>
+    <div class="auth-list">
+      <p class="auth-sub"><strong>Automatic</strong> means every service this
+        instance can fetch a calendar from, including any added later.
+        <strong>Only the services I tick</strong> means those and only those — a
+        service added later will not appear until you say so.</p>
+      <ul class="auth-sub source-reach">
+        {# The source's own DECLARED reach, not a guess: a calendar feed that
+           publishes a rolling window cannot answer for last year, and saying so
+           here is what stops an empty month reading as "nothing airs then". #}
+        {% for source in sources %}{% if source.has_calendar %}
+        <li>{{ source.label }} reaches {{ source.reach_before }} back and {{ source.reach_after }} forward.</li>
+        {% endif %}{% endfor %}
+      </ul>
+      {{ selector('calendar', 'Every calendar', calendar, choices=calendar_choices) }}
+
+      {# THE PER-CALENDAR OVERRIDE, UNDER THE ACCOUNT-WIDE ONE RATHER THAN IN A
+         section of its own, because "same as above" is a statement ABOUT the row
+         above and a heading between them made it a reference to another part of
+         the page. The reason the override exists is measured rather than
+         supposed: one service's movie calendar is a global release calendar
+         running to well over a thousand entries in a month, where the same
+         service's show calendar is coverage worth having. Those are opposite
+         answers about one service, and a single account-wide value can only give
+         one of them. #}
+      <p class="auth-sub">A calendar left on "same as above" follows the choice
+        you just made, including if you change it later.</p>
+      {% for endpoint in endpoints %}
+      {{ selector('endpoint:' ~ endpoint.key, endpoint.label, endpoint.state,
+                  inherit_label='Same as above', choices=endpoint.sources) }}
+      {% endfor %}
+    </div>
+
+    <div class="settings-section">🗂️ Watch history</div>
+    <div class="auth-list">
+      {{ selector('tracker', 'Where your history is read from', tracker,
+                  choices=tracker_choices) }}
+      <p class="auth-sub">Here <strong>Automatic</strong> means every service you
+        have connected — reading your own viewing history needs your own sign-in,
+        which a calendar does not. With more than one connected, a season the
+        services disagree about shows both numbers.</p>
+    </div>
+
+    {# PRECEDENCE. A reordering and never a filter: nothing chosen here can
+       remove a value, only decide which of several is shown. A field only one
+       service filled in arrives from that service whoever is preferred. #}
+    <div class="settings-section">⚖️ Whose answer wins</div>
+    <div class="auth-list">
+      <p class="auth-sub">Only ever consulted when two services describe one
+        title differently. Leave a row on "the app decides" and it uses the
+        order the services are declared in, which is what this app has always
+        shown.</p>
+      <div class="row">
+        <span class="label">Everything, unless said otherwise</span>
+        <select id="precedenceDefault">
+          <option value=""{% if not precedence_default %} selected{% endif %}>The app decides</option>
+          {% for source in sources %}
+          <option value="{{ source.name }}"{% if precedence_default == source.name %} selected{% endif %}>{{ source.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% for field in precedence_fields %}
+      <div class="row">
+        <span class="label">{{ field.label }}</span>
+        <select data-field="{{ field.name }}">
+          <option value=""{% if not field.chosen %} selected{% endif %}>The app decides</option>
+          {% for source in sources %}
+          <option value="{{ source.name }}"{% if field.chosen == source.name %} selected{% endif %}>{{ source.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="auth-list">
+      <div class="row">
+        <div class="row-main">
+          <button class="btn-ghost" type="button" id="saveSources">Save</button>
+          <span class="auth-hint" id="sourcesSaved"></span>
+          <span class="auth-error" id="sourcesError" role="alert"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+// Wrapped for the reason every inline script on a boosted page is: a second
+// arrival re-executes this in the same document, and a top-level const would be
+// a redeclaration that kills the whole script.
+(function () {
+const saveBtn = document.getElementById('saveSources');
+const errorLine = document.getElementById('sourcesError');
+const savedLine = document.getElementById('sourcesSaved');
+
+// One control's answer, in the app's own spelling: 'auto', the ticked services
+// joined, or null for "this calendar has nothing of its own to say".
+//
+// A NAMED CHOICE WITH NOTHING TICKED IS REFUSED HERE rather than sent, because
+// the server would (correctly) refuse it and the message would arrive detached
+// from the control that caused it.
+function readChoice(scope) {
+  const box = document.querySelector('.source-choice[data-scope="' + scope + '"]');
+  const mode = box.querySelector('input[type=radio]:checked');
+  if (!mode || mode.value === 'inherit') return null;
+  if (mode.value === 'auto') return 'auto';
+  const ticked = [...box.querySelectorAll('input[type=checkbox]:checked')]
+    .map(cb => cb.dataset.source);
+  if (!ticked.length) throw new Error('Tick at least one service, or choose Automatic.');
+  return ticked.join('+');
+}
+
+// Ticking a service means you want the ticked set, so the radio follows the
+// tick rather than leaving the page showing ticks that are not in force.
+document.querySelectorAll('.source-choice').forEach(box => {
+  box.querySelectorAll('input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      if (cb.checked) box.querySelector('input[value="named"]').checked = true;
+    });
+  });
+});
+
+function readPrecedence() {
+  const fields = {};
+  document.querySelectorAll('select[data-field]').forEach(select => {
+    if (select.value) fields[select.dataset.field] = select.value;
+  });
+  return {default: document.getElementById('precedenceDefault').value, fields};
+}
+
+saveBtn.addEventListener('click', async () => {
+  errorLine.textContent = '';
+  savedLine.textContent = '';
+  let body;
+  try {
+    const endpoints = {};
+    document.querySelectorAll('.source-choice[data-scope^="endpoint:"]').forEach(box => {
+      const key = box.dataset.scope.slice('endpoint:'.length);
+      const value = readChoice(box.dataset.scope);
+      if (value) endpoints[key] = value;
+    });
+    body = {
+      calendar_source: readChoice('calendar') || 'auto',
+      tracker_source: readChoice('tracker') || 'auto',
+      endpoint_sources: endpoints,
+      precedence: readPrecedence(),
+    };
+  } catch (e) {
+    errorLine.textContent = e.message;
+    return;
+  }
+  saveBtn.disabled = true;
+  try {
+    const resp = await fetch('/api/sources', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) {
+      // No reload: nothing on this page is derived from anything but the row
+      // that was just written, and a preference change invalidates no cache —
+      // so the calendar shows it on its next read with nothing refetched.
+      savedLine.textContent = 'Saved. Your calendar will use this next time you open it.';
+    } else {
+      errorLine.textContent = data.error || 'Could not save that.';
+    }
+  } catch (e) {
+    errorLine.textContent = 'Could not reach the server.';
+  }
+  saveBtn.disabled = false;
+});
+})();
+</script>
+</body>
+</html>

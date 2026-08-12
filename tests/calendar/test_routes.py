@@ -16,6 +16,7 @@ real.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import unittest
@@ -24,13 +25,16 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
-from app import auth, db
+from app import auth, db, providers
 from app.calendar import cache as calendar_cache, routes as calendar_routes
 from app.calendar import state as calendar_state
+from app.endpoints import ENDPOINTS
+from app.providers.base import Capabilities
 from app.providers.trakt import TraktError
 from app.config import Settings, save_settings
+from app.sources import prefs as source_prefs
 from app.main import app
-from tests.support import ORIGIN, migrated_db
+from tests.support import ORIGIN, migrated_db, window_fetch
 
 
 def _configured_settings() -> Settings:
@@ -50,6 +54,28 @@ def _entry(slug: str, title: str, first_aired: str) -> dict:
             "ids": {"slug": slug, "trakt": abs(hash(slug)) % 100000},
         },
     }
+
+
+class _ThirdSource:
+    """A service the app does not have, for the tests that check a rule was
+    DERIVED rather than written down for the two that exist. It is deliberately
+    not a `Source` member: the point is that nothing in the code under test may
+    reach for one by name."""
+
+    source = "mercury"
+    label = "Mercury"
+    sync_port = None
+    calendar_port = object()
+    capabilities = Capabilities(
+        endpoints=frozenset({"shows"}), days_before=None, days_after=None,
+        private_user_data=False)
+
+    def is_configured(self, settings) -> bool:
+        return True
+
+
+def _third_source() -> _ThirdSource:
+    return _ThirdSource()
 
 
 class CalendarRouteTestCase(unittest.TestCase):
@@ -86,8 +112,7 @@ class SharedCalendarIndependentOverlayTests(CalendarRouteTestCase):
             _entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
             _entry("show-b", "Show B", "2026-07-16T20:00:00Z"),
         ]
-        fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -201,8 +226,7 @@ class ViewPrefsPersistenceTests(CalendarRouteTestCase):
         super().setUp()
         self.user_id = self._make_user("plain_viewer", is_admin=False)
         self.sign_in_as(self.user_id)
-        fetch = AsyncMock(return_value=[])
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -257,8 +281,8 @@ class ViewerFilterTests(CalendarRouteTestCase):
         comedy["show"]["genres"] = ["comedy"]
         comedy["show"]["network"] = "Netflix"
         comedy["show"]["certification"] = "TV-MA"
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=[drama, comedy]))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([drama, comedy]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -270,7 +294,34 @@ class ViewerFilterTests(CalendarRouteTestCase):
         self.assertEqual(prefs["countries"], "")
         self.assertEqual(prefs["show_certifications"], "")
         self.assertEqual(prefs["movie_certifications"], "")
+        self.assertEqual(prefs["movie_release_countries"], "")
+        self.assertEqual(prefs["movie_release_types"], "")
         self.assertEqual(prefs["network_filter"], [])
+
+    def test_the_release_filter_round_trips_and_keeps_only_numbers(self):
+        """The release types are stored as the numbers the service publishes,
+        so a word is dropped on the way IN rather than stored as a preference
+        that can never do anything — the read path already ignores one it
+        cannot parse."""
+        self.sign_in_as(self.user1)
+        resp = self.client.post("/api/me/prefs", json={
+            "movie_release_countries": " us , , -br ",
+            "movie_release_types": "3, theatrical, -1, 3"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        prefs = self.client.get("/api/me/prefs").json()["prefs"]
+        self.assertEqual(prefs["movie_release_countries"], "us, -br")
+        self.assertEqual(prefs["movie_release_types"], "3, -1")
+
+    def test_a_release_filter_does_not_narrow_a_show_calendar(self):
+        """It is a films-only dimension, and the specs travel with every read —
+        so the show calendars have to be untouched rather than merely
+        unaffected by accident."""
+        self.sign_in_as(self.user1)
+        self.client.post("/api/me/prefs", json={
+            "movie_release_countries": "zz", "movie_release_types": "5"})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Drama", page)
+        self.assertIn("The Comedy", page)
 
     def test_a_viewer_can_filter_shows_by_certification(self):
         """A per-user certification exclude behaves exactly like the existing
@@ -371,12 +422,12 @@ class TimezonePickerTests(CalendarRouteTestCase):
         self.sign_in_as(self.user_id)
         target_window = calendar_cache.window_start(date(2026, 3, 1))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == target_window:
                 return [_entry("boundary", "Boundary Show", "2026-03-01T02:00:00Z")]
             return []
 
-        patcher = patch("app.calendar.cache.fetch_window_raw", side_effect=fake)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(fake))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -423,14 +474,14 @@ class PartialDataBannerTests(CalendarRouteTestCase):
         good_window = calendar_cache.window_start(date(2026, 7, 8))
         boom_window = calendar_cache.window_start(date(2026, 7, 20))
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == boom_window:
                 raise TraktError("Trakt unreachable", 503)
             if start == good_window:
                 return [_entry("show-good", "Good Show", "2026-07-08T20:00:00Z")]
             return []
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get("/?year=2026&month=7")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("Good Show", resp.text)
@@ -441,14 +492,237 @@ class PartialDataBannerTests(CalendarRouteTestCase):
     def test_every_window_failing_shows_the_error_banner_not_the_warning(self):
         """No window loaded and nothing cached: there is nothing to show, so the
         month falls to the hard error banner, not the partial warning."""
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get("/?year=2026&month=7")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("error-banner", resp.text)
         self.assertNotIn("warning-banner", resp.text)
+
+
+# ---------------------------------------------------------------------------
+# A Simkl-only month outside the declared coverage window
+# ---------------------------------------------------------------------------
+
+class CoverageGapTests(CalendarRouteTestCase):
+    """Naming ONE calendar source that does not reach the requested
+    month must render an explicit state, never a blank calendar — and it is
+    the ROUTE's job, since only the route knows a source was picked on
+    purpose rather than merely admitted by 'auto'."""
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("gap_viewer")
+        self.sign_in_as(self.user_id)
+
+    def test_naming_simkl_for_a_month_it_does_not_reach_says_so(self):
+        """March 2015 is far outside Simkl's declared ~36 months back —
+        real Capabilities, no stub needed for the coverage question itself."""
+        # fetch_window_records is patched even though the coverage-gap branch
+        # returns before calling it, so a regression that removed the early
+        # return would fail LOUD (a real fetch) rather than quietly passing
+        # against a fixture that happens to render nothing.
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            resp = self.client.get("/calendar?year=2015&month=3&source=simkl")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Simkl", resp.text)
+        self.assertIn("doesn&#39;t reach", resp.text.replace("’", "'"))
+        self.assertIn("warning-banner", resp.text)
+        self.assertNotIn("error-banner", resp.text)
+        self.assertNotIn("empty-state", resp.text)  # not the plain "nothing matched" state
+
+    def test_the_gap_offers_a_link_to_the_other_source(self):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            resp = self.client.get("/calendar?year=2015&month=3&source=simkl")
+        self.assertIn("source=trakt", resp.text)
+
+    def test_naming_both_never_reports_a_gap(self):
+        """'both' is never one source's promise to keep — a month outside
+        Simkl's window under `both` just renders Trakt-only, silently, exactly
+        as it did before Simkl had a calendar at all."""
+        entries = [_entry("show-a", "Show A", "2015-03-05T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get("/calendar?year=2015&month=3&source=both")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("doesn&#39;t reach", resp.text)
+        self.assertIn("Show A", resp.text)
+
+    def test_auto_never_reports_a_gap_either(self):
+        entries = [_entry("show-a", "Show A", "2015-03-05T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get("/calendar?year=2015&month=3")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("doesn&#39;t reach", resp.text)
+
+    def test_a_month_inside_simkls_window_renders_normally(self):
+        """Naming Simkl for a month it DOES cover is not a gap at all — the
+        source is asked like any other, through the real fetch."""
+        entries = [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get("/?year=2026&month=7&source=simkl")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Show A", resp.text)
+        self.assertNotIn("doesn&#39;t reach", resp.text)
+
+
+class SourceSelectorTests(CalendarRouteTestCase):
+    """The toolbar control that reaches `?source=`.
+
+    IT IS A VIEW CONTROL AND THE ASSERTION THAT MATTERS IS WHAT IT DOES NOT DO.
+    The account's answer to "which services fill my calendar" is stated on one
+    screen, and a control on the calendar that quietly rewrote it would change
+    every other view the account has as a side effect of a look — so the stored
+    row is checked to be exactly as it was after the control has been used.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("selector_viewer")
+        self.sign_in_as(self.user_id)
+
+    def _options(self, html: str) -> list[tuple[str, str]]:
+        block = re.search(r'<select id="sourceSelect".*?</select>', html, re.S)
+        self.assertIsNotNone(block, "the toolbar offers no source control")
+        return re.findall(r'<option value="([^"]*)"([^>]*)>', block.group(0))
+
+    def _page(self, url: str) -> str:
+        entries = [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def test_it_offers_the_services_that_answer_this_calendar(self):
+        shows = [value for value, _ in
+                 self._options(self._page("/calendar?year=2026&month=7&endpoint=shows"))]
+        self.assertEqual(shows, ["", "auto", "trakt", "simkl"])
+
+    def test_a_calendar_one_service_publishes_gets_no_control_at_all(self):
+        """Season finales are published by one service, so "my sources", "every
+        service" and "that one only" are three labels for one outcome. A control
+        offering them says a choice is available when none is."""
+        html = self._page("/calendar?year=2026&month=7&endpoint=shows/finales")
+        self.assertNotIn('id="sourceSelect"', html)
+        self.assertIn('id="endpointSelect"', html)
+
+    def test_a_service_switched_off_for_the_instance_is_not_offered(self):
+        """The reported fault, and the reason the admission is asked of
+        app/providers rather than counted here: with the instance-wide switch off
+        the control was still offering a service the calendar underneath it would
+        refuse. One service is left, so there is nothing to choose and nothing is
+        drawn."""
+        save_settings(dataclasses.replace(
+            _configured_settings(), simkl_public_calendar_enabled=False))
+        html = self._page("/calendar?year=2026&month=7&endpoint=shows")
+        self.assertNotIn('id="sourceSelect"', html)
+        self.assertIn('id="endpointSelect"', html)
+
+    def test_what_it_offers_is_derived_and_never_a_list_of_service_names(self):
+        """The rule has to keep working for a service nobody has written yet, so
+        this asks the function with a registry that has one. Anything spelling a
+        service name in the logic would leave the hypothetical one out while the
+        two real ones survived."""
+        from app.endpoints import get_endpoint
+
+        endpoint = get_endpoint("shows")
+        settings = _configured_settings()
+        real = calendar_routes._source_choices(endpoint, "", settings)
+        with patch("app.providers.registered", return_value=dict(
+                providers.registered(), **{"mercury": _third_source()})):
+            widened = calendar_routes._source_choices(endpoint, "", settings)
+        self.assertEqual([c["value"] for c in widened],
+                         [c["value"] for c in real] + ["mercury"])
+        self.assertIn({"value": "mercury", "label": "Mercury only", "selected": False},
+                      widened)
+
+    def test_a_hypothetical_service_switched_off_leaves_the_other_two(self):
+        """The two halves compose: the registry widens the offer and the
+        instance's own admission narrows it, and neither knows a name."""
+        from app.endpoints import get_endpoint
+
+        registry = dict(providers.registered(), **{"mercury": _third_source()})
+        with patch("app.providers.registered", return_value=registry):
+            with patch("app.calendar.resolve.instance_sources",
+                       return_value=frozenset({"trakt", "mercury"})):
+                choices = calendar_routes._source_choices(
+                    get_endpoint("shows"), "", _configured_settings())
+        self.assertEqual([c["value"] for c in choices],
+                         ["", "auto", "trakt", "mercury"])
+
+    def test_with_nothing_overridden_it_sits_on_the_accounts_own_answer(self):
+        options = self._options(self._page("/calendar?year=2026&month=7"))
+        selected = [value for value, attrs in options if "selected" in attrs]
+        self.assertEqual(selected, [""])
+
+    def test_it_reflects_what_the_query_string_currently_says(self):
+        options = self._options(self._page("/calendar?year=2026&month=7&source=simkl"))
+        selected = [value for value, attrs in options if "selected" in attrs]
+        self.assertEqual(selected, ["simkl"])
+
+    def test_an_override_this_calendar_does_not_offer_is_still_shown(self):
+        """It is in force, so reading as the stored answer it is overriding would
+        be the control disagreeing with the page under it."""
+        options = self._options(
+            self._page("/calendar?year=2026&month=7&source=trakt%2Bsimkl"))
+        self.assertIn(("trakt+simkl", " selected"), options)
+
+    def test_using_it_changes_what_the_page_reads_and_nothing_else(self):
+        """THE WHOLE POINT. The override applies to this view; the stored
+        preference is untouched — including for an account that had no row at
+        all, which must still have none afterwards."""
+        before = asyncio.run(source_prefs.load(self.user_id))
+        row_before = asyncio.run(db.fetch_one(
+            "SELECT * FROM source_prefs WHERE user_id = ?", (self.user_id,)))
+        self._page("/calendar?year=2026&month=7&source=simkl")
+        self._page("/calendar?year=2026&month=7&source=trakt")
+        self.assertIsNone(row_before)
+        self.assertIsNone(asyncio.run(db.fetch_one(
+            "SELECT * FROM source_prefs WHERE user_id = ?", (self.user_id,))))
+        self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), before)
+
+    def test_an_account_that_did_state_a_preference_keeps_it_byte_for_byte(self):
+        asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
+            user_id=self.user_id, calendar_source="simkl",
+            precedence={"default": "simkl"})))
+        stored = asyncio.run(source_prefs.load(self.user_id))
+        self._page("/calendar?year=2026&month=7&source=trakt")
+        self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), stored)
+
+    def test_the_control_sits_between_the_calendar_and_the_card_layout(self):
+        """Where the author asked for it, and where it belongs: the two controls
+        either side of it also decide what this one page shows. Still true now
+        that three of the four share a panel — the order within it is the order
+        they were in when they were loose."""
+        html = self._page("/calendar?year=2026&month=7")
+        self.assertLess(html.index('id="endpointSelect"'), html.index('id="sourceSelect"'))
+        self.assertLess(html.index('id="sourceSelect"'), html.index('id="cardStyleSelect"'))
+
+    def test_the_device_timezone_button_sits_before_its_select(self):
+        """The 📍 acts ON the timezone control, so it reads as a prefix to it
+        rather than as something trailing the row — and keeping it out of the
+        select's own cell is what lets that select stay the same width as the
+        three above it. Asserted by DOM order because that is what decides it."""
+        html = self._page("/calendar?year=2026&month=7")
+        row = html[html.index('class="view-row tz"'):]
+        row = row[:row.index("</div>")]
+        self.assertLess(row.index("useDeviceTimezone()"), row.index('id="tzSelect"'))
+
+    def test_the_endpoint_picker_stays_out_of_the_view_panel(self):
+        """THE GROUPING RULE, PINNED. The four controls behind 👁️ View answer
+        "how should this be drawn"; the endpoint picker answers "which calendar
+        am I reading", which is navigation and stays in the bar. Asserted because
+        the cheapest future tidy-up of that row is to sweep the picker in too,
+        and that would put the most-used control on the page behind a click."""
+        html = self._page("/calendar?year=2026&month=7")
+        panel = html[html.index('class="nav-menu view-menu"'):]
+        panel = panel[:panel.index("</details>")]
+        self.assertIn('id="sourceSelect"', panel)
+        self.assertIn('id="cardStyleSelect"', panel)
+        self.assertIn('id="dayPackSelect"', panel)
+        self.assertIn('id="tzSelect"', panel)
+        self.assertNotIn('id="endpointSelect"', panel)
 
 
 # ---------------------------------------------------------------------------
@@ -494,8 +768,8 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
             _entry("show-a", "Show A", "2026-07-17T20:00:00Z"),
             _entry("show-c", "Show C", "2026-07-20T20:00:00Z"),
         ]
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -565,10 +839,10 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         month look new the next time it loads properly."""
         self._seed_baseline(last_show_ids=["show-a", "show-b", "show-c"], last_count=4)
 
-        async def boom(endpoint, settings, start):
+        def boom(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=boom):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(boom)):
             resp = self.client.get(self.PAGE)
         self.assertIn("error-banner", resp.text)
         stored = self._stored_baseline()
@@ -600,8 +874,8 @@ class CalendarMarkupTests(CalendarRouteTestCase):
             _entry("show-a", "Show A", "2026-07-15T20:00:00Z"),
             _entry("show-b", "Show B", "2026-07-16T20:00:00Z"),
         ]
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -726,8 +1000,8 @@ class DayLayoutTests(CalendarRouteTestCase):
         self.sign_in_as(self.user_id)
         entries = [_entry(f"show-{n}", f"Show {n}", "2026-07-15T20:00:00Z") for n in range(3)]
         entries.append(_entry("solo", "Solo", "2026-07-16T20:00:00Z"))
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -791,7 +1065,7 @@ class RouteSplitTests(CalendarRouteTestCase):
         self.assertEqual(resp.headers["location"], "/calendar?month=7&year=2026&endpoint=shows")
 
     def test_the_calendar_lives_at_its_own_path(self):
-        with patch("app.calendar.cache.fetch_window_raw", AsyncMock(return_value=[])):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
             page = self.client.get("/calendar?year=2026&month=7")
         self.assertEqual(page.status_code, 200)
         self.assertIn('id="statsBar"', page.text)
@@ -809,8 +1083,8 @@ class CalendarShellTests(CalendarRouteTestCase):
         # renders inline, so the split is actually exercised.
         entries = [_entry(f"show-{day}", f"Show {day}", f"2026-07-{day:02d}T20:00:00Z")
                    for day in range(1, 11)]
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=entries))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -847,8 +1121,8 @@ class CalendarShellTests(CalendarRouteTestCase):
         self.assertIn('href="#day-2026-07-10"', html)
 
     def test_a_month_that_fits_asks_for_nothing(self):
-        with patch("app.calendar.cache.fetch_window_raw",
-                   AsyncMock(return_value=[_entry("solo", "Solo Show", "2026-07-04T20:00:00Z")])):
+        with patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([_entry("solo", "Solo Show", "2026-07-04T20:00:00Z")])):
             html = self.client.get("/calendar?year=2026&month=7").text
         self.assertEqual(_day_sections(html), ["2026-07-04"])
         self.assertEqual(_day_urls(html), [])
@@ -870,8 +1144,8 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         # Outside the requested span, so a route that read the whole month and
         # forgot to trim would be caught.
         self.early = _entry("the-early", "The Early", "2026-07-02T20:00:00Z")
-        patcher = patch("app.calendar.cache.fetch_window_raw",
-                        AsyncMock(return_value=[self.early, self.drama, self.comedy]))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([self.early, self.drama, self.comedy]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -959,10 +1233,10 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         """The rest of the month is already on screen and correct, so one day that
         couldn't be loaded is a gap, not a broken page — and it must not sit there
         looking like it is still loading."""
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get(self.DAY)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("warning-banner", resp.text)
@@ -982,12 +1256,12 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         boom = calendar_cache.window_start(date(2026, 7, 6))
         self.assertNotEqual(calendar_cache.window_start(straddling), boom)
 
-        async def fake(endpoint, settings, start):
+        def fake(endpoint, start):
             if start == boom:
                 raise TraktError("Trakt unreachable", 503)
             return [_entry("the-late", "The Late", "2026-07-13T20:00:00Z")]
 
-        with patch("app.calendar.cache.fetch_window_raw", side_effect=fake):
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
             resp = self.client.get(
                 "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-13")
         self.assertEqual(resp.status_code, 200)
@@ -1011,7 +1285,7 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         super().setUp()
         self.user_id = self._make_user("header_viewer")
         self.sign_in_as(self.user_id)
-        patcher = patch("app.calendar.cache.fetch_window_raw", AsyncMock(return_value=[]))
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch([]))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1024,12 +1298,24 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         self.assertLess(head.index("/static/css/style.css"),
                         head.index("/static/fonts/"))
 
-    def test_the_brand_logo_reserves_its_box_in_the_markup(self):
-        """The file is 512x512; with no intrinsic size in the markup the element
-        is zero-wide until it downloads and everything beside it then shifts."""
+    def test_the_brand_wordmark_reserves_its_box_in_the_markup(self):
+        """With no intrinsic size in the markup the element is zero-wide until it
+        downloads and everything beside it then shifts. The header carries the
+        WORDMARK now rather than the square mark, which makes this matter more,
+        not less: it reserves 175px rather than 30, so getting it wrong moves the
+        month heading and the view control most of a column. The number must
+        track the file's own box — 565x110 at the 34px height the stylesheet
+        draws it at — or the reservation is wrong in the other direction."""
         html = self.client.get(self.PAGE).text
-        self.assertRegex(html, r'<img class="brand-logo"[^>]*\swidth="30"[^>]*>')
-        self.assertRegex(html, r'<img class="brand-logo"[^>]*\sheight="30"[^>]*>')
+        self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\swidth="175"[^>]*>')
+        self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\sheight="34"[^>]*>')
+
+    def test_the_wordmark_links_home(self):
+        """A site's name in a header is the one thing everybody already expects to
+        be clickable, and this is the only place the product is named on a page a
+        signed-in person actually visits."""
+        html = self.client.get(self.PAGE).text
+        self.assertRegex(html, r'<a class="brand-home" href="/calendar"')
 
     def test_the_head_decides_the_optional_nav_link_before_the_body_is_parsed(self):
         """The deciding script must be inline and ahead of the deferred bundle —
@@ -1055,6 +1341,125 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         self.sign_in_as(finder)
         self.assertIn('<a id="distraktNav"', self.client.get(self.PAGE).text)
         self.assertIn('<a id="distraktNav"', plain)
+
+
+class SharePanelSourceControlTests(CalendarRouteTestCase):
+    """The Sources control inside the Share panel — what a generated LINK may
+    say about which services fill it, as against the toolbar control beside it,
+    which says what THIS page shows and stores nothing.
+
+    The two are drawn from one function for one reason: an instance where the
+    toolbar has nothing to offer is an instance where the panel has nothing to
+    offer either, and a dialog growing a control that can only say one thing
+    would be advertising a choice this instance does not have.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("panel_viewer")
+        self.sign_in_as(self.user_id)
+
+    def _page(self, url: str = "/calendar?year=2026&month=7") -> str:
+        entries = [_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(entries)):
+            resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        return resp.text
+
+    def _ticks(self, html: str) -> list[str]:
+        block = re.search(r'id="share_view_sources".*?</div>', html, re.S)
+        self.assertIsNotNone(block, "the Share panel offers no source control")
+        return re.findall(r'data-source="([^"]*)"', block.group(0))
+
+    def test_it_offers_one_tick_per_service_and_no_all_or_nothing_entry(self):
+        """A selection is a SET, so the control is ticks — the same shape the
+        Sources screen uses for the account-wide version of this question, and
+        the one that does not have to be redrawn when a third service is
+        registered. There is no "every service" tick because a link can only
+        narrow: all of them and none of them are one outcome, and the empty
+        state already names it."""
+        self.assertEqual(self._ticks(self._page()), ["trakt", "simkl"])
+
+    def _sources_field(self, html: str) -> str:
+        """The attributes on the Sources block, which is always in the markup and
+        hidden when there is nothing to choose — the panel rebuilds it as its own
+        Calendar option moves, so it cannot be conditionally rendered away."""
+        found = re.search(r'<div class="field" id="share_view_sources_field"([^>]*)>', html)
+        self.assertIsNotNone(found, "the Share panel has no source block at all")
+        return found.group(1)
+
+    def _source_map(self, html: str) -> dict:
+        found = re.search(r'window\.SHARE_SOURCE_CHOICES = (\{.*?\});', html)
+        self.assertIsNotNone(found, "the panel was sent no per-calendar source map")
+        return json.loads(found.group(1))
+
+    def test_a_calendar_one_service_publishes_gets_no_control_at_all(self):
+        html = self._page("/calendar?year=2026&month=7&endpoint=shows/finales")
+        self.assertIn("hidden", self._sources_field(html))
+        self.assertEqual(self._ticks(html), [])
+        self.assertIn('id="share_view_endpoint"', html)
+
+    def test_a_service_switched_off_for_the_instance_leaves_nothing_to_choose(self):
+        """One service left, so the panel says nothing about sources — by the
+        same admission that empties the toolbar, not by a second count of it."""
+        save_settings(dataclasses.replace(
+            _configured_settings(), simkl_public_calendar_enabled=False))
+        html = self._page()
+        self.assertIn("hidden", self._sources_field(html))
+        self.assertNotIn('id="sourceSelect"', html)
+
+    def test_the_panel_is_sent_an_answer_for_every_calendar_a_link_may_open_on(self):
+        """THE LINK PICKS ITS OWN CALENDAR. The panel's Calendar option need not
+        be the one being looked at, so the answer to "which services could fill
+        this link" has to be available for all five without another page load —
+        otherwise the block goes on offering a service the link's own calendar
+        cannot use, and stays drawn on the calendar that has nothing to choose."""
+        offered = self._source_map(self._page())
+        self.assertEqual(sorted(offered), sorted(ENDPOINTS))
+        self.assertEqual([c["value"] for c in offered["shows"]], ["trakt", "simkl"])
+        # Empty is the answer the control needs most: it is what tells the panel
+        # to draw nothing at all.
+        self.assertEqual(offered["shows/finales"], [])
+
+    def test_the_map_and_the_rendered_block_agree_on_the_page_s_own_calendar(self):
+        """Two spellings of one answer — the server renders the block for the
+        calendar the page was loaded on and the map re-renders it afterwards. A
+        disagreement would show as the block changing the instant the panel was
+        touched, without anything having been chosen."""
+        for endpoint, expected in (("shows", ["trakt", "simkl"]), ("shows/finales", [])):
+            with self.subTest(endpoint=endpoint):
+                html = self._page(f"/calendar?year=2026&month=7&endpoint={endpoint}")
+                self.assertEqual(self._ticks(html), expected)
+                self.assertEqual([c["value"] for c in self._source_map(html)[endpoint]],
+                                 expected)
+
+    def test_it_sits_inside_the_panel_s_own_options_block(self):
+        """It is a property of the LINK, so it belongs with the other options
+        the link carries rather than beside the link box itself."""
+        html = self._page()
+        block = html[html.index('id="share_view_options"'):]
+        block = block[:block.index('class="modal-foot"')]
+        self.assertIn('id="share_view_sources"', block)
+
+    def test_nothing_is_preticked_from_the_calendar_being_looked_at(self):
+        """Which services a link names is stored per link and the panel ticks
+        from that. A server-marked tick would fight the panel's own render and
+        could write a source into a link whose owner never chose one."""
+        block = re.search(r'id="share_view_sources".*?</div>',
+                          self._page("/calendar?year=2026&month=7&source=simkl"), re.S)
+        self.assertNotIn("checked", block.group(0))
+
+    def test_the_ticks_are_the_services_and_never_a_list_of_names(self):
+        """The rule has to keep working for a service nobody has written yet, so
+        this asks the function with a registry that has one."""
+        from app.endpoints import get_endpoint
+
+        settings = _configured_settings()
+        with patch("app.providers.registered", return_value=dict(
+                providers.registered(), **{"mercury": _third_source()})):
+            widened = calendar_routes._share_source_choices(get_endpoint("shows"), settings)
+        self.assertEqual([choice["value"] for choice in widened],
+                         ["trakt", "simkl", "mercury"])
 
 
 if __name__ == "__main__":  # pragma: no cover

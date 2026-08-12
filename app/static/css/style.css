@@ -63,6 +63,23 @@ header.hero {
 html.has-distrakt #distraktNav { display: flex; }
 
 .hero-lead img.brand-logo { height: 30px; filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55)); }
+
+/* THE WORDMARK IN THE HEADER. Taller than the 30px mark it replaced because it
+   is being READ rather than recognised, and the file carries generous padding
+   inside its own box (the glyphs occupy 565 of its 820 units), so a 26px cap
+   height needs a 34px image to land there.
+   `flex-shrink: 0` because this is the one thing in the bar that must not
+   compress: .hero-controls beside it already wraps, so a narrow window drops the
+   controls to a second row, which is the behaviour that was already there and is
+   the right one to keep. */
+.brand-home { display: inline-flex; align-items: center; text-decoration: none; flex-shrink: 0; }
+.hero-lead img.brand-wordmark {
+    height: 34px; width: auto; display: block;
+    filter: drop-shadow(0 2px 6px rgba(0,0,0,0.55));
+}
+/* A wordmark is not a button, so it gets the quietest possible acknowledgement
+   that it is clickable rather than a border or a background. */
+.brand-home:hover img.brand-wordmark { filter: drop-shadow(0 2px 10px rgba(232,181,69,0.45)); }
 .month-nav { display: flex; align-items: center; gap: 8px; }
 .month-nav-btn {
     display: flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -124,6 +141,113 @@ html.has-distrakt #distraktNav { display: flex; }
     text-align: left; text-decoration: none; cursor: pointer; white-space: nowrap;
 }
 .nav-menu-items a:hover, .nav-menu-items button:hover { background: rgba(255,255,255,0.07); }
+
+/* THE 👁️ VIEW PANEL. Same pill summary and same popover shell as the ☰ Menu
+   above — that is the point of reusing .nav-menu — with only the two things that
+   genuinely differ overridden here.
+   OPENS TO THE LEFT EDGE, unlike the menu: this control sits at the START of the
+   header row rather than the end, and a panel right-aligned to it would hang off
+   toward the middle of the page away from the thing that opened it. */
+/* SIZED BY ITS OWN CONTENT, WHICH IS THE ONLY WAY THIS PANEL CANNOT OVERFLOW.
+   It is position:absolute inside a .nav-menu whose width is just the summary
+   pill, so its containing block is about 80px wide. Shrink-to-fit therefore
+   resolves against 80px, and a hand-picked `min-width` pins it to exactly that
+   number — so the moment one row needed more (the timezone row, which carries a
+   button as well as a select) that row overflowed the box and drew its select
+   outside the panel's own background.
+   `width: max-content` sizes the box to the widest row instead, whatever that
+   row turns out to hold, so there is no number here to get wrong and no way for
+   a future row to escape. min-width is now only a floor for looks. */
+/* ONE GRID ON THE PANEL, AND THE ROWS ARE `display: contents` SO THEIR PARTS
+   LAND IN IT DIRECTLY. Three columns — label, the optional button, the control —
+   shared by all four rows.
+   THIS REPLACED TWO ATTEMPTS THAT BOTH FAILED THE SAME WAY, and the reason is
+   worth keeping: while each ROW laid itself out, the timezone row was the only
+   one with three things in it, so it negotiated its own widths differently from
+   the three rows above it however the negotiation was phrased — a `1fr auto`
+   grid, then flex with an auto margin. Both aligned three rows and left the
+   fourth out of line. Columns declared ONCE, on the container, cannot disagree
+   between rows, because there is only one set of them: the button column is
+   simply empty on the rows that have no button.
+   `width: max-content` because this panel is position:absolute inside a
+   .nav-menu whose width is only the summary pill, so shrink-to-fit would resolve
+   against ~80px and any fixed min-width pins it to exactly that number — which
+   is how a row wider than the guess came to draw itself outside the panel's own
+   background. Sized from the columns instead, there is no number to get wrong. */
+.view-menu > .nav-menu-items {
+    left: 0; right: auto; width: max-content;
+    display: grid; grid-template-columns: max-content max-content 210px;
+    align-items: center; column-gap: 10px; row-gap: 2px;
+    padding: 10px; white-space: nowrap;
+}
+/* The row boxes themselves draw nothing and take no space — they exist to keep
+   the markup readable and to carry the `title` tooltip and the form the sources
+   row needs. `display: contents` is what puts their children in the grid above.
+   A row-wide hover went with it, which is a fair trade for four controls that
+   actually line up. */
+.view-menu-items .view-row { display: contents; }
+/* Explicit columns rather than auto-placement: a row with two children would
+   otherwise put its control in the BUTTON's column and undo the whole point. */
+.view-menu-items .view-row > label { grid-column: 1; }
+.view-menu-items .view-row .btn-ghost { grid-column: 2; justify-self: center; }
+.view-menu-items .view-row select { grid-column: 3; }
+/* The wrapper is structural only — its two children belong to the grid, not to
+   it, so it disappears the same way the row does. */
+.view-menu-items .view-row .view-control { display: contents; }
+.view-menu-items .view-row label {
+    font-size: 0.8rem; font-weight: 600; color: var(--text); white-space: nowrap;
+}
+/* ALL FOUR SELECTS ARE ONE SIZE, STATED THREE WAYS ON PURPOSE. `width` alone is
+   not enough to guarantee it: `max-width` beats `width` in the cascade, and this
+   app already sets `max-width: 15ch` on .control select and 11ch on .control.tz
+   select a hundred lines above — the shape these rows were lifted out of. Any of
+   that leaking in here would silently clamp a 210px select down to about 117px
+   and only on some rows, which is precisely the ragged result this is fixing. So
+   the floor, the width and the ceiling are all pinned to the same number and
+   there is nothing left for an inherited rule to win. */
+.view-menu-items .view-row select {
+    background: var(--bg-deep); border: 1px solid var(--card-border); color: var(--text);
+    border-radius: 7px; padding: 6px 8px; font: inherit; font-size: 0.78rem;
+    width: 210px; min-width: 210px; max-width: 210px;
+    /* A timezone name is longer than the box; truncate rather than let the
+       select ask for more room, which is what would push this row out of line
+       with the other three again. */
+    text-overflow: ellipsis;
+}
+.view-menu-items .view-row select option { background: var(--bg-panel); color: var(--text); }
+/* The 📍 sits in the middle column, so it is to the LEFT of the select it acts
+   on and on the same line as it, without being part of that select's width —
+   which is what lets the timezone select stay identical to the three above it
+   instead of giving up room to make space for a button.
+   ITS OWN SIZE IS STATED, AND THAT IS THE FIX RATHER THAN A TIDY-UP. The menu's
+   own rule ninety lines up — `.nav-menu-items a, .nav-menu-items button` — sets
+   `width: 100%`, because in the ☰ menu every button IS a full-width row. This
+   one is not: it is a glyph beside a control. Inherited, that 100% made the pin
+   as wide as its whole cell and pushed the select clean out of the panel — and
+   it survived every attempt to pin the SELECT's width, because flex-basis:auto
+   defers to `width`, so the button was what was wrong the whole time.
+   A TIGHT SQUARE ALSO MAKES CENTRING THE BOX THE SAME AS CENTRING THE PIN. With
+   the menu rule's roomy `padding: 7px 10px` the box was taller than the glyph,
+   and an emoji does not sit in the middle of its own line box — it hangs off the
+   baseline with the ascent above it — so a box the grid had centred perfectly
+   still read as a pin sitting high. With no padding and no spare line-height
+   there is nothing left between the glyph and the edges to be asymmetric. */
+.view-menu-items .view-row .btn-ghost {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; padding: 0; line-height: 1; font-size: 0.95rem;
+}
+/* The provider picture palette on the account page. Wraps rather than scrolls:
+   there are at most three of these, one per connected service, so a narrow
+   window should stack them rather than hide any behind an edge. */
+.provider-avatars { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.provider-avatar { display: flex; align-items: center; gap: 6px; }
+.provider-avatar .avatar-thumb { width: 40px; height: 40px; }
+.provider-avatar-name { font-size: 0.78rem; font-weight: 600; text-transform: capitalize; }
+/* The one currently in use is marked on the picture itself as well as by its
+   badge — the badge says it and the ring shows it, which is what makes the row
+   readable at a glance rather than needing to be read. */
+.provider-avatar.is-adopted .avatar-thumb { outline: 2px solid var(--gold); outline-offset: 2px; }
+
 .pill-btn { cursor: pointer; background: var(--bg-panel); border: 1px solid var(--card-border); color: var(--text); padding: 6px 12px; border-radius: 999px; font-size: 0.78rem; font-weight: 600; font-family: inherit; transition: all .18s ease; display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
 .pill-btn:hover { border-color: var(--gold); background: rgba(232,181,69,0.12); }
 .pill-btn.active { border-color: var(--crimson); color: var(--crimson); background: rgba(224,56,77,0.1); }
@@ -310,6 +434,15 @@ body.card-poster .card-body,
 body.card-horizontal .card-body { gap: 5px; overflow: hidden; }
 body.card-poster .overview,
 body.card-horizontal .overview { display: block; flex: 1 1 auto; min-height: 0; max-height: none; overflow-y: auto; }
+/* THE DESCRIPTION'S HEIGHT COMES FROM ITS ROW, and `stretch` is what hands it
+   over. In these two layouts the description has no cap of its own — it is meant
+   to fill whatever the card has left and scroll — so the element that scrolls has
+   to be given a bounded height by something. As a direct child of the column that
+   was the card body itself; wrapped in a ROW, `flex: 1 1 auto` now sizes it along
+   the row's main axis (across) and says nothing about its height, so without this
+   it grows to fit its text and runs out under the air date and the buttons. */
+body.card-poster .overview-row,
+body.card-horizontal .overview-row { flex: 1 1 auto; min-height: 0; align-items: stretch; }
 body.card-poster .overview::-webkit-scrollbar,
 body.card-horizontal .overview::-webkit-scrollbar { width: 5px; }
 body.card-poster .overview::-webkit-scrollbar-thumb,
@@ -323,7 +456,7 @@ body.card-horizontal .links-row { margin-top: 6px; }
 body.card-poster .trakt-btn,
 body.card-horizontal .trakt-btn { padding: 5px 0; }
 body.card-poster .trakt-btn img,
-body.card-horizontal .trakt-btn img { height: 13px; }
+body.card-horizontal .trakt-btn img { height: 12px; }
 
 @media (max-width: 700px) {
     body.pack-packed main { display: block; }
@@ -418,17 +551,75 @@ body.hide-not-watching .card.not-watching { display: none; }
 .chip.cert[data-cert="PG-13"], .chip.cert[data-cert="TV-14"] { background: var(--gold); color: #2b1c02; border-color: var(--gold); }
 .chip.cert[data-cert="R"], .chip.cert[data-cert="NC-17"], .chip.cert[data-cert="TV-MA"] { background: var(--crimson); color: #fff; border-color: var(--crimson); }
 
-/* Description is capped to a uniform height and scrolls on hover (no truncation). */
+/* Description is capped to a uniform height and scrolls on hover (no truncation).
+   The row around it exists only when a second service wrote a different one: the
+   flip control sits beside the text rather than inside it, so it does not move
+   as the description scrolls. */
+.overview-row { display: flex; align-items: flex-start; gap: 6px; flex: 1; min-height: 0; }
 .overview { color: var(--text-dim); font-size: 0.82rem; line-height: 1.45; flex: 1; max-height: 7.4em; overflow: hidden; }
 .card:hover .overview { overflow-y: auto; }
 .overview::-webkit-scrollbar { width: 5px; }
 .overview::-webkit-scrollbar-thumb { background: var(--card-border); border-radius: 3px; }
+/* WHERE TWO SERVICES DISAGREED. Three controls, all of them quiet: a card whose
+   services agreed — which is every card on an instance with one source — draws
+   none of this, so it has to cost nothing to look at when it is there.
+
+   THE MARK IS A DISC OR A TILE CARRYING ITS OWN BACKGROUND, which is why it needs
+   no plate behind it here: it stays legible over poster art, over the card's
+   near-black panel and over the gold a hover turns on, where a transparent
+   symbol would be readable on one of the three. */
+.source-logo { height: 13px; width: auto; display: block; border-radius: 4px; }
+/* THE SERVICE MARK ON A POSTER, CENTRED ALONG THE BOTTOM EDGE. Every corner of a
+   poster is already claimed — runtime and episode down the left, rating and the
+   watching eye down the right, the network's own logo bottom-right — so a mark
+   given a corner of its own lands on one of them, which is what put the flip
+   control on top of the network. The middle of the bottom edge is the one place
+   free on every card. It stays a CONTAINER rather than being folded into the
+   button's own rule because placing what is drawn on a poster is a question
+   about the poster, and a second mark that ever earns a place here has to be
+   given it here, where the clearance from everything else is already settled. */
+.poster-marks {
+    position: absolute; bottom: 9px; left: 50%; transform: translateX(-50%);
+    z-index: 6; display: flex; align-items: center; gap: 6px;
+}
+.poster-marks .source-swap { padding: 3px; background: rgba(10,12,16,0.82); backdrop-filter: blur(4px); }
+.poster-marks .source-logo { height: 15px; }
+/* The flip control. A button, because it does something; sized down to the logo
+   so it reads as a mark beside the value rather than as an action bar. */
+/* `align-self` because the row it sits in is told to stretch, and what that
+   stretch is for is the description beside it — a flip button as tall as a
+   paragraph is a click target nobody aimed at. */
+.source-swap {
+    flex: 0 0 auto; align-self: flex-start;
+    display: inline-flex; align-items: center; padding: 2px 4px;
+    border-radius: 6px; border: 1px solid var(--card-border);
+    background: rgba(255,255,255,0.04); cursor: pointer; opacity: 0.7;
+    transition: opacity .16s ease, border-color .16s ease;
+}
+.source-swap:hover { opacity: 1; border-color: var(--gold-soft); }
+.source-swap .source-logo { height: 11px; }
+/* Both numbers side by side, each with the service that reported it. Never an
+   average: two user bases produce two legitimate ratings and a mean is a number
+   nobody gave. */
+.chip.dual { display: inline-flex; align-items: center; gap: 8px; border-color: rgba(232,181,69,0.35); }
+.dual-value { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.dual-value .source-logo { height: 11px; opacity: 0.85; }
+
 .premiere-info { margin-top: auto; padding-top: 10px; border-top: 1px solid var(--card-border); font-size: 0.82rem; font-weight: 600; display: flex; justify-content: space-between; gap: 8px; }
 .premiere-info .time { color: var(--text-faint); font-weight: 400; }
 .links-row { display: flex; gap: 8px; margin-top: 8px; }
-.trakt-btn { flex: 1; display: flex; align-items: center; justify-content: center; padding: 6px 0; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); transition: all .18s ease; }
-.trakt-btn img { height: 16px; }
-.trakt-btn:hover { background: var(--gold); box-shadow: 0 0 14px rgba(232,181,69,0.5); transform: translateY(-2px); }
+/* One per service that has a page for this title, so two of them share the row
+   evenly and one fills it. */
+.trakt-btn { flex: 1; min-width: 0; display: flex; align-items: center; justify-content: center; padding: 6px 0; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); transition: all .18s ease; }
+.trakt-btn img { height: 16px; max-width: 100%; object-fit: contain; }
+/* THE HOVER LIGHTS THE EDGE RATHER THAN FLOODING THE BUTTON, because what it is
+   lighting is a wordmark: both services' names are drawn in white, and a gold
+   fill behind white lettering leaves the name of the place you are about to go
+   the least readable thing on the card. */
+.trakt-btn:hover { background: rgba(232,181,69,0.14); border-color: var(--gold); box-shadow: 0 0 14px rgba(232,181,69,0.35); transform: translateY(-2px); }
+/* The service NAME, on the button that goes there. Height rather than width, so
+   two wordmarks of different proportions sit on one optical line. */
+.source-wordmark { height: 15px; width: auto; max-width: 100%; object-fit: contain; display: block; }
 
 /* Sonarr / Radarr / Seerr add-to-library buttons (official icon + wordmark text) */
 .arr-btn { flex: 1; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); color: var(--text); font-family: inherit; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.2px; cursor: pointer; white-space: nowrap; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, opacity .16s ease; }
@@ -452,6 +643,9 @@ body.hide-not-watching .card.not-watching { display: none; }
 .error-banner { margin: 28px 6vw 0 6vw; padding: 16px 20px; border-radius: 12px; background: rgba(224,56,77,0.1); border: 1px solid rgba(224,56,77,0.5); color: var(--gold-soft); font-size: 0.9rem; }
 /* A non-fatal degradation, amber rather than the error banner's red: the month
    rendered but a window's data was missing, so it may be short a few days. */
+/* Deliberately not a banner: nothing is wrong, and giving it the warning's gold
+   border would make a self-healing count read as a failure. */
+.enrichment-note { margin: 14px 6vw 0 6vw; font-size: 0.8rem; }
 .warning-banner { margin: 28px 6vw 0 6vw; padding: 16px 20px; border-radius: 12px; background: rgba(232,181,69,0.1); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft); font-size: 0.9rem; }
 
 /* ---- Footer ---- */
@@ -824,6 +1018,53 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 .image-card input:focus { border-color: var(--gold); outline: none; }
 .image-card .btn-ghost { align-self: flex-start; }
 
+/* The Sources screen. Same card shell as the account page — it is the same kind
+   of page, a list of settings that belong to one account — with one repeated
+   control: a mode, and a tick per service for the mode that names them.
+   Wider than the account page because each row carries a whole control rather
+   than a badge, and at 680px the ticks wrapped under their own radio buttons. */
+.auth-shell.wide { max-width: 820px; }
+.auth-list .row-main { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* THE BUTTONS AT THE END OF A CONNECTED-ACCOUNT ROW, AS ONE CLUSTER. The row is
+   `justify-content: space-between`, which spreads its children across the full
+   width — so a second button did not join the first at the right, it landed in
+   the middle of the row with gaps either side. Grouped, the row is back to three
+   parts (name, badge, actions) and the actions sit together at the end however
+   many of them a given row happens to offer. */
+.auth-list .row-actions {
+    display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0;
+}
+.auth-list .row select {
+    padding: 5px 8px; font-size: 0.78rem; font-family: inherit;
+    background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
+    border-radius: 8px; color: var(--text);
+}
+/* ONE SHAPE FOR EVERY ONE OF THESE ROWS, whatever it offers. The name of what is
+   being chosen goes on its own line above the choice rather than beside it: with
+   the label on the left, a row offering one service fits on a single line while a
+   row offering two wraps onto a second, so rows asking the identical question
+   came out as two different things — which is what made the one calendar only one
+   service publishes look like a mistake. Stacked, how many services there are
+   decides how wide the ticks are and nothing else. */
+.auth-list .row.source-row {
+    flex-direction: column; align-items: stretch; gap: 8px;
+    padding: 11px 12px;
+}
+.auth-list .row.source-row .label { color: var(--text); font-weight: 600; }
+.source-choice { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 0.8rem; }
+.source-mode, .source-tick { display: flex; align-items: center; gap: 5px; color: var(--text-dim); cursor: pointer; }
+.source-mode input, .source-tick input { accent-color: var(--gold); }
+.source-ticks {
+    display: flex; align-items: center; gap: 12px; padding: 4px 10px;
+    border: 1px solid var(--card-border); border-radius: 999px; background: var(--bg-panel);
+    margin-left: auto;
+}
+.source-reach { margin: 0; padding-left: 18px; }
+.source-reach li { margin-top: 2px; }
+/* The prose between the rows of a section explains the rows, so it is indented
+   under them rather than sitting at the same margin as a heading. */
+.auth-list > .auth-sub { margin-top: 0; padding: 0 2px; }
+
 /* Error pages (404 / 403). The same card as the auth screens, with the status
    set as a watermark so the page is identifiable at a glance without the number
    competing with the sentence that actually explains it. */
@@ -1004,6 +1245,33 @@ a.ep-check:hover { background: rgba(76,175,80,0.2); }
    click to go and mark it off. */
 .ep-check.unseen { color: var(--text-faint); font-weight: 400; }
 a.ep-check.unseen:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+/* ONE TICK PER SERVICE, side by side, when the account syncs more than one. The
+   row still has a single tick column so the episode numbers stay in line — the
+   ticks share it rather than each taking one. */
+.ep-checks { flex: 0 0 auto; display: flex; align-items: center; gap: 2px; }
+.ep-checks .ep-check { display: inline-flex; align-items: center; gap: 2px; width: auto; padding: 0 3px; }
+/* The mark rides at the tick's own size: it says WHOSE record this is, and the
+   glyph beside it says what that record holds. A mark large enough to read as a
+   logo would make a checklist look like a row of buttons. */
+.ep-check .ep-mark { height: 11px; width: auto; border-radius: 3px; }
+/* A service that has not recorded the episode is drawn back rather than hidden:
+   the empty slot is the useful half of the answer, and its mark is what says
+   which service is missing it. */
+.ep-check.unseen .ep-mark { opacity: 0.4; filter: grayscale(1); }
+a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
+
+/* WHOSE TICKS THESE ARE, drawn only where the services disagree about the
+   season. Quiet on purpose: nothing is wrong when two services hold different
+   records of the same viewing, and styling the note as a warning would make an
+   account that simply linked its second service last week read as broken. Text
+   rather than a service logo — see the note in tracker/details.js. */
+.ep-source-note {
+    font-size: 0.72rem; color: var(--text-faint); margin: 2px 0 6px 0;
+}
+.ep-source {
+    flex: 0 0 auto; font-size: 0.68rem; color: var(--text-faint);
+    border: 1px solid var(--border, #39404d); border-radius: 999px; padding: 0 6px;
+}
 
 /* The emoji map is keyed on this exact string, so it is shown rather than left in
    a tooltip. Truncates instead of wrapping — a long network name must not push

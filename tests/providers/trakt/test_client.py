@@ -21,8 +21,10 @@ import httpx
 import pytest
 
 from app.endpoints import get_endpoint
+from app.providers.base import Source
 from app.providers.trakt import TraktError
 from app.providers.trakt import calendar as trakt_calendar
+from app.providers.trakt import sync as trakt_sync
 from app.providers.trakt import transport
 from app.providers.trakt.detail import _cast_from, _episodes_from
 
@@ -164,6 +166,253 @@ class TestCachedGetStoresOnlyRealAnswers:
         assert writes == []
 
 
+def _cached_get(*answers):
+    """A stand-in for transport.cached_get that serves `answers` in order.
+
+    AN ANSWER THAT IS AN EXCEPTION IS SERVED THE WAY THE REAL FUNCTION SERVES A
+    FAILURE: raised when the caller passed `raise_errors=True`, and handed back as
+    None otherwise. That flag is the whole mechanism under test — a double that
+    raised regardless would pass just as happily against the swallowing code these
+    tests exist to forbid, which would make every one of them worthless.
+    """
+    served = list(answers)
+    calls: list[dict] = []
+
+    async def _get(_client, _settings, path, params=None, **kwargs):
+        calls.append({"path": path, "params": params, **kwargs})
+        answer = served.pop(0) if len(served) > 1 else served[0]
+        if isinstance(answer, Exception):
+            if kwargs.get("raise_errors"):
+                raise answer
+            return None
+        return answer
+
+    _get.calls = calls
+    return _get
+
+
+class TestThePrivateReadsRefuseToLookEmpty:
+    """A FAILURE IS NEVER NORMALIZED INTO AN EMPTY ANSWER, asked of the three
+    reads a person's own viewing comes through.
+
+    Each of these was a swallowed refusal, and each swallowed one differently:
+    the beacon reported "nothing has changed", the history reported "nothing was
+    watched", and the progress fan-out reported "this show has been watched by
+    nobody" once per show. All three read as ordinary answers, all three are
+    acted on, and the third overwrites stored counts — so with one refused
+    credential the page rendered healthy on a reload and unavailable on a
+    refresh, with nothing anywhere naming the service that had stopped
+    answering.
+    """
+
+    def test_a_refused_beacon_raises_rather_than_answering_empty(self):
+        """An empty beacon is not a missing one. It claims all four stamps are
+        absent, which compares EQUAL to a stored empty one and gates the next
+        sync as unchanged — so a refused token has the source report itself up to
+        date for as long as it stays refused."""
+        get = _cached_get(TraktError("nope", 401))
+        with patch.object(transport, "cached_get", get):
+            with pytest.raises(TraktError):
+                asyncio.run(trakt_sync.fetch_last_activities(SETTINGS))
+        assert get.calls[0]["raise_errors"] is True
+
+    def test_a_beacon_that_answered_with_nothing_is_still_an_empty_blob(self):
+        """The distinction the fix rests on: Trakt answering with a body that
+        held nothing is a real, successful, empty answer."""
+        with patch.object(transport, "cached_get", _cached_get(None)):
+            assert asyncio.run(trakt_sync.fetch_last_activities(SETTINGS)) == {}
+
+    def test_a_show_that_could_not_be_read_is_absent_rather_than_empty(self):
+        """The one that overwrites data. An empty map against an id means "this
+        person has watched none of it" and retires the stored seasons; a show
+        whose own call failed has said nothing, so its id is left out entirely
+        and the caller keeps what it had."""
+        with patch.object(transport, "cached_get", _cached_get(TraktError("gone", 404))), \
+             patch.object(transport, "shared_client", lambda: None):
+            assert asyncio.run(trakt_sync.fetch_progress_details(SETTINGS, [7])) == {}
+
+    def test_a_show_with_nothing_watched_is_present_and_empty(self):
+        """The other side of the same rule, and the reason absence had to be
+        reserved: a real "none of it" still has to reach the caller."""
+        with patch.object(transport, "cached_get", _cached_get({"seasons": []})), \
+             patch.object(transport, "shared_client", lambda: None):
+            assert asyncio.run(trakt_sync.fetch_progress_details(SETTINGS, [7])) == {7: {}}
+
+    def test_a_refused_credential_is_not_one_show_failing(self):
+        """It is true of every request this token will make, so tolerating it per
+        show composes a whole roster of refusals into a library nobody watched."""
+        with patch.object(transport, "cached_get", _cached_get(TraktError("nope", 401))), \
+             patch.object(transport, "shared_client", lambda: None):
+            with pytest.raises(TraktError):
+                asyncio.run(trakt_sync.fetch_progress_details(SETTINGS, [7, 8]))
+
+    def test_a_403_is_a_credential_failure_too(self):
+        """Both say the request was refused over WHO asked rather than WHAT was
+        asked for, so the same token on any other path gets the same answer."""
+        assert transport.is_credential_failure(TraktError("x", 403))
+        assert not transport.is_credential_failure(TraktError("x", 404))
+
+    def _history(self, response):
+        async def _send(_client, _method, _url, **_kwargs):
+            return response
+        with patch.object(transport, "send", _send), \
+             patch.object(transport, "shared_client", lambda: None):
+            return asyncio.run(trakt_sync.fetch_history(SETTINGS))
+
+    def test_a_refused_history_page_raises_rather_than_ending_the_sweep(self):
+        """It used to log, stop, and return what had arrived — so a refused read
+        was reported as "0 event(s) over 1 page(s)", and the caller advanced its
+        cursor past a window nothing had read."""
+        with pytest.raises(TraktError):
+            self._history(_response(401))
+
+    def test_a_page_that_answered_with_no_events_ends_the_sweep_normally(self):
+        """Trakt saying there is nothing more, which is the ordinary answer for
+        an account that has watched nothing since the cursor."""
+        assert self._history(_response(200, body="[]")) == []
+
+
+class _PagedClient:
+    """A send() stand-in that serves canned pages BY PAGE NUMBER and records the
+    URLs it was asked for.
+
+    Keyed on the `page=` parameter rather than on call order, deliberately: the
+    sweep asks for page one alone and then for the rest together, so the order the
+    remainder arrive in is not defined and a double that served them positionally
+    would hand page four's body to whichever coroutine happened to be scheduled
+    first. What it ASKED for is half of what is under test, which is why the URLs
+    are kept.
+    """
+
+    def __init__(self, *pages):
+        self._pages = list(pages)
+        self.urls: list[str] = []
+        self.in_flight = 0
+        self.most_at_once = 0
+
+    def _number(self, url: str) -> int:
+        for part in url.split("?", 1)[-1].split("&"):
+            if part.startswith("page="):
+                return int(part[len("page="):])
+        return 1
+
+    async def __call__(self, _client, _method, url, **_kwargs):
+        self.urls.append(url)
+        self.in_flight += 1
+        self.most_at_once = max(self.most_at_once, self.in_flight)
+        try:
+            # A real await, so two calls issued together are actually overlapping
+            # here rather than each running to completion before the next starts.
+            await asyncio.sleep(0)
+            index = self._number(url) - 1
+            return self._pages[index] if index < len(self._pages) else self._pages[-1]
+        finally:
+            self.in_flight -= 1
+
+
+def _page(body, status: int = 200, page_count: int = 1):
+    page = _WindowResponse(body, status, {"x-pagination-page-count": str(page_count)})
+    page.text = ""  # what the sweep logs a refusal with
+    return page
+
+
+class TestThePlayCountSweep:
+    """WHAT /sync/watched/shows IS ACTUALLY FOR.
+
+    It carries no seasons and no episodes in any variant, so it cannot say what
+    anybody has watched — the docstring that claimed otherwise is what made a
+    whole plan out of it. What each row DOES carry is `plays`, and measured live,
+    `plays` moved in both directions with the watched set while the
+    `last_updated_at` beside it moved only on the addition. So this is a change
+    detector for the whole library at a handful of calls, and the field it must
+    NOT be keyed on is the obvious one.
+    """
+
+    def _sweep(self, send):
+        with patch.object(transport, "send", send), \
+             patch.object(transport, "shared_client", lambda: None):
+            return asyncio.run(trakt_sync.fetch_play_counts(SETTINGS, limit=2))
+
+    def test_a_row_becomes_its_show_id_and_its_play_count(self):
+        send = _PagedClient(_page([{"plays": 20, "show": {"ids": {"trakt": 202341}}}]))
+        counts = self._sweep(send)
+        assert counts == ({"202341": 20}, True)
+
+    def test_it_follows_the_page_count_header(self):
+        send = _PagedClient(
+            _page([{"plays": 3, "show": {"ids": {"trakt": 1}}}], page_count=2),
+            _page([{"plays": 5, "show": {"ids": {"trakt": 2}}}], page_count=2))
+        counts, complete = self._sweep(send)
+        assert counts == {"1": 3, "2": 5}
+        assert complete
+        assert len(send.urls) == 2
+        assert "page=2" in send.urls[1]
+
+    def test_the_pages_after_the_first_go_out_together(self):
+        """Page one has to come back before anything knows how many there are;
+        after that they are disjoint slices of one listing with no ordering
+        between them. Issued one at a time this is five round trips end to end on
+        a real library, on the critical path of every load where anything moved.
+
+        ASSERTED AS OVERLAP RATHER THAN AS DURATION, which is the only form that
+        does not turn into a flaky clock comparison: the double counts how many
+        calls were in flight at once."""
+        pages = [_page([{"plays": n, "show": {"ids": {"trakt": n}}}], page_count=4)
+                 for n in range(1, 5)]
+        send = _PagedClient(*pages)
+        counts, complete = self._sweep(send)
+        assert counts == {"1": 1, "2": 2, "3": 3, "4": 4}
+        assert complete
+        # The first is alone — nothing yet knows there are four — and the other
+        # three overlap.
+        assert send.most_at_once == 3
+
+    def test_a_cap_on_how_many_pages_are_fetched_makes_the_sweep_incomplete(self):
+        """Running out of pages we are willing to fetch is not the same as running
+        out of pages to read, and a cap that quietly said "the rest of the library
+        has no plays" would read as a removal of everything past it."""
+        pages = [_page([{"plays": n, "show": {"ids": {"trakt": n}}}], page_count=9)
+                 for n in range(1, 4)]
+        send = _PagedClient(*pages)
+        with patch.object(transport, "send", send), \
+             patch.object(transport, "shared_client", lambda: None):
+            counts, complete = asyncio.run(
+                trakt_sync.fetch_play_counts(SETTINGS, limit=2, max_pages=2))
+        assert not complete
+        assert len(send.urls) == 2
+        assert set(counts) == {"1", "2"}
+
+    def test_a_row_with_no_id_is_skipped_rather_than_keyed_on_nothing(self):
+        send = _PagedClient(_page([{"plays": 1, "show": {"ids": {}}}, "not a dict"]))
+        assert self._sweep(send).counts == {}
+
+    def test_the_first_page_failing_raises(self):
+        """A sweep that read nothing is not a library that holds nothing — and an
+        empty map here means every title has lost its plays."""
+        send = _PagedClient(_page(None, status=500))
+        with pytest.raises(TraktError):
+            self._sweep(send)
+
+    def test_a_later_page_failing_makes_the_sweep_incomplete(self):
+        """Survivable, and the flag is what keeps it survivable: the caller may
+        read an incomplete sweep for what it FOUND and never for what is missing,
+        because a title on a page nobody fetched looks exactly like a title with
+        no plays left."""
+        send = _PagedClient(
+            _page([{"plays": 3, "show": {"ids": {"trakt": 1}}}], page_count=3),
+            _page(None, status=502, page_count=3))
+        counts, complete = self._sweep(send)
+        assert counts == {"1": 3}
+        assert not complete
+
+    def test_a_refused_credential_raises_on_any_page(self):
+        send = _PagedClient(
+            _page([{"plays": 3, "show": {"ids": {"trakt": 1}}}], page_count=3),
+            _page(None, status=401, page_count=3))
+        with pytest.raises(TraktError):
+            self._sweep(send)
+
+
 class TestFetchWindow:
     """The one place the app asks Trakt what airs.
 
@@ -192,11 +441,31 @@ class TestFetchWindow:
         assert "X-Pagination-Page" not in client.sent_headers
         assert "X-Pagination-Limit" not in client.sent_headers
 
-    def test_the_entries_come_back_untouched(self):
-        """Raw, unfiltered and unnormalized: the two callers filter differently
-        and one of them stores the result, so deciding here would make one wrong."""
-        entries = [{"show": {"title": "A"}}, {"show": {"title": "B"}}]
-        assert self._fetch(_CaptureClient(body=entries)) == entries
+    def test_the_entries_come_back_as_records_and_unfiltered(self):
+        """NORMALIZED but not filtered. Normalizing here is what lets the cache
+        store a second source's window in the same rows without learning either
+        payload's field layout; filtering is still the caller's, because the
+        instance floor and one viewer's own spec are different questions asked at
+        different moments."""
+        entries = [
+            {"first_aired": "2026-07-06T20:00:00Z",
+             "show": {"title": "A", "ids": {"slug": "a", "trakt": 1}}},
+            {"first_aired": "2026-07-07T20:00:00Z",
+             "show": {"title": "B", "ids": {"slug": "b", "trakt": 2}}},
+        ]
+        records = self._fetch(_CaptureClient(body=entries))
+        assert [r.title for r in records] == ["A", "B"]
+        assert {r.source for r in records} == {Source.TRAKT}
+
+    def test_an_entry_the_normalizer_cannot_read_is_dropped_not_raised_over(self):
+        """A window is a list somebody else assembled, and one unusable row in it
+        is not a reason to lose the other four hundred."""
+        entries = [
+            {"show": {"title": "No air date", "ids": {"slug": "a", "trakt": 1}}},
+            {"first_aired": "2026-07-07T20:00:00Z",
+             "show": {"title": "Fine", "ids": {"slug": "b", "trakt": 2}}},
+        ]
+        assert [r.title for r in self._fetch(_CaptureClient(body=entries))] == ["Fine"]
 
     def test_a_401_names_the_credentials_to_check(self):
         with pytest.raises(TraktError) as exc:
@@ -257,3 +526,63 @@ class TestModalShaping:
         """cache_only can leave the episodes lookup with nothing at all, and the
         modal renders around it."""
         assert _episodes_from(None, ZoneInfo("UTC")) == []
+
+
+class TestATokenlessCallStillGoesOut:
+    """Trakt without a bearer, which is most of what this app asks it for.
+
+    The public catalogue endpoints — a title's summary, its cast, a season's
+    episode list, /search — authenticate with the `trakt-api-key` header, which
+    carries the INSTANCE's client id. Only the per-person reads under /sync/ want
+    an Authorization header at all.
+
+    THE FAILURE THIS PINS was not a refusal from Trakt; it never reached Trakt.
+    An account with no Trakt token produced the literal header value "Bearer ",
+    the HTTP layer refused to put that on the wire, and every call the app made
+    died locally — including the season episode counts, which are the same
+    number for everybody and need no token. A whole roster rendered
+    "unavailable" because of it.
+    """
+
+    def _headers(self, token):
+        settings = SimpleNamespace(trakt_access_token=token, trakt_client_id="id",
+                                   pagination_limit=100, cache_ttl_minutes=10)
+        return transport.api_headers(settings)
+
+    def test_a_token_is_still_sent_as_a_bearer(self):
+        assert self._headers("token")["Authorization"] == "Bearer token"
+
+    def test_no_token_means_no_authorization_header_at_all(self):
+        """Omitted, not empty. An empty bearer is not an anonymous request."""
+        assert "Authorization" not in self._headers("")
+
+    def test_a_blank_token_is_no_token(self):
+        """A pasted credential that is only whitespace is the same nothing, and
+        it used to be the same illegal header."""
+        assert "Authorization" not in self._headers("   ")
+
+    def test_the_api_key_is_what_carries_a_tokenless_call(self):
+        assert self._headers("")["trakt-api-key"] == "id"
+
+    def test_the_headers_are_ones_the_wire_will_actually_accept(self):
+        """THE REGRESSION, at the layer that raised it. h11 validates header
+        values as it frames the request, and it is what rejected b'Bearer ' —
+        so asserting the header is absent is only half the claim, and this is
+        the other half. Building the same request with a token proves the check
+        is real rather than vacuous.
+        """
+        import h11
+        for token in ("", "token"):
+            headers = [("host", "api.trakt.tv")] + list(self._headers(token).items())
+            h11.Request(method="GET", target="/shows/1/seasons/2", headers=headers)
+
+    def test_a_tokenless_get_comes_back_with_its_body(self):
+        client = _CaptureClient(body={"aired_episodes": 8})
+        settings = SimpleNamespace(trakt_access_token="", trakt_client_id="id",
+                                   pagination_limit=100, cache_ttl_minutes=10)
+        fake_cache = _FakeCache()
+        with patch.object(transport, "cache", fake_cache):
+            body = asyncio.run(transport.cached_get(client, settings, "shows/1", {}))
+        assert body == {"aired_episodes": 8}
+        assert "Authorization" not in client.sent_headers
+        assert client.sent_headers["trakt-api-key"] == "id"

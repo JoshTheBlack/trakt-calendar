@@ -66,6 +66,7 @@ INTEGRATIONS = "integrations"
 CALENDAR = "calendar"
 DISTRAKT = "distrakt"
 RANKER = "ranker"
+SOURCES = "sources"
 SETTINGS = "settings"
 MAIN = "main"
 
@@ -112,6 +113,13 @@ GROUPS: dict[str, str] = {
 
     "ranker": RANKER,
 
+    # Which services answer for an account, and whose value wins when two of them
+    # disagree. Its own group rather than a corner of the calendar or of auth
+    # because it is about neither: both features READ it and neither owns it, and
+    # filing it inside one of them would make the other's dependency on it look
+    # like a dependency on that feature.
+    "sources": SOURCES,
+
     # The admin Settings screen's API, plus the app-wide Trakt device-code flow.
     # Feature tier despite sitting at the root: it reaches sideways into two
     # features and up into auth. One module does not earn a package.
@@ -150,6 +158,7 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (DISTRAKT, KERNEL): Edge("the tracker's tables, settings and templates"),
     (RANKER, KERNEL): Edge("boards are stored, rendered and configured"),
     (SETTINGS, KERNEL): Edge("the Settings screen reads and writes the settings themselves"),
+    (SOURCES, KERNEL): Edge("a source preference is one row in the database, per account"),
 
     # --- the value-type contract, which everything may name ----------------
     (KERNEL, PROVIDER_TYPES): Edge(
@@ -161,6 +170,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (CALENDAR, PROVIDER_TYPES): Edge("the cache stores and replays Items"),
     (DISTRAKT, PROVIDER_TYPES): Edge("watch state is keyed by ItemKey across sources"),
     (RANKER, PROVIDER_TYPES): Edge("a board entry is a title identified the same way"),
+    (SOURCES, PROVIDER_TYPES): Edge(
+        "the services a preference may name ARE the Source members, read from "
+        "there rather than spelled again, so a preference cannot name a service "
+        "the app does not have"),
     (PROVIDER_TYPES, KERNEL): Edge(
         "Settings appears in the Protocol signatures only. Deferred behind "
         "TYPE_CHECKING so the value-type module stays importable from the "
@@ -169,13 +182,18 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
 
     # --- into the sources --------------------------------------------------
     (AUTH, PROVIDERS): Edge(
-        "the Trakt login flow exchanges its device code on the same pooled "
-        "client and against the same API base the source itself uses, so the "
-        "two cannot drift apart"),
+        "a login flow exchanges its codes on the same pooled client and against "
+        "the same API base the source itself uses, so the two cannot drift "
+        "apart — and so the sign-in call is covered by whatever pacing, retry "
+        "and circuit-breaking that source's transport already owes the service"),
     (MEDIA, PROVIDERS): Edge("poster art is looked up per title through the source"),
     (CALENDAR, PROVIDERS): Edge("the cache asks a source what airs in a window"),
     (DISTRAKT, PROVIDERS): Edge("the tracker reads the viewer's own history and progress"),
     (RANKER, PROVIDERS): Edge("ratings are imported from the viewer's source account"),
+    (SOURCES, PROVIDERS): Edge(
+        "the Sources screen lists the services themselves — their labels and how "
+        "far each one's calendar reaches — and asks the registry rather than "
+        "naming any of them, so a service added later appears by being registered"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
         "validates settings. Function-local because providers/ reads config, "
@@ -188,6 +206,9 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (DISTRAKT, AUTH): Edge("a tracker month belongs to one signed-in person"),
     (RANKER, AUTH): Edge("a board belongs to one signed-in person"),
     (SETTINGS, AUTH): Edge("the Settings screen is admin-only and links the app's own account"),
+    (SOURCES, AUTH): Edge(
+        "a source preference belongs to one signed-in account, and the screen "
+        "shows which services that account has actually connected"),
     (KERNEL, AUTH): Edge(
         "config.py reaches encryption_flow to refuse writing a secret while the "
         "at-rest key is in a bad state. Function-local because encryption_flow "
@@ -196,7 +217,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
 
     # --- feature -> feature. Each one earned its place ---------------------
-    (AUTH, MEDIA): Edge("deleting an account deletes its profile and header pictures"),
+    (AUTH, MEDIA): Edge(
+        "deleting an account deletes its profile and header pictures, and "
+        "connecting a service seeds its picture into that account's slots — "
+        "both are auth events whose effect is on stored images"),
     (CALENDAR, MEDIA): Edge("a day block, and the picture a share link unfurls into, show posters"),
     (DISTRAKT, MEDIA): Edge("a tracked show is shown with its poster"),
     (RANKER, MEDIA): Edge("an exported board is drawn from posters with the shared image primitives"),
@@ -206,6 +230,20 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
     (SETTINGS, INTEGRATIONS): Edge(
         "saving settings invalidates the cached library so the add-buttons stop "
         "showing marks from the old configuration"),
+    (DISTRAKT, SOURCES): Edge(
+        "which services back the tracker for an account is that account's stated "
+        "preference, so the sync asks the preference store before it asks any "
+        "source"),
+    (CALENDAR, SOURCES): Edge(
+        "which services fill a viewer's calendar is that account's stated "
+        "preference, so the route reads it before asking the registry which "
+        "sources may fill a window — the same reason the tracker reaches SOURCES"),
+    (SOURCES, CALENDAR): Edge(
+        "the vocabulary a precedence preference is written in is the calendar's "
+        "resolve.FIELDS, imported rather than spelled again so it cannot drift "
+        "from the record. Function-local because the calendar reads this package, "
+        "and naming a calendar module at load time would close that loop",
+        deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
         "links a Discord post at the viewer's own calendar"),

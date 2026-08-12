@@ -19,15 +19,22 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import TraktError
+from app.sources import prefs as source_prefs
 
 UTC = ZoneInfo("UTC")
 ENDPOINT = get_endpoint("shows")
 USER = SimpleNamespace(user_id=1, timezone="UTC", is_admin=False)
 
+# 'auto' admits every registered source, the same set assemble_month's callers
+# got before a per-viewer selection existed to narrow it — so tests about
+# something else keep exercising exactly what they did before.
+DEFAULT_SOURCE_SELECTION = source_prefs.SourcePrefs(user_id=1)
+
 NO_PREFS = {
     "endpoint": None, "card_style": None, "day_packing": None,
     "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
     "show_certifications": "", "movie_certifications": "",
+    "movie_release_countries": "", "movie_release_types": "",
 }
 
 
@@ -48,18 +55,22 @@ def _day(date_iso: str, *item_ids: str) -> dict:
 
 
 def _meta(total: int, watching: int = 0, not_watching: int = 0,
-          partial: bool = False, show_ids=()) -> dict:
+          partial: bool = False, show_ids=(), unenriched: int = 0,
+          release_filtered: int = 0) -> dict:
     return {"total": total, "watching": watching, "not_watching": not_watching,
-            "partial": partial, "show_ids": list(show_ids)}
+            "partial": partial, "show_ids": list(show_ids), "unenriched": unenriched,
+            "release_filtered": release_filtered}
 
 
 class AssembleMonthTests(unittest.TestCase):
     """assemble_month — the month's cards plus every number stated about them."""
 
-    def _run(self, settings=None, prefs=None, not_watching=frozenset()):
+    def _run(self, settings=None, prefs=None, not_watching=frozenset(),
+             source_selection=None):
         return asyncio.run(calendar_routes.assemble_month(
             USER, settings or Settings(trakt_client_id="cid", trakt_access_token="tok"),
-            prefs or NO_PREFS, ENDPOINT, UTC, 2026, 7, set(not_watching)))
+            prefs or NO_PREFS, ENDPOINT, UTC, 2026, 7, set(not_watching),
+            source_selection or DEFAULT_SOURCE_SELECTION))
 
     def test_no_configured_source_reports_it_and_assembles_nothing(self):
         """The one path that must not touch the cache at all — there is nobody to
@@ -93,6 +104,23 @@ class AssembleMonthTests(unittest.TestCase):
         self.assertEqual(assembly.history, [{"when": "now"}])
         # Counted over the whole month, not per day: "a" airs twice.
         self.assertEqual(dict(assembly.show_counts), {"a": 2, "b": 1})
+
+    def test_how_many_cards_are_still_being_looked_up_reaches_the_page(self):
+        """A title one source listed but nobody has looked up yet has no genres
+        or country to judge, so the per-viewer filter lets it through rather than
+        removing it on values nobody has. The page says so; the number falls to
+        zero by itself as the background catalogue read catches up."""
+        async def fake_range(*a, **kw):
+            return [_day("2026-07-01", "a")], _meta(1, show_ids=["a"], unenriched=1)
+
+        async def fake_view(*a, **kw):
+            return {"new_ids": set(), "delta": {"text": "", "kind": "none"}, "history": []}
+
+        with patch("app.calendar.cache.assemble_range", fake_range), \
+             patch("app.calendar.state.resolve_view", fake_view):
+            assembly = self._run()
+        self.assertEqual(assembly.unenriched, 1)
+        self.assertIsNone(assembly.error)
 
     def test_a_partial_month_is_flagged_without_being_an_error(self):
         async def fake_range(*a, **kw):
@@ -165,6 +193,16 @@ class ViewPreferencesTests(unittest.TestCase):
             with self.subTest(key=key):
                 view = calendar_routes._view_preferences({**NO_PREFS, key: "TV-MA"}, Settings())
                 self.assertEqual(view["filters_summary"], "certification")
+
+    def test_both_release_specs_collapse_to_one_label(self):
+        """Where a film is released and in what format are two halves of one
+        question, so they name one dimension between them — the same reasoning
+        the two certification specs already follow."""
+        for key in ("movie_release_countries", "movie_release_types"):
+            with self.subTest(key=key):
+                view = calendar_routes._view_preferences({**NO_PREFS, key: "us"}, Settings())
+                self.assertTrue(view["filters_active"])
+                self.assertEqual(view["filters_summary"], "film release")
 
     def test_no_filters_reports_inactive_with_an_empty_summary(self):
         view = calendar_routes._view_preferences(NO_PREFS, Settings())

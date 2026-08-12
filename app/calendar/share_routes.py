@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import calendar as _calendar
+import dataclasses
 import json
 import logging
 from collections.abc import Mapping, Sequence
@@ -30,17 +31,18 @@ import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, share_card, share_card_cache,
-               share_code, share_links, state as calendar_state)
+from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
+               share_card, share_card_cache, share_code, share_links,
+               state as calendar_state)
 from .. import auth, authz, clock, perftrace, route_params
-from ..providers.trakt import detail as trakt_detail
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import posters, user_images
 from ..perftrace import span
-from ..providers.base import Item, Media
+from ..providers.base import Item, Media, Source
+from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
 
@@ -61,7 +63,7 @@ SHARE_RATE_WINDOW_SECONDS = 60
 
 # Query params a share request may carry, kept here so the view-option resolvers
 # below and the "carry these into the month-nav links" helper agree on the set.
-_CARRY_PARAMS = ("card", "packing", "hidenw", "tz", "networks", "endpoint")
+_CARRY_PARAMS = ("card", "packing", "hidenw", "tz", "networks", "endpoint", "source")
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +132,26 @@ def _resolve_networks(params: _Params, share_row, settings) -> list[str] | None:
     return list(settings.network_filter or []) or None
 
 
+def _resolve_source(params: _Params) -> str | None:
+    """Which services this request asks the month be filled from, or None for
+    "whatever the owner's own preference says".
+
+    WHITELISTED HERE, HONOURED ELSEWHERE, and the split is deliberate. All this
+    can say is that the value is a selection the app can act on at all
+    (`is_selection` — the same predicate the calendar's own `?source=` passes
+    through, and the same one that guarded it on the way into the link). Whether
+    it may actually be acted on for THIS share depends on two things a resolver
+    taking nothing but params does not have: what the owner's preference already
+    admits, and what the instance still puts on its calendar. `_narrowed_prefs`
+    owns that, once, where both surfaces reach it.
+
+    Anything unusable reads as None rather than as an error, like every other
+    resolver here: these arrive from strangers editing URLs.
+    """
+    requested = (params.get("source") or "").strip()
+    return requested if source_prefs.is_selection(requested) else None
+
+
 def _resolve_owner_tz(share_row, settings) -> ZoneInfo:
     """The owner's default timezone: their share-specific override if they set
     one, else their account's own saved timezone, else the app-wide default."""
@@ -168,6 +190,14 @@ class ShareView:
     `card_style` and `day_packing` are page layout and mean nothing to the card;
     everything else changes WHICH AIRINGS are in the view and therefore changes
     both.
+
+    `source` IS THE ONE FIELD THAT IS A REQUEST RATHER THAN AN ANSWER, and it
+    says so here so nobody reads it as one. It is the selection this request
+    NAMES, already whitelisted; whether the month is actually narrowed to it is
+    settled by `_narrowed_prefs` inside `_read_month`, because that answer needs
+    the owner's own preference and the instance's admitted set. Carrying the
+    request on the view is still what makes the two surfaces agree: both reach
+    that one decision through this one value.
     """
     year: int
     month: int
@@ -177,6 +207,7 @@ class ShareView:
     network_filter: list[str] | None
     card_style: str
     day_packing: str
+    source: str | None = None
 
     @property
     def month_label(self) -> str:
@@ -205,6 +236,7 @@ def resolve_view(params: _Params, share_row, settings) -> ShareView:
         day_packing=_resolve_choice(
             params.get("packing"), share_row["day_packing"], settings.day_packing, _DAY_PACKINGS,
         ),
+        source=_resolve_source(params),
     )
 
 
@@ -216,7 +248,62 @@ def _not_found(request: Request) -> Response:
     return templates.TemplateResponse(request, "share_not_found.html", {"request": request}, status_code=404)
 
 
-async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item], int | None]:
+def _narrowed_prefs(prefs, view: ShareView, settings):
+    """The owner's source preference, narrowed to the services this request
+    named — or the preference untouched, whenever that narrowing cannot be
+    honoured.
+
+    IT CAN ONLY EVER NARROW, NEVER WIDEN, and that is the whole of how a
+    per-link source sits with the rule that a share page renders the OWNER's
+    source preference. A link is the owner saying "open this one on Simkl", the
+    same kind of statement as "open this one on the premieres calendar" — but
+    the set it picks from is the set their own calendar already shows. Honouring
+    a widening would put back exactly the defect that rule was written to fix:
+    an owner who narrowed their calendar to one service handing strangers a link
+    showing the titles they narrowed out. It is also what makes the value's
+    arrival by query string harmless, and it does arrive that way — a `p=` code
+    expands into the address bar, so `source` is a param a visitor can retype,
+    and the most a retyped one can do is show them a subset of a page they were
+    already being shown.
+
+    THE INTERSECTION IS TAKEN AGAINST BOTH ADMISSIONS, the owner's and the
+    operator's, and the second is what answers "the instance switched that
+    service off after the link went out". The named services simply fall out of
+    the intersection, nothing is left to narrow to, and the month renders on the
+    owner's preference — a link degrading to the default rather than to an error
+    page, which is how an unreadable `p=` and an unknown timezone already behave
+    on these routes. NEVER A REFUSAL AND NEVER AN EMPTY MONTH: narrowing to a
+    service the calendar cannot fill would render a blank page that says nothing
+    about why.
+
+    `auto` names no services at all — it is "whatever there is" — so it is not a
+    narrowing of anything and is left alone here, resolving as the owner's
+    preference does.
+    """
+    named = source_prefs.named_sources(view.source or "")
+    if named is None:
+        return prefs
+    instance = calendar_resolve.instance_sources(settings)
+    surviving = [
+        str(source) for source in Source
+        if str(source) in named
+        and prefs.admits_calendar(source, view.endpoint.key)
+        and (instance is None or str(source) in instance)
+    ]
+    if not surviving:
+        return prefs
+    # The per-endpoint overrides go with it, for the reason the calendar's own
+    # `?source=` clears them: a link that says "open this on Simkl" has to mean
+    # that on the calendar it opens, and a stored override for that endpoint
+    # would quietly win over the thing the link asked for.
+    return dataclasses.replace(
+        prefs, calendar_source=source_prefs.SEPARATOR.join(surviving),
+        endpoint_sources={},
+    )
+
+
+async def _read_month(view: ShareView, settings, owner_prefs,
+                      owner_id: int) -> tuple[list[Item], int | None]:
     """The month a share request is asking for, out of the local cache and only
     the local cache.
 
@@ -227,9 +314,22 @@ async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item
     nobody to ask at all, and reads as an empty month rather than raising.
 
     The prefs come from the OWNER's account rather than from the URL, exactly as
-    they do for the owner's own calendar: genres, countries and certifications
-    are the owner's editorial choices about their calendar, not view options a
-    visitor gets to set.
+    they do for the owner's own calendar: genres, countries, certifications and
+    the films-calendar release narrowing are the owner's editorial choices about
+    their calendar, not view options a visitor gets to set.
+
+    WHICH SERVICES ANSWER IS THE OWNER'S TOO, and it is read HERE rather than by
+    each caller, which is what keeps the count invariant. A share link's page and
+    its preview picture both come through this function, so they cannot resolve a
+    month under different preferences however either of them changes — a card
+    advertising a count the page does not show is exactly the failure a second
+    read of the same fact would produce. Without this the two surfaces admitted
+    every source the stored rows held while the owner's own calendar admitted
+    what they asked for, so a link could show a stranger titles the owner had
+    narrowed their calendar to exclude.
+
+    A LINK MAY NARROW THAT FURTHER — see `_narrowed_prefs`, which is applied here
+    for the same one-place reason the preference is loaded here.
     """
     if not settings.calendar_source_configured:
         return [], None
@@ -238,7 +338,11 @@ async def _read_month(view: ShareView, settings, owner_prefs) -> tuple[list[Item
         genres=owner_prefs["genres"], countries=owner_prefs["countries"],
         show_certifications=owner_prefs["show_certifications"],
         movie_certifications=owner_prefs["movie_certifications"],
-        network_filter=view.network_filter, allow_fetch=False,
+        movie_release_countries=owner_prefs["movie_release_countries"],
+        movie_release_types=owner_prefs["movie_release_types"],
+        network_filter=view.network_filter,
+        prefs=_narrowed_prefs(await source_prefs.load(owner_id), view, settings),
+        allow_fetch=False,
     )
 
 
@@ -342,7 +446,7 @@ async def _render(request: Request, share_row) -> Response:
     # single total for the request cannot tell them apart.
     with span("share.read_month", ym=f"{view.year}-{view.month:02d}",
               endpoint=view.endpoint.key) as sp:
-        items, as_of = await _read_month(view, settings, owner_prefs)
+        items, as_of = await _read_month(view, settings, owner_prefs, owner_id)
         sp.set(items=len(items))
     with span("share.not_watching"):
         nw_ids = await calendar_state.not_watching_ids(owner_id)
@@ -398,6 +502,9 @@ async def _render(request: Request, share_row) -> Response:
         "not_watching": nw_ids,
         "total": len(visible),
         "view": {"card_style": view.card_style, "day_packing": view.day_packing},
+        # Carried through this page's own controls rather than offered by one:
+        # the visitor sets how the month is DRAWN, never which services fill it.
+        "source": view.source,
         "as_of": as_of_label,
         "query_extra": _carry_query(request),
         # The visitor's own view controls. Everything they drive is a GET with
@@ -456,6 +563,12 @@ def _card_view_params(view: ShareView) -> dict[str, str]:
         "hidenw": "1" if view.hide_not_watching else "0",
         "tz": view.tz.key,
     }
+    if view.source:
+        # Pinned like everything else here: the picture must be filled from the
+        # services the page it previews was filled from, and leaving it to be
+        # resolved again from whatever an unfurler happened to fetch is how a
+        # card ends up advertising a count its page does not show.
+        params["source"] = view.source
     if view.network_filter:
         # The one view param the compact code has no field for, which is why
         # share_links.link_query decides between the short and long spellings
@@ -487,6 +600,23 @@ def _card_url(view: ShareView, share_row, base: str) -> str | None:
 # for exactly this many, so resolving more would be work nothing draws — and a
 # thirty-airing August must not become thirty lookups.
 MAX_CARD_TILES = share_card.MAX_TILES
+
+# How far down the ranking a card may look for a title it can actually DRAW.
+#
+# WHY IT IS MORE THAN THE GRID, which is the whole of this number's reason to
+# exist. Selection ranks titles by how strongly they represent the month; a tile
+# also needs ARTWORK, and those are different questions asked at different times.
+# Taking exactly a grid's worth and then dropping whatever had no poster spends a
+# slot on a title that cannot be drawn — so a month with a hundred candidates
+# rendered a strip of six, while titles with artwork on disk sat just below the
+# cut. Measured on a real August: four of the top ten had no poster.
+#
+# IT IS A CEILING, NOT A MULTIPLE OF THE MONTH. The bound that matters is that a
+# busy month must not become a month's worth of lookups, and this is a fixed
+# thirty however many airings there are. What it costs is a stat each for the
+# twenty beyond the grid: only the first grid's worth is ever WARMED (see
+# `_resolve_tiles`), so the outbound work is exactly what it was.
+TILE_CANDIDATES = MAX_CARD_TILES * 3
 
 # A wall clock on resolving artwork, applied ONLY where a request is waiting on
 # the answer. An unfurler gives up in a handful of seconds, and a card that
@@ -670,23 +800,31 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     that decided the title was worth a tile in the first place, rather than a
     second spelling of the same rule. The renderer is handed the answers.
 
+    THE GRID IS FILLED FROM THE RANKING, NOT FROM A SLICE OF IT. Candidates run
+    `TILE_CANDIDATES` deep and the first grid's worth that HAVE artwork are the
+    ones drawn, in ranking order — so a title with no poster costs itself a place
+    rather than costing the card a tile. Only the leading grid's worth is warmed,
+    so this reaches further without asking for more.
+
     THE ORDER THE TILES COME BACK IN IS THE DISPLAY ORDER, not the selection
     order — see `arrange_tiles`. The two are sorted separately and the
     arrangement happens LAST, after the titles with no artwork have dropped out,
     so the dates a reader sees run in order across whatever tiles survived
     rather than across the ones that were hoped for.
     """
-    pairs = _poster_refs(select_tile_items(visible))
+    candidates = _poster_refs(select_tile_items(visible, limit=TILE_CANDIDATES))
+    wanted = candidates[:MAX_CARD_TILES]
     # The one place a card request can wait on the network. `budget` is the wall
     # clock it is allowed — a span at or just under it means the budget FIRED and
     # the card that follows is a tile short on purpose, which is a very different
     # story from the same span reading 30ms.
-    with span("share.warm_posters", refs=len(pairs), budget=budget):
-        await _warm_posters(settings, [ref for _item, ref in pairs], budget=budget)
+    with span("share.warm_posters", refs=len(wanted), budget=budget):
+        await _warm_posters(settings, [ref for _item, ref in wanted], budget=budget)
 
     drawn: list[tuple[share_card.Tile, float | None]] = []
-    complete = True
-    for item, ref in pairs:
+    for item, ref in candidates:
+        if len(drawn) >= MAX_CARD_TILES:
+            break
         path = posters.cached_poster(*ref)
         if path is not None:
             drawn.append((share_card.Tile(
@@ -694,9 +832,14 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
                 date_label=_tile_date_label(item),
                 is_premiere=tile_tier(item) == _TIER_SERIES_PREMIERE,
             ), _air_moment(item)))
-        elif not posters.is_negative(*ref):
-            complete = False
-    return arrange_tiles(drawn), complete
+    # A FULL GRID IS SETTLED whatever is still resolving behind it: the card is
+    # already the best this month can look, and holding the cache open for a
+    # poster that would only displace an equally good tile would re-render it on
+    # every crawl for nothing. Short of full, anything still on its way is a
+    # reason to render again later — which is what makes a thin card heal.
+    pending = any(posters.cached_poster(*ref) is None and not posters.is_negative(*ref)
+                  for _item, ref in wanted)
+    return arrange_tiles(drawn), len(drawn) >= MAX_CARD_TILES or not pending
 
 
 def _avatar_bytes(owner_id: int) -> bytes | None:
@@ -728,7 +871,7 @@ async def assemble_card(view: ShareView, share_row, settings, *,
     owner_prefs = await auth.get_user_prefs(owner_id)
     with span("card.read_month", ym=f"{view.year}-{view.month:02d}",
               endpoint=view.endpoint.key) as sp:
-        items, _as_of = await _read_month(view, settings, owner_prefs)
+        items, _as_of = await _read_month(view, settings, owner_prefs, owner_id)
         sp.set(items=len(items))
     nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible = _visible_items(items, view, nw_ids)
@@ -888,8 +1031,11 @@ async def share_by_token(request: Request, token: str):
 
 
 # The picture this feature degrades to, and the picture it replaced: the app's
-# static banner, which is also what the register and invite pages advertise.
-STATIC_CARD_URL = "/static/images/tvbanner.png"
+# own social card, which is also what the register and invite pages advertise
+# (app/auth/routes.py builds the same URL). Drawn at the 1200x630 unfurlers
+# expect, so a card that falls back to it is still a wide card rather than a
+# thumbnail.
+STATIC_CARD_URL = "/static/images/distrakkl-social-card-1200x630.png"
 
 # DELIBERATELY NOT THE 90 DAYS THE RENDERED FILE IS KEPT FOR, and the two numbers
 # looking like they should match is exactly why this is worth writing down. The
@@ -973,13 +1119,20 @@ async def share_by_slug(request: Request, slug: str):
 # ---------------------------------------------------------------------------
 # details for a card on a public page — same modal content as the calendar
 # ---------------------------------------------------------------------------
-# CACHE-ONLY, same as the calendar view above: this never calls Trakt. The
-# owner's own calendar views already fetch and cache each show's detail (cast,
-# trailer, episodes);
-# this serves that cache back to visitors. A show the owner has not viewed comes
+# CACHE-ONLY, same as the calendar view above: this never calls a source. The
+# owner's own calendar views already fetch and cache each title's detail (cast,
+# trailer, episodes) and the enrichment drain warms Simkl's catalogue record;
+# this serves that cache back to visitors. A title the owner has not viewed comes
 # back with empty fields and the modal renders around them — no public request
 # ever spends the owner's rate limit. Rate-limited per IP like every other share
 # request; no membership gate is needed because there is no fetch to amplify.
+#
+# WHICH SERVICE ANSWERS IS DECIDED BY THE SAME CODE THE SIGNED-IN ROUTE USES
+# (detail_source), and that shared decision is the point: this modal is
+# documented as showing the same content as the calendar's, and two copies of
+# "who describes this title" would make that stop being true in a way neither
+# page could show on its own. Only the cache_only flag differs, which is exactly
+# the one thing that is genuinely different about a public request.
 
 def _season_param(value) -> int | None:
     try:
@@ -995,12 +1148,16 @@ async def _details(request: Request, share_row) -> Response:
     if share_row is None:
         return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
     media = request.query_params.get("media", "show")
-    trakt_id = (request.query_params.get("id") or "").strip()
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    chosen = detail_source.choose(
+        settings, detail_source.ids_from_query(request.query_params))
+    if chosen is None:
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    source, source_id = chosen
     season = _season_param(request.query_params.get("season"))
-    details = await trakt_detail.fetch_details(settings, media, trakt_id, season, cache_only=True)
-    return JSONResponse({"ok": True, **details})
+    details = await detail_source.fetch(settings, source, media, source_id, season,
+                                        cache_only=True)
+    return JSONResponse({"ok": True, "source": str(source), **details})
 
 
 @guard.get("/s/{token}/details", AuthLevel.PUBLIC)

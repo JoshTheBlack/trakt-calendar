@@ -19,6 +19,7 @@ from pathlib import Path
 from fastapi.templating import Jinja2Templates
 
 from . import assets
+from . import chrome
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
@@ -27,3 +28,12 @@ templates = Jinja2Templates(directory=TEMPLATES_DIR)
 # `assets` is the module itself, so _head.html calls assets.url(assets.STYLESHEET)
 # and there is no second copy of any asset path anywhere in the templates.
 templates.env.globals["assets"] = assets
+
+# A GLOBAL RATHER THAN PART OF chrome.page_context, because the pages that need
+# it most are the ones with no context to speak of: the sign-in screen, the
+# invite-expired page and the error pages all render the name and several of
+# them render before there is a user to build a context from. A global is also
+# what makes it reachable from inside the _head.html MACRO, which receives only
+# its own arguments and would otherwise have to be passed the name by every one
+# of its callers — which is the fifteen-literals problem again, one level up.
+templates.env.globals["product"] = chrome.PRODUCT_NAME

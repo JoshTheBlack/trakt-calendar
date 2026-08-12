@@ -25,6 +25,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
+from .. import chrome
 from .. import db
 from .. import http_pool
 
@@ -43,7 +44,15 @@ AUTH_APP_URL = "https://app.plex.tv/auth"
 
 # Shown to Plex as the name of the thing asking for access. Cosmetic only — it
 # appears on the approval screen and in the user's plex.tv device list.
-PRODUCT = "Trakt New Shows"
+#
+# VERIFIED COSMETIC BEFORE IT WAS RENAMED, because "cosmetic" is a claim about a
+# handshake with somebody else's server. What plex.tv keys a PIN and its resulting
+# token on is X-Plex-Client-Identifier, which this instance persists once (see
+# ensure_client_identifier) and which did NOT change. So an already-linked account
+# keeps working and simply shows a new name in its device list; nothing has to be
+# re-authorized. Taken from app/chrome.py so the product has one name, not a
+# fifteenth literal.
+PRODUCT = chrome.PRODUCT_NAME
 
 CLIENT_IDENTIFIER_META_KEY = "plex_client_identifier"
 
@@ -166,4 +175,7 @@ async def fetch_account(auth_token: str, client_id: str) -> dict:
     if not isinstance(account_id, int):
         raise AccountLookupError("plex.tv /api/v2/user returned no numeric account id.")
     name = payload.get("username") or payload.get("title") or payload.get("email")
-    return {"id": account_id, "name": name}
+    # See the note in app/auth/trakt.py's fetch_account: display-only, never part
+    # of the identity, and checked against a host allowlist before it is fetched.
+    # Measured live: Plex serves `thumb` from plex.tv.
+    return {"id": account_id, "name": name, "avatar": payload.get("thumb")}

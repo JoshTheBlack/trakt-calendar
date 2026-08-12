@@ -18,6 +18,7 @@ import httpx
 from ... import cache
 from ... import http_pool
 from ...config import Settings
+from ..base import SourceUnavailable
 
 logger = logging.getLogger(__name__)
 _perf = logging.getLogger("app.perf")
@@ -25,10 +26,13 @@ _perf = logging.getLogger("app.perf")
 API_BASE = "https://api.trakt.tv"
 
 
-class TraktError(Exception):
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
+class TraktError(SourceUnavailable):
+    """Trakt could not answer.
+
+    Its base is the app-wide "a source could not answer" contract, so a caller
+    reading several sources can degrade whichever one failed without naming this
+    one. Every `except TraktError` already written keeps its exact meaning.
+    """
 
 
 class TraktRateLimitError(TraktError):
@@ -44,21 +48,74 @@ class TraktRateLimitError(TraktError):
     correctly degrades to its stale cached window)."""
 
 
+# The statuses that are about WHO ASKED rather than about WHAT WAS ASKED FOR.
+# Trakt answers 401 for a token it will not accept and 403 for one it accepts but
+# will not honour, and neither is a property of the path that happened to be
+# called first: the same token on any other path gets the same answer. A caller
+# that tolerates ONE call failing — the per-show progress fan-out does, so that a
+# single missing show does not sink a whole re-baseline — must NOT tolerate one of
+# these, because "this show could not be read" and "nothing this token asks for
+# can be read" are different facts with opposite consequences. Tolerating the
+# second once per show tolerates it a hundred and forty-six times and calls the
+# result a read of an empty library, which is how a viewer's stored counts get
+# replaced with "watched nothing".
+CREDENTIAL_STATUSES = (401, 403)
+
+
+def is_credential_failure(error: TraktError) -> bool:
+    """True when this failure says the CREDENTIAL is not usable.
+
+    Lives here because the statuses are Trakt's, and reading them is what this
+    module is for; a caller asks the question rather than comparing numbers of
+    its own, so the answer has one place to change.
+    """
+    return error.status in CREDENTIAL_STATUSES
+
+
 def api_headers(settings: Settings, paginate: bool = True) -> dict:
     """Trakt request headers. `paginate=False` OMITS the X-Pagination-* headers.
 
-    This matters for /sync/watched/shows: sending pagination headers switches it
-    into a PAGINATED, show-level response (100/page) that DROPS the nested
-    seasons[]/episodes[] breakdown we count — which manifested as every watched
-    count coming back 0. Non-paginated, it returns the full watched library WITH
-    seasons in one call."""
+    THERE IS NO CHEAP WHOLE-LIBRARY READ BEHIND `paginate=False`, and this
+    docstring used to claim there was. It said that omitting the pagination
+    headers made /sync/watched/shows return "the full watched library WITH
+    seasons in one call". Measured against the live API, that is false in every
+    variant that could plausibly matter: with the headers and without them, with
+    `extended=full`, with `extended=noseasons`, with `limit=2000` and with
+    `page=1&limit=2000`, the response is the same 250 show-level rows carrying
+    `plays`, `last_watched_at`, `last_updated_at`, `reset_at` and the show — and
+    `seasons[]` on not one of them. The endpoint paginates unconditionally and
+    caps a page at 250. `extended=noseasons` behaving identically to the default
+    is the control that says the seasons are already absent rather than being
+    stripped by something sent here.
+
+    So per-season completion comes from one /shows/{id}/progress/watched call per
+    show and from nothing else (see sync.fetch_watched_map, whose docstring has
+    always been the accurate one, and sync.fetch_play_counts, which is what the
+    show-level rows are actually good for: learning WHICH shows changed).
+
+    What `paginate=False` still does is what its name says — leave the
+    X-Pagination-* request headers off, for the calls that page through query
+    parameters instead or that want the whole response in one piece.
+    """
     headers = {
-        "Authorization": f"Bearer {settings.trakt_access_token}",
         "trakt-api-version": "2",
         "trakt-api-key": settings.trakt_client_id,
         "Content-Type": "application/json",
         "User-Agent": "trakt-new-shows-py/2.0",
     }
+    # THE BEARER IS OMITTED, NOT EMPTIED, WHEN THERE IS NO TOKEN. An empty bearer
+    # is not an anonymous request, it is an invalid one: httpx refuses to send the
+    # literal value "Bearer " and raises `Illegal header value b'Bearer '` before
+    # a socket is opened. That failed EVERY Trakt call for an account with no
+    # token, including the public catalogue lookups in detail.py — a season's
+    # episode list, a title's overview and cast — which authenticate with the
+    # `trakt-api-key` header above (the INSTANCE's client id) and want no bearer
+    # at all. Only the per-person reads under /sync/ need one, and a caller with
+    # no token was never going to get a useful answer out of those anyway; it now
+    # gets Trakt's own 401 instead of a client-side crash.
+    token = settings.trakt_access_token.strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     if paginate:
         headers["X-Pagination-Page"] = "1"
         headers["X-Pagination-Limit"] = str(settings.pagination_limit)

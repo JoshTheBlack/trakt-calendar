@@ -2,6 +2,46 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.0] - 2026-08-12
+
+### What's new
+- ✨ **The app has a name: Distrakkl.** It has been "Trakt New Shows" — and, depending on which page you were looking at, "New Shows" — since it was built. It is one name now, on every page, in the browser tab, on the icon, and on the card that unfurls when you paste a link somewhere. Nothing about how it works changed, and your existing sign-ins, links and connected services all carry on as they were.
+- 🆕 **Simkl is a second source, everywhere Trakt was the only one.** Sign in or register with a Simkl account, link one to the account you already have, and let it fill your calendar alongside Trakt. Setting it up as an instance takes a Simkl client id and secret in Settings — see the README — and none of it is required: an instance that only ever knew about Trakt carries on exactly as it did.
+- 📅 **A calendar built from both services.** Simkl lists titles Trakt does not, so a month can now show more than either service knows about on its own. Where both list the same title you get one card, not two. Simkl's calendar reaches roughly three years back and three months forward; ask for a month outside that and the app says so rather than showing you an empty one and letting you conclude nothing airs then.
+- 🎛️ **A Sources screen, in the menu.** Which services fill your calendar, which ones fill each calendar — one service's film listing is every release everywhere and the other's is a curated few dozen, and you can now want one and not the other — and, when two services describe the same title differently, whose answer you see. Nothing here costs a fetch: it is applied when a page is read, so a change shows up the next time you open your calendar and nothing is re-downloaded to make it happen.
+- 🏷️ **A card two services described says so.** Where they disagree — the poster, the title, the description — a small logo says whose you are looking at, and clicking it shows the other. Ratings, runtimes, networks and statuses show both side by side instead, each with the service that reported it; they are never averaged, because two audiences produce two real numbers and the middle is one nobody gave. A card both services describe offers a button to each of their pages.
+- 🎚️ **Switch a calendar's sources without leaving it.** A control in the calendar's own header moves this view between your saved answer, every service, and one service on its own. It applies to the page you are looking at and saves nothing — your real preference stays where you set it, on the Sources screen — and it only appears where there is actually a choice to make.
+- 🔗 **A share link can say which services fill it.** Tick the services you want a link built from and it opens that way for everybody who has it, preview card included. Tick none and it goes on opening on whatever your own calendar shows. It only ever narrows that, never widens it, and if a service you ticked is later switched off the link quietly opens on your usual sources instead of breaking. Links you have already handed out are unaffected.
+- 🎞️ **Titles only one service carries open like any other.** They used to refuse — you got an apology instead of a description. They now show that service's overview, ratings, episode list and trailer where it has one. There is no cast on those, because the service does not publish one, and the section is left out rather than left empty. Shared calendars open them too.
+
+### Look and feel
+- 🎨 **New artwork throughout.** A mark in the header, a proper wordmark on the sign-in and invite pages instead of the old squashed square, sharp favicons at both sizes, and a real 1200x630 preview card — so a shared link or an invite unfurls as a wide card rather than a thumbnail. The intermission page you land on at a dead end wears the wordmark too, drained of colour to match the rest of that page.
+
+### Changed
+- 📡 **The calendar no longer depends on which services you have connected.** It used to show only the services your account was linked to, so connecting one could make the other's listings disappear even though the app fetches those listings with its own credentials. Your calendar now shows everything the instance can fetch, and connecting an account changes only what it reads about *you*.
+- 🗓️ **A month is fetched once for everybody and filtered as it is read.** Whoever opened a month first used to decide which services were fetched for everyone after them, and their filters could narrow what the next person saw. The stored month now holds everything every service answered with, and your own choices are applied when your page is drawn — so two people can read the same month differently without either affecting the other.
+
+### Fixed
+- 🎬 **A film shows on the day it was released.** Anywhere west of UTC a film was drawn a day early, and one released on the 1st fell into the previous month entirely — so it was not just on the wrong day, it was on the wrong page. Release dates are dates now, not moments, and everyone sees a film on the date the studio published whatever their timezone.
+- 🎬 **Film filters judge every film they are given.** Narrowing your films calendar to a country or a release format quietly skipped films it had no answer for and kept them regardless. It now asks Trakt directly where a film is released rather than inferring it from where it was made, and judges each film on the records that can answer.
+- 🔗 **A shared calendar keeps working for months, not hours.** A share link shows whatever the app has already downloaded and never fetches anything itself, so once the pages behind it were cleaned up the link opened on an empty month. They are now kept long enough to outlive the month they describe.
+- 🖼️ **A shared link's preview picture fills its whole strip.** It drew a short row whenever the month's leading titles had no artwork yet, instead of moving on to the next title that did.
+
+### Under the hood
+- 🔑 **Signing in with one service is enough.** Several corners of the app still asked whether you had connected Trakt specifically before they would do something that never needed it — reading a calendar, looking a title up, building a month. They ask whether the thing they need is available now.
+- 🧩 **One sign-in path for every service.** Trakt, Plex and Simkl all complete a sign-in, a registration and a link through the same code, so the rules about who may register, what happens to a disabled account, and what a already-linked identity does are stated once rather than three times.
+
+### 🥚
+- There are two of them in the room now, and it does not make them agree. Where both saw the same thing it says so once; where they differ you get both accounts, each with a name against it. Neither of them is lying — one was simply there for something the other missed.
+- When one cannot be raised, the other is not asked to speak for it. You get what could be heard, and a note of who was quiet, rather than a tidy number with a hole in the middle of it.
+- A month that closed while the two of them were still disagreeing does not pick a winner. It sets down what each of them said, and can still tell you years from now.
+- Reaching the end of something used to make it go quiet about how much of it you saw, and close the door behind it. It keeps the count now, and the door opens.
+- When neither of them will vouch any more for something you had finished, it says which one changed its mind and what it had been told before, then leaves it with you. It asks once, and does not bring it up again.
+- It notices things being taken back, not only added. The count follows you down as readily as it followed you up — without being asked, and without making an ordinary evening cost more.
+- The ticks were being kept by one of them and shown from the other. They are everything either one saw now, and where the two differ the list says who was watching.
+- Asked to think again, it goes and looks, rather than reading its own notes back to itself.
+- It had been asking everyone for one particular introduction before it would do anything for them. It was a door it never uses.
+
 ## 🏷️ [1.1.7] - 2026-08-03
 
 ### Fixed

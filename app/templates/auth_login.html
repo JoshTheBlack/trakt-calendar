@@ -2,7 +2,7 @@
 <html lang="en">
 {% import '_head.html' as page with context %}
 {% call page.head('Sign in', scripts=assets.scripts('sign-in'), nav_head=false) %}
-  {{ page.og('Trakt New Shows', "Track new episode premieres for the shows you're watching.") }}
+  {{ page.og(product, "Track new episode premieres for the shows you're watching.") }}
 {% endcall %}
 {%- set body_class %}auth-page{% endset %}
 <body class="{{ body_class }}" hx-boost="true">
@@ -13,7 +13,7 @@
    survive a Back, which htmx serves from its own cache with no request at all. #}
 <div id="pageMeta" hidden data-page="sign-in" data-body-class="{{ body_class }}"></div>
 <div class="auth-shell">
-  <img class="auth-logo" src="/static/images/trakttop.png" alt="Trakt New Shows">
+  <img class="auth-logo" src="/static/images/distrakkl-wordmark.svg" alt="{{ product }}">
   <div class="auth-card">
     <h1>Sign in</h1>
 
@@ -42,6 +42,12 @@
       <a class="auth-provider-btn ready" href="/auth/trakt/start" hx-boost="false">Continue with Trakt</a>
       {% else %}
       <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Trakt client ID, client secret, and public base URL in Settings">Continue with Trakt <span class="soon">Off</span></button>
+      {% endif %}
+      {% if simkl_login_configured %}
+      {# Leaves the app for the same reason the Trakt link above does. #}
+      <a class="auth-provider-btn ready" href="/auth/simkl/start" hx-boost="false">Continue with Simkl</a>
+      {% else %}
+      <button type="button" class="auth-provider-btn" disabled title="An administrator has to add the Simkl client ID, client secret, and public base URL in Settings">Continue with Simkl <span class="soon">Off</span></button>
       {% endif %}
       <button type="button" class="auth-provider-btn ready" id="plexBtn">Continue with Plex</button>
     </div>

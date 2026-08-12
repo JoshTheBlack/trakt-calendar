@@ -50,6 +50,53 @@ _db_counter = itertools.count(1)
 PRODUCTION_HASHER = None
 
 
+def calendar_records(entries, endpoint):
+    """Raw calendar entries, as the Records a source hands the cache.
+
+    The calendar cache stores each source's NORMALIZED record, so a test that
+    wants "these shows air in this window" has to say it in records. Fixtures
+    stay written as the payload a real source returns — that is what makes them
+    checkable against a captured response — and this is the one place they are
+    turned into what the cache actually sees.
+    """
+    from app.providers.trakt import calendar as trakt_calendar
+    return [r for r in (trakt_calendar.to_record(e, endpoint) for e in entries)
+            if r is not None]
+
+
+def window_fetch(entries):
+    """A stand-in for app.calendar.cache.fetch_window_records.
+
+    `entries` is either the raw entries every window should answer with, or a
+    callable (endpoint, start) -> raw entries for a test that wants one window to
+    differ from another. The answer names EVERY SOURCE THAT COULD HAVE ANSWERED
+    THIS ENDPOINT as having replied — `trakt` always, and `simkl` for the four
+    endpoints its calendar covers — because that is what a real fill against two
+    registered sources returns, and because the caller records who it ASKED
+    independently: a stub answering for fewer sources than are in play stores a
+    window that was asked-but-silent, and the read path then marks the span
+    partial. A test exercising a genuinely partial fetch (one source refused)
+    wants that, and builds its own stub instead of this one.
+
+    Patching HERE rather than at the transport keeps the floor filter and the
+    window trim out of the way, which is what a test about the read path wants;
+    a test about the fill itself patches the client instead and gets both.
+
+    Every record it hands back is attributed to `trakt`, which is what makes a
+    span read the same whichever sources answered; a test about per-viewer source
+    selection needs records from two services and builds them itself.
+    """
+    async def fetch(endpoint, settings, start):
+        from app.providers.simkl import _SimklProvider
+
+        rows = entries(endpoint, start) if callable(entries) else entries
+        sources = ["trakt"]
+        if _SimklProvider.capabilities.answers(endpoint.key):
+            sources.append("simkl")
+        return calendar_records(rows, endpoint), sources
+    return fetch
+
+
 def new_db_path(prefix: str = "test") -> Path:
     """Point app.db at a database no other test is using, and return its path.
 

@@ -1,10 +1,10 @@
 """Unit tests for the calendar-source seam (app/providers).
 
-Covers the four things the seam actually promises: that an Item carries its
+Covers the four things the seam actually promises: that a Record carries its
 provenance as source/ids/detail_url rather than one service's ids hoisted to the
 top level; that a provider forgetting a field fails at construction rather than
 rendering a blank card; that Capabilities answers "can this source do that"; and
-that the registry resolves the configured calendar source without any caller
+that the registry resolves the configured calendar sources without any caller
 naming one.
 
 Also pins the endpoint-key -> provider-path translation, which is the boundary
@@ -15,6 +15,7 @@ No network — the one normalizer test runs on a literal Trakt calendar entry.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from datetime import date
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
@@ -25,6 +26,7 @@ from app import providers
 from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.endpoints import ENDPOINTS, get_endpoint
+from app.sources import prefs
 from app.providers.base import (
     Capabilities,
     Item,
@@ -64,29 +66,36 @@ class TestCollectIds:
         assert ids == {"trakt": 1}
 
 
-class TestNormalizeProducesAnItem:
+class TestNormalizeProducesARecord:
     def test_provenance_is_source_ids_and_detail_url(self):
-        item = trakt_calendar.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
-        assert item.source == Source.TRAKT
-        assert item.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
-                            "tmdb": 789, "imdb": "tt42"}
-        assert item.detail_url == "https://trakt.tv/shows/a-show"
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.source == Source.TRAKT
+        assert record.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
+                              "tmdb": 789, "imdb": "tt42"}
+        assert record.detail_url == "https://trakt.tv/shows/a-show"
 
     def test_a_movie_gets_the_movies_detail_url(self):
         """The two media types live under different paths on Trakt, and a show
         URL for a movie 404s rather than failing visibly here."""
         entry = {"released": "2026-07-15",
                  "movie": {"title": "A Film", "ids": {"slug": "a-film", "trakt": 9}}}
-        item = trakt_calendar.normalize(entry, MOVIES, ZoneInfo("UTC"))
-        assert item.detail_url == "https://trakt.tv/movies/a-film"
+        record = trakt_calendar.to_record(entry, MOVIES)
+        assert record.detail_url == "https://trakt.tv/movies/a-film"
 
     def test_media_is_the_enum_and_still_equals_its_string(self):
         """Templates, DB columns and the response keys all hold the plain
         string; the enum has to stay interchangeable with it or every one of
         those boundaries grows a conversion."""
-        item = trakt_calendar.normalize(ENTRY, SHOWS, ZoneInfo("UTC"))
-        assert item.media is Media.SHOW
-        assert item.media == "show"
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.media is Media.SHOW
+        assert record.media == "show"
+
+    def test_a_record_carries_no_viewer_local_spelling_of_its_air_time(self):
+        """The whole reason the cache can be shared: a record says WHEN in POSIX
+        seconds and nothing else, so one stored copy serves every timezone."""
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.air_ts == 1784145600.0
+        assert not hasattr(record, "air_date")
 
     def test_an_item_missing_a_required_field_raises_at_construction(self):
         """THE REASON THIS IS A DATACLASS. A provider that forgets to say when
@@ -128,12 +137,100 @@ class TestRegistry:
         assert provider.capabilities.endpoints == frozenset(ENDPOINTS)
         assert provider.capabilities.private_user_data
 
-    def test_for_calendar_returns_none_until_a_source_is_configured(self):
-        assert providers.for_calendar(Settings()) is None
+    def test_no_usable_calendar_source_until_one_is_configured(self):
+        assert providers.for_calendar_sources(Settings()) == []
 
-    def test_for_calendar_finds_the_configured_source(self):
+    def test_the_configured_source_is_the_usable_one(self):
         configured = Settings(trakt_client_id="id", trakt_access_token="token")
-        assert providers.for_calendar(configured).source == Source.TRAKT
+        assert [p.source for p in providers.for_calendar_sources(configured)] == [Source.TRAKT]
+
+    def test_a_source_that_could_answer_is_listed_whether_or_not_it_is_set_up(self):
+        """The two questions are different and both are asked. "Who could put
+        something on a calendar" is a property of the SOURCE and decides who the
+        fill asks; "who can we actually use" adds the credentials and is what the
+        page checks before it renders an explanation instead of a month. Simkl's
+        calendar needs no credential at all, so it is listed here with NO
+        Settings object in play whatsoever — calendar_sources() takes none."""
+        assert {p.source for p in providers.calendar_sources()} == {Source.TRAKT, Source.SIMKL}
+
+    def test_a_source_with_no_calendar_port_would_be_in_neither_list(self):
+        """The negative half of the rule above, pinned against whichever source
+        genuinely carries no calendar_port today — asserted through the
+        registry rather than by name, so this does not silently stop meaning
+        anything the day every registered source has one."""
+        no_calendar = [p for p in providers.registered().values() if p.calendar_port is None]
+        for provider in no_calendar:
+            assert provider.source not in [p.source for p in providers.calendar_sources()]
+
+    def test_simkl_is_a_usable_calendar_source_once_its_own_credential_is_set(self):
+        """`for_calendar_sources` narrows to `is_configured`, which for Simkl
+        still asks the TRACKER's credential (client id + access token) even
+        though the calendar CDN itself needs neither. `is_configured` answers
+        for the whole source rather than per capability, so linking Simkl for
+        the tracker is what makes its calendar count as "usable" here too."""
+        both = Settings(trakt_client_id="id", trakt_access_token="token",
+                        simkl_client_id="id", simkl_access_token="token")
+        assert {p.source for p in providers.for_calendar_sources(both)} == {Source.TRAKT, Source.SIMKL}
+
+    def test_an_unconfigured_simkl_is_still_asked_by_the_fill_but_not_usable_yet(self):
+        """The fill (`calendar_sources`) does not ask `is_configured` at all —
+        so Simkl is admitted to the fill regardless; `for_calendar_sources`
+        is the narrower, credential-checked list a route uses to decide whether
+        there is anybody to explain the calendar with."""
+        trakt_only = Settings(trakt_client_id="id", trakt_access_token="token")
+        assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
+        assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(trakt_only)]
+
+    def test_an_accounts_auto_asks_every_source_the_instance_can_fill_from(self):
+        """The fill is instance-credentialed, so an account's links have no say
+        in it: `calendar_sources` takes no linked set, and `auto` therefore
+        cannot come out narrower for somebody who linked one service than for a
+        share-link visitor who is nobody at all."""
+        auto = prefs.SourcePrefs(user_id=1, calendar_source=prefs.AUTO)
+        assert ({p.source for p in providers.calendar_sources(prefs=auto)}
+                == {p.source for p in providers.calendar_sources()})
+
+    def test_a_stated_selection_still_narrows_the_fill(self):
+        named = prefs.SourcePrefs(user_id=1, calendar_source="simkl")
+        assert [p.source for p in providers.calendar_sources(prefs=named)] == [Source.SIMKL]
+
+    def test_default_settings_still_admits_unconfigured_simkl(self):
+        """simkl_public_calendar_enabled defaults True, so passing a Settings
+        object at all — which no caller did before this switch existed — must
+        not itself change who is asked. An instance that has touched nothing
+        about Simkl keeps reading its calendar exactly as before."""
+        assert Source.SIMKL in [
+            p.source for p in providers.calendar_sources(settings=Settings())]
+
+    def test_switching_it_off_drops_unconfigured_simkl_from_the_fill(self):
+        off = Settings(simkl_public_calendar_enabled=False)
+        sources = {p.source for p in providers.calendar_sources(settings=off)}
+        assert sources == {Source.TRAKT}
+
+    def test_switching_it_off_drops_a_configured_simkl_too(self):
+        """The switch answers exactly one question — does Simkl contribute to
+        this instance's calendar — and it is not conditioned on credentials.
+        It used to apply only while Simkl was unconfigured, which was very
+        nearly always the case (nothing about the calendar needs an
+        instance-level Simkl token) and left the rare operator who HAD set one
+        with a switch they could not use."""
+        configured_off = Settings(
+            simkl_client_id="id", simkl_access_token="token",
+            simkl_public_calendar_enabled=False)
+        assert Source.SIMKL not in [
+            p.source for p in providers.calendar_sources(settings=configured_off)]
+
+    def test_a_configured_simkl_is_still_admitted_with_the_switch_on(self):
+        """Default-on is what every existing instance has, configured or not."""
+        configured_on = Settings(simkl_client_id="id", simkl_access_token="token")
+        assert Source.SIMKL in [
+            p.source for p in providers.calendar_sources(settings=configured_on)]
+
+    def test_no_settings_at_all_behaves_like_the_switch_being_on(self):
+        """The pre-existing, no-argument call every untouched caller still
+        makes must keep admitting Simkl — the switch can only ever narrow a
+        caller that was updated to pass a Settings object."""
+        assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
 
     def test_registered_hands_back_a_copy(self):
         """A caller iterating the registry must not be able to empty it."""
@@ -203,14 +300,66 @@ class TestIdentityWaterfall:
             parse_item_key(bad)
 
 
+# A preference that admits everything, the set of every service name, and a
+# Settings carrying a usable credential for both — the three arguments the
+# selector takes, spelled once because most of these tests vary exactly one of
+# them.
+_ALL_SOURCES = prefs.SourcePrefs(user_id=1, tracker_source=prefs.BOTH)
+_ALL_NAMES = frozenset(str(source) for source in providers.Source)
+_CONFIGURED = Settings(trakt_client_id="c", trakt_access_token="t",
+                       simkl_client_id="c", simkl_access_token="t")
+
+
 class TestTrackerPort:
     """The registry answering "who can read one person's own viewing", so the
     tracker never has to name a service."""
 
-    def test_it_finds_the_source_that_reaches_private_data(self):
-        port = providers.for_tracker()
-        assert port is not None
-        assert port is providers.get(Source.TRAKT).sync_port
+    def test_it_finds_every_source_that_reaches_private_data(self):
+        ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, _CONFIGURED)
+        assert [source for source, _p in ports] == [Source.TRAKT, Source.SIMKL]
+        assert ports[0][1] is providers.get(Source.TRAKT).sync_port
+
+    def test_the_primary_source_is_the_first_declared_one(self):
+        """The order is the registry's, and the FIRST entry is what a frozen
+        month and the announcement post carry when there is room for one number.
+        Trakt leads because every existing instance already reads it."""
+        ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, _CONFIGURED)
+        assert ports[0][0] is Source.TRAKT
+
+    def test_a_preference_naming_one_source_admits_only_that_one(self):
+        ports = providers.for_tracker_ports(
+            prefs.SourcePrefs(user_id=1, tracker_source=str(Source.SIMKL)),
+            _ALL_NAMES, _CONFIGURED)
+        assert [source for source, _p in ports] == [Source.SIMKL]
+
+    def test_auto_follows_the_links(self):
+        """`auto` is the default and asks whatever the account has connected, so
+        an account with one service is on exactly the path it always was."""
+        ports = providers.for_tracker_ports(
+            prefs.SourcePrefs(user_id=1), {str(Source.TRAKT)}, _CONFIGURED)
+        assert [source for source, _p in ports] == [Source.TRAKT]
+
+    def test_an_unconfigured_source_is_never_asked(self):
+        """Admitted by the preference and linked, but with no credential on this
+        request's settings, is not something to call — see _distrakt_settings,
+        which is what puts an account's own tokens there."""
+        ports = providers.for_tracker_ports(
+            _ALL_SOURCES, _ALL_NAMES, Settings(trakt_client_id="c", trakt_access_token="t"))
+        assert [source for source, _p in ports] == [Source.TRAKT]
+
+    def test_the_calendar_switch_is_not_a_gate_on_the_tracker(self):
+        """simkl_public_calendar_enabled governs exactly one thing — whether
+        Simkl contributes to the CALENDAR. Reading somebody's own Simkl viewing
+        is a different question answered by their own credential, and turning
+        the calendar off must not take their watch history with it."""
+        for enabled in (True, False):
+            settings = dataclasses.replace(
+                _CONFIGURED, simkl_public_calendar_enabled=enabled)
+            ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, settings)
+            assert [source for source, _p in ports] == [Source.TRAKT, Source.SIMKL]
+
+    def test_tracker_sources_names_who_could_back_it_at_all(self):
+        assert providers.tracker_sources() == {str(Source.TRAKT), str(Source.SIMKL)}
 
     def test_only_a_source_that_declares_private_data_can_back_the_tracker(self):
         for provider in providers.registered().values():
@@ -218,7 +367,7 @@ class TestTrackerPort:
                 assert provider.capabilities.private_user_data
 
     def test_the_port_answers_every_question_the_protocol_names(self):
-        port = providers.for_tracker()
+        port = providers.get(Source.TRAKT).sync_port
         for name in ("fetch_last_activities", "fetch_history", "fetch_progress_details",
                      "fetch_watched_progress", "watched_progress_from", "movie_plays_from"):
             assert callable(getattr(port, name))
@@ -229,7 +378,7 @@ class TestTrackerPort:
         longer reach, and the test then exercises the real call. Asserted directly
         because a port that quietly stopped being patchable would show up as live
         provider traffic, not as a failure."""
-        port = providers.for_tracker()
+        port = providers.get(Source.TRAKT).sync_port
         with patch("app.providers.trakt.sync.fetch_last_activities",
                    new=AsyncMock(return_value={"episodes": {"watched_at": "T"}})) as spy:
             answer = asyncio.run(port.fetch_last_activities(Settings()))

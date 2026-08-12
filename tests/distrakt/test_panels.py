@@ -177,9 +177,14 @@ class ImportingAMonthTests(TrackerPanelTestCase):
     """
 
     def make_settings(self):
-        # The route refuses outright without Trakt credentials, so the instance
-        # has to carry a client id for the month rule to be what is under test.
-        return Settings(public_base_url=ORIGIN, trakt_client_id="cid")
+        # The route refuses outright when the INSTANCE has no calendar to import
+        # from, so it carries a working credential here for the month rule to be
+        # what is under test. It used to be enough to carry a client id and let
+        # the signed-in viewer's own token do the fetching — which is exactly the
+        # coupling that refused the button to somebody signed in with Simkl
+        # alone, and the calendar page itself has never accepted that shape.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        trakt_access_token="instance-token")
 
     def setUp(self):
         super().setUp()

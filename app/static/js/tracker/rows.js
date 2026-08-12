@@ -37,9 +37,10 @@ const byPremiere = (a, b) => (premiereKey(a) - premiereKey(b)) || byTitle(a, b);
 // is not part of the month; it is a question, and a question buried under six
 // headings is a question nobody answers.
 //
-// TWO QUESTIONS SHARE ONE ROW because they read the same way and are answered the
-// same way; only the sentence and what ✓ does differ. Saying no is one statement
-// either way — do not put this on my list — so both send the same dismissal.
+// THREE QUESTIONS SHARE ONE ROW because they read the same way and are answered
+// the same way; only the sentence and what ✓ does differ. Saying no is one
+// statement whichever it was — do not put this season on my list, stop asking —
+// so all three send the same dismissal.
 //
 // The title and the ids travel on the row's dataset rather than through the
 // onclick attribute, for the reason deleteFilm already documents: a show called
@@ -56,17 +57,30 @@ const ASK_KINDS = {
         yesTitle: 'Put this season back on your list',
         yes: 'resumeGivenUpSeason',
     },
+    // The odd one out: it is not raised by a play, so there is no episode to name
+    // and the sentence is the SERVER's. What raised it is a comparison between
+    // what the month wrote down and what the services say now, and only the server
+    // holds both halves — a sentence assembled here would be a second opinion
+    // about numbers it would have to re-derive to state.
+    unbacked: {
+        yesTitle: 'Work this season out again from what the services say now',
+        yes: 'readdSettledSeason',
+    },
 };
 
 function askRow(u, kind) {
     const ask = ASK_KINDS[kind];
-    const ep = `S${String(u.season).padStart(2, '0')}E${String(u.number).padStart(2, '0')}`;
-    const label = `${u.title || 'Something'} ${ep}`;
     const args = `'${esc(u.key)}', ${u.season}, this`;
+    const season = `S${String(u.season).padStart(2, '0')}`;
+    // A question a PLAY raised names the episode that raised it; one raised by a
+    // settled row names the season and carries the server's own explanation.
+    const text = u.note
+        ? `<strong>${esc(`${u.title || 'Something'} ${season}`)}</strong> — ${esc(u.note)}`
+        : `You watched <strong>${esc(`${u.title || 'Something'} ${season}E${String(u.number).padStart(2, '0')}`)}</strong>. ${esc(ask.sentence)}`;
     return `
         <div class="distrakt-unknown-row" data-key="${esc(u.key)}" data-season="${u.season}"
              data-title="${esc(u.title || '')}" data-ids="${esc(JSON.stringify(u.ids || {}))}">
-            <span class="distrakt-unknown-text">You watched <strong>${esc(label)}</strong>. ${esc(ask.sentence)}</span>
+            <span class="distrakt-unknown-text">${text}</span>
             <span class="distrakt-row-actions">
                 <button type="button" class="btn-ghost small" title="${esc(ask.yesTitle)}"
                         onclick="${ask.yes}(${args})">✓</button>
@@ -77,16 +91,19 @@ function askRow(u, kind) {
 }
 
 // The ones nothing knows about first: a title the tracker has never heard of is a
-// bigger gap than one it holds a verdict on.
-function renderAsks(unknown, givenUp) {
+// bigger gap than one it holds a verdict on, and a verdict that has lost its
+// backing is the smallest of the three — the row it is about is on the page just
+// below, saying exactly what it has always said.
+function renderAsks(unknown, givenUp, unbacked) {
     return (unknown || []).map(u => askRow(u, 'unknown')).join('')
-        + (givenUp || []).map(u => askRow(u, 'givenUp')).join('');
+        + (givenUp || []).map(u => askRow(u, 'givenUp')).join('')
+        + (unbacked || []).map(u => askRow(u, 'unbacked')).join('');
 }
 
-function renderShowList(shows, movies, emptyNote, unknown, givenUp) {
+function renderShowList(shows, movies, emptyNote, unknown, givenUp, unbacked) {
     const host = document.getElementById('distraktShowList');
     const films = movies || [];
-    const asks = renderAsks(unknown, givenUp);
+    const asks = renderAsks(unknown, givenUp, unbacked);
     if (!shows.length && !films.length) {
         // The questions still stand on an otherwise empty month: they come from
         // viewing, not from anything the month holds.
@@ -171,8 +188,22 @@ function returnMark(s) {
 
 function showRow(s) {
     const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
-    let counts = isNewRet ? `${s.watched}/${s.total}${s.cadence ? ', ' + s.cadence : ''}`
-        : (s.bucket === 'completed') ? '' : `${s.watched}/${s.total}`;
+    // The x/y comes from the server already written out, because when two
+    // accounts report different numbers for a season the row shows BOTH, each
+    // labelled — and that rule is the same one a closed month is written with, so
+    // it has one home rather than a copy here that could disagree with it.
+    const xy = s.counts || `${s.watched}/${s.total}`;
+    // EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED. A completed row used to
+    // draw nothing here, on the reasoning that "finished" already says x equals y
+    // — which is true only while one service is answering. With two, a season
+    // lands in Completed on the PRIMARY service's number, and the other may still
+    // be part-way through it; a blank cell then reads as both of them agreeing the
+    // season is done, which is a claim neither of them made. The string is the
+    // server's (app/distrakt/counts.py), so a row where they disagree arrives here
+    // already carrying both numbers, each named, and drawing it is all that is
+    // left to do. The announcement post deliberately does NOT follow: it is prose
+    // rather than a ledger and carries one number or none (app/distrakt/live.py).
+    let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}` : xy;
     // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;
@@ -186,7 +217,20 @@ function showRow(s) {
     // were settled when it froze and are not up for re-deciding now.
     const remove = `
             <button type="button" class="btn-ghost small danger" onclick="deleteShow('${esc(s.key)}', ${s.season}, event, '${esc(s.added_by || '')}')" title="${monthClosed ? 'Remove from this month' : 'Remove from tracker'}">✕</button>`;
-    const actions = monthClosed ? remove : `
+    // A COMPLETED ROW OFFERS NO ABANDON EITHER, and that is not a tidying-up. You
+    // cannot give up on something you have finished, so the control was offering a
+    // move that has no meaning — and it could never have worked on one: the abandon
+    // route searches the way a watch-history reconciliation searches, and that
+    // search deliberately steps over a verdict the month under way has already
+    // reached, so pressing it answered 404 with nothing to explain why. Widening
+    // the search is the repair that must NOT be made — it would find the completed
+    // record, fail to migrate it (it is on no list) and file an abandoned record
+    // BESIDE it, putting one season on this page twice under two headings. So the
+    // control goes and the route's refusal stays, as the backstop for a direct
+    // call. Un-abandoning is untouched: that one is offered on an abandoned row,
+    // which is a different bucket and a real move.
+    const abandonable = !monthClosed && s.bucket !== 'completed';
+    const actions = !abandonable ? remove : `
             <button type="button" class="btn-ghost small" onclick="toggleAbandon('${esc(s.key)}', ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>` + remove;
     const net = s.network || '';
     // Prefer the TMDB network logo (shared cache with the calendar); if it isn't

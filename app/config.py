@@ -75,9 +75,9 @@ DEFAULT_MOVIE_CERTIFICATIONS = ""
 # either a bearer token or a key that grants access to somebody's account, so a
 # route that returned them would hand the whole instance to whoever asked.
 #
-# `trakt_client_id` is deliberately NOT in this set: it is a public OAuth client
-# identifier that ends up in the browser during authorization anyway, and the
-# Settings screen needs to show it.
+# `trakt_client_id` and `simkl_client_id` are deliberately NOT in this set: a
+# client id is a public OAuth identifier that ends up in the browser during
+# authorization anyway, and the Settings screen needs to show it.
 #
 # ADDING A SETTING? If it holds a secret, add it here. A test fails on any
 # string field whose NAME looks like a credential but is missing from this set.
@@ -85,6 +85,8 @@ SECRET_FIELDS = frozenset({
     "trakt_client_secret",
     "trakt_access_token",
     "trakt_refresh_token",
+    "simkl_client_secret",
+    "simkl_access_token",
     "sonarr_api_key",
     "radarr_api_key",
     "seer_api_key",
@@ -106,6 +108,42 @@ class Settings:
     trakt_access_token: str = ""
     trakt_refresh_token: str = ""
     trakt_token_expires_at: int = 0  # unix timestamp; 0 = unknown/never obtained via OAuth
+    simkl_client_id: str = ""
+    simkl_client_secret: str = ""
+    simkl_access_token: str = ""
+    # NO simkl_refresh_token AND NO simkl_token_expires_at, and their absence is
+    # a fact about Simkl rather than an omission: its token exchange issues no
+    # refresh token and the access token stays valid until the user revokes the
+    # application. There is nothing to put in either field, and a refresh path
+    # built on one would silently do nothing. A 401 from Simkl means the link has
+    # to be made again.
+    #
+    # WHETHER SIMKL CONTRIBUTES TO THIS INSTANCE'S CALENDAR AT ALL. ON BY
+    # DEFAULT, which is exactly the behaviour every existing instance already
+    # has: Simkl's calendar files sit on a public CDN and need no client id or
+    # token, so the fill has always asked them regardless of whether this
+    # instance ever touches the three credential fields above (see
+    # providers.calendar_sources, which is where this is applied). This is the
+    # operator's lever to say no — reasonable on self-hosted software even when
+    # the traffic is harmless, because "harmless" is the app's judgement and not
+    # necessarily theirs.
+    #
+    # IT APPLIES WHETHER OR NOT SIMKL IS CONFIGURED. It once applied only to an
+    # instance with no Simkl credentials, and that qualifier was very nearly
+    # always true and so said nothing: nothing this app does with the calendar
+    # needs an instance-level Simkl token, so almost no instance ever has one,
+    # while the rare operator who does was left unable to turn Simkl's calendar
+    # off at all.
+    #
+    # THE FIELD NAME KEEPS ITS OLD SPELLING even though the label no longer says
+    # "public": it is the key this value is stored under in app_settings, and
+    # renaming it would orphan every choice an operator has already made and
+    # silently reset it to the default.
+    #
+    # IT IS NOT A GATE ON THE TRACKER. Reading somebody's Simkl watch history is
+    # a separate question answered by their own linked identity; a calendar that
+    # needs no credential is not withheld over an unrelated one.
+    simkl_public_calendar_enabled: bool = True
     timezone: str = "Europe/Athens"
     endpoint: str = "shows/new"
     genres: str = DEFAULT_GENRES
@@ -288,8 +326,33 @@ class Settings:
         stop being the same statement the moment there is a second source, and
         the calendar route in particular wants the other question — see
         calendar_source_configured.
+
+        THIS IS THE PRIVATE QUESTION and it is deliberately the narrower of the
+        pair: it means "this request can read or write somebody's own Trakt
+        data". A gate in front of a PUBLIC catalogue read wants
+        trakt_catalogue_configured instead, or losing one person's token
+        disables data that never depended on it.
         """
         return bool(self.trakt_client_id.strip() and self.trakt_access_token.strip())
+
+    @property
+    def trakt_catalogue_configured(self) -> bool:
+        """Whether this instance can make PUBLIC Trakt catalogue reads.
+
+        Trakt's public endpoints — a title's summary, its cast, a season's
+        episode list, /search — authenticate with the `trakt-api-key` header
+        alone, which carries the INSTANCE's client id. Only the per-person reads
+        under /sync/ take a bearer. So the answer to "can we look a title up" is
+        the client id and nothing else, and asking trakt_configured in front of
+        one of those reads asks whether a PARTICULAR VIEWER linked Trakt — which
+        made an instance-wide, globally-cached fact hinge on one account's token
+        and turned a Simkl-only viewer's every roster row into an error.
+
+        Two questions rather than one widened one: the sync gates genuinely do
+        need the token, and quietly making trakt_configured mean less would
+        weaken every one of them at once.
+        """
+        return bool(self.trakt_client_id.strip())
 
     @property
     def calendar_source_configured(self) -> bool:
@@ -298,12 +361,12 @@ class Settings:
         This is the question the calendar page, the day fragment and the public
         share pages are actually asking before they try to read a month: not
         "does Trakt work" but "is there anybody to ask". Today the two answers
-        coincide because Trakt is the only registered provider; they diverge the
-        moment a second one is registered, and this is the call site that then
-        needs no edit.
+        coincide because Trakt is the only registered source that publishes a
+        calendar; they diverge the moment a second one does, and this is the call
+        site that then needs no edit.
         """
         from . import providers  # local: providers -> trakt -> config would cycle
-        return providers.for_calendar(self) is not None
+        return bool(providers.for_calendar_sources(self))
 
     @property
     def trakt_login_configured(self) -> bool:
@@ -318,6 +381,60 @@ class Settings:
         return bool(
             self.trakt_client_id.strip()
             and self.trakt_client_secret.strip()
+            and self.public_base_url.strip()
+        )
+
+    @property
+    def simkl_configured(self) -> bool:
+        """True once this instance can ask Simkl a question that needs a token.
+
+        The pair Trakt's property uses, for the same reason: an id names the
+        application and a token authorizes it, and neither alone can be sent
+        anywhere useful.
+
+        WORTH KNOWING, because it is not true of Trakt: the two halves of Simkl
+        this app reads are not equally gated. Its calendar arrives from public
+        CDN files that take no client id and no token at all, so a source that
+        is "not configured" by this property can still answer for a month. This
+        property is about the AUTHENTICATED half — the person's own library —
+        which is what the registry asks about before offering the source.
+        """
+        return bool(self.simkl_client_id.strip() and self.simkl_access_token.strip())
+
+    @property
+    def simkl_catalogue_configured(self) -> bool:
+        """Whether this instance can make PUBLIC Simkl catalogue reads.
+
+        The pair to `trakt_catalogue_configured`, drawn for the same reason and
+        with a bigger gap between the halves: Simkl's per-title endpoints — a
+        show's record, its episode list — take the client id as a query parameter
+        and no bearer at all (app/providers/simkl/transport.py's `api_params`),
+        so the answer to "can we look a title up" is the client id and nothing
+        else. Asking `simkl_configured` in front of one of those asks whether
+        this instance has issued a Simkl TOKEN, which essentially no instance
+        running only the public halves ever has — the author's own live instance
+        has a client id and no token — and would refuse every Simkl-only title's
+        detail modal on a credential the lookup never sends.
+
+        The calendar is a third answer again and is not this one: those files
+        come from a CDN that takes neither (see calendar.py in that package), so
+        a source that is unconfigured by BOTH properties still fills a month.
+        """
+        return bool(self.simkl_client_id.strip())
+
+    @property
+    def simkl_login_configured(self) -> bool:
+        """Whether "Log in with Simkl" can be offered.
+
+        All three parts are mandatory and none has a fallback: the client id and
+        secret authenticate the code exchange, and without a base URL there is no
+        redirect URI to send — and one guessed from the request headers could not
+        match what the operator registered with Simkl, which compares it byte for
+        byte exactly as Trakt does.
+        """
+        return bool(
+            self.simkl_client_id.strip()
+            and self.simkl_client_secret.strip()
             and self.public_base_url.strip()
         )
 

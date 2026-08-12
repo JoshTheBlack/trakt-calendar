@@ -1,9 +1,10 @@
 """The shape every calendar source must speak, and nothing about any one source.
 
-This module is the seam. It declares WHAT a source produces (`Item`), WHAT it is
-able to answer (`Capabilities`), and the one method the calendar route calls
-(`Provider`). It imports nothing from the rest of the app at runtime, so a
-provider implementation can depend on it without anything depending back.
+This module is the seam. It declares WHAT a source produces (`Record`), WHAT a
+template renders (`Item`), WHAT a source is able to answer (`Capabilities`), and
+the ports the rest of the app calls a source through (`Provider` and friends). It
+imports nothing from the rest of the app at runtime, so a provider implementation
+can depend on it without anything depending back.
 
 WHY A DATACLASS AND NOT A TypedDict OR A DICT. There is no type checker in this
 project's CI, so a TypedDict would document the contract without enforcing it —
@@ -15,13 +16,35 @@ dot access, which reads identically either way.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from datetime import date, timedelta
+from dataclasses import MISSING as MISSING_DEFAULT
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
     from ..config import Settings
+
+
+class SourceUnavailable(Exception):
+    """A source could not answer. THE app-wide degradation contract, stated once
+    and named by nobody in particular.
+
+    Each source's own error type derives from this — `TraktError`,
+    `SimklError` — so a caller that genuinely wants to handle one service's
+    failure specifically still can, while a caller that reads TWO sources and has
+    to carry on with whichever answered has something to catch that does not name
+    either of them. Without it, the tracker would need one `except` clause per
+    registered source, which is exactly the shape a registry exists to prevent.
+
+    `status` is the HTTP status where there was one, and None where the failure
+    never got that far.
+    """
+
+    def __init__(self, message: str, status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class Media(StrEnum):
@@ -50,12 +73,15 @@ def parse_media(value: Any, default: Media | None = None) -> Media:
 class Source(StrEnum):
     """Which service produced a record.
 
-    One member today. It is an enum rather than a bare "trakt" string because
-    this value is written into `Item.source` by every provider and read back to
-    decide who to ask for a detail lookup — a typo in either half would produce
-    a record that silently belongs to nobody.
+    An enum rather than a bare string because this value is written into
+    `Item.source` by every provider and read back to decide who to ask for a
+    detail lookup — a typo in either half would produce a record that silently
+    belongs to nobody. With two members that is no longer hypothetical: the same
+    title can arrive from both, and which one a given field came from is a fact
+    the reader has to be able to state.
     """
     TRAKT = "trakt"
+    SIMKL = "simkl"
 
 
 # The id namespaces an Item may carry, and the only keys `Item.ids` uses. These
@@ -167,13 +193,34 @@ def resolve_key(media: Media | str, ids: Mapping[str, Any]) -> ItemKey | None:
     return ItemKey(str(media), match_source, match_id)
 
 
-@dataclass
-class Item:
-    """One airing on the calendar, as any source must describe it.
+# The fields on `Record` that resolution writes and storage never does. See
+# `Record.field_sources` for what they hold and `Record.to_dict` for why they are
+# the one thing excluded from a stored record by name.
+PROVENANCE_FIELDS = ("field_sources", "alternatives", "source_links")
 
-    NOT FROZEN: the calendar read path annotates items in place (day layout,
-    per-viewer marks) and a frozen record would force a copy at each step for no
-    safety anyone is currently relying on.
+
+@dataclass
+class Record:
+    """One airing as a SOURCE describes it, said in a way that is true for
+    everybody who might look at it.
+
+    THIS IS WHAT THE CALENDAR CACHE STORES, and the reason it can be stored at
+    all is that nothing on it depends on who is reading. `air_ts` is POSIX
+    seconds — an absolute instant — and the four viewer-local spellings of that
+    instant live on `Item` below, derived at read time by `render`. A record
+    carrying "21:00" would be one viewer's 21:00 and would be wrong in the shared
+    cache the moment a second timezone read it.
+
+    `genres` ARE THE SOURCE'S RAW SLUGS, lowercase and hyphenated ("game-show"),
+    NOT the title-cased display form. The per-viewer genre filter matches on the
+    slug (app/calendar/filter.py says so), so a record holding "Game Show" would
+    silently break every multi-word genre filter while leaving single-word ones
+    working — which is about the hardest failure of this kind to notice. The
+    title-casing happens in `render`, on the far side of the filter.
+
+    NOT FROZEN: the calendar read path annotates the rendered items in place (day
+    layout, per-viewer marks) and a frozen record would force a copy at each step
+    for no safety anyone is currently relying on.
 
     Provenance is deliberately three fields rather than one provider's ids
     hoisted to the top level:
@@ -192,17 +239,20 @@ class Item:
     id: str
     ids: dict[str, Any]
     detail_url: str
-
-    # When it airs, already converted into the VIEWER's timezone — every one of
-    # these is a rendering of the same moment, precomputed because the template
-    # cannot do timezone arithmetic and the sort needs the timestamp.
-    air_date: str        # YYYY-MM-DD, local
-    air_ts: float        # unix seconds; the sort key
-    air_display: str     # "03 Jul 2026"
-    air_time: str        # "21:00"
-    day_of_week: str     # "Friday"
-
     title: str
+    # The instant this airs, in POSIX seconds. The sort key, and the only time
+    # fact a source has to supply.
+    air_ts: float
+
+    # WHETHER THAT INSTANT IS REALLY AN INSTANT. A movie's release is a calendar
+    # FACT, not a moment: a film released on the 6th is released on the 6th
+    # wherever you are. Trakt's `released` and every Simkl movie entry are plain
+    # dates, and turning one into a UTC-midnight timestamp and then rendering it
+    # in a viewer's timezone moves a UTC-8 viewer's release to the day before.
+    # When this is set, `render` reads the date straight back out of `air_ts` in
+    # UTC and does no conversion at all, so every viewer sees the date the source
+    # published.
+    date_only: bool = False
 
     # Everything below is genuinely optional: a source that does not carry it,
     # or a title that has none, leaves it at the default rather than inventing a
@@ -223,6 +273,187 @@ class Item:
     episode_title: str = ""
     season: int | None = None
     episode_number: int | None = None
+
+    # SIMKL'S OWN "IS THIS ACTUALLY A FILM" ANSWER, carried on the record so
+    # app/calendar/filter.py's read-time prune can act on it — see
+    # prune_disguised_films there for the rule and app/providers/simkl/
+    # titles.py's `_extract` for where the value comes from. Empty for every
+    # record no enrichment has looked up yet (including every non-Simkl
+    # source, which never sets this at all) and for the small serial formats
+    # ("ona", "ova", "tv", "special") that must NOT be pruned; only "movie"
+    # means "this is a film masquerading on a series endpoint".
+    anime_type: str = ""
+
+    # WHERE AND HOW THIS FILM IS BEING RELEASED, as {country: [release type]} —
+    # TMDB's numbering (1 premiere, 2 limited theatrical, 3 theatrical,
+    # 4 digital, 5 physical, 6 TV), which is what the service publishes. Read by
+    # app/calendar/filter.py's release rule and by nothing else; see
+    # app/providers/simkl/titles.py's `_release_types_by_country` for where the
+    # value comes from and why the dates that sit beside these types in the
+    # payload are deliberately not kept.
+    #
+    # NOT `country` PLURAL, AND NOT A REPLACEMENT FOR IT. `country` is where a
+    # title was MADE and is one value; this is a list, it is about distribution,
+    # and the two disagree constantly — a film made in France released only in
+    # Brazil answers FR to one and BR to the other, and both are true.
+    #
+    # ONLY ENRICHMENT EVER SETS IT, so it never reaches a stored window: a
+    # calendar file carries no release schedule, and `to_dict` omits an empty
+    # default factory. That is the same reason `enriched` exists — the filter
+    # must be able to tell "no release blocks" from "nobody has looked yet".
+    release_types_by_country: dict[str, list[int]] = field(default_factory=dict)
+
+    # WHETHER genres/network/country/certification/runtime/status/overview ARE
+    # REAL ANSWERS OR JUST THIS RECORD'S DEFAULTS. True for every source that
+    # carries these fields on its calendar payload already (Trakt does, so it
+    # never sets this). Simkl's calendar CDN files carry none of them — see
+    # app/providers/simkl/calendar.py — so a Simkl record starts False and is
+    # filled in by app/calendar/enrich.py's background drain; the per-viewer
+    # genre/country/certification/network filter (app/calendar/filter.py) reads
+    # this to tell "empty because there is nothing to say" apart from "empty
+    # because we have not looked yet", and exempts the second rather than
+    # judging it on values it cannot answer for.
+    enriched: bool = True
+
+    # WHO SUPPLIED WHAT, once several sources have described this airing.
+    # {field: [source, ...]} for every field any of them filled in, and
+    # {field: {source: value}} for the ones where they filled it in DIFFERENTLY.
+    # Both are set by app/calendar/resolve.py and by nothing else, and both are
+    # empty on a record only one source described — which is what keeps them free
+    # for the overwhelming majority of instances, where they always will be.
+    #
+    # NOT STORED, AND THEY MUST NOT BECOME STORED. A record is what ONE source
+    # said; these two are what several sources said WHEN COMPARED, which is an
+    # answer that only exists after resolution has run, at read, over a window
+    # filled without knowing who would read it. Writing them into a window would
+    # be storing the comparison, and the whole reason resolution runs at read is
+    # that a preference change must invalidate nothing. `to_dict` drops them for
+    # the same reason it drops empty genres.
+    field_sources: dict[str, list[str]] = field(default_factory=dict)
+    alternatives: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    # {source: detail_url} for every service that described this airing.
+    #
+    # WHY IT IS NOT `detail_url` PLURAL AND WHY IT IS NOT A PREFERENCE. Exactly
+    # one service is the card's — see app/calendar/resolve.py's SOURCE_FIELD, and
+    # `detail_url` is one of the three fields that travel with it, because a page
+    # on one service is not an answer another service gave. This is the other
+    # thing a merged card knows and had no way to say: that BOTH services have a
+    # page for this title. It is a set of destinations, not a value anybody won,
+    # so no preference orders it and resolution states no opinion about it — it is
+    # collected, in declared source order, and offered.
+    #
+    # NOT STORED, for the same reason the two maps above are not: it exists only
+    # after several records have been compared, which happens at read.
+    source_links: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        """The JSON-safe form the cache stores.
+
+        A FIELD SITTING AT ITS DEFAULT IS OMITTED, which is what makes
+        `from_dict`'s defaults load-bearing rather than decorative: the common
+        record has no certification, no language and no episode title, so the
+        round trip is exercised on every single window rather than only when a
+        new field is added. The enums are already strings (StrEnum), so they
+        serialize as themselves.
+
+        A FIELD WITH A DEFAULT FACTORY IS OMITTED WHEN IT IS EMPTY, which is the
+        same rule said for the fields whose default cannot be compared against.
+        An empty list is what `from_dict` builds when the key is absent, so
+        writing one out says nothing and costs bytes in every stored window.
+
+        THE PROVENANCE MAPS ARE OMITTED EVEN WHEN THEY ARE FULL, which is the one
+        exclusion by name here and is not an optimization. They say what several
+        sources said WHEN COMPARED — an answer that only exists after resolution
+        has run, at read, for one account. A window is filled without knowing who
+        will read it, so a comparison written into one would be one account's
+        answer in a row served to everybody, and the next preference change would
+        have to invalidate it. That is the exact coupling resolution runs at read
+        to avoid.
+        """
+        out: dict[str, Any] = {}
+        for f in fields(self):
+            if f.name in PROVENANCE_FIELDS:
+                continue
+            value = getattr(self, f.name)
+            if f.default is not MISSING_DEFAULT and value == f.default:
+                continue
+            if f.default_factory is not MISSING_DEFAULT and not value:
+                continue
+            out[f.name] = value
+        return out
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Record":
+        """A stored record, with EXPLICIT DEFAULTS FOR EVERY OPTIONAL FIELD.
+
+        Caching normalized data means a normalizer change does not take effect
+        until the window's TTL expires, and across a deploy there will be rows in
+        the old shape sitting beside new ones. The version envelope
+        (app/calendar/cache.py) handles a change big enough to invalidate; a
+        field merely ADDED to this class has to be tolerated as missing, which is
+        what this does. A row written before a field existed reads as a record
+        that simply does not carry it.
+
+        Raises for a row missing one of the fields that has no default — that row
+        is not a record at all, and the caller treats the whole window as a miss.
+        """
+        kwargs: dict[str, Any] = {}
+        for f in fields(cls):
+            if f.name in data:
+                kwargs[f.name] = data[f.name]
+            elif f.default is MISSING_DEFAULT and f.default_factory is MISSING_DEFAULT:
+                raise ValueError(f"A stored record is missing {f.name!r}.")
+        kwargs["source"] = Source(kwargs["source"])
+        kwargs["media"] = Media(kwargs["media"])
+        kwargs["air_ts"] = float(kwargs["air_ts"])
+        return cls(**kwargs)
+
+
+@dataclass
+class Item(Record):
+    """A Record as ONE VIEWER sees it: the same facts, plus the four spellings of
+    its air time in that viewer's timezone.
+
+    A SUBCLASS RATHER THAN A SEPARATE TYPE, so every template, filter and share
+    page that reads `item.title` or `item.genres` today reads it unchanged, and
+    anything that only needs the source's facts can take a Record and be handed
+    an Item. The four fields below are the whole difference, and `render` is the
+    only thing that should ever set them.
+    """
+    air_date: str = ""      # YYYY-MM-DD, local
+    air_display: str = ""   # "03 Jul 2026"
+    air_time: str = ""      # "21:00"
+    day_of_week: str = ""   # "Friday"
+
+
+def render(record: Record, tz: ZoneInfo) -> Item:
+    """The Item one viewer sees for `record`.
+
+    THE ONE PLACE A STORED RECORD BECOMES A RENDERED ONE. Two things happen here
+    and nowhere else, because both are per-viewer or per-display and neither may
+    be baked into the shared cache:
+
+      - the four air-time fields are derived from `air_ts`, in `tz` — unless
+        `date_only` is set, in which case the date is read back in UTC and no
+        conversion happens at all (see Record.date_only for why a release date is
+        not an instant);
+      - the genre slugs become their display form ("game-show" -> "Game Show").
+        This is after every filter has run, which is the entire reason it is here
+        rather than in a normalizer.
+    """
+    moment = datetime.fromtimestamp(record.air_ts, tz=timezone.utc)
+    if not record.date_only:
+        moment = moment.astimezone(tz)
+    values = {f.name: getattr(record, f.name) for f in fields(Record)}
+    values["genres"] = [str(g).replace("-", " ").title() for g in record.genres]
+    return Item(
+        **values,
+        air_date=moment.strftime("%Y-%m-%d"),
+        air_display=moment.strftime("%d %b %Y"),
+        air_time=moment.strftime("%H:%M"),
+        day_of_week=moment.strftime("%A"),
+    )
 
 
 @dataclass(frozen=True)
@@ -293,7 +524,23 @@ class SyncPort(Protocol):
 
     async def fetch_last_activities(self, settings: Settings) -> dict:
         """A small, fixed-size "last changed at" blob, independent of library
-        size, that a sync can gate on so an unchanged history costs one call."""
+        size, that a sync can gate on so an unchanged history costs one call.
+
+        THE SHAPE IS DECLARED HERE, and it is the one thing in this protocol that
+        is not simply passed through:
+
+            {"episodes": {"watched_at": <stamp|None>, "removed_at": <stamp|None>},
+             "movies":   {"watched_at": <stamp|None>, "removed_at": <stamp|None>}}
+
+        The gate compares the whole blob for equality and watches `removed_at`
+        separately, because a removal is not a play and never appears in the
+        history — so when one moves, cached progress has to be re-baselined
+        rather than folded forward. Extra keys are ignored; a source that files
+        its lists differently maps them onto these four AT ITS OWN BOUNDARY. It
+        has to live here rather than in the one module that reads it, because
+        every source has to uphold it and a rule written inside one reader is a
+        claim the other implementers never see.
+        """
         ...
 
     async def fetch_history(self, settings: Settings, start_at: str | None = None) -> list[dict]:
@@ -308,6 +555,22 @@ class SyncPort(Protocol):
         A batch call rather than one-per-show because pooling the connections is
         the source's business, not its caller's — the tracker baselines a whole
         roster at a time and should not have to hold a client to do it.
+
+        AN ID THAT WAS ANSWERED ABOUT IS PRESENT; AN ID THAT COULD NOT BE READ IS
+        ABSENT. That is the one thing this shape has to say beyond the counts, and
+        it has to be said here because every implementation has to uphold it. An
+        empty map against an id is a real answer — this person has seen none of
+        that show — and the caller acts on it by retiring the seasons it had
+        stored. A show whose own request failed has said nothing at all, and
+        flattening the two into one empty map deletes watch history over a
+        transient failure, one show at a time, with nothing on the page to say so.
+        Absence therefore means "I have nothing to tell you about this one" and
+        the caller leaves what it already knew alone.
+
+        A REFUSED CREDENTIAL IS NOT ONE SHOW FAILING and must raise rather than
+        emptying the answer, for the reason SourceUnavailable exists: it is true of
+        every request that token will make, so tolerating it per show composes a
+        whole roster of refusals into a library nobody has watched.
         """
         ...
 
@@ -330,6 +593,292 @@ class SyncPort(Protocol):
         ...
 
 
+class UnlistedSeasons(StrEnum):
+    """WHAT A SOURCE'S SILENCE ABOUT A SEASON OF A TITLE IT HOLDS MEANS.
+
+    Three answers, because a library payload can be making any of three different
+    statements with the same absent season, and they are not degrees of one
+    another:
+
+      SILENT   the payload says nothing about seasons it did not list. Reading
+               anything into the gap would be inventing an answer.
+      ZERO     the payload lists only the seasons with watches in them, so a
+               season it did not list is one the viewer has seen NONE of. A
+               season both services have seen none of is an agreement at zero,
+               and recording nothing for it renders that agreement as a claim
+               only one service made.
+      WATCHED  the payload says the whole title is finished and itemizes nothing,
+               so every season of it has been seen in full. Reading THAT as a
+               zero is the same mistake with the sign flipped, and it is the
+               worse of the two: it claims a service reported none of a title
+               that service reports as complete.
+
+    A SOURCE DECIDES THIS PER ENTRY AND NOTHING ELSE MAY. Which of the three is
+    true is a fact about one payload — often about one list within it, since a
+    service can itemize the titles in progress and count the finished ones — so
+    it is stated where the payload is read and travels on the entry. SILENT is
+    the default because a source that has not thought about the question must
+    come out too cautious rather than confidently wrong.
+    """
+    SILENT = "silent"
+    ZERO = "zero"
+    WATCHED = "watched"
+
+
+class LibraryEntry(NamedTuple):
+    """What one source holds about ONE title in somebody's library.
+
+    `ids` is every id space that source named the title in, and it is what makes
+    a library read worth more than a progress read: the caller learns the
+    source's own id for a title it had no id for, as a BY-PRODUCT of the match
+    rather than as its precondition.
+
+    `seasons` is {season: {episode: watched_at}} — the same shape a per-show
+    progress record returns, so a caller folds either in through one path. An
+    empty map is a real answer: the source holds the title and has seen none of
+    it.
+
+    `unlisted_seasons` SAYS WHAT THE SEASONS NOT IN THAT MAP MEAN — see
+    UnlistedSeasons above, which is where the three answers and the reason for
+    each are written.
+
+    IT IS A PROPERTY OF THE PAYLOAD, WHICH IS WHY IT RIDES ON THE ENTRY AND NOT ON
+    THE READ. The claim is only ever about a title this source HOLDS; a title
+    absent from the read has no entry, so there is nothing to consult and no way
+    for a caller to extend the claim to one.
+
+    A SOURCE THAT CLAIMS `WATCHED` STATES A FACT AND NOT A COUNT, deliberately. A
+    service that reports a title as finished without itemizing it has no episode
+    numbers and no per-episode dates to hand over, and a provider that
+    manufactured them would be inventing a viewing history to fit a shape. How
+    many episodes that is, is the CALLER's question — it is the side holding the
+    season's total, because it is the side that renders "watched out of total".
+    """
+    ids: dict[str, Any]
+    seasons: dict[int, dict[int, str]]
+    unlisted_seasons: UnlistedSeasons = UnlistedSeasons.SILENT
+
+
+class LibraryRead(NamedTuple):
+    """One pass over a person's library at one source.
+
+    `entries` is keyed by the FLAT ItemKey — `str(resolve_key(...))` — because
+    that is the identity the app files its own rows under, and keying on it here
+    is the whole reason a caller never needs a per-source id in order to ask.
+    Shows only: a film is a play on a day rather than a count out of a total, and
+    it arrives through `events` like any other play.
+
+    `events` are the plays inside that same read, in the shape
+    `SyncPort.fetch_history` returns, so one pull answers both questions instead
+    of two pulls answering one each.
+
+    `complete` says whether this read covered the WHOLE library. A partial read
+    is what makes skipping unchanged lists safe: a title missing from a complete
+    read is a title the source does not hold, while a title missing from a
+    partial one says nothing at all and its caller must leave what it already
+    knew alone.
+    """
+    entries: dict[str, LibraryEntry]
+    events: list[dict]
+    complete: bool
+
+
+@runtime_checkable  # see the note on SyncPort above
+class LibraryPort(Protocol):
+    """A source that can hand over a person's WHOLE library in one read, keyed by
+    the shared title identity.
+
+    SEPARATE FROM SyncPort, AND OPTIONAL, because it is a different question
+    rather than a bigger version of the same one. `SyncPort.fetch_progress_details`
+    asks "what has this person seen of the titles I can already name to you",
+    which needs the source's own id for every title before it can be placed. This
+    asks "what does this person's library say", and answers about titles the
+    caller could not have named — which is the only way a roster built entirely
+    from one service ever learns what a second service holds. A source with no
+    endpoint that returns a whole library simply does not implement this and its
+    caller keeps asking per title.
+
+    THE IDENTITY RULE IS NOT RESTATED HERE OR IN ANY IMPLEMENTATION. `resolve_key`
+    above is the one waterfall; an implementation runs its own payload's ids
+    through it and nothing more. What an implementation DOES own is the payload
+    shape — which field carries which id, and how its lists are spelled.
+    """
+
+    async def fetch_library(self, settings: Settings, *, start_at: str | None = None,
+                            activities: dict | None = None,
+                            since: dict | None = None) -> LibraryRead:
+        """This person's library, and the plays inside it since `start_at`.
+
+        `activities` is what this source's own `fetch_last_activities` returned
+        for THIS pass, and `since` is what it returned at the end of the last
+        successful one, or None. BOTH ARE OPAQUE TO THE CALLER — it hands back
+        what the source gave it and reads nothing out of them. A source that
+        publishes per-list change stamps uses the pair to read only the lists
+        that moved and to skip one that has never been used at all, and says so
+        by returning `complete=False`. A source that cannot tell ignores both,
+        reads everything, and returns `complete=True`; that is why the default
+        for both is None and why neither is required.
+        """
+        ...
+
+
+class PlayCounts(NamedTuple):
+    """How many plays a source has recorded against each title it holds for one
+    person, keyed by THAT SOURCE'S OWN ID as a string.
+
+    A COUNTER, NOT A WATCH RECORD, and the difference is the whole point. It says
+    nothing about which episodes were seen — it cannot, and a source offering this
+    typically has no cheap read that could. What it is for is telling a caller
+    WHICH titles to ask about properly, so a re-baseline costs one call per title
+    that actually moved rather than one per title ever tracked.
+
+    IT HAS TO MOVE IN BOTH DIRECTIONS OR IT IS USELESS HERE. Measured against a
+    live account by removing a season's plays and then re-marking them: the count
+    fell and rose with the watched set, while the "last updated" stamp beside it
+    moved only on the addition. A change detector keyed on a stamp like that
+    silently misses every removal, which is the exact defect this exists to catch,
+    reintroduced one layer down.
+
+    The id is a STRING because it is a dict key that gets stored as JSON, where a
+    number could not be one, and because the caller compares it against ids that
+    arrive from storage in either form.
+
+    `complete` says whether the sweep covered the whole listing. A partial sweep
+    may say what it FOUND and may never be read for what is missing: a title
+    absent from a page that was never fetched is indistinguishable from a title
+    with no plays left, and only the second is a removal.
+    """
+    counts: dict[str, int]
+    complete: bool
+
+
+@runtime_checkable  # see the note on SyncPort above
+class PlayCountPort(Protocol):
+    """A source that can say, cheaply and for the whole library at once, which
+    titles a person's watch record has MOVED for.
+
+    A THIRD OPTIONAL PROTOCOL, beside SyncPort and LibraryPort, because it is a
+    third question rather than a smaller version of either. LibraryPort answers
+    "what does this person's library say", per episode, and a source that can do
+    that needs nothing here — re-reading a list it holds re-states what it holds,
+    so a removal inside one corrects itself. This answers only "what changed", and
+    it exists for the source whose whole-library read carries no episodes at all:
+    without it, the only way to find out what moved is to ask about every title,
+    which is one call each and grows with everything ever tracked.
+
+    A source that can answer neither is asked per title exactly as before.
+    """
+
+    async def fetch_play_counts(self, settings: Settings) -> PlayCounts:
+        """Every title this person has plays against, and how many.
+
+        Must be cheap relative to asking per title — that is the only reason to
+        implement it. A sweep that could read nothing at all raises rather than
+        answering with an empty map, for the reason every read here does: an empty
+        map means "every title you had plays for has lost them", which is a
+        removal of the entire library.
+        """
+        ...
+
+
+@runtime_checkable  # see the note on SyncPort above
+class CalendarPort(Protocol):
+    """A source that can say what airs in a stretch of days.
+
+    A FOURTH PROTOCOL, beside SyncPort, LibraryPort and PlayCountPort, and
+    deliberately not folded into any of them: this is the only one that answers a
+    question about the WORLD rather than about one person, which is why it needs
+    no token, why its answers are cached globally, and why a source that has
+    nothing else to offer can still be registered for it.
+
+    THE UNIT IS A WINDOW, NOT A MONTH. A start date and a day count is what the
+    calendar cache stores and therefore what it asks for; a month is the thing a
+    viewer looks at and is assembled from several windows, each shared between
+    every viewer of every month that overlaps it.
+    """
+
+    async def fetch_window(self, endpoint, settings: Settings,
+                           start: date, days: int) -> list["Record"]:
+        """What this source says airs in [start, start + days), as Records.
+
+        NORMALIZING IS THE SOURCE'S JOB AND IS DECLARED HERE SO IT CAN ONLY BE
+        DONE ONCE. The alternative — handing back a payload for somebody else to
+        interpret — means the interpreting side learns every source's field
+        layout, which is exactly what stops a third source being an addition
+        rather than an edit.
+
+        `endpoint` is one of app/endpoints.py's source-neutral calendar keys; a
+        source that cannot answer it says so through `Capabilities.endpoints` and
+        is never asked. Raises SourceUnavailable when the source could not be
+        read at all — the caller degrades one source, or one window, rather than
+        failing a month.
+
+        A SOURCE MAY RETURN MORE THAN IT WAS ASKED FOR and the caller trims:
+        Trakt treats `days` as a floor rather than a ceiling (measured — a 7-day
+        window came back carrying entries two months past its end), so the bound
+        is a request, not a promise.
+        """
+        ...
+
+
+@runtime_checkable  # see the note on SyncPort above
+class DetailPort(Protocol):
+    """A source that can describe ONE TITLE as fully as it knows how — what the
+    detail modal draws.
+
+    A FIFTH PROTOCOL, and it exists now for the reason `Provider`'s own docstring
+    below gives for keeping itself narrow: a detail lookup is a different
+    consumer with a different degradation story from a calendar window, so it
+    becomes its own protocol the moment a second source needs one. That moment
+    has arrived — a title only one service listed has to be describable by that
+    service or its card opens on nothing.
+
+    LIKE CalendarPort, THIS ASKS ABOUT THE WORLD RATHER THAN ABOUT ONE PERSON.
+    Every answer is identical for every viewer, which is why it caches globally
+    and why a viewer who has linked nothing still gets one.
+
+    THE ANSWER'S KEY SET IS THE SAME WHOEVER GIVES IT, and that is the whole
+    reason this is a protocol rather than two functions the route branches
+    between. One client-side renderer draws the modal, so a key present on only
+    one source's answer would read as a template bug rather than as a lookup that
+    source cannot make. A source with nothing to say for a key says it with an
+    empty value — which is exactly what `cache_only` already produces on a source
+    that CAN answer, so the renderer has always had to tolerate it.
+    """
+
+    def catalogue_configured(self, settings: Settings) -> bool:
+        """Whether this instance can make this source's PUBLIC per-title reads.
+
+        DELIBERATELY NOT `Provider.is_configured`, and the pair is the same split
+        `Settings.trakt_catalogue_configured` draws beside `trakt_configured`:
+        that one asks whether somebody's PRIVATE data can be read, which needs a
+        token, and asking it in front of a public catalogue lookup makes an
+        instance-wide, globally cached fact hinge on one account's credential.
+        Two sources make the gap bigger rather than smaller — Simkl's catalogue
+        takes a client id and no token at all, so an instance that has never
+        issued a Simkl token can still describe every title Simkl listed.
+
+        Must answer without a network call: it gates the call.
+        """
+        ...
+
+    async def fetch_details(self, settings: Settings, media, source_id,
+                            season: int | None, *, cache_only: bool = False) -> dict:
+        """One title, in THIS SOURCE's own id space, as the modal's field set.
+
+        `source_id` is the id this source knows the title by — the value under
+        this source's own name in a group's `ids` map — and never another
+        service's, because a source cannot look a title up by an id it does not
+        issue.
+
+        `cache_only=True` serves whatever is already cached and makes no outbound
+        call, which is what the public share pages use so a visitor's click can
+        never spend the owner's rate limit. Fields with nothing cached behind them
+        come back empty and the modal renders around them.
+        """
+        ...
+
+
 @runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
     """What the registry needs in order to offer a source at all: who it is,
@@ -339,16 +888,16 @@ class Provider(Protocol):
     consumer with a different degradation story, and folding them in here would
     mean a source that only publishes a calendar could not be registered at all.
     They become their own protocols when a second source actually needs them —
-    which is what `sync_port` below already is.
+    which is what `sync_port` below already is, and what `detail_port` became
+    once a title only one service listed had to be describable by that service.
 
-    THERE IS DELIBERATELY NO CALENDAR VERB HERE, and the gap is load-bearing.
-    There used to be a `fetch_calendar(endpoint, settings, year, month)`, but
-    nothing reached a user through it: the live path is a WINDOW fetch — a start
-    date and a day count — driven by the calendar cache, because a month is not
-    the unit Trakt is asked about and is not the unit the cache stores. A second
-    source should be given the window shape the app actually uses, so an empty
-    slot here is better than a method the first implementer would have to
-    contradict.
+    THE CALENDAR VERB IS A PORT RATHER THAN A METHOD, and the shape it has is
+    the shape the app actually uses. There used to be a
+    `fetch_calendar(endpoint, settings, year, month)` here that nothing reached a
+    user through, because the live path is a WINDOW fetch — a start date and a
+    day count — driven by the calendar cache: a month is not the unit a source is
+    asked about and is not the unit the cache stores. `calendar_port` below is
+    that verb, declared once, in the shape it is really called in.
     """
     source: Source
     label: str
@@ -359,6 +908,18 @@ class Provider(Protocol):
     # `capabilities.private_user_data` while carrying no port would be lying in a
     # way nothing else can catch.
     sync_port: SyncPort | None
+    # What airs, or None for a source that publishes no calendar. Declared beside
+    # `sync_port` for the same reason: the calendar cache asks the registry which
+    # sources can answer and never names one, and a source declaring
+    # `capabilities.endpoints` while carrying no port would be claiming a calendar
+    # it cannot produce.
+    calendar_port: CalendarPort | None
+    # How this source describes ONE title, or None for a source that cannot.
+    # Declared here for the same reason as the two ports above: the detail modal
+    # asks the registry which source can describe the title in front of it and
+    # never names a service, so a card from a source nobody added a port for
+    # opens on an honest refusal rather than on an AttributeError.
+    detail_port: DetailPort | None
 
     def is_configured(self, settings: Settings) -> bool:
         """Whether this source has the credentials it needs to be asked

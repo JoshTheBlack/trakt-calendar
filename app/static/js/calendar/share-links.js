@@ -28,6 +28,45 @@ function renderShare() {
     renderShareView();
 }
 
+// The Sources ticks, or an empty list on an instance that draws none of them.
+function shareSourceTicks() {
+    return [...document.querySelectorAll('#share_view_sources input[type=checkbox]')];
+}
+
+// Rebuild the Sources ticks for the calendar the LINK opens on, keeping whatever
+// was ticked that is still on offer.
+//
+// WHICH CALENDAR DECIDES, AND IT IS THE PANEL'S RATHER THAN THE PAGE'S. The
+// link's Calendar option need not be the one being looked at, so a panel that
+// kept the page's answer would go on offering a service the link's own calendar
+// cannot use — and would keep the block drawn on Season Finales, which only one
+// service publishes and which therefore has nothing to choose between.
+//
+// A TICK THAT IS NO LONGER OFFERED IS DROPPED, deliberately. Switching a link to
+// a calendar a service does not publish means that service can no longer be what
+// fills it, and carrying the tick invisibly would leave the link saying
+// something the panel had stopped showing.
+function renderShareSourceTicks(endpointKey, selected) {
+    const field = document.getElementById('share_view_sources_field');
+    const box = document.getElementById('share_view_sources');
+    if (!field || !box) return;
+    const choices = (window.SHARE_SOURCE_CHOICES || {})[endpointKey] || [];
+    field.hidden = !choices.length;
+    box.innerHTML = choices.map(choice => `<label class="source-tick">`
+        + `<input type="checkbox" data-source="${choice.value}"`
+        + `${selected.has(choice.value) ? ' checked' : ''} onchange="saveShareView()">`
+        + `<span>${choice.label}</span></label>`).join('');
+}
+
+// The link's calendar changed: re-ask which services could fill it, then save.
+// In that order — saving first would write the ticks from the calendar the owner
+// has just moved away from.
+function onShareEndpointChange() {
+    const ticked = new Set(shareSourceTicks().filter(cb => cb.checked).map(cb => cb.dataset.source));
+    renderShareSourceTicks(document.getElementById('share_view_endpoint').value, ticked);
+    saveShareView();
+}
+
 // The link's display options. A null link_view means the URL goes out bare, so
 // whoever opens it sees whatever the owner's calendar currently resolves to;
 // otherwise the options below are written into the query string. Neither case
@@ -50,6 +89,21 @@ function renderShareView() {
     if (view.card) document.getElementById('share_view_card').value = view.card;
     if (view.packing) document.getElementById('share_view_packing').value = view.packing;
     document.getElementById('share_view_hidenw').checked = view.hidenw === '1';
+    // The ticked services, from the set the link names. Absent entirely on an
+    // instance where fewer than two services could fill this calendar — the
+    // template draws no control there — so every read and write of these is
+    // guarded rather than assuming they are on the page.
+    //
+    // A stored 'auto' ticks nothing, which is correct rather than a gap: it
+    // names no services, so under a link that can only narrow it comes out the
+    // same as naming none at all. Saving from this panel then writes the ticks,
+    // which is what the owner is looking at.
+    //
+    // REBUILT RATHER THAN JUST RE-TICKED, because the link's own calendar is
+    // what decides which ticks exist at all, and this runs after that select has
+    // been set from the stored view above.
+    renderShareSourceTicks(document.getElementById('share_view_endpoint').value,
+                           new Set((view.source || '').split('+')));
     setSharePinnedMonth(view.month || '', view.year || null);
 }
 
@@ -106,6 +160,13 @@ function saveShareView() {
         packing: document.getElementById('share_view_packing').value,
         hidenw: document.getElementById('share_view_hidenw').checked ? '1' : '0',
     };
+    // Nothing ticked means "my sources": the link carries no source at all and
+    // the page resolves the owner's own preference, so the key is left out
+    // rather than written as a blank the server would have to read as absent.
+    // Several ticked is spelled the way every other part of the app spells a set
+    // of services, joined — see app/sources/prefs.py.
+    const ticked = shareSourceTicks().filter(cb => cb.checked).map(cb => cb.dataset.source);
+    if (ticked.length) view.source = ticked.join('+');
     // Both or neither — a month pinned without its year would mean a different
     // month once the year turned over, and the server rejects the half of a pair.
     if (month) {

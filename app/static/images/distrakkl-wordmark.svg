@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 565 110">
+  <defs>
+    <!-- PINNED IN USER SPACE rather than left on the default objectBoundingBox
+         units, which would stretch the ramp to whatever element carries it: the
+         path's box is its INK, and ink starts at 6.55 here because D's left
+         sidebearing is not ink. Measured against the <text> element this file
+         used to be, the pinned ramp reproduces it to within single-level 8-bit
+         rounding; on the default every interior pixel of the word changed. -->
+    <linearGradient id="wordmarkGrad" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="565" y2="0">
+      <stop offset="0%" stop-color="#f4d385"></stop>
+      <stop offset="40%" stop-color="#e8b545"></stop>
+      <stop offset="100%" stop-color="#e0384d"></stop>
+    </linearGradient>
+  </defs>
+  <!-- OUTLINED, NOT LIVE <text>, AND THE viewBox IS THE TYPE. The word used to
+       be a <text> element set in Arial Black, which meant it only looked like
+       the wordmark on a machine with that face installed; anywhere else the
+       browser substituted, and a substituted face has different glyph widths, so
+       the word changed shape AND total width. That is not a thing a brand mark
+       may do, and it is invisible to anyone whose own machine has the font.
+
+       The old box was 820 wide with the word centred inside it, which left 127.5
+       units — about 39px at the 34px height every surface draws this at — of
+       transparent padding on EACH side. Centred surfaces never noticed, because
+       the padding was symmetric, but in the header it read as a large gap
+       between the name and the month controls that no stylesheet could close:
+       the space was inside the picture. The box is now the type's own box, so
+       the only space either side is the outer glyphs' sidebearings, and the
+       header's own 14px gap is the gap you see.
+
+       TIGHTENING THE BOX ONLY BECAME SAFE WHEN THE TYPE STOPPED BEING LIVE. A
+       viewBox measured against Arial Black's metrics would have been wrong again
+       on exactly the machines that substitute; paths have no such dependency.
+       Every surface sizes this by HEIGHT with width:auto (34px in the header and
+       on the sign-in pages, 30px on the 404), so nothing changed size — the
+       image simply stopped carrying dead space. The intrinsic width stated in
+       the markup did change, 254 to 175, and it is 565/110*34 rounded.
+
+       TO REGENERATE, if the word or its spacing ever changes: shape the runs
+       "DISTRA", "KK" and "L" against Arial Black (ariblk.ttf) at font-size 86
+       with letter-spacing -2, 10 and -2, which is what the old markup asked for;
+       the advances sum to 565.00, which is the viewBox width, and each glyph is
+       drawn from a pen starting at 0 on the baseline y=80, scaled by 86/2048
+       with y flipped. Rendered against the old element at 3x device scale, all
+       eight glyphs occupied the same ink columns and rows to the pixel, and the
+       only differences were antialiasing along the diagonals of K, A and S. -->
+  <path d="M6.55 18.44H34.81Q43.17 18.44 48.31 20.71Q53.46 22.97 56.82 27.22Q60.17 31.46 61.69 37.08Q63.20 42.71 63.20 49.01Q63.20 58.88 60.95 64.32Q58.71 69.75 54.72 73.43Q50.73 77.10 46.15 78.32Q39.89 80.00 34.81 80.00H6.55ZM25.57 32.38V66.02H30.23Q36.20 66.02 38.72 64.69Q41.24 63.37 42.66 60.07Q44.09 56.78 44.09 49.39Q44.09 39.60 40.90 35.99Q37.71 32.38 30.32 32.38Z M71.95 18.44H91.01V80.00H71.95Z M99.34 59.63 117.44 58.50Q118.03 62.91 119.83 65.22Q122.77 68.96 128.23 68.96Q132.31 68.96 134.51 67.05Q136.72 65.13 136.72 62.62Q136.72 60.22 134.62 58.33Q132.52 56.44 124.87 54.76Q112.36 51.95 107.03 47.29Q101.65 42.63 101.65 35.40Q101.65 30.66 104.40 26.44Q107.15 22.22 112.68 19.80Q118.20 17.39 127.81 17.39Q139.61 17.39 145.81 21.78Q152.00 26.17 153.18 35.74L135.25 36.79Q134.53 32.63 132.24 30.74Q129.96 28.85 125.92 28.85Q122.61 28.85 120.93 30.26Q119.25 31.67 119.25 33.68Q119.25 35.15 120.63 36.33Q121.98 37.55 127.02 38.60Q139.49 41.28 144.88 44.03Q150.28 46.78 152.74 50.86Q155.19 54.93 155.19 59.97Q155.19 65.89 151.92 70.89Q148.64 75.88 142.76 78.47Q136.88 81.05 127.94 81.05Q112.23 81.05 106.19 75.00Q100.14 68.96 99.34 59.63Z M158.44 18.44H216.26V33.64H196.86V80.00H177.84V33.64H158.44Z M223.12 80.00V18.44H254.83Q263.65 18.44 268.31 19.95Q272.97 21.46 275.83 25.56Q278.68 29.65 278.68 35.53Q278.68 40.65 276.50 44.37Q274.31 48.09 270.49 50.40Q268.06 51.87 263.82 52.83Q267.22 53.96 268.77 55.10Q269.82 55.85 271.81 58.33Q273.81 60.81 274.48 62.15L283.68 80.00H262.18L252.02 61.19Q250.08 57.53 248.57 56.44Q246.51 55.01 243.91 55.01H242.23V80.00ZM242.23 43.38H250.25Q251.55 43.38 255.29 42.54Q257.18 42.17 258.38 40.61Q259.57 39.06 259.57 37.04Q259.57 34.06 257.68 32.46Q255.79 30.87 250.59 30.87H242.23Z M325.64 69.84H303.98L300.99 80.00H281.55L304.69 18.44H325.43L348.57 80.00H328.67ZM321.65 56.53 314.85 34.40 308.09 56.53Z M352.74 18.44H371.77V41.70L391.71 18.44H416.99L394.57 41.66L418.00 80.00H394.57L381.59 54.68L371.77 64.97V80.00H352.74Z M434.38 18.44H453.41V41.70L473.35 18.44H498.63L476.21 41.66L499.64 80.00H476.21L463.23 54.68L453.41 64.97V80.00H434.38Z M515.94 18.44H534.96V64.84H564.65V80.00H515.94Z" fill="url(#wordmarkGrad)"></path>
+</svg>

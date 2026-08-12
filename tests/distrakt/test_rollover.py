@@ -24,10 +24,19 @@ from unittest.mock import AsyncMock, patch
 from app import auth, db, distrakt
 from app.distrakt import rollover, watch_history
 from app.calendar import state as calendar_state
-from app.providers.base import Item, ItemKey, Media, Source
+from app.providers.base import Item, ItemKey, Media, PlayCounts, Source, SourceUnavailable
 from tests.support import new_db_path
 
-SETTINGS = SimpleNamespace(trakt_configured=True, network_emojis={}, default_network_emoji=":tv:",
+# The credential flags the tracker reads, all of which a fake settings object has
+# to answer. The first two are the source selection's: it asks every registered
+# source whether this request carries a usable credential for it — see
+# app/distrakt/routes.py's _distrakt_settings. The third is a different question
+# and belongs to the instance rather than to the account: whether there is a
+# CALENDAR to build a month's premieres from, which is what rollover asks before
+# it will create one.
+SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
+                           calendar_source_configured=True,
+                           network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 
 
@@ -104,11 +113,11 @@ def _cal_item(tid, season, title, network="Net"):
 
 
 def _raw_entry(tid, season, title, *, first_aired, certification=None, network="Net"):
-    """A calendar entry in the shape calendar_cache.fetch_window_raw returns:
-    pruned, un-normalized, still carrying whatever real filter_entries reads
-    (certification included) so mocking at this layer exercises the real
-    per-user filter inside calendar_cache.read_month rather than a test double
-    standing in for it."""
+    """A calendar entry in the shape a SOURCE returns it: un-normalized, still
+    carrying everything the real filter reads (certification included), so
+    mocking at this layer exercises the whole fill and the real per-user filter
+    inside calendar_cache.read_month rather than a test double standing in for
+    them."""
     return {
         "show": {
             "title": title, "network": network, "certification": certification,
@@ -324,7 +333,7 @@ class RolloverTests(RolloverTestCase):
 
     async def test_unconfigured_month_not_persisted(self):
         out = await distrakt.ensure_month(
-            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False),
+            self.user_id, 2026, 9, SimpleNamespace(trakt_configured=False, simkl_configured=False),
             today=self.TODAY)
         self.assertEqual(out["shows"], [])
         self.assertIsNone(await distrakt.load_month(self.user_id, self.AHEAD))
@@ -405,7 +414,7 @@ class RolloverTests(RolloverTestCase):
 
 
 class _Resp:
-    """A minimal stand-in for the httpx response fetch_window_raw reads."""
+    """A minimal stand-in for the httpx response the window fetch reads."""
     def __init__(self, data):
         self._data = data
         self.status_code = 200
@@ -417,7 +426,7 @@ class _Resp:
 
 class _FixedClient:
     """Replies with the same canned window body to every request, regardless of
-    the window's date range — fetch_window_raw's own in_window trim (see
+    the window's date range — the fill's own in_window trim (see
     app/calendar/cache.py) is what actually decides which entries survive for
     which window, so this only needs to hand back the full candidate set."""
     def __init__(self, entries):
@@ -438,6 +447,19 @@ class DistraktImportFilterTests(RolloverTestCase):
         await super().asyncSetUp()
         from app.config import Settings
         self.settings = Settings(trakt_client_id="cid", trakt_access_token="tok", timezone="UTC")
+        # This class reads the calendar cache through import_premieres, which now
+        # asks Simkl too — its calendar declares endpoints and needs no
+        # credential, so the fill admits it even though this Settings object
+        # carries none (see app/providers/__init__.py's calendar_sources). Left
+        # unpatched, the real fetch would reach Simkl's live CDN, which the
+        # suite's network guard refuses. Stubbed unreachable, not empty, so it
+        # stays out of the fill's `sources` the way it would if this instance
+        # genuinely had no working second source.
+        simkl_patcher = patch(
+            "app.providers.simkl.calendar.fetch_window",
+            AsyncMock(side_effect=SourceUnavailable("not exercised in this test")))
+        simkl_patcher.start()
+        self.addCleanup(simkl_patcher.stop)
 
     async def _open_month(self, month_key: str) -> None:
         await distrakt.save_month(self.user_id, distrakt.new_month_doc(month_key))
@@ -752,6 +774,8 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
                    return_value=progress), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar.cache.read_month", side_effect=no_premieres), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
@@ -972,6 +996,8 @@ class WhatAMonthThatHasNotBegunTakesTests(RolloverTestCase):
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
             payload, status = await distrakt_routes._distrakt_month_payload(
@@ -1092,6 +1118,8 @@ class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
         with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
              patch("app.calendar.cache.read_month", side_effect=no_premieres), \
              patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):

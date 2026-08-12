@@ -76,7 +76,7 @@ from .. import http_pool
 POOL = http_pool.Pool("trakt_auth", max_connections=4, timeout=15)
 
 # Same "app.perf" DEBUG channel the Trakt transport's cached_get and
-# app/calendar/cache.py's fetch_window_raw log their own outbound calls to —
+# app/calendar/cache.py's window fill log their own outbound calls to —
 # one place to watch every Trakt request, OAuth included. Never logs a body:
 # these calls carry client_secret/tokens, so only the path and outcome go out.
 _perf = logging.getLogger("app.perf")
@@ -202,7 +202,16 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     uuid = ((user.get("ids") or {}).get("uuid") or "").strip()
     if not uuid:
         raise AccountLookupError(f"Trakt {ACCOUNT_PATH} returned no account UUID.")
-    return {"id": uuid, "name": user.get("name") or user.get("username")}
+    # `avatar` is DISPLAY-ONLY and is never part of the identity. It is a URL
+    # this app may choose to fetch a picture from, checked against a per-provider
+    # host allowlist before anything goes near the network — see
+    # app/auth/provider_avatars.py, which is where the reasoning lives. Measured
+    # live: Trakt serves these from media.trakt.tv.
+    return {
+        "id": uuid,
+        "name": user.get("name") or user.get("username"),
+        "avatar": ((user.get("images") or {}).get("avatar") or {}).get("full"),
+    }
 
 
 class DevicePending(Exception):

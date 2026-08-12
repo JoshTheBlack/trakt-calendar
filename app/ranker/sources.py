@@ -209,7 +209,10 @@ class TraktSearchSource:
 
     @property
     def configured(self) -> bool:
-        return bool(self._settings.trakt_configured)
+        # The catalogue credential, because /search is a public read that
+        # authenticates with the client id alone — this source can answer for an
+        # instance that has never held an access token.
+        return bool(self._settings.trakt_catalogue_configured)
 
     async def search(self, query: str, media: Media) -> list[TitleRef]:
         with _translating_failures():

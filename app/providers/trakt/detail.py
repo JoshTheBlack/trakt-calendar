@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import Counter
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import httpx
 
 from ...config import Settings
+from .. import season as season_rules
 from ..base import Media
 from . import transport
 
@@ -156,10 +156,6 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
 # fine, but we don't want to hold a season's episode list for the 12h detail TTL.
 SEASON_CACHE_TTL_SECONDS = 24 * 60 * 60
 
-# date.weekday(): Mon=0 .. Sun=6. Explicit map so cadence is locale-independent.
-_WEEKDAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-
-
 def _parse_air_date(first_aired, tz: ZoneInfo) -> date | None:
     """Trakt's ISO-UTC `first_aired` -> local calendar date, or None if missing."""
     if not first_aired:
@@ -170,62 +166,25 @@ def _parse_air_date(first_aired, tz: ZoneInfo) -> date | None:
         return None
 
 
-def _md(d: date | None) -> str | None:
-    """Format a date as 'M/D' with no leading zeros. None stays None so the
-    renderer can decide to show '?/?' for an unknown date."""
-    return f"{d.month}/{d.day}" if d else None
-
-
 def _derive_season(episodes: list[dict], tz: ZoneInfo, now: datetime | None = None) -> dict:
-    """Pure derivation of the cadence/date fields from a season's raw episode
-    list. No I/O — unit-tested directly.
+    """A season's cadence/date fields from Trakt's raw episode list. No I/O —
+    unit-tested directly.
 
-    Rules:
-      total (y)  = every episode Trakt currently reports (dated or not).
-      premiere   = first KNOWN air date.
-      finale     = last KNOWN air date, but ONLY once the season is fully
-                   scheduled; an unscheduled tail leaves it unknown -> '?/?'.
-      cadence    = 'b' when every episode shares one air date (binge), else the
-                   weekday abbrev of the airing pattern (mode of known weekdays);
-                   None when no air dates are known yet.
-      started/finished_airing compare premiere/finale against `now`.
+    The rule itself lives in app/providers/season.py, because it is about air
+    dates rather than about Trakt: what belongs here is knowing that Trakt spells
+    an episode's air date `first_aired`, in ISO-UTC. One episode in, one date out
+    — INCLUDING None for an episode Trakt has not dated yet, since the count of
+    entries is the season's episode total and dropping the undated ones would
+    make a half-announced season look fully scheduled.
     """
-    episodes = episodes or []
-    total = len(episodes)
-    now_date = (now or datetime.now(tz)).date()
-
-    known = sorted(d for d in (_parse_air_date(ep.get("first_aired"), tz) for ep in episodes) if d)
-    fully_scheduled = total > 0 and len(known) == total
-
-    premiere_date = known[0] if known else None
-    # Finale is only meaningful when nothing is left unscheduled; an unscheduled
-    # tail leaves it unknown so the renderer shows a "?/?" date.
-    finale_date = known[-1] if (fully_scheduled and known) else None
-
-    if not known:
-        cadence = None
-    elif fully_scheduled and len(set(known)) == 1:
-        cadence = "b"  # binge: all episodes share one air date
-    else:
-        weekday = Counter(d.weekday() for d in known).most_common(1)[0][0]
-        cadence = _WEEKDAY_ABBR[weekday]
-
-    return {
-        "total": total,
-        "cadence": cadence,
-        "premiere": _md(premiere_date),
-        "finale": _md(finale_date),
-        "started_airing": premiere_date is not None and premiere_date <= now_date,
-        "finished_airing": finale_date is not None and finale_date <= now_date,
-        "air_dates": [d.isoformat() for d in known],
-    }
+    return season_rules.derive_season(
+        [_parse_air_date(ep.get("first_aired"), tz) for ep in (episodes or [])],
+        (now or datetime.now(tz)).date(),
+    )
 
 
 def _empty_season(season: int) -> dict:
-    return {
-        "season": season, "total": 0, "cadence": None, "premiere": None,
-        "finale": None, "started_airing": False, "finished_airing": False, "air_dates": [],
-    }
+    return season_rules.empty_season(season)
 
 
 async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: bool = False,

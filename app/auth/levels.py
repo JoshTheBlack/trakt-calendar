@@ -79,17 +79,24 @@ async def require_calendar(request: Request) -> CurrentUser:
 
 
 async def require_distrakt(request: Request) -> CurrentUser:
-    """Signed in, approved for distrakt, and linked to Trakt.
+    """Signed in, approved for distrakt, and linked to a service that can read a
+    watch history.
 
-    The Trakt link is not decoration: distrakt reads the requesting user's own
-    watch history using their own token, so an account that only ever signed in
-    with a password or with Plex has nothing for it to read.
+    The link is not decoration: distrakt reads the requesting user's own viewing
+    using their own token, so an account that only ever signed in with a password
+    or with Plex has nothing for it to read. WHICH service supplies it is not
+    this gate's business — Trakt and Simkl both can, either one is enough, and
+    having both is neither required nor a problem. The refusal keeps its
+    `trakt_link_required` code, because that string is what the front end already
+    branches on and renaming it would change an answer nobody's account depends
+    on for a word.
     """
     user = await require_session(request)
     if not user.distrakt_approved:
         raise AuthError(403, "distrakt_not_approved", "distrakt access not yet approved.")
-    if not user.has_trakt_identity:
-        raise AuthError(403, "trakt_link_required", "Link your Trakt account to use distrakt.")
+    if not user.has_tracker_identity:
+        raise AuthError(403, "trakt_link_required",
+                        "Link your Trakt or Simkl account to use distrakt.")
     return user
 
 

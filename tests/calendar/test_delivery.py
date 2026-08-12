@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from app import auth, db
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import ORIGIN, migrated_db
+from tests.support import ORIGIN, migrated_db, window_fetch
 
 
 def _configured_settings() -> Settings:
@@ -54,8 +54,7 @@ class GzipResponseTests(unittest.TestCase):
             _entry(f"show-{i}", f"Show {i}", f"2026-07-{(i % 27) + 1:02d}T20:00:00Z")
             for i in range(120)
         ]
-        fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -103,8 +102,12 @@ class StaticCacheHeaderTests(unittest.TestCase):
                          "public, max-age=31536000, immutable")
 
     def test_the_long_cache_is_scoped_to_fonts(self):
-        """Images live one directory over and have no version in their names."""
-        resp = self.client.get("/static/images/trakttop.png")
+        """Images live one directory over and have no version in their names —
+        which is exactly why the brand artwork was given NEW filenames rather
+        than new bytes under the old ones. A ten-minute max-age and no `?v=`
+        token means a replaced-in-place image is served stale for as long as a
+        browser holds it; a new URL cannot be."""
+        resp = self.client.get("/static/images/distrakkl-mark.svg")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers.get("cache-control"), "max-age=600")
 
@@ -138,8 +141,7 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
 
         entries = [_entry("show-a", "Show A", "2026-07-10T20:00:00Z")]
-        fetch = AsyncMock(return_value=entries)
-        patcher = patch("app.calendar.cache.fetch_window_raw", fetch)
+        patcher = patch("app.calendar.cache.fetch_window_records", window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 

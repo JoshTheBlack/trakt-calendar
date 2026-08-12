@@ -20,13 +20,14 @@ from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
 from app import auth, cache, db
+from app.endpoints import get_endpoint
 from app.calendar import (cache as calendar_cache, share_card, share_code,
                           share_links, share_routes)
 from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
 from app.media import posters
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, ORIGIN, calendar_records
 
 
 async def _no_poster_warm(settings, refs) -> int:
@@ -142,7 +143,8 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         ignore is a link that quietly does not do what its author set."""
         for view in ({"endpoint": "shows/imaginary"}, {"card": "hologram"},
                      {"packing": "sideways"}, {"hidenw": "yes"},
-                     {"tz": "Mars/Olympus_Mons"}, {"nonsense": "1"}):
+                     {"tz": "Mars/Olympus_Mons"}, {"nonsense": "1"},
+                     {"source": "netflix"}, {"source": ""}, {"source": "trakt "}):
             with self.subTest(view=view):
                 resp = self.client.post("/api/me/share/view", json={"view": view})
                 self.assertEqual(resp.status_code, 400)
@@ -155,6 +157,35 @@ class ShareLinkViewOptionsTests(SharePageTestCase):
         for kind in ("token", "username"):
             with self.subTest(kind=kind):
                 self.assertEqual(self._link_view_of(urls[kind]), {"endpoint": "shows/premieres"})
+
+    def test_a_named_source_is_written_into_the_link(self):
+        """The one view option the panel was missing, and it travels the same
+        way every other one does — short code included."""
+        resp = self.client.post("/api/me/share/view",
+                                json={"view": {"endpoint": "shows", "source": "simkl"}})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        url = resp.json()["urls"]["token"]
+        self.assertIn("?p=", url)
+        self.assertEqual(self._link_view_of(url), {"endpoint": "shows", "source": "simkl"})
+
+    def test_a_link_naming_no_source_says_nothing_about_sources(self):
+        """"My sources" is the ABSENCE of the param, so the page resolves the
+        owner's own preference — the standing behaviour of a share page, which a
+        link that opted out of choosing must not change."""
+        self.client.post("/api/me/share/view", json={"view": {"card": "poster"}})
+        self.assertNotIn("source", self._link_view_of(self._share()["urls"]["token"]))
+
+    def test_a_link_may_name_a_combination_of_services(self):
+        """The vocabulary is a SET, so a link has to be able to say one — and to
+        say it in the short form, since the number of combinations grows with
+        every service registered and none of them may be the one that quietly
+        stops fitting."""
+        resp = self.client.post("/api/me/share/view",
+                                json={"view": {"source": "trakt+simkl"}})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        url = resp.json()["urls"]["token"]
+        self.assertIn("?p=", url)
+        self.assertEqual(self._link_view_of(url), {"source": "trakt+simkl"})
 
     def test_a_pinned_month_is_written_into_the_link(self):
         resp = self.client.post("/api/me/share/view", json={"view": {"year": "2026", "month": "8"}})
@@ -254,6 +285,14 @@ class ShareCodeArrivalTests(SharePageTestCase):
         self.assertIn("card-poster", resp.text)
         self.assertIn("August 2026", resp.text)
 
+    def test_a_coded_source_arrives_as_the_ordinary_param(self):
+        """The field the code grew last, through the same expansion as the rest:
+        after arrival nothing on the page knows the short form exists."""
+        code = share_code.encode({"source": "simkl", "year": "2026", "month": "8"})
+        resp = self._arrive(f"p={code}")
+        self.assertEqual(dict(parse_qsl(urlsplit(resp.headers["location"]).query)),
+                         {"source": "simkl", "year": "2026", "month": "8"})
+
     def test_a_long_link_still_works_untouched(self):
         """Every link handed out before the short form existed stays valid."""
         resp = self.client.get(f"/s/{self.token}?card=poster&year=2026&month=8",
@@ -332,7 +371,8 @@ class SharePageDetailsModalTests(SharePageTestCase):
         }
         start = calendar_cache.window_start(date(2026, 7, 15))
         asyncio.run(calendar_cache.store_window(
-            "shows/new", start, [entry], 600, db.now()))
+            "shows/new", start, calendar_records([entry], get_endpoint("shows/new")),
+            600, db.now(), sources=["trakt"]))
 
     def _seed_detail_cache(self):
         """Write the raw Trakt payloads the OWNER's own detail view would have
@@ -367,7 +407,7 @@ class SharePageDetailsModalTests(SharePageTestCase):
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
         self._seed_detail_cache()
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&id=123&season=2")
+            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
         d = resp.json()
         self.assertTrue(d["ok"])
@@ -381,7 +421,7 @@ class SharePageDetailsModalTests(SharePageTestCase):
         """A show the owner never opened has nothing cached — the modal renders
         around the blanks rather than triggering a fetch."""
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&id=555&season=1")
+            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=555&season=1")
         self.assertEqual(resp.status_code, 200, resp.text)
         d = resp.json()
         self.assertTrue(d["ok"])
@@ -392,13 +432,13 @@ class SharePageDetailsModalTests(SharePageTestCase):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._seed_detail_cache()
         with self._no_network():
-            resp = self.client.get("/u/modalowner/details?media=show&id=123&season=2")
+            resp = self.client.get("/u/modalowner/details?media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["cast"][0]["name"], "A Actor")
 
     def test_a_bad_token_details_request_is_a_404(self):
         with self._no_network():
-            resp = self.client.get("/s/not-a-real-token/details?media=show&id=123&season=2")
+            resp = self.client.get("/s/not-a-real-token/details?media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 404)
 
 

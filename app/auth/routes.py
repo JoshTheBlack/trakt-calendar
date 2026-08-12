@@ -39,12 +39,13 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 # `auth` is the package this module lives in, reached through the parent so the
 # routes read the public surface app/auth/__init__.py exposes rather than
 # knowing which submodule each name is defined in.
-from .. import auth, authz, chrome, db, secrets_box
+from .. import auth, authz, chrome, db, providers, secrets_box
 from ..config import Settings, load_settings, save_settings
 from ..media import user_images
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
+from . import provider_avatars
 from . import trakt as trakt_auth
 from .levels import AuthLevel
 
@@ -259,11 +260,23 @@ def _og_context(settings, path: str) -> dict:
     THE STATIC BANNER HERE IS NOT AN OVERSIGHT. A shared calendar's preview is a
     generated picture of the month it points at (app/calendar/share_routes.py); a
     registration form has no calendar behind it to render, so it advertises the
-    app's own banner. Two different facts that happen to name one file today."""
+    app's own banner. Two different facts that happen to name one file today.
+
+    THE DIMENSIONS TRAVEL WITH THE PICTURE, which they did not before. The og()
+    macro emits og:image:width/height only when a route supplies them, and without
+    them Slack and Discord size a card by guessing — a `summary_large_image` claim
+    with no dimensions renders as a thumbnail often enough to be worth closing.
+    The card is drawn at exactly the 1200x630 those unfurlers want, so the numbers
+    are stated rather than left to be worked out."""
     base = _public_base(settings)
     if not base:
         return {"og_url": None, "og_image": None}
-    return {"og_url": f"{base}{path}", "og_image": f"{base}/static/images/tvbanner.png"}
+    return {
+        "og_url": f"{base}{path}",
+        "og_image": f"{base}/static/images/distrakkl-social-card-1200x630.png",
+        "og_image_w": 1200,
+        "og_image_h": 630,
+    }
 
 
 @guard.get("/register", AuthLevel.PUBLIC)
@@ -288,6 +301,7 @@ async def register_page(request: Request):
         # in a cookie or the redirect URL, so registering that way is gated
         # exactly as tightly as registering with a password.
         "trakt_login_configured": settings.trakt_login_configured,
+        "simkl_login_configured": settings.simkl_login_configured,
         **_og_context(settings, f"/register?invite={quote(token)}" if token else "/register"),
     })
 
@@ -433,6 +447,10 @@ async def login_page(request: Request):
         # the way in, and it is the way to the recovery screen.
         "key_mismatch": key_mismatch,
         "trakt_login_configured": settings.trakt_login_configured,
+        # Same story one provider along: the Simkl code exchange authenticates
+        # with a client secret that will not open under the wrong key, so the
+        # button is off exactly when Trakt's is and for the same reason.
+        "simkl_login_configured": settings.simkl_login_configured,
         # Whether the cookie a successful sign-in issues will carry `Secure`. The
         # page compares it against the protocol the browser is really on: if this
         # is true over plain http:// the cookie is dropped on arrival and sign-in
@@ -572,10 +590,25 @@ async def me_page(request: Request):
         # This page gates the tracker's menu item server-side rather than leaving
         # it to CSS — it must not mention the tracker at all to an account without
         # the grant. Same two conditions the tracker's own access level enforces.
-        "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
+        "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "user": user,
         "linked": linked,
+        # THE SERVICES THAT COULD SUPPLY A WATCH HISTORY AND ARE NOT LINKED, by
+        # their own labels, for the notice that tells somebody with the tracker
+        # grant why it has nothing to read. Asked of the registry rather than
+        # written out, because more than one source can answer now and a sentence
+        # naming Trakt alone became wrong the moment a second one could: it told a
+        # viewer signed in with the other service to go and link a service they had
+        # deliberately not linked. An empty list means somebody is already linked
+        # and the notice does not appear at all.
+        # IN DECLARED ORDER, not alphabetical: `registered()` iterates the Source
+        # declaration, which is the app's one statement of which service comes
+        # first, and the sentence should not disagree with the rows below it.
+        "tracker_services_missing": [
+            provider.label for source, provider in providers.registered().items()
+            if str(source) in providers.tracker_sources() and str(source) not in linked],
         "trakt_login_configured": settings.trakt_login_configured,
+        "simkl_login_configured": settings.simkl_login_configured,
         # Whether unlinking is offered at all. Without a password an account's
         # linked identities are its only way in, so the last one may not be
         # removed — showing a button that always refuses would be worse than
@@ -587,6 +620,39 @@ async def me_page(request: Request):
         "min_password_length": auth.MIN_PASSWORD_LENGTH,
         "display_name_max": auth.DISPLAY_NAME_MAX,
         "has_avatar": user_images.has_avatar(user.user_id),
+        # THE PICTURE'S OWN VERSION, SO A RELOAD CANNOT SHOW THE OLD ONE. These
+        # images are served `private, max-age=86400`, which is right for a file
+        # that rarely changes and wrong for the moment it does: the URL is
+        # identical either side of a change, so a browser that has one cached
+        # goes on drawing it for a day. The upload path already worked around
+        # this by cache-busting in JavaScript; carrying the file's mtime in the
+        # template fixes it for every path at once — upload, adopt, refresh —
+        # rather than each call site remembering.
+        "avatar_version": user_images.picture_version(
+            user_images.avatar_path(user.user_id)),
+        # WHICH SERVICES HAVE GIVEN US A PICTURE, and which one (if any) the
+        # account is currently wearing. The second is derived by comparing bytes
+        # rather than stored, for the reason user_images.adopt_avatar_source
+        # gives: the avatar is a COPY, so there is no "primary provider" field
+        # and the honest answer is whether the two files match.
+        "avatar_sources": [
+            {"source": name,
+             "label": "Uploaded" if name == user_images.UPLOAD_SOURCE else name.title(),
+             # Refresh means "ask them again", which only a service can answer.
+             "refreshable": name != user_images.UPLOAD_SOURCE,
+             "adopted": user_images.avatar_source_is_adopted(user.user_id, name),
+             "version": user_images.picture_version(
+                 user_images.avatar_source_path(user.user_id, name))}
+            for name in user_images.list_avatar_sources(user.user_id)
+        ],
+        # WHICH SERVICES COULD BE ASKED, as opposed to which have already
+        # answered. An account linked before pictures were ever fetched has a
+        # connection and no slot, and without this it would have no way to get
+        # one but to disconnect and reconnect — which is a destructive action
+        # standing in for "fetch that, please".
+        "avatar_fetchable": [
+            name for name in user_images.PROVIDER_SLOTS if name in linked
+        ],
     })
 
 
@@ -601,7 +667,7 @@ async def unlink_identity(request: Request):
     user = await auth.require_session(request)
     data = await authz.json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
-    if provider not in ("trakt", "plex"):
+    if provider not in ("trakt", "plex", "simkl"):
         return authz.error("Unknown provider.")
     # Imported here rather than at module scope: trakt_routes.py reads this
     # module's message constants, so the dependency only runs one way at import
@@ -611,6 +677,12 @@ async def unlink_identity(request: Request):
     # Read before the unlink (the token lives on the row it deletes), spent only
     # after one actually happened — an unlink that gets refused below must not
     # leave the account linked to a token this app just killed.
+    #
+    # TRAKT ONLY, and not for want of trying at the others: Plex's token is
+    # invalidated by the user on plex.tv, and Simkl documents no revocation
+    # endpoint at all. For those two, deleting the local row is the whole of what
+    # this app can do, and the grant is removed by the user on the service's own
+    # settings page.
     token = await trakt_routes.stored_access_token(user.user_id) if provider == "trakt" else None
     try:
         removed = await auth.unlink_identity(user.user_id, provider)
@@ -783,6 +855,114 @@ async def get_avatar(request: Request):
     return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
 
 
+# ---------------------------------------------------------------------------
+# the provider picture palette
+# ---------------------------------------------------------------------------
+# A slot is one connected service's copy of that account's picture. The routes
+# below never take a provider name into a path themselves —
+# user_images.provider_avatar_path refuses anything outside its closed set, and
+# these check membership first so the refusal is a 400 rather than a 500.
+
+
+def _known_source(value: object) -> str | None:
+    """A name from a request, or None. Membership of the closed set is what keeps
+    it from becoming a path component."""
+    name = str(value or "").strip().lower()
+    return name if name in user_images.AVATAR_SOURCES else None
+
+
+def _known_slot(value: object) -> str | None:
+    """A CONNECTED SERVICE only. Refresh is the one action that means "ask them
+    again", and the account's own upload has nobody to ask."""
+    name = str(value or "").strip().lower()
+    return name if name in user_images.PROVIDER_SLOTS else None
+
+
+@guard.get("/api/me/avatar/source/{source}", AuthLevel.SESSION)
+async def get_avatar_source(request: Request, source: str):
+    """One source's picture — the upload, or a service's — for the picker."""
+    user = await auth.require_session(request)
+    name = _known_source(source)
+    if name is None:
+        return Response(status_code=404)
+    path = user_images.avatar_source_path(user.user_id, name)
+    if not path.exists():
+        return Response(status_code=404)
+    size_param = request.query_params.get("size")
+    if size_param is None:
+        return FileResponse(path, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+    try:
+        size = int(size_param)
+    except ValueError:
+        return authz.error("`size` must be a whole number.")
+    if not 16 <= size <= user_images.MASTER_SIZE:
+        return authz.error(f"`size` must be between 16 and {user_images.MASTER_SIZE}.")
+    resized = await anyio.to_thread.run_sync(user_images.resize_master, path.read_bytes(), size)
+    return Response(content=resized, media_type="image/webp", headers=_PRIVATE_CACHE_HEADERS)
+
+
+@guard.post("/api/me/avatar/source", AuthLevel.SESSION)
+async def use_avatar_source(request: Request):
+    """Make one source's picture this account's avatar.
+
+    `only_if_missing=False`: this is a person choosing, and a choice overrides
+    whatever is there. That is the whole difference from the automatic seeding
+    at sign-in, which never overwrites — see provider_login.seed_provider_avatar.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    name = _known_source(data.get("source"))
+    if name is None:
+        return authz.error("Unknown picture.")
+    if not user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False):
+        return authz.error("There is no saved picture of that kind.")
+    return JSONResponse({"ok": True})
+
+
+@guard.post("/api/me/avatar/source/refresh", AuthLevel.SESSION)
+async def refresh_provider_avatar(request: Request):
+    """Ask the service for its current picture again and refill the slot.
+
+    THE ONLY WAY A SLOT IS EVER RE-FETCHED, which is what makes "no refetch on an
+    ordinary sign-in" affordable rather than a limitation: a picture that almost
+    never changes is not worth an outbound fetch on every login, and a person who
+    has just changed theirs has somewhere to press.
+
+    THE AVATAR IS NOT TOUCHED unless it was already a copy of this slot. Somebody
+    refreshing a service's picture means "update that picture", not "make it my
+    avatar" — but if they were already wearing it, leaving the old copy on would
+    make the refresh look like it did nothing.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    name = _known_slot(data.get("source") or data.get("provider"))
+    if name is None:
+        return authz.error("Unknown service.")
+    was_adopted = user_images.avatar_source_is_adopted(user.user_id, name)
+    url = await provider_avatars.current_url(user.user_id, name)
+    raw = await provider_avatars.fetch(name, url)
+    if raw is None:
+        return authz.error("That service did not give us a picture to use.")
+    try:
+        await user_images.save_provider_avatar(user.user_id, name, raw)
+    except user_images.ValidationError as exc:
+        return authz.error(str(exc))
+    if was_adopted:
+        user_images.adopt_avatar_source(user.user_id, name, only_if_missing=False)
+    return JSONResponse({"ok": True, "adopted": was_adopted})
+
+
+@guard.delete("/api/me/avatar/source", AuthLevel.SESSION)
+async def remove_avatar_source(request: Request):
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    name = _known_source(data.get("source"))
+    if name is None:
+        return authz.error("Unknown picture.")
+    user_images.delete_avatar_source(user.user_id, name)
+    return JSONResponse({"ok": True})
+
+
 @guard.post("/api/me/images", AuthLevel.SESSION)
 async def upload_saved_image(request: Request):
     """Add a saved image (an alternative grid-header icon to the avatar),
@@ -806,11 +986,20 @@ async def upload_saved_image(request: Request):
 @guard.get("/api/me/images", AuthLevel.SESSION)
 async def list_saved_images(request: Request):
     """This account's saved images as {uid, name}, oldest first — enough for a
-    picker to render a named thumbnail of each through the route below."""
+    picker to render a named thumbnail of each through the route below.
+
+    `provider_avatars` TRAVELS BESIDE THEM RATHER THAN AMONG THEM. The export
+    picker offers both, but they are different things: a saved image is one of
+    five an account may upload, and a provider picture is a copy of a connected
+    service's, owned by the server and counting against no quota. Folding them
+    into one list would have meant `max` describing a count that included things
+    it does not cap.
+    """
     user = await auth.require_session(request)
     return JSONResponse({
         "ok": True,
         "images": user_images.describe_images(user.user_id),
+        "provider_avatars": user_images.list_provider_avatars(user.user_id),
         "max": user_images.MAX_IMAGES_PER_USER,
         "max_name": user_images.MAX_IMAGE_NAME,
     })

@@ -31,16 +31,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import cache as calendar_cache, share_links, state as calendar_state
+from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
+               share_links, state as calendar_state)
 from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
-from ..endpoints import DEFAULT_ENDPOINT, endpoint_choices, get_endpoint
+from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
+from ..providers.base import SourceUnavailable
 from ..providers.trakt import TraktError
-from ..providers.trakt.detail import fetch_details, fetch_tile_info
+from ..providers.trakt.detail import fetch_tile_info
+from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
 
@@ -128,6 +131,7 @@ def _filters_active(prefs: dict) -> bool:
     return bool(
         prefs["genres"] or prefs["countries"] or prefs["network_filter"]
         or prefs["show_certifications"] or prefs["movie_certifications"]
+        or prefs["movie_release_countries"] or prefs["movie_release_types"]
     )
 
 
@@ -144,6 +148,11 @@ def _filters_summary(prefs: dict) -> str:
             ("country", prefs["countries"]),
             ("certification", prefs["show_certifications"] or prefs["movie_certifications"]),
             ("network", prefs["network_filter"]),
+            # One label for the two release specs, the same way the two
+            # certification specs share one: the tooltip names a DIMENSION, and
+            # "where and how a film is released" is one dimension asked in two
+            # halves.
+            ("film release", prefs["movie_release_countries"] or prefs["movie_release_types"]),
         ) if value
     ]
     return ", ".join(named)
@@ -156,6 +165,202 @@ def _requested_endpoint(request: Request, prefs: dict, settings):
     return get_endpoint(
         request.query_params.get("endpoint") or prefs["endpoint"] or settings.endpoint or DEFAULT_ENDPOINT
     )
+
+
+async def _viewer_source_selection(request: Request, user) -> source_prefs.SourcePrefs:
+    """This viewer's saved source preferences, with `calendar_source` swapped
+    for a `?source=` override when the query names one of the app's own
+    selections.
+
+    THE OVERRIDE IS NEVER PERSISTED. It exists so a coverage-gap message (see
+    _coverage_gap below) can offer "show Trakt instead" as a link for THIS
+    view only, without silently rewriting the account's saved preference — the
+    same reason a share link's own view parameters never write back to the
+    owner's row. An unrecognized value is ignored rather than refused, since
+    this is a read of the calendar and not a form that owes the visitor an
+    error for a stray query string.
+    """
+    saved = await source_prefs.load(user.user_id)
+    requested = request.query_params.get("source")
+    if requested and source_prefs.is_selection(requested):
+        # The override replaces the account-wide value AND clears the per-
+        # endpoint ones: a link that says "show me Trakt instead" has to mean
+        # that on the calendar the reader is looking at, and a stored override
+        # for that endpoint would quietly win over the thing they just clicked.
+        return dataclasses.replace(saved, calendar_source=requested,
+                                   endpoint_sources={})
+    return saved
+
+
+def _answering_services(endpoint, settings) -> list[tuple[str, str]]:
+    """(name, label) for every service that could actually fill THIS calendar on
+    THIS instance, in declared order — or an empty list when there is nothing to
+    choose between. The two source controls are both built out of this, so they
+    cannot come to different answers about what this calendar has to offer.
+
+    IT IS TWO QUESTIONS AND NEITHER OF THEM IS ASKED HERE. Whether a service is
+    on this INSTANCE's calendar at all belongs to `providers.calendar_sources`,
+    and it is asked through `resolve.instance_sources` so that an operator
+    switching a service off empties these controls by the same rule that empties
+    the calendar underneath them — a second spelling of that question living here
+    is a copy that answers differently the first time either is edited. Whether
+    it publishes THIS calendar is `capabilities.answers`. No service is named in
+    either check, so a third one is offered the day it is registered.
+
+    AND WITH FEWER THAN TWO THERE IS NOTHING TO OFFER, which is returned as an
+    empty list rather than as one entry. One service that can answer means every
+    label a control could carry names the same outcome, and drawing it makes the
+    page look as though a choice is available when none is. Nothing else on
+    either surface is drawn to be inert either.
+    """
+    from .. import providers  # deferred: see _coverage_gap, same reason
+
+    admitted = calendar_resolve.instance_sources(settings)
+    services = [(str(source), provider.label)
+                for source, provider in providers.registered().items()
+                if provider.capabilities.answers(endpoint.key)
+                and (admitted is None or str(source) in admitted)]
+    return services if len(services) >= 2 else []
+
+
+def _source_choices(endpoint, requested, settings) -> list[dict]:
+    """The toolbar's source control: what it offers, which option is on, and
+    whether it is drawn at all. An empty list means the toolbar draws nothing.
+
+    A VIEW CONTROL AND NOT A PREFERENCE, which is the whole of why it is built
+    here out of the query string rather than out of the stored row. `?source=`
+    has always been a transient override (see `_viewer_source_selection`); this
+    is the way to reach it without typing one. Choosing something re-reads THIS
+    page and writes nothing — the account's answer is stated on /sources, in one
+    place, and a control on the calendar that quietly rewrote it would change
+    every other view the account has as a side effect of a look.
+
+    THE FIRST OPTION IS THE STORED ANSWER, unnamed, because it is whatever the
+    account said and this control is not the place that says it. It is also the
+    way back: without it, overriding once would leave no way to stop overriding
+    short of editing the address.
+
+    IT OFFERS EXACTLY THE SERVICES THAT COULD ACTUALLY FILL THIS CALENDAR, and
+    which those are is `_answering_services`' question rather than this
+    function's — including the rule that fewer than two of them is no control at
+    all.
+
+    THE COST OF NOT DRAWING IT, taken deliberately: a `?source=` in the address
+    on a single-service calendar has no control to clear it with. That override
+    only arrives by following a link, switching calendars drops it (the picker
+    beside this one carries no source), and the alternative was to keep drawing
+    a control whose whole purpose on that page would be to undo something the
+    reader did not do.
+    """
+    chosen = requested if requested and source_prefs.is_selection(requested) else ""
+    services = _answering_services(endpoint, settings)
+    if not services:
+        return []
+    choices = [
+        {"value": "", "label": "My sources"},
+        {"value": source_prefs.AUTO, "label": "Every service"},
+    ]
+    choices += [{"value": value, "label": f"{label} only"} for value, label in services]
+    # An override this calendar does not offer — a named pair, or a service that
+    # answers a different endpoint — is still in force, so it is shown rather
+    # than silently reading as the stored answer it is currently overriding.
+    offered = {source_prefs.AUTO, *(value for value, _ in services)}
+    if chosen and chosen not in offered:
+        choices.append({"value": chosen, "label": chosen.replace(
+            source_prefs.SEPARATOR, " and ").title()})
+    for choice in choices:
+        choice["selected"] = choice["value"] == chosen
+    return choices
+
+
+def _share_source_choices(endpoint, settings) -> list[dict]:
+    """The Share panel's Sources control: one TICK per service a generated link
+    may be narrowed to. An empty list means the panel draws nothing, by
+    `_answering_services`' rule rather than by a second count of the same thing,
+    so the panel and the toolbar disappear together.
+
+    TICKS RATHER THAN A LIST OF ANSWERS, because a source selection is a SET.
+    It is what the Sources screen already draws for the account-wide version of
+    this same question, and it is the shape that survives a service being
+    registered: a list of answers would have to enumerate the combinations, and
+    those double per service.
+
+    NOTHING TICKED IS THE DEFAULT AND MEANS "MY SOURCES" — the link carries no
+    source at all and the page resolves the owner's own preference, which is
+    what a share page has always done. That is also why there is no "every
+    service" tick to draw: a link narrows the owner's calendar and can never
+    widen it (app/calendar/share_routes.py's `_narrowed_prefs` says why), so
+    "all of them" and "none of them" are one outcome, and the empty state
+    already names it.
+
+    Nothing is pre-ticked here: which services a link names is stored per link,
+    and the panel sets the ticks from that rather than from whichever calendar
+    the owner happens to be looking at.
+    """
+    return [{"value": name, "label": label}
+            for name, label in _answering_services(endpoint, settings)]
+
+
+def _share_source_choices_by_endpoint(settings) -> dict[str, list[dict]]:
+    """The panel's Sources ticks for EVERY calendar, keyed by endpoint.
+
+    THE PANEL PICKS ITS OWN CALENDAR, which is why one list is not enough. A
+    link's Calendar option is chosen inside the dialog and need not be the
+    calendar the owner is looking at — so the moment that dropdown moves, the
+    question "which services could fill this link" has a different answer, and
+    on Season Finales it has none. Sending the whole map with the page lets the
+    control answer that on the spot rather than on the next page load, which is
+    the difference between a block that disappears when it should and one that
+    lingers offering a service the link's calendar cannot use.
+
+    ONE ENTRY PER CALENDAR, INCLUDING THE EMPTY ONES, because empty is the
+    answer the control needs most: it is what tells the panel to draw nothing.
+    """
+    return {key: _share_source_choices(endpoint, settings)
+            for key, endpoint in ENDPOINTS.items()}
+
+
+def _coverage_gap(prefs: source_prefs.SourcePrefs,
+                  year: int, month: int, settings, *, endpoint=None,
+                  ) -> tuple[str | None, str | None]:
+    """(message, switch_url) when this viewer has named ONE calendar source and
+    that source's declared reach does not cover {year, month} at all — the
+    explicit "Simkl doesn't reach this month" state. (None, None) otherwise,
+    including for 'auto' and 'both', which are never a single source's
+    promise to keep.
+
+    ROUTE-LEVEL BY DESIGN. The fill itself (app/providers/__init__.py's
+    calendar_sources, app/calendar/cache.py's _covers) already skips a source
+    outside its window with no route learning a date range belonging to a
+    particular service — so a month simply renders short when several sources
+    are admitted, which is correct and needs no message. Naming ONE source and
+    getting nothing back is different: an empty calendar reads as "nothing airs
+    then" when the honest answer is "this source does not reach that far", and
+    only the route knows which of those happened.
+
+    IT ASKS THE ENDPOINT'S OWN SELECTION, not the account-wide one, because a
+    per-calendar override is what actually governs what this page will show. A
+    viewer whose movies calendar alone names one service would otherwise get an
+    unexplained empty month while the account-wide value said several services
+    were answering.
+    """
+    from .. import providers  # deferred: see the DECLARED_EDGES note for CALENDAR -> SOURCES
+
+    selection = prefs.calendar_selection(endpoint.key if endpoint is not None else None)
+    named_sources = source_prefs.named_sources(selection)
+    if named_sources is None or len(named_sources) != 1:
+        return None, None
+    admitted = providers.calendar_sources(prefs=prefs, settings=settings, endpoint=endpoint)
+    if not admitted or any(calendar_cache.month_covered(p, year, month) for p in admitted):
+        return None, None
+    named = admitted[0].label
+    message = f"{named}'s calendar doesn't reach {_calendar.month_name[month]} {year}."
+    alternatives = [p for p in providers.registered().values()
+                   if str(p.source) not in named_sources]
+    switch_url = None
+    if alternatives:
+        switch_url = f"?year={year}&month={month}&source={alternatives[0].source}"
+    return message, switch_url
 
 
 @dataclasses.dataclass
@@ -188,10 +393,33 @@ class MonthAssembly:
     # without asking the DOM, which only ever knows about the cards it holds.
     show_counts: dict[str, int] = dataclasses.field(default_factory=dict)
     error: str | None = None
+    # A Simkl-only month outside the declared coverage window's explicit
+    # empty state: set together, and only together, by _coverage_gap.
+    # `error` still carries the message a viewer reads — this
+    # pair is what the template uses to also offer the switch-source link,
+    # which a plain "not configured" error has none of.
+    coverage_gap: bool = False
+    switch_url: str | None = None
+    # How many of THIS month's cards are still waiting for a source's catalogue
+    # to be read — see app/calendar/enrich.py. They are on the page rather than
+    # filtered out, because the per-viewer genre/country filter exempts a record
+    # nobody has looked up yet rather than judging it on values it cannot answer
+    # for. So a viewer whose filters are narrow can be looking at titles their
+    # own filters would remove, and the honest thing is to say so and let the
+    # count fall to zero on its own as the background drain catches up.
+    unenriched: int = 0
+    # How many titles this viewer's release filter removed from this month. A
+    # release-country rule removes films rather than moving them — a film out
+    # only in Brazil does not match a US filter at all — so it can empty a month
+    # outright, and an empty month with nothing on the page to explain it reads
+    # as a broken calendar rather than as a filter doing its job.
+    release_filtered: int = 0
 
 
 async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
-                         year: int, month: int, not_watching: set[str]) -> MonthAssembly:
+                         year: int, month: int, not_watching: set[str],
+                         source_selection: source_prefs.SourcePrefs,
+                         ) -> MonthAssembly:
     """Fetch, filter and group a WHOLE month, and resolve what changed since this
     viewer last looked at it.
 
@@ -203,6 +431,14 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
     assembly = MonthAssembly()
     if not settings.calendar_source_configured:
         assembly.error = NOT_CONFIGURED
+        return assembly
+
+    message, switch_url = _coverage_gap(source_selection, year, month, settings,
+                                        endpoint=endpoint)
+    if message is not None:
+        assembly.coverage_gap = True
+        assembly.switch_url = switch_url
+        assembly.error = message
         return assembly
 
     days = _calendar.monthrange(year, month)[1]
@@ -218,8 +454,11 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
                 genres=prefs["genres"], countries=prefs["countries"],
                 show_certifications=prefs["show_certifications"],
                 movie_certifications=prefs["movie_certifications"],
+                movie_release_countries=prefs["movie_release_countries"],
+                movie_release_types=prefs["movie_release_types"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
+                prefs=source_selection,
             )
             sp.set(items=meta["total"])
         assembly.total = meta["total"]
@@ -229,6 +468,8 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # whole month; flag it so the page can say the month is incomplete
         # instead of silently showing a short one.
         assembly.partial = meta["partial"]
+        assembly.unenriched = meta["unenriched"]
+        assembly.release_filtered = meta["release_filtered"]
         assembly.show_counts = Counter(
             item.id for group in assembly.grouped for item in group["items"])
         # The is-new diff and its baseline commit belong to whoever produced
@@ -346,12 +587,20 @@ async def calendar_page(request: Request):
     tz = _resolve_viewer_tz(user, settings)
     days = _calendar.monthrange(year, month)[1]
 
+    # Which calendar source(s) this VIEWER reads from — the calendar half of the
+    # same source-preference seam the tracker already reads
+    # (app/sources/prefs.py). What they have LINKED is deliberately not part of
+    # it: a calendar needs no viewer credential, so linkage narrows the tracker
+    # and nothing here (app/sources/prefs.py's `admits_calendar`).
+    source_selection = await _viewer_source_selection(request, user)
+
     # This viewer's marks, read ONCE and handed to the assembly so the cards come
     # out of the template already carrying the class. The client used to add it
     # after the page had painted, which is what made hidden items visibly pop out.
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     month_view = await assemble_month(
-        user, settings, prefs, endpoint, tz, year, month, not_watching)
+        user, settings, prefs, endpoint, tz, year, month, not_watching,
+        source_selection)
     view = _view_preferences(prefs, settings)
 
     _apply_day_layout(month_view.grouped, not_watching=not_watching,
@@ -368,7 +617,8 @@ async def calendar_page(request: Request):
     inline_groups = month_view.grouped[:INITIAL_DAY_BLOCKS]
     skeleton_groups = month_view.grouped[INITIAL_DAY_BLOCKS:]
     for group in skeleton_groups:
-        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]))
+        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]),
+                                source=request.query_params.get("source"))
 
     context = {
         "request": request,
@@ -376,6 +626,19 @@ async def calendar_page(request: Request):
         "view": view,
         "endpoint": endpoint,
         "endpoints": endpoint_choices(),
+        # The toolbar's source control. Built from the query string, applying to
+        # this view alone, and storing nothing — see _source_choices. Empty when
+        # fewer than two services could fill this calendar, and the template
+        # draws nothing at all rather than an inert control.
+        "source_choices": _source_choices(
+            endpoint, request.query_params.get("source"), settings),
+        # The Share panel's own Sources control, which asks a narrower question
+        # than the toolbar's — see _share_source_choices — and is likewise absent
+        # when there is nothing to choose between. TWO SHAPES OF THE SAME ANSWER:
+        # the list for THIS calendar renders the panel on arrival, and the map
+        # keeps it right when the panel's own Calendar option is changed.
+        "share_source_choices": _share_source_choices(endpoint, settings),
+        "share_source_choices_by_endpoint": _share_source_choices_by_endpoint(settings),
         "timezone_groups": build_timezone_options(settings.timezone),
         "viewer_timezone_groups": build_timezone_options(tz.key),
         "year": year,
@@ -407,6 +670,17 @@ async def calendar_page(request: Request):
                                 not_watching, view["hide_not_watching"]),
         "error": month_view.error,
         "partial": month_view.partial,
+        "unenriched": month_view.unenriched,
+        # How many films this viewer's own release filter took off this month,
+        # so a page it emptied can name the filter that emptied it instead of
+        # showing a month that looks like it has nothing in it.
+        "release_filtered": month_view.release_filtered,
+        # A Simkl-only month outside its declared coverage window renders
+        # this explicit state rather than a blank calendar. `switch_url` is
+        # the query string to append to THIS page's own URL to preview the
+        # other source without saving anything.
+        "coverage_gap": month_view.coverage_gap,
+        "switch_url": month_view.switch_url,
         "generated": datetime.now().strftime("%H:%M"),
         # Sonarr/Radarr/Seerr writes land in the operator's own shared libraries
         # and Seerr's requests all carry one app-wide API key, so they are an
@@ -422,7 +696,7 @@ async def calendar_page(request: Request):
         # endpoint answering "may I?" is itself a disclosure that there is
         # something to be allowed into. Note this gates the REVEAL, not the menu
         # item — see _nav.html.
-        "distrakt_available": bool(user and user.distrakt_approved and user.has_trakt_identity),
+        "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "integrations": integrations_routes.INTEGRATION_HEALTH if is_admin else {},
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of
@@ -456,12 +730,21 @@ def _month_date(value, year: int, month: int) -> date | None:
     return parsed
 
 
-def _day_url(endpoint_key: str, day: date) -> str:
+def _day_url(endpoint_key: str, day: date, *, source: str | None = None) -> str:
     """The content request for one day. Built in one place because the shell's
     placeholder and the retry button on a day that failed must ask for exactly the
-    same thing."""
-    return (f"/calendar/day?endpoint={quote(endpoint_key)}"
-            f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+    same thing.
+
+    `source` carries the shell's own `?source=` override forward, when it has
+    one, so a day fetched after the fact reads from the same source selection
+    the shell resolved the month with — the shell never puts one in a
+    placeholder's URL for a viewer who never overrode anything, so the common
+    case is unchanged."""
+    url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
+          f"&year={day.year}&month={day.month}&date={day.isoformat()}")
+    if source:
+        url += f"&source={quote(source)}"
+    return url
 
 
 @guard.get("/calendar/day", AuthLevel.CALENDAR_APPROVED)
@@ -499,6 +782,12 @@ async def calendar_day(request: Request):
     if not settings.calendar_source_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
 
+    # Same source selection the shell resolved for this month — see _day_url:
+    # the placeholder it built for this day already carries the same `source`
+    # override, so this read asks the same source(s) the shell's own numbers
+    # for the month were computed from.
+    source_selection = await _viewer_source_selection(request, user)
+
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     context = {
@@ -507,7 +796,7 @@ async def calendar_day(request: Request):
         "new_ids": set(),
         "settings": settings, "is_admin": bool(user and user.is_admin),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
-        "retry_url": _day_url(endpoint.key, day),
+        "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source")),
         "partial": False,
     }
     try:
@@ -517,8 +806,11 @@ async def calendar_day(request: Request):
                 genres=prefs["genres"], countries=prefs["countries"],
                 show_certifications=prefs["show_certifications"],
                 movie_certifications=prefs["movie_certifications"],
+                movie_release_countries=prefs["movie_release_countries"],
+                movie_release_types=prefs["movie_release_types"],
                 network_filter=prefs["network_filter"] or None,
                 not_watching_ids=not_watching,
+                prefs=source_selection,
             )
             sp.set(items=meta["total"])
         # Same per-day presentation the shell's own blocks were rendered with, so a
@@ -547,9 +839,15 @@ async def calendar_day(request: Request):
 
 @guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)
 async def api_tile(request: Request):
-    """Compact season info for a tile."""
+    """Compact season info for a tile.
+
+    Gated on the CATALOGUE credential, not on the instance's access token: a
+    season's episode list is public, globally cached and the same for everybody
+    (app/providers/trakt/detail.py), so it must not stop working because a token
+    lapsed.
+    """
     settings = load_settings()
-    if not settings.trakt_configured:
+    if not settings.trakt_catalogue_configured:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
     trakt_id = request.query_params.get("id")
@@ -567,20 +865,43 @@ async def api_tile(request: Request):
 
 @guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)
 async def api_details(request: Request):
-    """Full detail payload for the modal."""
+    """Full detail payload for the modal, from whichever service can describe
+    the title.
+
+    THE CALLER HANDS OVER IDS, NOT A SERVICE. The query carries one parameter per
+    id namespace the card was drawn with — `trakt=`, `simkl=` — and
+    detail_source.choose picks who to ask. That keeps "which service answers" on
+    the side that can see whether a service's credentials are filled in, and it
+    is why this is a branch on ONE route rather than a second route per source: a
+    Simkl-only title asks the same question at the same level about the same
+    thing, and a second route would be a second gate, a second refusal shape and
+    a second place the client decides who to ask.
+
+    Catalogue credentials only, for the same reason as /api/tile: everything this
+    returns — overview, cast, the episode list — is public and shared. What
+    changed is that "catalogue" is now a question per SOURCE. It used to gate on
+    Trakt's, which refuses a title that needs no Trakt credential at all.
+    """
     settings = load_settings()
-    if not settings.trakt_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
-    trakt_id = request.query_params.get("id")
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    chosen = detail_source.choose(
+        settings, detail_source.ids_from_query(request.query_params))
+    if chosen is None:
+        # 404 rather than 400: the request was well formed and there is simply
+        # nobody who can answer it. The modal says so in its own words.
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    source, source_id = chosen
     try:
-        details = await fetch_details(
-            settings, media, trakt_id, route_params.season(request.query_params.get("season")))
-    except TraktError as exc:
+        details = await detail_source.fetch(
+            settings, source, media, source_id,
+            route_params.season(request.query_params.get("season")))
+    except SourceUnavailable as exc:
+        # The shared degradation contract rather than one service's error type:
+        # this route can now be answered by either of two sources and catching
+        # only Trakt's would let Simkl's escape as a 500.
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, **details})
+    return JSONResponse({"ok": True, "source": str(source), **details})
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)
@@ -663,6 +984,28 @@ def _filter_spec(value) -> str:
     return ", ".join(t for t in (s.strip() for s in str(value or "").split(",")) if t)
 
 
+def _release_type_spec(value) -> str:
+    """Normalize a release-type spec to comma-separated numbers, keeping the
+    same leading-'-' exclude convention every other spec here uses.
+
+    The vocabulary is TMDB's release-type numbering, which is what the service
+    publishes (see app/providers/simkl/titles.py's RELEASE_TYPE_LABELS). A token
+    that is not a number is DROPPED rather than stored: the read path ignores
+    one it cannot parse, so keeping it would store a preference that can never
+    do anything and would show up on the filters screen as if it could.
+    """
+    kept: list[str] = []
+    for raw in str(value or "").split(","):
+        token = raw.strip()
+        bare = token[1:].strip() if token.startswith("-") else token
+        if not bare.isdigit():
+            continue
+        spelled = f"-{int(bare)}" if token.startswith("-") else str(int(bare))
+        if spelled not in kept:
+            kept.append(spelled)
+    return ", ".join(kept)
+
+
 def _network_list(value) -> list[str]:
     """Networks as a de-duplicated list, from either a JSON array or the comma
     string the textarea produces. Names are matched exactly on the read path, so
@@ -728,6 +1071,15 @@ async def post_me_prefs(request: Request):
         updates["show_certifications"] = _filter_spec(data["show_certifications"])
     if "movie_certifications" in data:
         updates["movie_certifications"] = _filter_spec(data["movie_certifications"])
+    if "movie_release_countries" in data:
+        updates["movie_release_countries"] = _filter_spec(data["movie_release_countries"])
+    if "movie_release_types" in data:
+        # NUMBERS ONLY, AND A BAD TOKEN IS DROPPED HERE RATHER THAN AT READ.
+        # The read path already ignores one it cannot parse, so storing it would
+        # be storing a preference that silently does nothing forever — the same
+        # reason the Sources screen refuses an unknown selection on the way in
+        # while resolution tolerates one on the way out.
+        updates["movie_release_types"] = _release_type_spec(data["movie_release_types"])
     if "network_filter" in data:
         updates["network_filter"] = _network_list(data["network_filter"])
     if not updates:

@@ -256,6 +256,26 @@ class RequestingUsersTokenTests(DistraktTestCase):
         # Everything genuinely app-wide still comes through.
         self.assertEqual(settings.trakt_client_id, "client-id")
 
+    def test_both_services_tokens_ride_on_the_one_settings_object(self):
+        """Each source reads its own field off `settings` — that is what
+        `is_configured` asks about — so a per-source credential object would be a
+        second mechanism for something this one already expresses, and the port
+        protocol would have to grow an argument for it."""
+        user_id = self.tracker_user(token="THE-USERS-TOKEN")
+        asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user_id, provider="simkl", provider_user_id=90210,
+            access_token="THEIR-SIMKL-TOKEN")))
+        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+        self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
+        self.assertEqual(settings.simkl_access_token, "THEIR-SIMKL-TOKEN")
+
+    def test_an_account_with_no_simkl_link_carries_no_simkl_token(self):
+        """`simkl_configured` then goes false and that port is simply not asked,
+        which is exactly what has always been true of Trakt."""
+        settings = asyncio.run(distrakt_routes._distrakt_settings(self.tracker_user()))
+        self.assertEqual(settings.simkl_access_token, "")
+        self.assertFalse(settings.simkl_configured)
+
     def test_it_comes_from_the_per_user_token_source(self):
         """Pinned to the function that knows how to renew a user's token, rather
         than to a direct read of the identity row, so an expired token is
@@ -323,7 +343,14 @@ class RequestingUsersTokenTests(DistraktTestCase):
     def test_a_link_with_no_token_does_not_fall_back_to_the_instances(self):
         """An identity row whose token was cleared reads as "this user has no
         Trakt access", not as "use the operator's". Falling back would show them
-        the operator's watch history."""
+        the operator's watch history.
+
+        THE SEARCH STILL RUNS, and that is not a weakening of this rule. Trakt's
+        /search is a public catalogue read that authenticates with the instance's
+        client id; what must never happen is somebody else's BEARER riding on it,
+        which is what this asserts. The request goes out with no Authorization
+        header at all — see transport.api_headers.
+        """
         user_id = self._make_user("tokenless", calendar_approved=True, distrakt_approved=True)
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
         settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
@@ -334,8 +361,8 @@ class RequestingUsersTokenTests(DistraktTestCase):
         self.sign_in_as(user_id)
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             resp = self.client.get("/api/distrakt/search?q=test")
-        self.assertEqual(resp.status_code, 400)
-        self.assertEqual(recorder.authorizations, [])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(set(recorder.authorizations), {""})
 
     def test_a_private_trakt_response_is_never_written_to_the_shared_cache(self):
         """The blob cache is keyed by URL and shared by the whole instance, so two

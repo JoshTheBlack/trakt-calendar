@@ -172,8 +172,12 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     state = await watch_history.sync_and_baseline(
         settings, user_id, records, since_month=doc["month"])
     if premieres:
-        shows = await compute_live_shows(user_id, premieres, settings, fresh=True,
-                                         watched_lookup=watch_history.watched_map(state))
+        shows = await compute_live_shows(
+            user_id, premieres, settings, fresh=True,
+            watched_lookup=watch_history.watched_map(state),
+            # The freeze did its own sync above, so it is the one that knows
+            # which services answered for this account.
+            sources_read=await watch_history.tracker_sources(settings, user_id))
         by_key = {live_key(s): s for s in shows}
         for rec in premieres:
             live = by_key.get(live_key(rec))
@@ -190,7 +194,7 @@ async def freeze_month(user_id: int, doc: dict, settings) -> dict:
     return doc
 
 
-async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]:
+async def history_records(user_id: int, settings, present: set[tuple[str, int]]) -> list[dict]:
     """Seasons from recent viewing that the viewer is part-way through, as records
     for their OWN LIST rather than for any month.
 
@@ -204,11 +208,18 @@ async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]
     whether the season is finished, so it costs nothing extra and is right from
     the first write instead of being corrected on the next load.
     """
-    from .. import providers
-    from ..providers.trakt.detail import fetch_season_detail
-    port = providers.for_tracker()
-    if port is None:
+    from . import live, watch_history
+    # THE PRIMARY SOURCE ALONE. This seeds the viewer's OWN LIST with seasons they
+    # are part-way through, and a season is on that list or it is not — there is
+    # no half-listed. Two services proposing overlapping sets of "you seem to be
+    # watching this" would add the union — the one collapse the counts rule
+    # refuses everywhere a disagreement can actually be shown. The ordinary sync
+    # then counts every admitted source against whatever ends up listed, so the
+    # second service still contributes its numbers to every row here.
+    ports = await watch_history.tracker_ports(settings, user_id)
+    if not ports:
         return []
+    _source, port = ports[0]
     progress = await port.fetch_watched_progress(settings, since_days=WATCHED_RECENCY_DAYS)
     candidates = []
     for entry in progress:
@@ -228,10 +239,8 @@ async def history_records(settings, present: set[tuple[str, int]]) -> list[dict]
         candidates.append((rec, entry))
     if not candidates:
         return []
-    details = await asyncio.gather(*(
-        fetch_season_detail(settings, (rec["ids"]).get("trakt"), rec["season"])
-        for rec, _ in candidates
-    ))
+    details = await live.fetch_season_details(
+        settings, [rec for rec, _ in candidates], fresh=False, allow_degrade=False)
     out = []
     for (rec, entry), detail in zip(candidates, details):
         total = int(detail.get("total") or 0)
@@ -277,7 +286,15 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     today = today or clock.today()
     month_key = store.month_key(year, month)
     existing = await load_month(user_id, month_key)
-    configured = bool(settings and getattr(settings, "trakt_configured", False))
+    # WHETHER A MONTH CAN BE BUILT AT ALL, which is whether there is a CALENDAR to
+    # build it from: `_initialize_month` fills a new month with that month's
+    # premieres and nothing else. It used to ask `trakt_configured`, and on the
+    # per-account Settings the tracker builds that reads as "did this viewer link
+    # Trakt" — so for an account signed in with Simkl alone the answer was no, no
+    # month was ever persisted, and every import and every manual add wrote into
+    # a transient document that was thrown away on the way out. Both reported as
+    # "it says it worked and nothing appears".
+    configured = bool(settings and getattr(settings, "calendar_source_configured", False))
 
     # A month settles by the calendar alone, so the one being read here freezes on
     # this very access if its own dates are over — leaving the tracker alone for
@@ -291,9 +308,10 @@ async def ensure_month(user_id: int, year: int, month: int, settings, today: dat
     if existing is not None:
         return await load_month(user_id, month_key)
     if not configured:
-        # Initialization needs Trakt (premieres + history); without credentials
-        # return a transient, UNPERSISTED empty doc so a proper init still happens
-        # once Trakt is configured (rather than baking in an empty month).
+        # Initialization needs a calendar to take premieres from; with no source
+        # able to supply one, return a transient, UNPERSISTED empty doc so a
+        # proper init still happens once one is configured (rather than baking in
+        # an empty month).
         return new_month_doc(month_key)
     if not await can_initialize(user_id, month_key, today):
         # Backward / gap navigation to a never-tracked past month: DO NOT backfill
@@ -339,13 +357,24 @@ async def _initialize_month(user_id: int, month_key: str, settings,
     # verdict to be about.
     nw_ids = await calendar_state.not_watching_ids(user_id)
 
-    # This month's premieres, minus not-watching.
-    await calendar_import.add_premieres(doc, present, user_id, settings, year, month, nw_ids)
+    # This month's premieres, minus not-watching. THE INSTANCE'S SETTINGS, not the
+    # per-account ones this function is working with: a calendar window is
+    # fetched under the instance's own credentials and served to everybody, and
+    # calendar_import.premiere_records states that contract. Handing it the
+    # viewer's made a month's own construction depend on whose token was on the
+    # request — an account signed in with Simkl alone had no Trakt token, so
+    # building a month asked Trakt's calendar with no bearer and the whole build
+    # failed on Trakt's 401. The history read below is the opposite case and
+    # keeps the per-account settings, because whose history it is IS the
+    # question there.
+    from ..config import load_settings
+    await calendar_import.add_premieres(doc, present, user_id, load_settings(),
+                                        year, month, nw_ids)
 
     if begun:
         present |= {(str(store.record_key(rec)), int(rec["season"]))
                     for rec in await store.user_records(user_id)}
-        for rec in await history_records(settings, present):
+        for rec in await history_records(user_id, settings, present):
             if calendar_import.matches_not_watching(rec, nw_ids):
                 continue
             await store.add_user_record(user_id, rec)

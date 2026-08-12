@@ -11,6 +11,13 @@ async function loadHeaderImageChoices() {
     select.innerHTML = '<option value="">None</option><option value="avatar">My avatar</option>';
     try {
         const data = await api('/api/me/images');
+        // A CONNECTED SERVICE'S PICTURE IS A THIRD KIND OF CHOICE, listed ahead
+        // of the saved images because there are at most three of them and they
+        // need no naming — the service IS the name. They are not saved images
+        // and do not count against that quota, which is why they arrive from a
+        // different key rather than being folded into the list above.
+        (data.provider_avatars || []).forEach(name => select.add(
+            new Option(name.charAt(0).toUpperCase() + name.slice(1), 'provider:' + name)));
         // The account's own name for each, so this is a choice between pictures
         // rather than between positions in a list.
         data.images.forEach(image => select.add(new Option(image.name, 'img:' + image.uid)));
@@ -28,9 +35,14 @@ function showHeaderThumb() {
     const value = document.getElementById('exHeader').value;
     const thumb = document.getElementById('exHeaderThumb');
     if (!value) { thumb.hidden = true; thumb.removeAttribute('src'); return; }
-    thumb.src = value === 'avatar'
-        ? '/api/me/avatar?size=96'
-        : '/api/me/images/' + encodeURIComponent(value.slice(4));
+    if (value === 'avatar') {
+        thumb.src = '/api/me/avatar?size=96';
+    } else if (value.startsWith('provider:')) {
+        thumb.src = '/api/me/avatar/source/'
+            + encodeURIComponent(value.slice(9)) + '?size=96';
+    } else {
+        thumb.src = '/api/me/images/' + encodeURIComponent(value.slice(4));
+    }
     thumb.hidden = false;
 }
 

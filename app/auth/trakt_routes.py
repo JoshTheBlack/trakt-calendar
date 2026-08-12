@@ -36,9 +36,10 @@ from ..config import Settings, load_settings
 from ..templating import templates
 # Bound as `trakt_auth` because inside app/auth/ a bare `trakt` would read as the
 # Trakt SOURCE (app/providers/trakt/); this is the login flow.
+from . import provider_login
 from . import trakt as trakt_auth
 from .levels import AuthLevel
-from .routes import INVALID_CREDENTIALS, INVALID_INVITE, TRAKT_RECONNECT_NOTICE
+from .routes import TRAKT_RECONNECT_NOTICE
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,36 @@ TOO_MANY_STARTS = (
     "Too many sign-in attempts from this address. Try again in a few minutes."
 )
 
+# Refusing a LINK rather than a sign-in: the visitor already has an account and
+# came from its page, so that is where "back" belongs.
+KEY_UNHEALTHY = (
+    "This instance's stored secrets are encrypted, but the key is currently "
+    "missing or wrong, so linking is refused rather than writing a fresh token "
+    "in the clear. An administrator needs to restore ENCRYPTION_KEY (see "
+    "Settings) before linking can continue."
+)
+
+_BACK_TO_ACCOUNT = {"back": "/me", "back_label": "Back to your account"}
+
+# What each shared refusal looks like as a PAGE. The message and the status ride
+# on the refusal itself — this is only the chrome around them. Two tables rather
+# than one because "back" genuinely differs: a refused link returns the visitor
+# to the account page they started from, while a refused sign-in has no account
+# page to return them to.
+_LOGIN_NOTICES = {
+    provider_login.THROTTLED: ("Too many attempts", {}),
+    provider_login.REGISTRATION_REFUSED: ("Invite required", {}),
+    provider_login.IDENTITY_IN_USE: ("Already linked", {}),
+    provider_login.ACCOUNT_UNAVAILABLE: ("Sign-in failed", {}),
+}
+
+_LINK_NOTICES = {
+    provider_login.NO_SESSION: ("Sign-in link not valid", {}),
+    provider_login.IDENTITY_IN_USE: ("Already linked", _BACK_TO_ACCOUNT),
+    provider_login.ACCOUNT_UNAVAILABLE: ("Sign-in failed", {}),
+    provider_login.KEY_UNHEALTHY: ("Encryption needs attention", _BACK_TO_ACCOUNT),
+}
+
 
 def _notice(request: Request, title: str, message: str, *, status: int = 400,
             back: str = "/login", back_label: str = "Back to sign in"):
@@ -95,6 +126,12 @@ def _notice(request: Request, title: str, message: str, *, status: int = 400,
 
 def _handshake_refused(request: Request):
     return _notice(request, "Sign-in link not valid", auth.HANDSHAKE_REJECTED, status=400)
+
+
+def _refusal_notice(request: Request, refusal: provider_login.Refusal, pages: dict):
+    """Render a shared refusal as this medium's dead-end page."""
+    title, back = pages[refusal.kind]
+    return _notice(request, title, refusal.message, status=refusal.status, **back)
 
 
 async def _begin(
@@ -210,6 +247,7 @@ async def trakt_callback(request: Request):
         # else, who would inherit this link along with it.
         provider_user_id=str(account["id"]),
         display_name=account.get("name"),
+        avatar_url=account.get("avatar"),
         access_token=token.get("access_token"),
         refresh_token=token.get("refresh_token") or None,
         token_expires_at=_expires_at(token),
@@ -230,69 +268,41 @@ def _expires_at(token: dict) -> int | None:
 
 async def _finish_link(request: Request, settings: Settings,
                        identity: auth.ProviderIdentity, current):
-    if current is None:  # pragma: no cover — consume_handshake already required it
-        return _handshake_refused(request)
-    try:
-        await auth.link_provider_identity(identity=identity, user_id=current.user_id)
-    except auth.IdentityInUse:
-        return _notice(request, "Already linked", ALREADY_LINKED,
-                       status=409, back="/me", back_label="Back to your account")
-    except auth.AccountUnavailable:
-        return _notice(request, "Sign-in failed", auth.HANDSHAKE_REJECTED, status=403)
-    except auth.IdentityWritesBlocked:
-        return _notice(
-            request, "Encryption needs attention",
-            "This instance's stored secrets are encrypted, but the key is currently "
-            "missing or wrong, so linking is refused rather than writing a fresh token "
-            "in the clear. An administrator needs to restore ENCRYPTION_KEY (see "
-            "Settings) before linking can continue.",
-            status=409, back="/me", back_label="Back to your account",
-        )
+    """Render provider_login's link completion as a browser redirect.
+
+    The policy — who may link what, and the refusals — is in
+    app/auth/provider_login.py, shared with Plex. What is left here is this
+    medium's rendering plus the reconnect notice, which is about the app-wide
+    Trakt token and has no counterpart at any other provider.
+    """
+    outcome = await provider_login.complete_provider_link(
+        identity=identity, current=current,
+        already_linked=ALREADY_LINKED, key_unhealthy=KEY_UNHEALTHY,
+    )
+    if isinstance(outcome, provider_login.Refusal):
+        return _refusal_notice(request, outcome, _LINK_NOTICES)
     await _clear_reconnect_notice(current.is_admin)
-    response = RedirectResponse("/me", status_code=303)
+    response = RedirectResponse(outcome.redirect_target, status_code=303)
     auth.clear_handshake_cookie(response, settings, request)
     return response
 
 
 async def _finish_login(request: Request, settings: Settings,
                         identity: auth.ProviderIdentity, handshake):
-    ip = auth.client_ip(request, settings)
-    token = handshake["invite_token"]
-    # Only a REGISTRATION is throttled. An ordinary sign-in with an already
-    # known identity is no more expensive than one with a password, and
-    # throttling it would lock out a household behind one address.
-    if await auth.find_identity(PROVIDER, identity.provider_user_id) is None:
-        if await auth.registration_rate_limited(ip, token):
-            return _notice(request, "Too many attempts",
-                           "Too many sign-up attempts from this address. Try again later.",
-                           status=429)
-    try:
-        outcome = await auth.login_with_provider_identity(
-            identity=identity, invite_token=token, ip_address=ip, settings=settings,
-        )
-    except auth.RegistrationRefused:
-        # An unknown Trakt account with no usable invite. NO account is created,
-        # and every unusable-invite cause renders the same page.
-        await auth.record_registration_attempt(ip, token, False)
-        return _notice(request, "Invite required", INVALID_INVITE, status=403)
-    except auth.IdentityInUse:  # pragma: no cover — needs a concurrent registration
-        return _notice(request, "Already linked", ALREADY_LINKED, status=409)
-    except auth.AccountUnavailable:
-        # A disabled account, reported exactly like a failed password sign-in so
-        # that a provider callback is not an oracle for account state.
-        return _notice(request, "Sign-in failed", INVALID_CREDENTIALS, status=403)
-
-    if outcome.kind == "registered":
-        await auth.record_registration_attempt(ip, token, True)
-    else:
-        await _clear_reconnect_notice(await _is_admin(outcome.user_id))
-
-    session_id = await auth.create_session(
-        outcome.user_id, user_agent=request.headers.get("user-agent"), ip_address=ip,
+    """Render provider_login's sign-in completion as a browser redirect."""
+    outcome = await provider_login.complete_provider_login(
+        identity=identity, handshake=handshake, request=request, settings=settings,
+        already_linked=ALREADY_LINKED,
     )
-    response = RedirectResponse("/" if outcome.calendar_approved else "/me", status_code=303)
-    auth.set_session_cookie(response, session_id, settings, request)
-    auth.clear_handshake_cookie(response, settings, request)
+    if isinstance(outcome, provider_login.Refusal):
+        return _refusal_notice(request, outcome, _LOGIN_NOTICES)
+    if not outcome.registered:
+        # A returning user, which is what the reconnect notice was asking for
+        # when an admin is the one returning. A registration cannot be: the
+        # account is seconds old and never held the app-wide token.
+        await _clear_reconnect_notice(await _is_admin(outcome.user_id))
+    response = RedirectResponse(outcome.redirect_target, status_code=303)
+    provider_login.attach_session(response, outcome, settings, request)
     return response
 
 

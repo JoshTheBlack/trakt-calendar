@@ -31,6 +31,16 @@ beyond the default. Keeping them separate is also what stops a slow bulk read on
 one service from consuming the budget of another, which is the whole reason these
 are per-service rather than one shared pool: a poster warm saturating eight
 connections must not leave a calendar refresh queued behind it.
+
+A POOL NEVER FOLLOWS A REDIRECT, and there is no knob here to make one. Every
+client is built with httpx's default of follow_redirects=False, because a pool
+is chosen BEFORE a request is made and a redirect is discovered AFTER: letting
+the client walk the hop would fetch the answer under a budget decided when
+nobody knew where it would land, and would forward this app's custom headers to
+whatever host the Location named. A service whose catalogue genuinely splits
+across paths that 30x between each other classifies the target and re-issues it
+on the pool that target deserves — see app/providers/simkl/transport.py's
+redirect_pool for the one implementation of that shape.
 """
 from __future__ import annotations
 

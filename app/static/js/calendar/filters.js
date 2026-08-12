@@ -13,6 +13,8 @@ async function openFilters() {
         document.getElementById('f_countries').value = p.countries || '';
         setCertPicker(document.getElementById('f_show_certifications'), p.show_certifications || '');
         setCertPicker(document.getElementById('f_movie_certifications'), p.movie_certifications || '');
+        document.getElementById('f_release_countries').value = p.movie_release_countries || '';
+        setCertPicker(document.getElementById('f_release_types'), p.movie_release_types || '');
         document.getElementById('f_networks').value = (p.network_filter || []).join(', ');
     } catch (e) {
         console.error(e);
@@ -28,10 +30,10 @@ function closeFilters() {
 // Empties the three inputs WITHOUT saving, so "Clear all" then Cancel leaves the
 // stored filters alone — the same bargain every other field in these modals makes.
 function clearFilters() {
-    ['f_genres', 'f_countries', 'f_networks'].forEach(id => {
+    ['f_genres', 'f_countries', 'f_release_countries', 'f_networks'].forEach(id => {
         document.getElementById(id).value = '';
     });
-    ['f_show_certifications', 'f_movie_certifications'].forEach(id => {
+    ['f_show_certifications', 'f_movie_certifications', 'f_release_types'].forEach(id => {
         clearCertPicker(document.getElementById(id));
     });
 }
@@ -43,6 +45,8 @@ async function saveFilters(event) {
         countries: document.getElementById('f_countries').value,
         show_certifications: readCertPicker(document.getElementById('f_show_certifications')),
         movie_certifications: readCertPicker(document.getElementById('f_movie_certifications')),
+        movie_release_countries: document.getElementById('f_release_countries').value,
+        movie_release_types: readCertPicker(document.getElementById('f_release_types')),
         network_filter: document.getElementById('f_networks').value
     };
     try {

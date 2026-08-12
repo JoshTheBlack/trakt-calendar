@@ -47,10 +47,15 @@
        discloses nothing to anyone else. For them it is the missing half of the
        gate, and without it the tracker just silently refuses with no way to work
        out why. #}
-    {% if user.distrakt_approved and 'trakt' not in linked %}
-    <p class="auth-notice"><strong>Link your Trakt account to finish setting up distrakt.</strong>
+    {# The services are named from the registry rather than written in, because
+       more than one of them can supply a watch history now and this notice
+       appears only while NONE of them is connected — so naming one of them
+       would tell somebody to link a service they may have chosen against. #}
+    {% if user.distrakt_approved and not user.has_tracker_identity %}
+    <p class="auth-notice"><strong>Connect {{ tracker_services_missing | join(' or ') }}
+      to finish setting up distrakt.</strong>
       It reads your own watch history with your own token, so it has nothing to read
-      until the account below is connected.</p>
+      until one of the accounts below is connected.</p>
     {% endif %}
 
     <div class="auth-list">
@@ -58,7 +63,7 @@
         <span class="label">Profile picture</span>
         <div class="row-main">
           <img id="avatarPreview" class="avatar-thumb" alt="Your profile picture"
-               src="{% if has_avatar %}/api/me/avatar?size=96{% endif %}"
+               src="{% if has_avatar %}/api/me/avatar?size=96&amp;v={{ avatar_version }}{% endif %}"
                {% if not has_avatar %}style="display:none"{% endif %}>
           <div id="avatarPlaceholder" class="avatar-thumb avatar-placeholder"
                {% if has_avatar %}style="display:none"{% endif %}>🙂</div>
@@ -72,6 +77,42 @@
           <span class="auth-error" id="avatarError" role="alert"></span>
         </div>
       </div>
+
+      {# THE PICKER. Every picture this account could wear, its own upload
+         included — `avatar.webp` is the FACE and each of these is a SOURCE it is
+         copied from, so the upload belongs in the list beside the services
+         rather than being the odd one out. Without it, the only way back to your
+         own picture after trying a service's was to REMOVE the service's, which
+         is a destructive action standing in for a choice. #}
+      {% if avatar_sources %}
+      <div class="row">
+        <span class="label">Avatar</span>
+        <div class="row-main provider-avatars">
+          {% for slot in avatar_sources %}
+          <div class="provider-avatar{% if slot.adopted %} is-adopted{% endif %}"
+               data-source="{{ slot.source }}">
+            <img class="avatar-thumb" alt="Your {{ slot.label }} picture"
+                 src="/api/me/avatar/source/{{ slot.source }}?size=96&amp;v={{ slot.version }}">
+            <span class="provider-avatar-name">{{ slot.label }}</span>
+            {# The one already in use says so instead of offering to be used
+               again — a button that cannot change anything reads as broken. #}
+            {% if slot.adopted %}
+            <span class="auth-badge ok">In use</span>
+            {% else %}
+            <button class="btn-ghost tiny" type="button" data-avatar-use="{{ slot.source }}">Use</button>
+            {% endif %}
+            {% if slot.refreshable %}
+            <button class="btn-ghost tiny" type="button" data-avatar-refresh="{{ slot.source }}"
+                    title="Ask {{ slot.label }} for this picture again">↻</button>
+            {% endif %}
+            <button class="btn-ghost tiny" type="button" data-avatar-drop="{{ slot.source }}"
+                    title="Forget this picture">&times;</button>
+          </div>
+          {% endfor %}
+          <span class="auth-error" id="providerAvatarError" role="alert"></span>
+        </div>
+      </div>
+      {% endif %}
     </div>
 
     {# RANKER IMAGES. The pictures an exported poster grid can carry at its top
@@ -177,9 +218,22 @@
         <span class="label">Trakt</span>
         {% if 'trakt' in linked %}
         <span class="auth-badge ok">{{ linked.get('trakt') or "Linked" }}</span>
-        {% if can_unlink %}
-        <button class="btn-ghost tiny" type="button" data-unlink="trakt">Unlink</button>
-        {% endif %}
+        {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+           arrives on its own when an account registers with a service or links
+           one, so an account linked before any of that existed has a connection
+           and no picture — and the only way to get one was to unlink and link
+           again, which is a destructive action standing in for "fetch that,
+           please". It is also the way to pick up a picture you have just changed
+           on the service's own site. #}
+        <span class="row-actions">
+          {% if 'trakt' in avatar_fetchable %}
+          <button class="btn-ghost tiny" type="button" data-avatar-pull="trakt"
+                  title="Use this account's picture">Get picture</button>
+          {% endif %}
+          {% if can_unlink %}
+          <button class="btn-ghost tiny" type="button" data-unlink="trakt">Unlink</button>
+          {% endif %}
+        </span>
         {% elif trakt_login_configured %}
         {# Leaves the app — see the same link on the sign-in page. #}
         <a class="btn-ghost tiny" href="/auth/trakt/link" hx-boost="false">Connect</a>
@@ -190,12 +244,54 @@
         {% endif %}
       </div>
       <div class="row">
+        <span class="label">Simkl</span>
+        {% if 'simkl' in linked %}
+        <span class="auth-badge ok">{{ linked.get('simkl') or "Linked" }}</span>
+        {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+           arrives on its own when an account registers with a service or links
+           one, so an account linked before any of that existed has a connection
+           and no picture — and the only way to get one was to unlink and link
+           again, which is a destructive action standing in for "fetch that,
+           please". It is also the way to pick up a picture you have just changed
+           on the service's own site. #}
+        <span class="row-actions">
+          {% if 'simkl' in avatar_fetchable %}
+          <button class="btn-ghost tiny" type="button" data-avatar-pull="simkl"
+                  title="Use this account's picture">Get picture</button>
+          {% endif %}
+          {% if can_unlink %}
+          <button class="btn-ghost tiny" type="button" data-unlink="simkl">Unlink</button>
+          {% endif %}
+        </span>
+        {% elif simkl_login_configured %}
+        {# Leaves the app — see the same link on the sign-in page. #}
+        <a class="btn-ghost tiny" href="/auth/simkl/link" hx-boost="false">Connect</a>
+        {% else %}
+        {# Not a dead end: say who can fix it, so this doesn't read as "linking
+           is broken". Only an administrator can, and only they are told how. #}
+        <span class="auth-badge off" title="{{ "Set the Simkl client ID, client secret, and public base URL in Settings." if user.is_admin else "An administrator has to finish setting up Simkl sign-in on this instance." }}">Unavailable</span>
+        {% endif %}
+      </div>
+      <div class="row">
         <span class="label">Plex</span>
         {% if 'plex' in linked %}
         <span class="auth-badge ok">{{ linked.get('plex') or "Linked" }}</span>
-        {% if can_unlink %}
-        <button class="btn-ghost tiny" type="button" data-unlink="plex">Unlink</button>
-        {% endif %}
+        {# FETCH THIS SERVICE'S PICTURE WITHOUT DISCONNECTING FIRST. A picture
+           arrives on its own when an account registers with a service or links
+           one, so an account linked before any of that existed has a connection
+           and no picture — and the only way to get one was to unlink and link
+           again, which is a destructive action standing in for "fetch that,
+           please". It is also the way to pick up a picture you have just changed
+           on the service's own site. #}
+        <span class="row-actions">
+          {% if 'plex' in avatar_fetchable %}
+          <button class="btn-ghost tiny" type="button" data-avatar-pull="plex"
+                  title="Use this account's picture">Get picture</button>
+          {% endif %}
+          {% if can_unlink %}
+          <button class="btn-ghost tiny" type="button" data-unlink="plex">Unlink</button>
+          {% endif %}
+        </span>
         {% else %}
         <button class="btn-ghost tiny" type="button" id="plexConnect">Connect</button>
         {% endif %}
@@ -420,6 +516,54 @@ avatarFile.addEventListener('change', async () => {
 avatarRemoveBtn.addEventListener('click', () => {
   confirmInline(avatarRemoveBtn, 'Remove your profile picture?', doRemoveAvatar, {danger: true});
 });
+
+// THE PROVIDER PALETTE. One delegated listener for the three actions rather than
+// a binding per button, because the row is re-rendered by a reload after each
+// one and per-button bindings would have to be re-attached.
+// EVERY ACTION RELOADS ON SUCCESS. The panel shows which picture is in use, and
+// that is derived server-side by comparing bytes — so patching the DOM here
+// would mean re-deriving it in JavaScript and getting a second answer to a
+// question the server already answers.
+document.addEventListener('click', async (event) => {
+  const button = event.target.closest(
+    '[data-avatar-use],[data-avatar-refresh],[data-avatar-drop],[data-avatar-pull]');
+  if (!button) return;
+  const err = document.getElementById('providerAvatarError');
+  const d = button.dataset;
+  const source = d.avatarUse || d.avatarRefresh || d.avatarDrop || d.avatarPull;
+
+  if (d.avatarDrop) {
+    confirmInline(button, 'Forget the ' + source + ' picture?',
+                  () => providerAvatarAction('DELETE', '/api/me/avatar/source', source, button, err),
+                  {danger: true});
+    return;
+  }
+  // Pull and refresh are the same request. They differ only in where you press
+  // it: refresh sits on a picture you already have, pull sits beside a service
+  // you are connected to and have none from yet.
+  const path = (d.avatarRefresh || d.avatarPull)
+    ? '/api/me/avatar/source/refresh' : '/api/me/avatar/source';
+  await providerAvatarAction('POST', path, source, button, err);
+});
+
+async function providerAvatarAction(method, path, source, button, err) {
+  button.disabled = true;
+  if (err) err.textContent = '';
+  try {
+    const resp = await fetch(path, {
+      method,
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source}),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.ok && data.ok) { window.location.reload(); return; }
+    if (err) err.textContent = data.error || 'That did not work.';
+  } catch (e) {
+    if (err) err.textContent = 'That did not work.';
+  } finally {
+    button.disabled = false;
+  }
+}
 
 async function doRemoveAvatar() {
   avatarRemoveBtn.disabled = true;

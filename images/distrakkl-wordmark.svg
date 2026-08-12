@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 110">
+  <defs>
+    <linearGradient id="wordmarkGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f4d385"></stop>
+      <stop offset="40%" stop-color="#e8b545"></stop>
+      <stop offset="100%" stop-color="#e0384d"></stop>
+    </linearGradient>
+  </defs>
+  <!-- ANCHORED AT THE MIDDLE OF THE viewBox, NOT AT A LEFT EDGE. Drawn from
+       x="66" the glyphs sat inside 66 units of left padding and 189 of right, so
+       every surface that centres this file rendered the word 61.5 units left of
+       centre — the header, the seven sign-in-side pages, and the 404 page most
+       visibly, where it hangs alone on a wide stage. Anchoring beats tightening
+       the viewBox because it does not depend on the FONT: the type here is live
+       <text> rather than outlined paths, so a machine without Arial Black
+       substitutes a face of a different width, and a viewBox measured against
+       Arial Black's metrics would be wrong again on exactly those machines. -->
+  <text x="410" y="80" text-anchor="middle" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="86" letter-spacing="-2" fill="url(#wordmarkGrad)">DISTRA<tspan letter-spacing="10">KK</tspan>L</text>
+</svg>

@@ -7,6 +7,7 @@ in one transaction, scoped to the requesting user.
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from .. import db
@@ -21,10 +22,17 @@ logger = logging.getLogger(__name__)
 # 2 added distrakt_prefs (the network->emoji map). 3 re-keyed the roster and the
 # two caches onto (media, match_source, match_id) — see MIGRATION_18 in app/db.py.
 # 4 split the single roster table into month records and user records — see
-# MIGRATION_19. Version 1, 2 and 3 documents still restore; see _upgrade_legacy
-# for what that takes and what it cannot carry across.
-EXPORT_SCHEMA = 4
-SUPPORTED_EXPORT_SCHEMAS = (1, 2, 3, 4)
+# MIGRATION_19. 5 gave every cached row and every sync cursor the SERVICE that
+# reported it — see MIGRATION_22. Version 1, 2, 3 and 4 documents still restore;
+# see _upgrade_legacy for what that takes and what it cannot carry across.
+EXPORT_SCHEMA = 5
+SUPPORTED_EXPORT_SCHEMAS = (1, 2, 3, 4, 5)
+
+# The service every row in a pre-5 document came from. Nothing else has ever
+# written the tracker's caches, so this is a statement of fact rather than a
+# guess — the same one MIGRATION_22 writes into a live database, deliberately, so
+# a backup and a database of the same vintage come out the same.
+_LEGACY_SOURCE = "trakt"
 
 # The tables that hold nothing but a cache of a provider's own answers. A legacy
 # document's copies of these are DROPPED rather than migrated: their rows are
@@ -40,11 +48,11 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("distrakt_month_records", MONTH_RECORD_COLUMNS),
     ("distrakt_user_seasons", USER_RECORD_COLUMNS),
     ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at")),
-    ("distrakt_watch_state", ("last_synced", "beacons_json")),
-    ("distrakt_show_progress", (*IDENTITY_COLUMNS, "season", "watched_episodes_json",
-                                "trakt_id", "simkl_id")),
-    ("distrakt_movie_watches", (*IDENTITY_COLUMNS, "watched_at", "title", "year",
-                                "trakt_id", "simkl_id")),
+    ("distrakt_watch_state", ("cursors_json", "beacons_json")),
+    ("distrakt_show_progress", (*IDENTITY_COLUMNS, "season", "source",
+                                "watched_episodes_json", "trakt_id", "simkl_id")),
+    ("distrakt_movie_watches", (*IDENTITY_COLUMNS, "source", "watched_at", "title",
+                                "year", "trakt_id", "simkl_id")),
     # The emoji map travels with the backup: it is the only copy there is now
     # that nothing seeds it, so a restore that dropped it would lose work that
     # cannot be recovered from anywhere else.
@@ -204,20 +212,19 @@ def _split_roster(rows: list[dict], stamp: int) -> tuple[list[dict], list[dict]]
     return month_records, user_records
 
 
-def _upgrade_legacy(doc: dict) -> dict:
-    """A schema 1, 2 or 3 document read into the current shape.
+def _split_legacy_roster(doc: dict, upgraded: dict) -> None:
+    """The pre-4 half of the upgrade, applied in place to `upgraded`.
 
     Each step is applied only to the documents that need it, so a schema-3 backup
     is split without being re-keyed and a schema-1 one gets both.
 
     The two CACHE tables cannot be re-keyed (they never recorded a shared id for
-    anything) and are dropped from a pre-3 document, with `last_synced` cleared so
-    the next sync re-seeds them from the start of the current month. That is a
+    anything) and are dropped from a pre-3 document, with the sync cursor cleared
+    so the next sync re-seeds them from the start of the current month. That is a
     re-fetch, not a loss: films in months that were already FROZEN live on the
     month row, which this carries across untouched.
     """
     schema = doc.get("schema")
-    upgraded = dict(doc)
     rows = list(doc.get("distrakt_shows") or [])
     if schema < 3:
         rows = _rekey_roster(doc)
@@ -240,6 +247,65 @@ def _upgrade_legacy(doc: dict) -> dict:
         "record(s) and %d user record(s).",
         schema, len(rows), len(month_records), len(user_records),
     )
+
+
+def _name_the_source(upgraded: dict) -> None:
+    """The pre-5 half: every cached row and both stored blobs gain their service.
+
+    A pre-5 document's rows are all Trakt's, so this NAMES what was already true
+    rather than choosing anything. It is done here as well as in MIGRATION_22
+    because a document is not a database and neither form can call the other;
+    when the rule changes, both change.
+    """
+    for table in _CACHE_TABLES:
+        rows = upgraded.get(table)
+        if isinstance(rows, list):
+            upgraded[table] = [
+                {**row, "source": row.get("source") or _LEGACY_SOURCE}
+                for row in rows if isinstance(row, dict)
+            ]
+    states = upgraded.get("distrakt_watch_state")
+    if isinstance(states, list):
+        upgraded["distrakt_watch_state"] = [
+            {"cursors_json": _nest(row.get("last_synced")),
+             "beacons_json": _nest(_parsed(row.get("beacons_json")))}
+            for row in states if isinstance(row, dict)
+        ]
+
+
+def _parsed(document):
+    """A stored JSON blob read back, or None if it is absent or unreadable.
+
+    Unreadable reads as absent for the same reason the loader treats it that way:
+    a beacon is a cache of a service's "something changed" marker, and the cost of
+    dropping one is a single extra call after the restore.
+    """
+    if not document:
+        return None
+    try:
+        return json.loads(document)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nest(value) -> str | None:
+    """One value as the {source: value} document the column now holds."""
+    return None if value is None else json.dumps({_LEGACY_SOURCE: value})
+
+
+def _upgrade_legacy(doc: dict) -> dict:
+    """A schema 1, 2, 3 or 4 document read into the current shape.
+
+    Each half is applied only to the documents that need it, and they are
+    separate because they are separate changes: a schema-4 backup already holds
+    the two record tables and only wants its cached rows named.
+    """
+    schema = doc.get("schema")
+    upgraded = dict(doc)
+    if schema < 4:
+        _split_legacy_roster(doc, upgraded)
+    if schema < 5:
+        _name_the_source(upgraded)
     return upgraded
 
 

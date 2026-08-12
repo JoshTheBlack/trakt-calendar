@@ -44,6 +44,7 @@ logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
 # in app/main.py). What actually decides it is config.accesslog below.
 
 from app.main import app
+from app import chrome
 
 
 def main() -> None:
@@ -55,7 +56,7 @@ def main() -> None:
     # Per-request access log ("GET /... 200" lines, incl. static 304s) is OFF by
     # default — set ACCESS_LOG=1 to enable. App INFO diagnostics are unaffected.
     config.accesslog = "-" if os.environ.get("ACCESS_LOG") else None
-    print(f">> Trakt New Shows running at http://localhost:{port}  (Ctrl+C to stop)")
+    print(f">> {chrome.PRODUCT_NAME} running at http://localhost:{port}  (Ctrl+C to stop)")
     import asyncio
     asyncio.run(hypercorn.asyncio.serve(app, config))
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import anyio.to_thread
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.gzip import GZipMiddleware
@@ -43,8 +43,10 @@ from .auth import plex as plex_auth
 from .auth import plex_routes
 from .auth import routes as auth_routes
 from .auth import secrets_backfill
+from .auth import simkl_routes
 from .auth import trakt_routes
 from .calendar import cache as calendar_cache
+from .calendar import enrich as calendar_enrich
 from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
@@ -52,6 +54,7 @@ from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
 from .media import artwork, posters
 from .ranker import routes as ranker_routes
+from .sources import routes as sources_routes
 from .auth import AuthLevel
 from .config import load_settings
 from .templating import templates
@@ -131,6 +134,10 @@ async def _sweep_auth_rows() -> None:
     # size cap, evicting least-recently-stored first.
     settings = load_settings()
     await cache.sweep(now, settings.api_cache_max_bytes)
+    # Same idea, one table over: a Simkl enrichment row past its retention
+    # window is not urgent to keep — the next read that resolves to that
+    # title just queues it again (see app/calendar/enrich.py).
+    await calendar_enrich.sweep(now)
     # Drop poster-URL sightings past their retention window, and hold the
     # on-disk poster tile cache under its own size cap, oldest file first. The
     # tile sweep is filesystem walking, not a DB call, so it goes through a
@@ -162,6 +169,11 @@ async def _heartbeat_tick() -> None:
         settings_routes.maybe_refresh_trakt_token,
         _sweep_auth_rows,
         lambda: calendar_cache.prewarm_calendar_cache(load_settings()),
+        # run_drain, not drain directly — the same coalescing latch a fill
+        # uses (app/calendar/enrich.py's schedule_drain), so a heartbeat tick
+        # landing while a fill-triggered pass is already running folds into
+        # it rather than starting a second, concurrent pass of its own.
+        lambda: calendar_enrich.run_drain(load_settings()),
     ):
         try:
             await job()
@@ -257,7 +269,7 @@ class _CachedStaticFiles(StaticFiles):
 # The interactive API docs are off: they are a complete, unauthenticated
 # inventory of every endpoint in the app, and nothing here is a public API that
 # anyone consumes from a schema.
-app = FastAPI(title="Trakt New Shows", lifespan=lifespan,
+app = FastAPI(title=chrome.PRODUCT_NAME, lifespan=lifespan,
               docs_url=None, redoc_url=None, openapi_url=None)
 # Added before authz.install() below, so it nests INSIDE the authz middleware
 # stack (Starlette's registration order is reversed — see authz.install's own
@@ -269,6 +281,7 @@ app.mount("/static", _CachedStaticFiles(directory=BASE_DIR / "static"), name="st
 
 app.include_router(auth_routes.router)
 app.include_router(trakt_routes.router)
+app.include_router(simkl_routes.router)
 app.include_router(plex_routes.router)
 app.include_router(admin_routes.router)
 app.include_router(encryption_routes.router)
@@ -276,6 +289,7 @@ app.include_router(share_routes.router)
 app.include_router(ranker_routes.router)
 app.include_router(calendar_routes.router)
 app.include_router(distrakt_routes.router)
+app.include_router(sources_routes.router)
 app.include_router(settings_routes.router)
 app.include_router(integrations_routes.router)
 
@@ -336,6 +350,23 @@ async def handle_http_exception(request: Request, exc: StarletteHTTPException) -
          **chrome.page_context(None)},
         status_code=exc.status_code,
     )
+
+
+# PUBLIC because the clients that ask for this one never carry a session: a
+# bookmark manager, a feed reader, a chat unfurler, a phone adding the site to a
+# home screen. They ask for /favicon.ico at the ROOT and ignore what the page
+# declared, which is the whole reason the .ico exists — and until this route
+# there was nothing at that address. The declared <link>s in _head.html cover a
+# browser rendering the page; they do not cover a client that never parsed it,
+# and one of those is what still hands back the pre-rename icon.
+#
+# It is not enough to leave the old app/static/images/favicon.ico in place: that
+# file is the OLD brand, and it is still reachable at its own URL for anything
+# that cached the address. This route answers with the current one.
+@guard.get("/favicon.ico", AuthLevel.PUBLIC)
+async def favicon():
+    return FileResponse(BASE_DIR / "static" / "images" / "distrakkl-favicon.ico",
+                        media_type="image/x-icon", headers=_STATIC_CACHE_HEADERS)
 
 
 # Deliberately reachable by anyone: a container orchestrator's liveness probe

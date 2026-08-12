@@ -18,12 +18,17 @@ from fastapi.testclient import TestClient
 from app import auth, db, distrakt
 from app.distrakt import backfill, watch_history
 from app.calendar import state as calendar_state
-from app.providers.base import ItemKey
+from app.providers.base import ItemKey, PlayCounts
 from app.config import Settings, save_settings
 from app.main import app
 from tests.support import ORIGIN, migrated_db, new_db_path
 
-SETTINGS = SimpleNamespace(configured=True, timezone="UTC")
+# The two credential flags the tracker's source selection reads. A fake
+# settings object has to answer both, because the selector asks every
+# registered source whether this request carries a usable credential for it
+# — see app/distrakt/routes.py's _distrakt_settings.
+SETTINGS = SimpleNamespace(configured=True, timezone="UTC",
+                           trakt_configured=True, simkl_configured=False)
 
 
 def _ep_event(trakt_id, season, number, watched_at, title="Show", network="Net"):
@@ -106,6 +111,8 @@ class BackfillTestCase(unittest.IsolatedAsyncioTestCase):
             return totals.get((int(trakt_id), int(season)), {"total": 0})
 
         with patch("app.providers.trakt.sync.fetch_history", side_effect=fake_history), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.sync.fetch_show_progress_detail", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season):
             return await backfill.survey(self.user_id, SETTINGS, start, end,
@@ -573,6 +580,8 @@ class FilmsAreVisibleTests(unittest.TestCase):
              patch("app.providers.trakt.sync.fetch_watched_progress", return_value=[]), \
              patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", side_effect=no_events), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
             body = self.client.get("/api/distrakt/month?year=2020&month=5").json()
         self.assertEqual(body["movies"], [])
@@ -713,6 +722,8 @@ class RemovingAFilmTests(unittest.TestCase):
 
         with patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
              patch("app.providers.trakt.sync.fetch_history", side_effect=no_events), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
             asyncio.run(watch_history.sync(SETTINGS, self.user_id, today=date(2026, 7, 28)))
 
@@ -752,6 +763,8 @@ class BackfillRouteTests(unittest.TestCase):
             return {"total": 2}
 
         with patch("app.providers.trakt.sync.fetch_history", side_effect=fake_history), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.sync.fetch_show_progress_detail", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season):
             return self.client.post("/api/distrakt/backfill/survey",

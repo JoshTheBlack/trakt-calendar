@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630">
+  <defs>
+    <linearGradient id="wgGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#f4d385"></stop>
+      <stop offset="40%" stop-color="#e8b545"></stop>
+      <stop offset="100%" stop-color="#e0384d"></stop>
+    </linearGradient>
+    <clipPath id="cardBodyClip"><rect x="64" y="150" width="384" height="270" rx="32"></rect></clipPath>
+    <mask id="cardCutouts">
+      <rect x="0" y="0" width="512" height="512" fill="white"></rect>
+      <circle cx="256" cy="150" r="24" fill="black"></circle>
+      <rect x="64" y="277" width="384" height="16" fill="black"></rect>
+      <rect x="248" y="150" width="16" height="270" fill="black"></rect>
+      <rect x="336" y="330" width="66" height="66" rx="14" fill="black"></rect>
+    </mask>
+  </defs>
+  <rect x="0" y="0" width="1200" height="630" fill="#0a0c10"></rect>
+  <g transform="translate(145,215) scale(0.390625)">
+    <g mask="url(#cardCutouts)">
+      <rect x="150" y="406" width="44" height="54" rx="14" fill="#e8b545"></rect>
+      <rect x="318" y="406" width="44" height="54" rx="14" fill="#e0384d"></rect>
+      <line x1="256" y1="150" x2="180" y2="50" stroke="#e8b545" stroke-width="20" stroke-linecap="round"></line>
+      <line x1="256" y1="150" x2="332" y2="50" stroke="#e0384d" stroke-width="20" stroke-linecap="round"></line>
+      <g clip-path="url(#cardBodyClip)">
+        <rect x="64" y="150" width="384" height="270" fill="#e0384d"></rect>
+        <polygon points="64,150 448,150 64,420" fill="#e8b545"></polygon>
+      </g>
+    </g>
+  </g>
+  <text x="385" y="330" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="86" letter-spacing="-2" fill="url(#wgGrad)">DISTRA<tspan letter-spacing="10">KK</tspan>L</text>
+</svg>

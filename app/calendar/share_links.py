@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from . import share_code
 from .. import auth, db
 from ..endpoints import ENDPOINTS
+from ..sources import prefs as source_prefs
 
 PREFERRED_KINDS = ("token", "username", "slug")
 
@@ -37,7 +38,14 @@ DAY_PACKINGS = ("stacked", "packed")
 # they are offered as an explicit opt-in (both together, never one alone) and
 # left out of a link that has not asked for them, which then opens on whatever
 # month it is opened in.
-LINK_VIEW_PARAMS = ("endpoint", "card", "packing", "hidenw", "tz", "year", "month")
+#
+# `source` is the one entry here whose vocabulary lives in another package
+# (app/sources/prefs.py) rather than beside this tuple, and it is asked rather
+# than restated for the reason CARD_STYLES above is restated: those two are
+# spellings this module invents, while a source selection is an account
+# preference with its own owner, and a second list of service names here would
+# be one that answers differently the day a third service is registered.
+LINK_VIEW_PARAMS = ("endpoint", "card", "packing", "hidenw", "tz", "year", "month", "source")
 
 # The years a link may be pinned to. Wide enough that a pinned link is never
 # rejected for being a couple of years old, narrow enough that a typo or a
@@ -215,6 +223,13 @@ def link_view_error(view: dict) -> str | None:
         if key == "month":
             if not (text.isdigit() and 1 <= int(text) <= 12):
                 return "Month must be between 1 and 12."
+        # The same predicate the calendar's own `?source=` is whitelisted
+        # through, so a link can only ever name a selection the page it opens
+        # knows how to act on. Never a free string: an unrecognized one would be
+        # dropped at the far end, which is the silent-nothing this function
+        # exists to refuse.
+        if key == "source" and not source_prefs.is_selection(text):
+            return "Unknown source selection."
     # A month with no year would land on the current year and silently mean
     # something different next January; a year with no month is not a month at
     # all. Either alone is a link that does not do what its author set it to.

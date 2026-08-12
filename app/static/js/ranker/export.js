@@ -63,9 +63,20 @@ function exportOptions() {
         fmt: document.getElementById('exFmt').value,
         show_titles: document.getElementById('exTitles').checked,
         podium: document.getElementById('exPodium').checked,
-        header_image: header === 'avatar' ? 'avatar'
-            : (header.startsWith('img:') ? { image_uid: header.slice(4) } : null),
+        // Three shapes, matching what _header_bytes accepts server-side: the
+        // bare string for the avatar, and one keyed object each for a saved
+        // image and for a connected service's picture. The server validates
+        // both names against what this account actually owns — nothing here is
+        // trusted to have picked a real one.
+        header_image: headerImageSpec(header),
     };
+}
+
+function headerImageSpec(header) {
+    if (header === 'avatar') return 'avatar';
+    if (header.startsWith('img:')) return { image_uid: header.slice(4) };
+    if (header.startsWith('provider:')) return { provider: header.slice(9) };
+    return null;
 }
 
 // How many titles the chosen scope actually contributes — the grid is that many

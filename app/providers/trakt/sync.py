@@ -7,6 +7,32 @@ send the identical URL — which is why every call here passes `private=True` or
 goes through send directly. That is also the whole of what a second provider
 has to supply before the tracker can be backed by it, so it is one module
 rather than a handful of functions scattered through the client.
+
+A FAILURE IS NEVER NORMALIZED INTO AN EMPTY ANSWER. Everything here reads one
+person's viewing, and an empty answer is a DESTRUCTIVE one — the tracker retires
+the seasons a source no longer reports — so "I could not read this" and "there is
+nothing here" must not arrive in the same shape. Three rules follow, and they are
+the same three the other source's port already keeps:
+
+  A REFUSED CREDENTIAL RAISES, IMMEDIATELY AND EVERYWHERE. It is a statement
+  about every request that token will make, not about the call that happened to
+  be placed first, so a fan-out that tolerates one show failing must not tolerate
+  this once per show. See transport.is_credential_failure.
+
+  A READ THAT READ NOTHING IS NOT AN EMPTY READ. A beacon that could not be
+  fetched is not four absent timestamps — an empty blob compares EQUAL to a
+  stored empty one and gates the next sync as unchanged, so a source that went
+  down would report itself up to date for as long as it stayed down. A history
+  sweep that lost a page is not a sweep that found no plays, because the cursor
+  moves past whatever it did not see and those plays are never asked for again.
+
+  A SHOW THE READ COULD NOT REACH IS ABSENT FROM THE ANSWER, not present with
+  nothing watched. The two are indistinguishable to the caller once flattened,
+  and the second retires that show's stored seasons.
+
+The whole point of the three is that the tracker degrades a source that raises —
+it names the service in the page's notice and leaves its stored rows exactly as
+they were — which is the honest version of the outcome a swallowed failure fakes.
 """
 from __future__ import annotations
 
@@ -20,7 +46,7 @@ import httpx
 
 from ...config import Settings
 from ...perftrace import span
-from ..base import collect_ids
+from ..base import PlayCounts, collect_ids
 from . import transport
 from .transport import TraktError
 
@@ -32,24 +58,26 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
     """Per-season watched-episode counts (the live `x`), keyed {(trakt_id, season):
     completed} — via ONE /shows/{id}/progress/watched call per UNIQUE show.
 
-    Why not the aggregate /sync/watched/shows? An audit showed it returning
-    show-level rows (plays + show, capped ~100/page) WITHOUT the seasons[]/
-    episodes[] breakdown — paginated or not — so every count came back 0. The
-    per-show progress endpoint is the authoritative source of a user's season
-    completion and always includes `seasons[].completed`.
+    Why not the aggregate /sync/watched/shows? Measured against the live API, it
+    returns show-level rows (plays + show, capped at 250 a page) WITHOUT the
+    seasons[]/episodes[] breakdown — with pagination headers and without them,
+    and with every `extended` variant — so every count came back 0. The per-show
+    progress endpoint is the authoritative source of a user's season completion
+    and always includes `seasons[].completed`. What the show-level rows ARE good
+    for is `plays`, which is fetch_play_counts's business.
 
     Never cached — both because `x` is live and because a progress record belongs
     to whoever's token asked for it, and the cache is keyed by URL alone. One
-    shared httpx client pools the fan-out. Errored/absent shows just contribute
-    no keys (that show renders 0)."""
+    shared httpx client pools the fan-out. A show that could not be read
+    contributes no keys and its caller falls back to the record it already had; a
+    refused CREDENTIAL raises, because that is not one show failing."""
     unique = sorted({int(t) for t in trakt_ids if t is not None})
     if not unique:
         return {}
     params = {"hidden": "false", "specials": "false", "count_specials": "false"}
     client = transport.shared_client()
     results = await asyncio.gather(*(
-        transport.cached_get(client, settings, f"shows/{tid}/progress/watched", params, private=True)
-        for tid in unique
+        _progress_record(settings, tid, client=client) for tid in unique
     ))
     lookup: dict[tuple[int, int], int] = {}
     for tid, res in zip(unique, results):
@@ -73,18 +101,58 @@ async def fetch_watched_map(settings: Settings, trakt_ids) -> dict[tuple[int, in
 
 async def fetch_last_activities(settings: Settings) -> dict:
     """/sync/last_activities -> the small per-type "last changed at" beacon blob
-    (fixed size, independent of library size). Used to gate the history sync."""
+    (fixed size, independent of library size). Used to gate the history sync.
+
+    A BEACON THAT COULD NOT BE READ RAISES, and is never answered with an empty
+    blob. The caller compares this against what it stored last time to decide
+    whether anything has moved, and an empty answer is not "no beacon" — it is the
+    claim that all four stamps are absent, which compares EQUAL to a stored empty
+    one and gates the sync as unchanged. A refused token would then have this
+    source report itself up to date for as long as it stayed refused, and the
+    whole pass would be built on that: the history pull would come back empty for
+    the same reason, no re-baseline would run, and the page would render stored
+    numbers as though they had just been confirmed.
+    """
     res = await transport.cached_get(
-        transport.shared_client(), settings, "sync/last_activities", {}, private=True)
+        transport.shared_client(), settings, "sync/last_activities", {},
+        private=True, raise_errors=True)
+    # None here is not a failure: raise_errors=True means a refusal has already
+    # raised, so this is Trakt answering with a body that held nothing to read.
     return res if isinstance(res, dict) else {}
 
 
-async def fetch_show_progress_detail(settings: Settings, trakt_id,
-                                     client: httpx.AsyncClient | None = None) -> dict[int, dict[int, str]]:
-    """/shows/{id}/progress/watched -> {season_number: {episode_number: watched_at}}.
-    The per-show baseline: authoritative, deduped completion straight from Trakt.
-    Never cached — this is one person's viewing, and the cache key is the URL.
-    Pass a shared `client` when batching.
+async def _progress_record(settings: Settings, trakt_id,
+                           client: httpx.AsyncClient | None = None):
+    """One /shows/{id}/progress/watched body, or None when THIS SHOW could not be
+    read.
+
+    None is deliberately not `{}`. An empty progress record is a real answer —
+    this person has watched none of this show — and the tracker acts on it by
+    retiring the seasons it had stored. A show that 500s or vanishes has said
+    nothing at all, and flattening the two would delete counts over a transient
+    failure, one show at a time and with nothing on the page to say so.
+
+    A REFUSED CREDENTIAL IS NOT A PER-SHOW FAILURE AND IS RE-RAISED. It is a
+    statement about every request this token will make, so tolerating it here
+    would tolerate it once for each show in the roster and compose a hundred and
+    forty-six refusals into "you have watched nothing".
+    """
+    params = {"hidden": "false", "specials": "false", "count_specials": "false"}
+    c = client or transport.shared_client()
+    try:
+        return await transport.cached_get(
+            c, settings, f"shows/{trakt_id}/progress/watched", params,
+            private=True, raise_errors=True)
+    except TraktError as exc:
+        if transport.is_credential_failure(exc):
+            raise
+        # transport has already logged the status; this says what was lost.
+        logger.warning("progress record for show %s could not be read: %s", trakt_id, exc)
+        return None
+
+
+def _seasons_from_progress(res) -> dict[int, dict[int, str]]:
+    """A progress body as {season: {episode: watched_at}}.
 
     `last_watched_at` is carried per episode rather than discarded because WHEN a
     season was finished is what decides which month records it as finished: the
@@ -93,9 +161,6 @@ async def fetch_show_progress_detail(settings: Settings, trakt_id,
     reports an episode as completed without a timestamp, which reads as "date
     unknown" everywhere downstream and never as a date.
     """
-    params = {"hidden": "false", "specials": "false", "count_specials": "false"}
-    c = client or transport.shared_client()
-    res = await transport.cached_get(c, settings, f"shows/{trakt_id}/progress/watched", params, private=True)
     out: dict[int, dict[int, str]] = {}
     if isinstance(res, dict):
         for season in res.get("seasons") or []:
@@ -111,6 +176,18 @@ async def fetch_show_progress_detail(settings: Settings, trakt_id,
     return out
 
 
+async def fetch_show_progress_detail(settings: Settings, trakt_id,
+                                     client: httpx.AsyncClient | None = None):
+    """/shows/{id}/progress/watched -> {season_number: {episode_number: watched_at}},
+    or None when this show could not be read.
+    The per-show baseline: authoritative, deduped completion straight from Trakt.
+    Never cached — this is one person's viewing, and the cache key is the URL.
+    Pass a shared `client` when batching.
+    """
+    res = await _progress_record(settings, trakt_id, client=client)
+    return None if res is None else _seasons_from_progress(res)
+
+
 async def fetch_progress_details(settings: Settings,
                                  show_ids) -> dict[int, dict[int, dict[int, str]]]:
     """fetch_show_progress_detail for several shows at once, as
@@ -120,6 +197,13 @@ async def fetch_progress_details(settings: Settings,
     this package's business: the tracker baselines a whole roster in one go and
     has no reason to hold an httpx client to do it. Ids are de-duplicated, so a
     roster carrying two seasons of one show costs one call.
+
+    A SHOW THAT COULD NOT BE READ IS ABSENT FROM THE ANSWER rather than present
+    with an empty record, which is the protocol's way of saying "I have nothing to
+    tell you about this one". Its caller leaves what it already knew alone. A
+    refused credential is not one show failing and propagates, which the tracker
+    degrades per source: this service is named on the page and every one of its
+    stored rows is left standing.
     """
     unique = list(dict.fromkeys(int(t) for t in show_ids if t is not None))
     if not unique:
@@ -134,7 +218,114 @@ async def fetch_progress_details(settings: Settings,
         details = await asyncio.gather(*(
             fetch_show_progress_detail(settings, tid, client=client) for tid in unique
         ))
-    return dict(zip(unique, details))
+    return {tid: seasons for tid, seasons in zip(unique, details) if seasons is not None}
+
+
+async def fetch_play_counts(settings: Settings, limit: int = 250,
+                            max_pages: int = 40) -> PlayCounts:
+    """/sync/watched/shows -> {trakt id: plays}, and whether the whole listing was
+    read (app/providers/base.py's PlayCounts).
+
+    WHAT THIS ENDPOINT IS ACTUALLY GOOD FOR. It carries no seasons[] and no
+    episodes[] in any variant — see api_headers, where the measurement that
+    settled that is written out — so it cannot answer what anyone has watched.
+    What each row DOES carry is `plays`, and `plays` tracks the watched set in
+    BOTH directions: measured live, removing a season's plays took a show from 20
+    to 10 and re-marking them took it back to 20. So a sweep of this is a change
+    detector for the whole library at five calls, against one call per title for
+    asking properly.
+
+    `last_updated_at` IS ON EVERY ROW AND MUST NOT BE USED FOR THIS. In the same
+    measurement it stayed put through the removal and moved only on the addition,
+    so a detector keyed on it misses every unwatch — which is the defect this is
+    here to catch, one layer down and harder to see.
+
+    A SHOW WITH NO PLAYS LEFT VANISHES FROM THE LISTING ENTIRELY rather than
+    appearing with zero, which is why the caller compares against what it stored
+    rather than reading this map alone.
+
+    PAGE ONE ALONE, THEN THE REST TOGETHER. The first response's
+    x-pagination-page-count says how many there are, and the remainder have no
+    ordering between them — they are disjoint slices of one listing — so issuing
+    them together turns a sweep of a thousand-title library from five round trips
+    end to end into two. They still queue behind the outbound rate gate that paces
+    every other Trakt fan-out, so this asks nothing more of the service than the
+    per-show reads it exists to replace already do; what it stops paying is the
+    latency of asking one at a time. Measured on a real account: about 800ms
+    sequential, on the critical path of every load where anything moved.
+
+    A page that could not be read raises if it is the FIRST — a sweep that read
+    nothing is not a library that holds nothing — and otherwise makes the sweep
+    incomplete, which the caller reads as "may not conclude anything from an
+    absence".
+    """
+    client = transport.shared_client()
+
+    async def _page(number: int):
+        params = {"limit": str(limit), "page": str(number)}
+        url = f"{transport.API_BASE}/sync/watched/shows?{urlencode(params)}"
+        t0 = _time.perf_counter()
+        try:
+            resp = await transport.send(
+                client, "GET", url, headers=transport.api_headers(settings, paginate=False))
+        except httpx.HTTPError as exc:
+            logger.warning("fetch_play_counts: request failed: %s", exc)
+            raise TraktError(f"Could not reach Trakt: {exc}") from exc
+        _perf.debug("netGET    sync/watched/shows?page=%s -> %s  %.0fms", number,
+                    resp.status_code, (_time.perf_counter() - t0) * 1000.0)
+        if resp.status_code != 200:
+            logger.warning("fetch_play_counts: HTTP %s: %s", resp.status_code, resp.text[:200])
+            raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
+        try:
+            return resp.json(), resp.headers
+        except ValueError:
+            raise TraktError("Trakt API returned an unreadable response.") from None
+
+    def _fold(batch, counts: dict[str, int]) -> None:
+        for entry in batch if isinstance(batch, list) else ():
+            if not isinstance(entry, dict):
+                continue
+            trakt_id = ((entry.get("show") or {}).get("ids") or {}).get("trakt")
+            if trakt_id is None:
+                continue
+            counts[str(trakt_id)] = int(entry.get("plays") or 0)
+
+    counts: dict[str, int] = {}
+    complete = True
+    with span("trakt.play_counts"):
+        # UNGUARDED, because the first page failing is the whole sweep failing.
+        batch, headers = await _page(1)
+        _fold(batch, counts)
+        try:
+            page_count = int(headers.get("x-pagination-page-count") or 1)
+        except (TypeError, ValueError):
+            page_count = 1
+        wanted = min(page_count, max_pages)
+        if page_count > max_pages:
+            # Ran out of pages we are willing to fetch rather than out of pages to
+            # read. Saying so is what keeps the cap from quietly becoming "the rest
+            # of the library has no plays".
+            complete = False
+        rest = await asyncio.gather(
+            *(_page(number) for number in range(2, wanted + 1)),
+            return_exceptions=True)
+        for answer in rest:
+            if isinstance(answer, BaseException):
+                # A LATER PAGE IS SURVIVABLE AND THE FIRST ONE IS NOT. Losing a page
+                # costs the titles on it a needless re-read next time, which is a
+                # cost; losing the whole listing would say every title has lost its
+                # plays, which is a wrong answer. A credential refusal is not one
+                # page failing and is re-raised whichever page it arrived on.
+                if isinstance(answer, TraktError) and transport.is_credential_failure(answer):
+                    raise answer
+                if not isinstance(answer, TraktError):
+                    raise answer
+                complete = False
+                continue
+            _fold(answer[0], counts)
+    logger.info("fetch_play_counts: %d show(s) over %d page(s), complete=%s",
+                len(counts), wanted, complete)
+    return PlayCounts(counts=counts, complete=complete)
 
 
 async def fetch_history(settings: Settings, start_at: str | None = None,
@@ -143,7 +334,21 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
     optionally since `start_at` (YYYY-MM-DD). Pages via ?page/?limit, following the
     X-Pagination-Page-Count header. Each event is an episode or movie play; the
     caller dedupes. `start_at` at day granularity means each sync may re-see the
-    day's earlier events — harmless, since applying them is idempotent."""
+    day's earlier events — harmless, since applying them is idempotent.
+
+    A PAGE THAT COULD NOT BE READ RAISES RATHER THAN ENDING THE SWEEP EARLY, and
+    that is not caution for its own sake: the caller advances its cursor past the
+    window this call covered, so plays on a page that was never fetched are never
+    asked for again. The old behaviour — log, stop, and return whatever had
+    arrived — reported a refused read as "nothing happened", which on a refused
+    token meant a page that looked perfectly healthy while no history was being
+    read at all. A source that raises is named on the page and its cursor stays
+    where it was, so the next load asks for the same window again.
+
+    A 200 CARRYING NO EVENTS IS A DIFFERENT THING AND STILL ENDS THE SWEEP
+    NORMALLY. That is Trakt saying there is nothing more, and it is the ordinary
+    answer for an account that has watched nothing since the cursor.
+    """
     events: list[dict] = []
     page = 1
     client = transport.shared_client()
@@ -157,16 +362,20 @@ async def fetch_history(settings: Settings, start_at: str | None = None,
             resp = await transport.send(client, "GET", url, headers=transport.api_headers(settings, paginate=False))
         except httpx.HTTPError as exc:
             logger.warning("fetch_history: request failed: %s", exc)
-            break
+            raise TraktError(f"Could not reach Trakt: {exc}") from exc
         _perf.debug("netGET    users/me/history?page=%s -> %s  %.0fms", page,
                     resp.status_code, (_time.perf_counter() - t0) * 1000.0)
         if resp.status_code != 200:
             logger.warning("fetch_history: HTTP %s: %s", resp.status_code, resp.text[:200])
-            break
+            if resp.status_code in transport.CREDENTIAL_STATUSES:
+                raise TraktError(
+                    "Trakt rejected the credentials (%s). The link has to be made "
+                    "again." % resp.status_code, resp.status_code)
+            raise TraktError(f"Trakt API returned HTTP {resp.status_code}.", resp.status_code)
         try:
             batch = resp.json()
         except ValueError:
-            break
+            raise TraktError("Trakt API returned an unreadable response.") from None
         if not isinstance(batch, list) or not batch:
             break
         events.extend(batch)

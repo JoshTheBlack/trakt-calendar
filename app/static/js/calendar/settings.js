@@ -120,6 +120,12 @@ async function openSettings() {
             s.auto_approve_calendar ? 'true' : 'false';
         updateRegistrationHint();
         document.getElementById('s_client_id').value = s.trakt_client_id || '';
+        // Not a credential — a client id is public and the screen has to show it
+        // back. The two Simkl secrets beside it are handled by applySecretState
+        // like every other one.
+        document.getElementById('s_simkl_client_id').value = s.simkl_client_id || '';
+        updateSimklRedirectHint(s);
+        document.getElementById('s_simkl_public_calendar').checked = s.simkl_public_calendar_enabled !== false;
         applySecretState(s.secrets_set);
         updateTokenStatus(s.trakt_token_expires_at);
         updateTraktLoginHints(s);
@@ -242,6 +248,27 @@ function updateProxyHint(s) {
 // field's own explanatory text. `s` may be the settings response OR nothing (a
 // re-check after the dropdown changes), so the mode is read from the control
 // when not passed.
+// Shows the exact redirect URI to register on the Simkl developer application.
+// Simkl compares it byte for byte — the same trap Trakt's field exists for —
+// so the screen shows the value rather than describing how to build it.
+function updateSimklRedirectHint(s) {
+    const field = document.getElementById('s_simkl_redirect_field');
+    const input = document.getElementById('s_simkl_redirect_uri');
+    if (!field || !input) return;
+    input.value = s.simkl_redirect_uri || '';
+    // Nothing to register until a public base URL exists to build it from.
+    field.hidden = !s.simkl_redirect_uri;
+}
+
+function copySimklRedirectUri() {
+    const input = document.getElementById('s_simkl_redirect_uri');
+    if (!input || !input.value) return;
+    navigator.clipboard.writeText(input.value).then(
+        () => toast('Redirect URI copied', true),
+        () => toast('Could not copy', false)
+    );
+}
+
 function updateCookieHint(s) {
     const select = document.getElementById('s_cookie_secure');
     const hint = document.getElementById('s_cookie_hint');
@@ -312,6 +339,8 @@ async function saveSettings(event) {
         allow_open_registration: document.getElementById('s_open_registration').value === 'true',
         auto_approve_calendar: document.getElementById('s_auto_approve').value === 'true',
         trakt_client_id: document.getElementById('s_client_id').value.trim(),
+        simkl_client_id: document.getElementById('s_simkl_client_id').value.trim(),
+        simkl_public_calendar_enabled: document.getElementById('s_simkl_public_calendar').checked,
         timezone: document.getElementById('s_timezone').value.trim() || 'Europe/Athens',
         endpoint: document.getElementById('s_endpoint').value,
         pagination_limit: parseInt(document.getElementById('s_limit').value, 10) || 300,

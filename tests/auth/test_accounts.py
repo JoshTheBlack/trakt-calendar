@@ -373,6 +373,30 @@ class SessionTests(AuthTestCase):
             conn, user_id=other, provider="plex", provider_user_id=999))
         self.assertFalse((await auth.validate_session(other_session)).has_trakt_identity)
 
+    async def test_a_service_that_reads_a_watch_history_is_enough_for_the_tracker(self):
+        """The tracker needs a service that can read this person's own viewing,
+        and more than one can. Which one is not the gate's business: a Simkl link
+        is an ADDITIONAL acceptable linkage, not a replacement for a Trakt one,
+        and an account holding both is neither required nor a problem."""
+        user_id = await self.make_user(username="simkl-only")
+        session_id = await auth.create_session(user_id)
+        await db.transaction(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user_id, provider="simkl", provider_user_id=777))
+        current = await auth.validate_session(session_id)
+        self.assertTrue(current.has_tracker_identity)
+        # …and it is still not a Trakt link, which the places that genuinely mean
+        # Trakt go on asking about by name.
+        self.assertFalse(current.has_trakt_identity)
+
+    async def test_a_plex_link_reads_nobodys_viewing(self):
+        """Plex signs somebody in; it exposes no watch history this app can read,
+        so it is not a linkage the tracker can be opened with."""
+        user_id = await self.make_user(username="plex-only")
+        session_id = await auth.create_session(user_id)
+        await db.transaction(lambda conn: auth.insert_linked_identity(
+            conn, user_id=user_id, provider="plex", provider_user_id=888))
+        self.assertFalse((await auth.validate_session(session_id)).has_tracker_identity)
+
 
 class DependencyTests(AuthTestCase):
     async def _request_for(self, **flags):
