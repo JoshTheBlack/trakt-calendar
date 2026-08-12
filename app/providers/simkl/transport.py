@@ -209,6 +209,14 @@ CATALOG_MIN_INTERVAL = 0.125
 # caller, and a second copy of this number is a second way to spend it.
 _catalog_ready_at = 0.0
 
+# How long after a refusal the catalogue stays paced. An hour is chosen against
+# the only number Simkl gave us — the block itself lasts fifteen minutes — so the
+# instance spends a while being polite after one clears rather than sprinting
+# straight back into whatever caused it. Nothing sets this on a healthy instance,
+# so nothing pays for it.
+PACE_AFTER_BLOCK_SECONDS = 3600.0
+_pace_until = 0.0
+
 # The monotonic instant the next POST may leave. Module state rather than
 # per-pool state because the cap is per client id: it is one budget however many
 # callers there are, and a second copy of this number would let two of them
@@ -392,8 +400,12 @@ def blocked_seconds_remaining() -> float:
 
 
 def _open_breaker(path: str) -> None:
-    global _blocked_until
+    global _blocked_until, _pace_until
     _blocked_until = _time.monotonic() + BLOCK_COOLDOWN_SECONDS
+    # The refusal is also what turns pacing ON — see _pace_catalog. It stays on
+    # past the block itself, because the moment the block lifts is exactly when
+    # a full-speed drain would go straight back at whatever earned it.
+    _pace_until = _blocked_until + PACE_AFTER_BLOCK_SECONDS
     # WARNING, NOT DEBUG. This is a fact about the instance's relationship with
     # Simkl — every user on this box has just lost the source for a quarter of
     # an hour — and not a timing detail. The same reasoning the 429 line below
@@ -418,9 +430,13 @@ def _open_breaker(path: str) -> None:
 def _close_breaker() -> None:
     """Let Simkl be called again immediately. Nothing in the app calls this —
     the deadline is what normally closes the breaker — but a test that has just
-    opened it must be able to leave the module as it found it."""
-    global _blocked_until
+    opened it must be able to leave the module as it found it.
+
+    Clears the pacing window too, since `_open_breaker` sets both: a test that
+    left pacing armed would slow an unrelated one and look like a hang."""
+    global _blocked_until, _pace_until
     _blocked_until = 0.0
+    _pace_until = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +482,30 @@ def _post_sent() -> None:
 
 
 async def _pace_catalog() -> None:
+    """Hold until this catalogue GET is allowed to leave — but only if Simkl has
+    actually refused this instance recently. Normally this returns instantly.
+
+    PACING EVERY CALL WAS THE WRONG TRADE, and it was made on an unproven theory.
+    The observed facts, once both instances were watched: a settled instance
+    fires six hundred of these in seconds and Simkl answers every one, and a 412
+    could not be reproduced from any machine under any credential shape — valid
+    id, invalid id, empty id, absent id, junk bearer, all 200. What pacing every
+    call bought was a sevenfold slowdown of the drain (8/second against the ~60
+    the pool's concurrency gave) in exchange for a guess.
+
+    WHAT REMAINS IS THE PART THAT IS NOT A GUESS: a 412 did happen, in
+    production, and it costs fifteen minutes of no Simkl at all. So the app now
+    runs at full speed until Simkl says otherwise, and paces only in the window
+    after a refusal, where the one thing we know for certain is that going
+    straight back to full rate risks tripping it again. Nothing to tune, and a
+    healthy instance never touches this path.
+    """
+    if _time.monotonic() >= _pace_until:
+        return
+    await _claim_catalog_slot()
+
+
+async def _claim_catalog_slot() -> None:
     """Hold until this catalogue GET is allowed to leave under CATALOG_MIN_INTERVAL.
 
     A TICKET, NOT A CHECK-THEN-SLEEP, and the difference is the whole reason this

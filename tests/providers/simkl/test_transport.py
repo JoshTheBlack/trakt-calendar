@@ -162,14 +162,27 @@ class CatalogPacerTests(TransportStateTestCase):
     down together for fifteen minutes.
     """
 
-    async def test_the_first_catalogue_get_is_not_delayed(self):
+    async def test_a_healthy_instance_is_never_paced(self):
+        """The default, and the one that matters for throughput: a settled
+        instance fires six hundred of these in seconds and Simkl answers every
+        one. Pacing every call cost a sevenfold slowdown of the drain in exchange
+        for a theory that could not be reproduced from any machine."""
         sleep = RecordingSleep()
-        client = FakeClient([_resp(200)])
+        client = FakeClient([_resp(200) for _ in range(5)])
         with _patch_sleep(sleep):
-            await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+            for _ in range(5):
+                await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(sleep.durations, [])
 
-    async def test_a_second_catalogue_get_waits_out_the_interval(self):
+    async def test_a_refusal_arms_the_pacing_and_it_outlives_the_block(self):
+        """The part that is not a theory: a 412 did happen in production, and it
+        costs fifteen minutes of no Simkl at all. Going straight back to full
+        rate the instant the block lifts is how an instance earns another."""
+        transport._open_breaker("/tv/1")
+        self.assertGreater(transport._pace_until, transport._blocked_until)
+        transport._close_breaker()  # the block lifted; pacing must NOT lift with it
+        transport._pace_until = transport._time.monotonic() + 60
+
         sleep = RecordingSleep()
         client = FakeClient([_resp(200), _resp(200)])
         with _patch_sleep(sleep):
@@ -179,11 +192,13 @@ class CatalogPacerTests(TransportStateTestCase):
         self.assertAlmostEqual(sleep.durations[0], transport.CATALOG_MIN_INTERVAL, places=2)
 
     async def test_a_burst_claims_distinct_slots_rather_than_agreeing_on_one(self):
+        """(Armed, as it would be after a refusal.)"""
         """The property a check-then-sleep pacer would NOT have. This pool admits
         six at once; six coroutines that each read the deadline and then slept
         would wake together and burst exactly as before. Each claims its slot
         before awaiting, so the waits are staggered — 0, then one interval, then
         two, and so on."""
+        transport._pace_until = transport._time.monotonic() + 60
         sleep = RecordingSleep()
         client = FakeClient([_resp(200) for _ in range(5)])
         with _patch_sleep(sleep):
@@ -203,6 +218,7 @@ class CatalogPacerTests(TransportStateTestCase):
         """The calendar files are static, edge-served and carry no client id, so
         they do not spend the budget this paces — and a month's fill would crawl
         for no reason."""
+        transport._pace_until = transport._time.monotonic() + 60
         sleep = RecordingSleep()
         client = FakeClient([_resp(200), _resp(200)])
         with _patch_sleep(sleep):
