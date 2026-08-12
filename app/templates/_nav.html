@@ -66,10 +66,10 @@
         <a class="brand-home" href="{{ calendar_href }}" title="{{ product }}">
             {# The intrinsic size is stated for the same reason the mark's was:
                without it the element is zero-wide until the file downloads and
-               the whole header shifts sideways on an uncached load. 820x110
-               scaled to the 34px the stylesheet draws it at. #}
+               the whole header shifts sideways on an uncached load. The file's
+               565x110 box scaled to the 34px the stylesheet draws it at. #}
             <img class="brand-wordmark" src="/static/images/distrakkl-wordmark.svg"
-                 alt="{{ product }}" width="254" height="34">
+                 alt="{{ product }}" width="175" height="34">
         </a>
         {% endif %}
         {% if title %}<h1>{{ title }}</h1>{% endif %}

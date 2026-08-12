@@ -1302,10 +1302,12 @@ class HeaderPaintStabilityTests(CalendarRouteTestCase):
         """With no intrinsic size in the markup the element is zero-wide until it
         downloads and everything beside it then shifts. The header carries the
         WORDMARK now rather than the square mark, which makes this matter more,
-        not less: it reserves 254px rather than 30, so getting it wrong moves the
-        month heading and the view control most of a column."""
+        not less: it reserves 175px rather than 30, so getting it wrong moves the
+        month heading and the view control most of a column. The number must
+        track the file's own box — 565x110 at the 34px height the stylesheet
+        draws it at — or the reservation is wrong in the other direction."""
         html = self.client.get(self.PAGE).text
-        self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\swidth="254"[^>]*>')
+        self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\swidth="175"[^>]*>')
         self.assertRegex(html, r'<img class="brand-wordmark"[^>]*\sheight="34"[^>]*>')
 
     def test_the_wordmark_links_home(self):
