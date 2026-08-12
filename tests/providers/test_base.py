@@ -384,3 +384,58 @@ class TestTrackerPort:
             answer = asyncio.run(port.fetch_last_activities(Settings()))
         assert answer == {"episodes": {"watched_at": "T"}}
         spy.assert_awaited_once()
+
+
+class TestCatalogueSearch:
+    """The registry answering "who can answer a catalogue search", which is
+    the whole mechanism a Trakt-only or a Simkl-only instance being able to
+    search at all rests on — see `for_catalogue_search`'s own docstring for
+    why it asks the catalogue question and not the private one.
+    """
+
+    def test_no_source_is_offered_until_one_has_a_catalogue_credential(self):
+        assert providers.for_catalogue_search(Settings()) == []
+
+    def test_a_trakt_only_instance_gets_exactly_trakt(self):
+        trakt_only = Settings(trakt_client_id="id")
+        assert [s for s, _p in providers.for_catalogue_search(trakt_only)] == [Source.TRAKT]
+
+    def test_a_simkl_only_instance_gets_exactly_simkl(self):
+        """THE CASE THIS PORT EXISTS FOR: an instance with no Trakt client id
+        must still be able to search — see this port's own module docstring
+        for what "not configured" used to mean for every one of these."""
+        simkl_only = Settings(simkl_client_id="id")
+        assert [s for s, _p in providers.for_catalogue_search(simkl_only)] == [Source.SIMKL]
+
+    def test_both_configured_gets_both_in_registry_order(self):
+        both = Settings(trakt_client_id="id", simkl_client_id="id")
+        assert [s for s, _p in providers.for_catalogue_search(both)] == [Source.TRAKT, Source.SIMKL]
+
+    def test_it_asks_the_catalogue_question_not_the_private_one(self):
+        """A client id with no access token is a real, searchable state for
+        both sources — the private per-account token a search never sends
+        must not be what gates it."""
+        client_id_only = Settings(
+            trakt_client_id="id", trakt_access_token="",
+            simkl_client_id="id", simkl_access_token="")
+        assert not Settings.trakt_configured.fget(client_id_only)
+        assert not Settings.simkl_configured.fget(client_id_only)
+        assert {s for s, _p in providers.for_catalogue_search(client_id_only)} == {
+            Source.TRAKT, Source.SIMKL}
+
+    def test_the_ports_returned_are_the_registered_search_ports(self):
+        both = Settings(trakt_client_id="id", simkl_client_id="id")
+        pairs = dict(providers.for_catalogue_search(both))
+        assert pairs[Source.TRAKT] is providers.get(Source.TRAKT).search_port
+        assert pairs[Source.SIMKL] is providers.get(Source.SIMKL).search_port
+
+    def test_a_source_with_no_search_port_would_be_excluded(self):
+        """The negative half, pinned through the registry rather than by name
+        so this keeps meaning something once every registered source has a
+        search port — see the equivalent calendar-port test above."""
+        no_search = [p for p in providers.registered().values() if p.search_port is None]
+        both = Settings(trakt_client_id="id", simkl_client_id="id")
+        offered = {s for s, _p in providers.for_catalogue_search(both)}
+        for provider in no_search:
+            assert provider.source not in offered
+

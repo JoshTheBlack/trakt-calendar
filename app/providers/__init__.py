@@ -22,6 +22,8 @@ from .base import (
     Media,
     Provider,
     Record,
+    SearchHit,
+    SearchPort,
     Source,
     SyncPort,
     collect_ids,
@@ -31,9 +33,10 @@ from .base import (
 
 __all__ = [
     "CalendarPort", "Capabilities", "ID_KEYS", "Item", "Media", "Provider",
-    "Record", "Source", "SyncPort", "collect_ids", "parse_media", "render",
-    "register", "get", "registered", "calendar_sources", "for_calendar_sources",
-    "for_tracker_ports", "tracker_sources",
+    "Record", "SearchHit", "SearchPort", "Source", "SyncPort", "collect_ids",
+    "parse_media", "render", "register", "get", "registered",
+    "calendar_sources", "for_calendar_sources", "for_tracker_ports",
+    "tracker_sources", "for_catalogue_search",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -227,3 +230,39 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
             continue
         ports.append((source, provider.sync_port))
     return ports
+
+
+def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
+    """Every source that can answer a catalogue search right now, in declared
+    order — the registry's answer to "who can I ask", following
+    `for_tracker_ports`'s shape above.
+
+    TWO CONDITIONS, DELIBERATELY NOT THREE. The source carries a
+    `search_port` — one usable for something else and with no search port is
+    simply not askable — and its CATALOGUE credential is present, asked
+    through `catalogue_is_configured` and NOT `is_configured`. A catalogue
+    search authenticates with the INSTANCE's own client id on both sources
+    registered today, never with a viewer's token, so asking the private
+    question here would repeat the exact fault `for_calendar_sources` above
+    already refuses to: an instance-wide, publicly-answerable question hinging
+    on whether one particular account happens to have linked something.
+
+    NO ACCOUNT PREFERENCE, UNLIKE `for_tracker_ports`. `prefs.admits_tracker`
+    governs whose DATA a read touches, and a catalogue search touches nobody's
+    data — there is nothing here for a preference to admit or refuse.
+
+    THE LENGTH IS THE WHOLE ANSWER TO "A TRAKT-ONLY OR A SIMKL-ONLY INSTANCE
+    MUST BOTH WORK ORDINARILY". 0 means no catalogue is reachable, 1 means one
+    source answers with nothing to disambiguate, 2 means a caller has two
+    answers to merge — and every behaviour downstream keys off that length
+    rather than off a source's name. Registry order, so Trakt leads where an
+    order is drawn from one, the same rule `for_tracker_ports` states in full.
+    """
+    out: list[tuple[Source, SearchPort]] = []
+    for source, provider in registered().items():
+        if provider.search_port is None:
+            continue
+        if not provider.catalogue_is_configured(settings):
+            continue
+        out.append((source, provider.search_port))
+    return out

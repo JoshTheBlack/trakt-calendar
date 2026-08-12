@@ -762,8 +762,13 @@ async def cached_get(
     reach this function without it.
 
     POST RESPONSES ARE NEVER CACHED AT ALL, which is why this function is GET
-    only: /sync/watched and the search endpoints are POSTs whose meaning is in
-    the request BODY, and a URL key cannot express that.
+    only: /sync/watched is a POST whose meaning is in the request BODY, and a
+    URL key cannot express that. THE FREE-TEXT SEARCH ENDPOINTS ARE NOT IN
+    THAT GROUP — measured live, `GET /search/tv|anime|movie` all answer 200
+    with results; the POSTs this area of Simkl's API actually reserves are
+    `/search/file` (identify one video file) and `/search/random`, which this
+    app has no use for. Search rides this function like any other catalogue
+    GET (see app/providers/simkl/search.py).
 
     `ttl_seconds` overrides the default detail TTL; `fresh=True` skips the cache
     read but still refreshes it; `raise_errors=True` raises SimklError instead of
