@@ -33,8 +33,8 @@ import asyncio
 import logging
 
 from ...config import Settings
-from ..base import Media, SearchHit, Source, collect_ids
-from . import transport
+from ..base import Media, SearchHit, Source
+from . import _ids, transport
 
 logger = logging.getLogger(__name__)
 
@@ -43,22 +43,6 @@ logger = logging.getLogger(__name__)
 # Simkl publishes for films.
 _SHOW_PATHS = ("search/tv", "search/anime")
 _MOVIE_PATHS = ("search/movie",)
-
-
-def _ids(raw: dict) -> dict:
-    """A search hit's ids block, remapped onto ID_KEYS.
-
-    THE SAME idiom sync.py's `_entry_ids` and calendar.py's `_simkl_ids` use
-    for the same Simkl quirk — `simkl_id` on some payloads, `simkl` on others
-    — restated here rather than shared across the three, because each module
-    owns the boundary conversion for its OWN payload shape and the three are
-    read from three different endpoints that happen to share one spelling
-    quirk, not one payload changing for one reason.
-    """
-    mapped = dict(raw)
-    if mapped.get("simkl") in (None, "") and mapped.get("simkl_id") not in (None, ""):
-        mapped["simkl"] = mapped["simkl_id"]
-    return collect_ids(mapped)
 
 
 def _hit(entry: dict, media: Media) -> SearchHit:
@@ -71,7 +55,7 @@ def _hit(entry: dict, media: Media) -> SearchHit:
         source=Source.SIMKL,
         source_id=str(raw_ids.get("simkl_id") or raw_ids.get("simkl") or ""),
         media=media,
-        ids=_ids(raw_ids),
+        ids=_ids.normalize(raw_ids),
         title=str(entry.get("title") or ""),
         year=entry.get("year"),
         season=None,

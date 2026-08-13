@@ -53,7 +53,7 @@ from ...config import Settings
 from ...perftrace import span
 from ..base import (LibraryEntry, LibraryRead, Media, UnlistedSeasons, collect_ids,
                     resolve_key)
-from . import transport
+from . import _ids, transport
 
 logger = logging.getLogger(__name__)
 
@@ -185,16 +185,11 @@ async def fetch_last_activities(settings: Settings) -> dict:
 
 
 def _entry_ids(payload: dict) -> dict:
-    """The id map off a show or movie object, in this app's spelling.
-
-    Simkl writes its own id as `simkl_id` on some payloads and `simkl` on others;
-    `collect_ids` only knows the second. Mapping it HERE, at the provider
-    boundary, is what keeps a second spelling out of the rest of the app.
-    """
-    raw = dict(payload.get("ids") or {})
-    if raw.get("simkl") in (None, "") and raw.get("simkl_id") not in (None, ""):
-        raw["simkl"] = raw["simkl_id"]
-    return collect_ids(raw)
+    """The id map off a show or movie object, in this app's spelling — the
+    `ids` sub-object extracted, and Simkl's own `simkl_id`/`simkl` spelling
+    quirk corrected by `_ids.normalize` (shared with search.py, which reads
+    the same quirk off a different endpoint's payload)."""
+    return _ids.normalize(payload.get("ids") or {})
 
 
 def _episode_events(item: dict, start_at: str | None) -> list[dict]:
