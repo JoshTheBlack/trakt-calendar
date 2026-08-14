@@ -85,6 +85,92 @@ class SearchRouteTests(AppTestCase):
         self.assertEqual(body["failed"], ["trakt"])
 
 
+TRAKT_MOVIE_HIT = {
+    "media": "movie", "ids": {"trakt": 1, "tmdb": 200, "slug": "a-movie"},
+    "title": "A Movie", "year": 2022, "network": "", "runtime": 118,
+    "overview": "A movie overview.",
+}
+
+
+class MovieSearchRouteTests(AppTestCase):
+    """GET /api/distrakt/search-movie — the same merge api_distrakt_search
+    uses, media-parameterized to MOVIE. Mirrors SearchRouteTests above rather
+    than re-deriving its own coverage, since the two routes share the merge
+    and differ only in what they hand it."""
+
+    def make_settings(self):
+        return Settings(**BOTH_CONFIGURED)
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("film-searcher", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        self.sign_in_as(self.user_id)
+
+    def test_a_trakt_only_instance_can_still_search(self):
+        save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_MOVIE_HIT])):
+            body = self.client.get("/api/distrakt/search-movie?q=a").json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["results"][0]["title"], "A Movie")
+
+    def test_a_simkl_only_instance_can_still_search(self):
+        """The gap §1 named as sharp and total: an instance with no Trakt
+        client id could not search for a film at all before this route went
+        through the registry."""
+        save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
+                               simkl_client_secret="ssecret"))
+        with patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
+            body = self.client.get("/api/distrakt/search-movie?q=a").json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["results"], [])
+
+    def test_no_catalogue_configured_is_refused(self):
+        save_settings(Settings(public_base_url=ORIGIN))
+        body = self.client.get("/api/distrakt/search-movie?q=a").json()
+        self.assertEqual(body, {"ok": False, "error": "Not configured"})
+
+    def test_merged_results_carry_both_sources_marks(self):
+        simkl_hit = SearchHit(source=Source.SIMKL, source_id="9", media="movie",
+                              ids={"simkl": 9, "tmdb": 200}, title="A Movie", year=2022,
+                              season=None, network="", runtime=None, overview="")
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_MOVIE_HIT])), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[simkl_hit])):
+            body = self.client.get("/api/distrakt/search-movie?q=a").json()
+        self.assertEqual(len(body["results"]), 1)
+        self.assertEqual(set(body["results"][0]["source_ids"]), {"trakt", "simkl"})
+
+    def test_one_source_failing_is_named_and_does_not_fail_the_search(self):
+        async def _boom(*args, **kwargs):
+            raise TraktError("down")
+
+        with patch.object(trakt_detail, "search_titles", _boom), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
+            body = self.client.get("/api/distrakt/search-movie?q=a").json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["results"], [])
+        self.assertEqual(body["failed"], ["trakt"])
+
+    def test_a_hit_with_no_shared_id_carries_no_key(self):
+        """FILMS HAVE NO SEASON STEP, so unlike a bare show hit (resolved for
+        free on the season click) a bare film hit has no click that already
+        pays for a per-title lookup — see this route's own docstring for why
+        that rules out §3.6's resolve-on-click treatment here. It is carried
+        with `key: None` rather than dropped, the same signal api_distrakt_add
+        already answers 400 for, and the add route is the honest backstop
+        (measured live: Simkl's own /search/movie never actually returns one
+        of these — see this route's §9 entry)."""
+        bare_hit = SearchHit(source=Source.SIMKL, source_id="9", media="movie",
+                             ids={"simkl": 9}, title="Untethered", year=2022,
+                             season=None, network="", runtime=None, overview="")
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[bare_hit])):
+            body = self.client.get("/api/distrakt/search-movie?q=a").json()
+        self.assertTrue(body["ok"])
+        self.assertIsNone(body["results"][0]["key"])
+
+
 class SeasonsRouteTests(AppTestCase):
     def make_settings(self):
         return Settings(**BOTH_CONFIGURED)

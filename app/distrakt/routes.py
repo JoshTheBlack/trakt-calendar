@@ -1351,25 +1351,39 @@ async def api_distrakt_search(request: Request):
 
 @guard.get("/api/distrakt/search-movie", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_search_movie(request: Request):
-    """Film search for the add-a-film flow. Its own route rather than a media
-    flag on the show search, because what comes back is a different shape with
-    no seasons in it and the caller does something else entirely with it.
+    """Film search for the add-a-film flow, merged across every catalogue this
+    instance can ask (app/distrakt/search.py's `search_catalogue`) — the same
+    machinery api_distrakt_search uses, media-parameterized to MOVIE.
 
-    Public catalogue read, gated as api_distrakt_search is."""
+    ITS OWN ROUTE RATHER THAN A MEDIA FLAG ON THE SHOW SEARCH, and the reason
+    is not that the payloads differ — it is that a show and a film MEAN
+    different things and change for different reasons, which is the test for
+    what may not be collapsed into one unit. A SHOW IS ADDED TO BE TRACKED AS
+    ITS EPISODES AIR: it goes onto the viewer's own list or becomes a month's
+    premiere record, and the point of adding it is everything that happens
+    afterwards — which is why it needs a season picker, a show search hit
+    being incomplete without one. A FILM IS RECORDED AS ALREADY WATCHED: it
+    goes straight into the month as completed, there is nothing to track and
+    nothing will happen afterwards, so there is no season to pick and never
+    will be. What is shared between the two routes is the port and the merge,
+    both media-parameterized; what is not shared is what each route does with
+    the answer.
+
+    Gated on WHETHER ANY SOURCE CAN BE SEARCHED, exactly as api_distrakt_search
+    is — see its own docstring for why `providers.for_catalogue_search` is
+    asked rather than `trakt_catalogue_configured` alone.
+    """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_catalogue_configured:
+    asked = providers.for_catalogue_search(settings)
+    if not asked:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
-    try:
-        found = await trakt_detail.search_titles(settings, Media.MOVIE, q)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    results = [
-        {"ids": entry["ids"], "title": entry["title"],
-         "year": entry["year"], "runtime": entry.get("runtime")}
-        for entry in found if (entry.get("ids") or {}).get("trakt")
-    ]
-    return JSONResponse({"ok": True, "results": results})
+    result = await catalogue_search.search_catalogue(asked, settings, Media.MOVIE, q)
+    return JSONResponse({
+        "ok": True,
+        "results": [_search_hit_payload(hit) for hit in result.hits],
+        "failed": sorted(str(source) for source in result.failed),
+    })
 
 
 @guard.post("/api/distrakt/add-movie", AuthLevel.DISTRAKT_APPROVED)
