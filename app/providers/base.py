@@ -821,6 +821,42 @@ class CalendarPort(Protocol):
         ...
 
 
+class SeasonsAnswer(NamedTuple):
+    """The season picker's whole answer for one title, from one per-title lookup.
+
+    THREE FACTS, ONE VERB, BECAUSE ONE LOOKUP ANSWERS ALL THREE ON THE SOURCE
+    THAT NEEDS THEM. A season-title source (Simkl, for anime) states its own
+    season and every shared id it knows on the SAME per-title record its season
+    list already has to be read from — so a search hit that source left bare of
+    a shared id is resolved at the one moment resolving it is free, and a hit
+    that already names its season skips a picker with nothing left to ask. A
+    caller that wanted this as two verbs would pay for the same lookup twice.
+
+    `seasons` is [{season, episode_count}] — a show's seasons this source has
+    populated with episodes, for a picker to offer. Empty for a source or a
+    media kind that has none to offer (a movie, or a lookup that found
+    nothing).
+
+    `named_season` is the season THIS hit's own per-title record already names,
+    or None — either because the source never says a hit is one season of a
+    larger show (Trakt, always), or because a season-title's own mapping is
+    missing or names more than one season of the show it belongs to. AN
+    AMBIGUOUS MAPPING IS NOT GUESSED AT: it comes back as None, exactly like no
+    mapping at all, and a caller falls back to `seasons` and lets somebody
+    choose — see the Simkl implementation for what "missing or ambiguous"
+    means against its actual payload.
+
+    `ids` IS collect_ids()-FILTERED, AND IT IS ONLY WHAT THIS LOOKUP SURFACED —
+    not a caller's own id map merged in, because this function does not have
+    one to merge with. Empty for a source whose search hit already carries
+    every shared id it will ever have (Trakt, measured), which makes unioning
+    it into whatever a caller already knew a no-op rather than a special case.
+    """
+    seasons: list[dict]
+    named_season: int | None
+    ids: dict[str, Any]
+
+
 @runtime_checkable  # see the note on SyncPort above
 class DetailPort(Protocol):
     """A source that can describe ONE TITLE as fully as it knows how — what the
@@ -875,6 +911,21 @@ class DetailPort(Protocol):
         call, which is what the public share pages use so a visitor's click can
         never spend the owner's rate limit. Fields with nothing cached behind them
         come back empty and the modal renders around them.
+        """
+        ...
+
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+        """The season picker's answer for one title, in THIS SOURCE's own id
+        space — see `SeasonsAnswer` for why the season list, a self-named
+        season and newly-surfaced ids all come back from one call.
+
+        `source_id` is this source's own id for the title, the same value
+        `fetch_details` takes it as and for the same reason: a source cannot
+        look a title up by an id it does not issue.
+
+        Raises this source's own `SourceUnavailable` subclass on a genuine
+        failure — the same distinction every other port in this file draws
+        between "asked and found nothing" and "could not be asked at all".
         """
         ...
 

@@ -333,7 +333,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         the calling account."""
         user_id = self.tracker_user(token="LOOKUP-TOKEN")
         self.sign_in_as(user_id)
-        for path in ("/api/distrakt/search?q=test", "/api/distrakt/seasons?id=7"):
+        for path in ("/api/distrakt/search?q=test", "/api/distrakt/seasons?source=trakt&id=7"):
             with self.subTest(path=path):
                 recorder = RecordingClient()
                 with patch("app.providers.trakt.transport.shared_client", return_value=recorder):

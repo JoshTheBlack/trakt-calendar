@@ -20,7 +20,7 @@ from ...endpoints import ENDPOINTS
 from datetime import date
 
 from .. import register
-from ..base import Capabilities, Media, Record, SearchHit, Source
+from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
 from . import calendar, detail, sync
 from .transport import TraktError, TraktRateLimitError
 
@@ -63,6 +63,22 @@ class _TraktDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, str(media), source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+        """app/providers/base.py's DetailPort.fetch_seasons, over the existing
+        `fetch_show_seasons` — see that function's own comment for the rule its
+        answer already upholds (filtering on `episode_count` rather than
+        `aired_episodes`, so an unaired season is not hidden from the picker).
+
+        `named_season` IS ALWAYS None: Trakt's catalogue has no concept of a
+        search hit that IS a season of a larger show, only shows and their
+        seasons as a picker would offer them. `ids` IS ALWAYS EMPTY for the
+        same reason `SeasonsAnswer`'s own docstring gives — a Trakt search hit
+        already carries every shared id `search_titles` found, so there is
+        nothing this per-title call could add.
+        """
+        seasons = await detail.fetch_show_seasons(settings, source_id)
+        return SeasonsAnswer(seasons=seasons, named_season=None, ids={})
 
 
 class _TraktSearchPort:

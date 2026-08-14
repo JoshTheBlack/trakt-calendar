@@ -17,13 +17,14 @@ an account at all.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media
-from . import titles, transport
+from ..base import Media, SeasonsAnswer
+from . import _ids, titles, transport
 
 logger = logging.getLogger(__name__)
 
@@ -306,3 +307,102 @@ def seasons_known(episodes: list[dict]) -> list[int]:
             continue
         seasons.add(int(entry.get("season") if entry.get("season") is not None else 1))
     return sorted(seasons)
+
+
+# ---------------------------------------------------------------------------
+# The catalogue search's season picker (app/providers/base.py's
+# DetailPort.fetch_seasons) — a different consumer from everything above, and a
+# different per-title lookup from titles.py's `fetch_title`.
+# ---------------------------------------------------------------------------
+
+
+def _season_counts(episodes: list[dict]) -> list[dict]:
+    """[{season, episode_count}] over `episodes`, one entry per season the
+    episode list actually contains, in order — the picker's candidate list.
+
+    GROUPED THE SAME WAY `seasons_known` GROUPS SEASON NUMBERS: an episode with
+    no season number counts as season 1, which is how anime arrives (Simkl
+    omits the field for a title it maps to one canonical season).
+    """
+    counts: dict[int, int] = {}
+    for entry in episodes or []:
+        if str(entry.get("type") or _REGULAR_EPISODE) != _REGULAR_EPISODE:
+            continue
+        if entry.get("episode") is None:
+            continue
+        season = int(entry.get("season") if entry.get("season") is not None else 1)
+        counts[season] = counts.get(season, 0) + 1
+    return [{"season": season, "episode_count": count} for season, count in sorted(counts.items())]
+
+
+async def _fetch_season_naming(settings: Settings, simkl_id) -> dict:
+    """GET /tv/{id}?extended=full — the ids and the season-naming fields
+    (`season`, `mapped_tvdb_seasons`) `fetch_seasons` needs, in ONE call.
+
+    DELIBERATELY NOT `titles.fetch_title`, even though both read the same
+    endpoint. That function's extraction is a versioned STORAGE shape the
+    calendar enrichment drain owns (see its own EXTRACT_VERSION), and neither
+    `season` nor `mapped_tvdb_seasons` is in it — adding them there would bump
+    that version and re-fetch every stored row in `simkl_titles` for a fact
+    only this lookup needs. This one reads the raw payload directly and keeps
+    nothing beyond what `fetch_seasons` reads out of it.
+
+    Returns {} for a title Simkl could not answer for — the same "not found or
+    unparseable, indistinguishable" reading `titles.fetch_title`'s own module
+    docstring gives for the reason stated there. Raises the transport's own
+    SimklError for a genuine failure (a rejected credential, an unreadable
+    body): `fetch_seasons`'s contract is that resolving a bare hit fails
+    honestly rather than reading as "this title has no ids after all".
+    """
+    if not simkl_id:
+        return {}
+    payload = await transport.cached_get(
+        transport.catalog_client(), settings, f"tv/{simkl_id}", {"extended": "full"},
+        pool=transport.CATALOG_POOL, raise_errors=True,
+    )
+    if not isinstance(payload, dict) or not isinstance(payload.get("ids"), dict):
+        return {}
+    return payload
+
+
+def _named_season(record: dict) -> int | None:
+    """The season `record` says IT IS, or None to fall back to a picker.
+
+    `mapped_tvdb_seasons` LEADS, `season` IS THE FALLBACK ONLY WHEN THE FIRST
+    IS ABSENT — not consulted when it is present but ambiguous. A season-title
+    names itself through `mapped_tvdb_seasons`; when that list holds anything
+    other than exactly one entry, the title has told us it does not know which
+    TVDB season it maps to, and guessing from `season` (Simkl's own, un-mapped
+    numbering) would be exactly the guess this function exists not to make.
+    """
+    mapped = record.get("mapped_tvdb_seasons")
+    if mapped is not None:
+        if isinstance(mapped, list) and len(mapped) == 1 and isinstance(mapped[0], (int, float)):
+            return int(mapped[0])
+        return None
+    season = record.get("season")
+    return int(season) if isinstance(season, (int, float)) else None
+
+
+async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media.SHOW) -> SeasonsAnswer:
+    """app/providers/base.py's DetailPort.fetch_seasons.
+
+    TWO CALLS, BOTH PAID BY ONE CLICK. `fetch_episodes` answers the picker's
+    candidate list exactly as `fetch_season_detail` already does elsewhere in
+    this module (§2.3's finding: no new endpoint needed for it), and
+    `_fetch_season_naming` answers the two things only the per-title record
+    carries — this hit's own season, and every shared id Simkl knows it by.
+    Both run together because neither depends on the other's answer.
+    """
+    media = Media(media)
+    if media is not Media.SHOW or not simkl_id:
+        return SeasonsAnswer(seasons=[], named_season=None, ids={})
+    episodes, record = await asyncio.gather(
+        fetch_episodes(settings, simkl_id, media),
+        _fetch_season_naming(settings, simkl_id),
+    )
+    return SeasonsAnswer(
+        seasons=_season_counts(episodes),
+        named_season=_named_season(record),
+        ids=_ids.normalize(record.get("ids") or {}),
+    )

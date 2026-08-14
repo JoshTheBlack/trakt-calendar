@@ -17,7 +17,7 @@ from datetime import date
 from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
-from ..base import Capabilities, Media, Record, SearchHit, Source
+from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
 from . import calendar, detail, search, sync
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
@@ -99,6 +99,9 @@ class _SimklDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+        return await detail.fetch_seasons(settings, source_id, media)
 
 
 class _SimklSearchPort:

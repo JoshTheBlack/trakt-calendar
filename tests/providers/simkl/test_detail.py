@@ -14,7 +14,7 @@ from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.providers.base import Media
+from app.providers.base import Media, SeasonsAnswer
 from app.providers.simkl import detail, transport
 
 SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="", cache_ttl_minutes=10)
@@ -170,6 +170,80 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["overview"], "")
         self.assertEqual(got["episodes"], [])
         self.assertIn("certification", got)
+
+
+class SeasonPickerTests(unittest.IsolatedAsyncioTestCase):
+    """app/providers/base.py's DetailPort.fetch_seasons — the add flow's season
+    picker, and the same per-title lookup that resolves a bare search hit's ids
+    (see app/distrakt/routes.py's api_distrakt_seasons)."""
+
+    async def _seasons(self, record, episodes=EPISODES, simkl_id=55, media=Media.SHOW):
+        calls = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            calls.append((path, kwargs))
+            return record if path == f"tv/{simkl_id}" else episodes
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)):
+            got = await detail.fetch_seasons(SETTINGS, simkl_id, media)
+        return got, calls
+
+    async def test_the_season_list_counts_episodes_per_season_excluding_specials(self):
+        got, _calls = await self._seasons({"ids": {"simkl": 55}})
+        self.assertEqual(got.seasons, [{"season": 1, "episode_count": 3},
+                                       {"season": 2, "episode_count": 1}])
+
+    async def test_both_lookups_run_and_stay_on_the_catalog_pool(self):
+        _got, calls = await self._seasons({"ids": {"simkl": 55}})
+        self.assertEqual(sorted(path for path, _ in calls), ["tv/55", "tv/episodes/55"])
+        for path, kwargs in calls:
+            with self.subTest(path=path):
+                self.assertIs(kwargs["pool"], transport.CATALOG_POOL)
+                self.assertNotIn("private", kwargs)
+
+    async def test_a_single_mapped_tvdb_season_names_itself(self):
+        """The Attack on Titan S3 shape: a season-title whose own record maps
+        unambiguously onto one TVDB season of the show it belongs to."""
+        got, _calls = await self._seasons(
+            {"ids": {"simkl": 694485, "tmdb": 1429}, "season": 3, "mapped_tvdb_seasons": [3]})
+        self.assertEqual(got.named_season, 3)
+
+    async def test_an_ambiguous_mapping_falls_back_to_the_picker_rather_than_guessing(self):
+        got, _calls = await self._seasons(
+            {"ids": {"simkl": 1}, "season": 2, "mapped_tvdb_seasons": [2, 3]})
+        self.assertIsNone(got.named_season)
+
+    async def test_no_mapping_at_all_falls_back_to_the_bare_season_field(self):
+        """A source with no `mapped_tvdb_seasons` key at all — measured on
+        ordinary TV titles, which never carry it — reads `season` instead."""
+        got, _calls = await self._seasons({"ids": {"simkl": 1}, "season": 4})
+        self.assertEqual(got.named_season, 4)
+
+    async def test_a_show_with_neither_field_offers_no_named_season(self):
+        got, _calls = await self._seasons({"ids": {"simkl": 1}})
+        self.assertIsNone(got.named_season)
+
+    async def test_ids_the_lookup_surfaces_are_collect_ids_filtered_and_spelling_corrected(self):
+        got, _calls = await self._seasons(
+            {"ids": {"simkl_id": 439744, "tmdb": 1429, "tvdb": 99, "imdb": "tt1",
+                     "mal": 51019, "relations": "dropped"}})
+        self.assertEqual(got.ids, {"simkl": 439744, "tmdb": 1429, "tvdb": 99,
+                                   "imdb": "tt1", "mal": 51019})
+
+    async def test_a_movie_costs_no_request(self):
+        spy = AsyncMock()
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            got = await detail.fetch_seasons(SETTINGS, 55, Media.MOVIE)
+        spy.assert_not_awaited()
+        self.assertEqual(got, SeasonsAnswer(seasons=[], named_season=None, ids={}))
+
+    async def test_a_title_simkl_cannot_place_answers_empty_rather_than_guessing(self):
+        """Simkl's "not found" is a 200 whose body is not a title (see
+        titles.py's own module docstring for the shapes this takes) — the same
+        reading, so a bare hit that cannot be resolved says so honestly instead
+        of the lookup raising."""
+        got, _calls = await self._seasons([], episodes=[])
+        self.assertEqual(got, SeasonsAnswer(seasons=[], named_season=None, ids={}))
 
 
 if __name__ == "__main__":  # pragma: no cover

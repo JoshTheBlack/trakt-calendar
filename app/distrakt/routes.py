@@ -27,12 +27,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from . import backfill, counts, discord_fmt, lifecycle, live, unsettled, watch_history
+# The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
+# rather than bare `search` so a call site reads which module it is, the same
+# reason the six modules above are imported by name rather than star-imported.
+from . import search as catalogue_search
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, clock, db, route_params
+from .. import auth, authz, chrome, clock, db, providers, route_params
 from ..auth import simkl_routes, trakt_routes
 from ..auth import AuthLevel
 from ..calendar import detail_source
@@ -44,8 +48,8 @@ from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
-from ..providers.base import (ID_KEYS, ItemKey, Media, SourceUnavailable, collect_ids,
-                              parse_item_key)
+from ..providers.base import (ID_KEYS, ItemKey, Media, Source, SourceUnavailable,
+                              collect_ids, parse_item_key, parse_media)
 from ..providers.trakt import TraktError, TraktRateLimitError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
@@ -1290,24 +1294,59 @@ async def api_distrakt_remove(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
+def _search_hit_payload(hit: catalogue_search.MergedSearchHit) -> dict:
+    """One merged search hit as the add flow's client reads it.
+
+    `key` TRAVELS AS THE SAME FLAT STRING every other route hands the client
+    (see app/distrakt/store.py's `normalize_show`) — None when no source could
+    name this title in a shared id space, which is the caller's cue that
+    clicking it has to resolve one before an add is offered (see
+    app/providers/base.py's SeasonsAnswer and this file's api_distrakt_seasons).
+    `source_ids` names both which sources found it (the marks) and, per source,
+    the id a season lookup calls back with — see MergedSearchHit's own
+    docstring for why one field carries both.
+    """
+    return {
+        "key": str(hit.key) if hit.key is not None else None,
+        "season": hit.season,
+        "source_ids": {str(source): source_id for source, source_id in hit.source_ids.items()},
+        "ids": hit.ids,
+        "title": hit.title,
+        "year": hit.year,
+        "network": hit.network,
+        "runtime": hit.runtime,
+        "overview": hit.overview,
+    }
+
+
 @guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_search(request: Request):
-    """Show search for the add flow.
+    """Show search for the add flow, merged across every catalogue this
+    instance can ask (app/distrakt/search.py's `search_catalogue`).
 
-    Trakt's /search is a public catalogue read — it authenticates with the
-    instance's client id and returns the same results to everybody — so this
-    gate asks the catalogue question rather than whether this viewer linked
-    Trakt. Adding what it finds is a separate act with its own gate.
+    Gated on WHETHER ANY SOURCE CAN BE SEARCHED — `providers.for_catalogue_search`
+    returning something — rather than on Trakt's configuration alone, so an
+    instance with only a Simkl client id can still search: each source
+    authenticates a catalogue read with the INSTANCE's own credential, never
+    this viewer's token, which is the same distinction api_distrakt_add's own
+    comment draws for the identical lookup. Adding what it finds is a separate
+    act with its own gate.
+
+    `failed` NAMES EVERY SOURCE THAT COULD NOT BE ASKED, so the caller can say
+    so quietly rather than let a partial answer read as the whole catalogue's.
+    One source failing is not this search failing — see `search_catalogue`.
     """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_catalogue_configured:
+    asked = providers.for_catalogue_search(settings)
+    if not asked:
         return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     q = request.query_params.get("q", "")
-    try:
-        results = await trakt_detail.search_shows(settings, q)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "results": results})
+    result = await catalogue_search.search_catalogue(asked, settings, Media.SHOW, q)
+    return JSONResponse({
+        "ok": True,
+        "results": [_search_hit_payload(hit) for hit in result.hits],
+        "failed": sorted(str(source) for source in result.failed),
+    })
 
 
 @guard.get("/api/distrakt/search-movie", AuthLevel.DISTRAKT_APPROVED)
@@ -1438,22 +1477,65 @@ async def api_distrakt_remove_movie(request: Request):
 
 @guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_seasons(request: Request):
-    """Aired seasons for a show (add-flow season picker) — required so the
-    browser can call fetch_show_seasons().
+    """The add flow's season picker for one search hit, answered by WHICHEVER
+    SOURCE FOUND IT — `source` names the service, `id` is that service's own
+    id for the title (a merged hit's `source_ids[source]`, never a shared id).
 
-    A show's season list is public catalogue data, so this asks the catalogue
-    question and not whether this viewer linked Trakt."""
+    THREE THINGS COME BACK FROM ONE LOOKUP (app/providers/base.py's
+    `DetailPort.fetch_seasons` — see its own docstring for why): the season
+    list a picker offers, the season this hit's own per-title record already
+    names (so a Simkl season-title skips the picker outright), and every
+    shared id that same lookup surfaced. THE LAST ONE IS WHAT RESOLVES A BARE
+    HIT: a search result with no shared id is under-described, not unkeyable
+    (measured — a per-title lookup fills in every one, 5 for 5), and this is
+    the same lookup the season question already pays for, so resolving it here
+    costs nothing beyond what the click already spends.
+
+    `ids...` QUERY PARAMS ARE THE HIT'S OWN, as the search response's `ids`
+    handed them back — unioned with what THIS lookup surfaces before the key
+    is re-resolved. Without them a source whose per-title lookup adds nothing
+    new (Trakt, always — see SeasonsAnswer's own docstring) would look
+    unresolvable even though the search hit that named it was never bare.
+
+    `unkeyable` CARRIES `UnkeyableRecord`'s OWN MESSAGE when the union still
+    names no shared id, the same sentence api_distrakt_add's 400 uses for the
+    identical refusal — one source of truth for why a title cannot be filed,
+    stated here BEFORE an add is offered rather than only after it is tried.
+    """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    trakt_id = request.query_params.get("id")
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
     try:
-        seasons = await trakt_detail.fetch_show_seasons(settings, trakt_id)
-    except TraktError as exc:
+        source = Source(request.query_params.get("source", ""))
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Missing or invalid source"}, status_code=400)
+    provider = providers.get(source)
+    if not provider.detail_port.catalogue_configured(settings):
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    source_id = request.query_params.get("id", "")
+    if not source_id:
+        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    media = parse_media(request.query_params.get("media"), Media.SHOW)
+    title = request.query_params.get("title", "")
+    given_ids = _client_ids({key: request.query_params.get(key)
+                             for key in ID_KEYS if key in request.query_params})
+    try:
+        answer = await provider.detail_port.fetch_seasons(settings, source_id, media)
+    except SourceUnavailable as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "seasons": seasons})
+    resolved_ids = dict(given_ids)
+    for id_key, id_value in answer.ids.items():
+        resolved_ids.setdefault(id_key, id_value)
+    try:
+        distrakt_store.record_key({"media": media, "ids": resolved_ids, "title": title})
+        unkeyable = None
+    except distrakt_store.UnkeyableRecord as exc:
+        unkeyable = str(exc)
+    return JSONResponse({
+        "ok": True,
+        "seasons": answer.seasons,
+        "season": answer.named_season,
+        "ids": resolved_ids,
+        "unkeyable": unkeyable,
+    })
 
 
 async def _register_networks(user_id: int, networks) -> dict:

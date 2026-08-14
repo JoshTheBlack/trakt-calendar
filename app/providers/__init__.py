@@ -24,6 +24,7 @@ from .base import (
     Record,
     SearchHit,
     SearchPort,
+    SeasonsAnswer,
     Source,
     SyncPort,
     collect_ids,
@@ -33,8 +34,8 @@ from .base import (
 
 __all__ = [
     "CalendarPort", "Capabilities", "ID_KEYS", "Item", "Media", "Provider",
-    "Record", "SearchHit", "SearchPort", "Source", "SyncPort", "collect_ids",
-    "parse_media", "render", "register", "get", "registered",
+    "Record", "SearchHit", "SearchPort", "SeasonsAnswer", "Source", "SyncPort",
+    "collect_ids", "parse_media", "render", "register", "get", "registered",
     "calendar_sources", "for_calendar_sources", "for_tracker_ports",
     "tracker_sources", "for_catalogue_search",
 ]
