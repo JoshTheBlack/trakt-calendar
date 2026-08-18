@@ -350,6 +350,21 @@ class SeasonsRouteTests(AppTestCase):
         self.assertEqual(body["ids"], {"tmdb": 100})
         self.assertIsNone(body["unkeyable"])
 
+    def test_the_lookups_own_ids_win_a_disagreement_with_the_clients(self):
+        """`season` is read off the same per-title record `ids` comes from, so
+        those two describe one title by construction. A client id that
+        disagrees describes a DIFFERENT one — and keeping it files the record
+        with one title's season beside another title's id, which is a row
+        nothing can count. The client's other ids still travel."""
+        answer = SeasonsAnswer(seasons=[], named_season=2, network="",
+                               ids={"simkl": 2595284, "tmdb": 209867})
+        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            body = self.client.get(
+                "/api/distrakt/seasons?source=simkl&id=2595284"
+                "&simkl=1990194&tmdb=209867&imdb=tt22248376").json()
+        self.assertEqual(body["ids"], {"simkl": 2595284, "tmdb": 209867,
+                                       "imdb": "tt22248376"})
+
     def test_the_lookup_carries_the_network_a_simkl_search_hit_never_has(self):
         """Simkl's search hit has no network and a single-catalogue instance has
         no other source to fill the gap from, so without this a show added by

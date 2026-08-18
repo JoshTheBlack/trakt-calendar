@@ -127,10 +127,18 @@ class _Merging:
         return slot
 
     def absorb(self, hit: SearchHit) -> None:
-        """Fold a second source's hit for the same (key, season) into this
-        slot — registry order picks the leader (whichever hit called `start`),
-        and this only ever fills what the leader left blank or adds what
-        neither had."""
+        """Fold another hit for the same (key, season) into this slot —
+        registry order picks the leader (whichever hit called `start`), and
+        this only ever fills what the leader left blank or adds what neither
+        had. EVERY field below upholds that, `source_ids` included.
+
+        THE HIT IS NOT NECESSARILY A SECOND SOURCE'S. Two hits from the SAME
+        source land here whenever that source lists one title more than once —
+        which Simkl does for every anime series, filing each season as its own
+        catalogue title carrying the parent's tmdb id. Searching "frieren"
+        returns three such titles, all resolving to `show:tmdb:209867` and all
+        carrying no season at search time, so all three fold into one slot.
+        """
         if _titles_differ_materially(self.title, hit.title):
             # See risk-3-shaped reasoning in the module docstring: the season
             # unit is what tells apart titles that share one match id, and a
@@ -143,7 +151,15 @@ class _Merging:
                 "season %s) — check whether the dedupe unit actually matched.",
                 self.title, next(iter(self.source_ids)), hit.title, hit.source,
                 self.key, self.season)
-        self.source_ids[hit.source] = hit.source_id
+        # THE LEADER'S ID SURVIVES, exactly as its title and its ids do. A
+        # source that already has an entry here is one whose FIRST hit named
+        # this row, and that hit is the one the row is showing — so taking a
+        # later hit's id would leave the row calling back about a different
+        # title from the one it drew. Observed: a "frieren" search drew
+        # "Sousou no Frieren (2023)" carrying the season-1 title's ids while
+        # addressing the season-3 title, so clicking it filed season 3 under
+        # the season-1 id and the record could never be counted.
+        self.source_ids.setdefault(hit.source, hit.source_id)
         for id_key, id_value in hit.ids.items():
             self.ids.setdefault(id_key, id_value)
         if _blank(self.network):

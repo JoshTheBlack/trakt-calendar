@@ -90,6 +90,49 @@ class DedupeTests(unittest.TestCase):
             self.assertEqual(len(merged.source_ids), 1)
 
 
+class LeaderIdTests(unittest.TestCase):
+    """Which id a merged row calls back with — the address a pick sends to
+    /api/distrakt/seasons, and the one that has to describe the title the row
+    is actually showing."""
+
+    def test_a_second_hit_from_the_same_source_does_not_take_over_the_callback_id(self):
+        """MEASURED IN THE BROWSER: a Simkl-only search for "frieren" returns
+        three titles that all resolve to show:tmdb:209867 and all carry no
+        season, so all three fold into one slot. The row drew the FIRST one —
+        "Sousou no Frieren (2023)", the season-1 title, with its ids — while
+        addressing the LAST, the season-3 title. Clicking it filed season 3
+        under the season-1 id, and nothing could ever count that record.
+        """
+        result = search.merge_search_hits([
+            (Source.SIMKL, [
+                hit(Source.SIMKL, "1990194", tmdb="209867", title="Sousou no Frieren",
+                    year=2023),
+                hit(Source.SIMKL, "2595284", tmdb="209867", title="Sousou no Frieren",
+                    year=2026),
+                hit(Source.SIMKL, "3063278", tmdb="209867", title="Sousou no Frieren",
+                    year=2027),
+            ]),
+        ])
+        row, = result.hits
+        # The row that is drawn and the id it calls back with are one title.
+        self.assertEqual(row.year, 2023)
+        self.assertEqual(row.ids["tmdb"], "209867")
+        self.assertEqual(row.source_ids[Source.SIMKL], "1990194")
+
+    def test_a_second_source_still_gets_its_own_entry(self):
+        """The leader rule is per-source, not a refusal to record anybody
+        else: both marks are still drawn and either source could be asked."""
+        result = search.merge_search_hits([
+            (Source.TRAKT, [hit(Source.TRAKT, "t1", tmdb="1429")]),
+            (Source.SIMKL, [hit(Source.SIMKL, "s1", tmdb="1429"),
+                            hit(Source.SIMKL, "s2", tmdb="1429")]),
+        ])
+        row, = result.hits
+        self.assertEqual(row.source_ids, {Source.TRAKT: "t1", Source.SIMKL: "s1"})
+        # And registry order still decides who answers for the row.
+        self.assertEqual(next(iter(row.source_ids)), Source.TRAKT)
+
+
 class FieldMergeTests(unittest.TestCase):
     def test_registry_order_leads_and_a_blank_field_is_filled_from_the_follower(self):
         simkl_first = hit(Source.SIMKL, "9", tmdb="1429", title="Severance",

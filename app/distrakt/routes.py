@@ -1565,9 +1565,12 @@ async def api_distrakt_seasons(request: Request):
 
     `ids...` QUERY PARAMS ARE THE HIT'S OWN, as the search response's `ids`
     handed them back — unioned with what THIS lookup surfaces before the key
-    is re-resolved. Without them a source whose per-title lookup adds nothing
-    new (Trakt, always — see SeasonsAnswer's own docstring) would look
-    unresolvable even though the search hit that named it was never bare.
+    is re-resolved, with the LOOKUP winning any disagreement. Without them a
+    source whose per-title lookup adds nothing new (Trakt, always — see
+    SeasonsAnswer's own docstring) would look unresolvable even though the
+    search hit that named it was never bare; without the precedence, a row
+    whose id and whose season came from two different titles would be filed
+    as one that can never be counted.
 
     `unkeyable` CARRIES `UnkeyableRecord`'s OWN MESSAGE when the union still
     names no shared id, the same sentence api_distrakt_add's 400 uses for the
@@ -1603,9 +1606,16 @@ async def api_distrakt_seasons(request: Request):
         answer = await provider.detail_port.fetch_seasons(settings, source_id, media)
     except SourceUnavailable as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    resolved_ids = dict(given_ids)
-    for id_key, id_value in answer.ids.items():
-        resolved_ids.setdefault(id_key, id_value)
+    # THE LOOKUP WINS A CONFLICT, and the client's ids fill in the rest. This
+    # answer's `season` was read off the per-title record `answer.ids` came
+    # from, so those two describe the same title by construction; a client id
+    # that disagrees describes a different one, and keeping it would file the
+    # record with one title's season beside another title's id — which is
+    # exactly what a source listing one series as several titles produces, and
+    # a record nothing can then count. The client's own ids still travel
+    # because a lookup that surfaces nothing (Trakt, always — see
+    # SeasonsAnswer) must not read as "this hit had no ids after all".
+    resolved_ids = {**given_ids, **answer.ids}
     return JSONResponse({
         "ok": True,
         "seasons": answer.seasons,
