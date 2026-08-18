@@ -1,4 +1,11 @@
 {% import '_source_logo.html' as src with context %}
+{# WHAT THE ADD FLOW'S SEARCH FIELDS SAY THEY SEARCH. Both modals ask the same
+   catalogues, so both wear the same label, and it names them from the registry's
+   own list rather than from a service somebody hard-coded when there was only
+   one — "Search Trakt" stopped being true the moment a second catalogue could
+   answer. With no catalogue at all it goes back to naming nothing: the field is
+   still there, and the results say why it can find nothing. #}
+{% set search_label = ('Search ' ~ src.names(catalogue_sources)) if catalogue_sources else 'Search' %}
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
@@ -215,10 +222,20 @@
                 <input type="date" id="addMovieDate">
             </div>
             <div class="field">
-                <label for="addMovieSearch">Search Trakt</label>
-                <input type="text" id="addMovieSearch" placeholder="Type a film title…" autocomplete="off" spellcheck="false" oninput="onAddMovieSearchInput()">
+                <label for="addMovieSearch">{{ search_label }}</label>
+                {# Submitted, not typed — see the show modal's own field below. #}
+                <div class="distrakt-search-submit">
+                    <input type="text" id="addMovieSearch" name="q" placeholder="Type a film title…"
+                           autocomplete="off" spellcheck="false"
+                           hx-get="/distrakt/fragments/search-movie" hx-trigger="search-submit"
+                           hx-target="#addMovieResults" hx-indicator="#addMovieBusy"
+                           onkeydown="onAddSearchKey(event, 'addMovieSearch')">
+                    <button type="button" class="btn-ghost small" onclick="submitAddSearch('addMovieSearch')">Search</button>
+                    <span id="addMovieBusy" class="htmx-indicator distrakt-empty">Searching…</span>
+                </div>
             </div>
-            <div id="addMovieResults" class="distrakt-search-results"></div>
+            <div id="addMovieResults" class="distrakt-search-results"
+                 onclick="onMovieResultClick(event)" onkeydown="onResultKey(event)"></div>
         </div>
         <div class="modal-foot">
             <button type="button" class="btn-ghost" onclick="closeAddMovie()">Cancel</button>
@@ -242,14 +259,44 @@
                 <strong>finished during it</strong> — your Trakt watch history is not
                 consulted and cannot contradict it.</p>
             <div class="field">
-                <label for="addSearchInput">Search Trakt</label>
-                <input type="text" id="addSearchInput" placeholder="Type a show title…" autocomplete="off" spellcheck="false" oninput="onAddSearchInput()">
+                <label for="addSearchInput">{{ search_label }}</label>
+                {# SUBMITTED, NOT TYPED. Enter and the button are the same act,
+                   and an empty box does nothing — this is not a discovery UI,
+                   you open it already knowing what you came to add, and a
+                   catalogue fan-out at every prefix of a title somebody has in
+                   mind buys nothing for it. It is also what lets the results be
+                   an ordinary fragment: a request per keystroke could not be.
+                   The trigger is a custom event so the "is there anything to
+                   search for" question stays in one place in add.js rather
+                   than in an attribute. #}
+                <div class="distrakt-search-submit">
+                    <input type="text" id="addSearchInput" name="q" placeholder="Type a show title…"
+                           autocomplete="off" spellcheck="false"
+                           hx-get="/distrakt/fragments/search" hx-trigger="search-submit"
+                           hx-target="#addSearchResults" hx-indicator="#addSearchBusy"
+                           onkeydown="onAddSearchKey(event, 'addSearchInput')">
+                    <button type="button" class="btn-ghost small" onclick="submitAddSearch('addSearchInput')">Search</button>
+                    <span id="addSearchBusy" class="htmx-indicator distrakt-empty">Searching…</span>
+                </div>
             </div>
-            <div id="addSearchResults" class="distrakt-search-results"></div>
+            {# ONE listener for every row, on the container that outlives them —
+               the rows arrive from the server and describe themselves, so
+               nothing here has to know how many there are or where in a list
+               each one sits. #}
+            <div id="addSearchResults" class="distrakt-search-results"
+                 onclick="onShowResultClick(event)" onkeydown="onResultKey(event)"></div>
+            {# A picked title the tracker turns out to have no id to file under.
+               Said HERE, after the per-title lookup that had its chance to
+               resolve it, rather than on the row: a show hit arriving without a
+               shared id is under-described, not unfileable, and refusing it up
+               front would refuse the anime season-titles this flow exists to
+               reach. The sentence is the server's own — the same one the add
+               route's refusal uses. #}
+            <p class="distrakt-note distrakt-warn" id="addShowUnkeyable" hidden></p>
             <div id="addSeasonPick" class="distrakt-season-pick" hidden>
                 <div class="field">
                     <label>Pick a season for <span id="addSeasonShowTitle"></span></label>
-                    <div id="addSeasonList" class="distrakt-season-list"></div>
+                    <div id="addSeasonList" class="distrakt-season-list" onclick="onSeasonClick(event)"></div>
                 </div>
             </div>
         </div>

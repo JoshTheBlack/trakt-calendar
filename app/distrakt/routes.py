@@ -1,4 +1,5 @@
-"""The hidden Discord tracker: its page shell and the whole /api/distrakt/* API.
+"""The hidden Discord tracker: its page shell, its rendered fragments, and the
+whole /api/distrakt/* API.
 
 Every route here is DISTRAKT_APPROVED, and every one of them reads ONE person's
 private Trakt history — their progress, their plays, their films. That is why
@@ -262,6 +263,13 @@ async def distrakt(request: Request):
         # back to these emoji whenever a network has no logo.
         "network_emojis": network_emojis,
         "default_network_emoji": default_network_emoji,
+        # WHICH CATALOGUES THE ADD FLOW'S SEARCH FIELDS NAME, from the same
+        # registry call that will answer the search itself, so the label cannot
+        # promise a service the search does not ask. The INSTANCE's settings,
+        # not this viewer's: a catalogue read authenticates with the instance's
+        # own client id and no account's token has any bearing on it.
+        "catalogue_sources": [str(source) for source, _
+                              in providers.for_catalogue_search(load_settings())],
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
 
@@ -1295,7 +1303,12 @@ async def api_distrakt_remove(request: Request):
 
 
 def _search_hit_payload(hit: catalogue_search.MergedSearchHit) -> dict:
-    """One merged search hit as the add flow's client reads it.
+    """One merged search hit as the add flow's results row is built from.
+
+    THE ONE PLACE A `MergedSearchHit` BECOMES THE ROW: the fragment template
+    (templates/_distrakt_search_results.html) draws both the row's text and the
+    data attributes the pick reads back off it from this same dict, so there is
+    no second statement of what a search hit is for the two to drift apart on.
 
     `key` TRAVELS AS THE SAME FLAT STRING every other route hands the client
     (see app/distrakt/store.py's `normalize_show`) — None when no source could
@@ -1319,10 +1332,52 @@ def _search_hit_payload(hit: catalogue_search.MergedSearchHit) -> dict:
     }
 
 
-@guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_search(request: Request):
-    """Show search for the add flow, merged across every catalogue this
-    instance can ask (app/distrakt/search.py's `search_catalogue`).
+def _unkeyable_reason(media: Media, ids: dict, title: str) -> str | None:
+    """`UnkeyableRecord`'s own sentence for a title the tracker cannot file, or
+    None when it can.
+
+    ONE SOURCE OF TRUTH FOR THE REFUSAL, asked BEFORE an add is offered as well
+    as at the add itself. `record_key` is what decides whether a title has an id
+    the tracker can key on (app/providers/base.py's MATCH_SOURCES is why some do
+    not), and its message is what every surface says about it — this file's
+    season lookup, the film search's disabled row, and api_distrakt_add's 400.
+    Editing that sentence changes all three, which is the point of asking the
+    question here rather than writing a second version of the answer.
+    """
+    try:
+        distrakt_store.record_key({"media": media, "ids": ids, "title": title})
+    except distrakt_store.UnkeyableRecord as exc:
+        return str(exc)
+    return None
+
+
+def _search_rows(hits, media: Media) -> list[dict]:
+    """The merged hits as the results fragment's row contexts.
+
+    A FILM HIT WITH NO SHARED ID IS REFUSED HERE AND A SHOW HIT IS NOT, and the
+    asymmetry is the flows' own rather than an inconsistency. Clicking a show
+    hit already pays for a per-title lookup — the season list — and that lookup
+    resolves the ids a search left out, so the show path can afford to find out
+    on the click (see api_distrakt_seasons). A film has no season to pick and so
+    no click that already spends a round trip, which would leave the refusal to
+    the add attempt itself; saying it on the row instead costs one key
+    resolution per hit and no request at all.
+    """
+    rows = []
+    for hit in hits:
+        row = _search_hit_payload(hit)
+        row["unkeyable"] = (_unkeyable_reason(media, hit.ids, hit.title)
+                            if media is Media.MOVIE and hit.key is None else None)
+        rows.append(row)
+    return rows
+
+
+async def _search_fragment(request: Request, media: Media):
+    """One submitted catalogue search as the results list the add modal swaps in.
+
+    A VIEW, NOT AN API, following the ranker's own fragments: it answers with
+    the rows and nothing else, so the browser has no second copy of what a
+    search hit looks like to keep in step with `_search_hit_payload`.
 
     Gated on WHETHER ANY SOURCE CAN BE SEARCHED — `providers.for_catalogue_search`
     returning something — rather than on Trakt's configuration alone, so an
@@ -1330,30 +1385,42 @@ async def api_distrakt_search(request: Request):
     authenticates a catalogue read with the INSTANCE's own credential, never
     this viewer's token, which is the same distinction api_distrakt_add's own
     comment draws for the identical lookup. Adding what it finds is a separate
-    act with its own gate.
+    act with its own gate. NO CATALOGUE AT ALL IS ITS OWN RENDERED STATE rather
+    than an error: nothing was searched, so telling somebody their search failed
+    would send them to retype a query that was never the problem.
 
-    `failed` NAMES EVERY SOURCE THAT COULD NOT BE ASKED, so the caller can say
-    so quietly rather than let a partial answer read as the whole catalogue's.
-    One source failing is not this search failing — see `search_catalogue`.
+    ONE SOURCE FAILING IS NOT THE SEARCH FAILING — `search_catalogue` returns
+    who could not be asked alongside what the rest found, and the fragment says
+    so quietly above results that are still real.
     """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
     asked = providers.for_catalogue_search(settings)
-    if not asked:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    q = request.query_params.get("q", "")
-    result = await catalogue_search.search_catalogue(asked, settings, Media.SHOW, q)
-    return JSONResponse({
-        "ok": True,
-        "results": [_search_hit_payload(hit) for hit in result.hits],
-        "failed": sorted(str(source) for source in result.failed),
-    })
+    context = {"request": request, "media": str(media), "hits": [], "failed": [],
+               # A MARK DISAMBIGUATES, so with one catalogue there is nothing for
+               # it to do — the rule _source_logo.html states and the reason a
+               # single-source instance looks like this app always did.
+               "marked": len(asked) > 1, "no_catalogue": not asked}
+    if asked:
+        result = await catalogue_search.search_catalogue(
+            asked, settings, media, request.query_params.get("q", ""))
+        context["hits"] = _search_rows(result.hits, media)
+        context["failed"] = sorted(str(source) for source in result.failed)
+    return templates.TemplateResponse(request, "_distrakt_search_results.html", context)
 
 
-@guard.get("/api/distrakt/search-movie", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_search_movie(request: Request):
+@guard.get("/distrakt/fragments/search", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_search_fragment(request: Request):
+    """Show search for the add flow, merged across every catalogue this instance
+    can ask (app/distrakt/search.py's `search_catalogue`). See `_search_fragment`
+    for what it renders and why it is a fragment rather than JSON."""
+    return await _search_fragment(request, Media.SHOW)
+
+
+@guard.get("/distrakt/fragments/search-movie", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_movie_search_fragment(request: Request):
     """Film search for the add-a-film flow, merged across every catalogue this
     instance can ask (app/distrakt/search.py's `search_catalogue`) — the same
-    machinery api_distrakt_search uses, media-parameterized to MOVIE.
+    machinery the show search uses, media-parameterized to MOVIE.
 
     ITS OWN ROUTE RATHER THAN A MEDIA FLAG ON THE SHOW SEARCH, and the reason
     is not that the payloads differ — it is that a show and a film MEAN
@@ -1369,21 +1436,12 @@ async def api_distrakt_search_movie(request: Request):
     both media-parameterized; what is not shared is what each route does with
     the answer.
 
-    Gated on WHETHER ANY SOURCE CAN BE SEARCHED, exactly as api_distrakt_search
-    is — see its own docstring for why `providers.for_catalogue_search` is
-    asked rather than `trakt_catalogue_configured` alone.
+    Gated on WHETHER ANY SOURCE CAN BE SEARCHED, exactly as the show search is
+    — see `_search_fragment` for why `providers.for_catalogue_search` is asked
+    rather than `trakt_catalogue_configured` alone, and for why a film hit with
+    no shared id comes back refused on the row while a show hit does not.
     """
-    settings = await _distrakt_settings(await _distrakt_user_id(request))
-    asked = providers.for_catalogue_search(settings)
-    if not asked:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    q = request.query_params.get("q", "")
-    result = await catalogue_search.search_catalogue(asked, settings, Media.MOVIE, q)
-    return JSONResponse({
-        "ok": True,
-        "results": [_search_hit_payload(hit) for hit in result.hits],
-        "failed": sorted(str(source) for source in result.failed),
-    })
+    return await _search_fragment(request, Media.MOVIE)
 
 
 @guard.post("/api/distrakt/add-movie", AuthLevel.DISTRAKT_APPROVED)
@@ -1538,17 +1596,12 @@ async def api_distrakt_seasons(request: Request):
     resolved_ids = dict(given_ids)
     for id_key, id_value in answer.ids.items():
         resolved_ids.setdefault(id_key, id_value)
-    try:
-        distrakt_store.record_key({"media": media, "ids": resolved_ids, "title": title})
-        unkeyable = None
-    except distrakt_store.UnkeyableRecord as exc:
-        unkeyable = str(exc)
     return JSONResponse({
         "ok": True,
         "seasons": answer.seasons,
         "season": answer.named_season,
         "ids": resolved_ids,
-        "unkeyable": unkeyable,
+        "unkeyable": _unkeyable_reason(media, resolved_ids, title),
     })
 
 
@@ -1583,13 +1636,13 @@ async def api_distrakt_add(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
-    # instance's client id, exactly as /search and /seasons ask for the same
-    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
-    # `trakt_configured` here asked whether this account had linked Trakt — and
-    # refused the whole action to somebody signed in with Simkl alone.
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    # NO CATALOGUE GATE. This used to refuse the whole add unless the instance
+    # held a TRAKT client id, which was the same shape of mistake `trakt_configured`
+    # was here for before it: a season lookup that only Trakt could answer, stated
+    # as a precondition on adding anything at all. The lookup below now asks
+    # whichever source the title's own ids name (live.season_detail), so a
+    # Simkl-only instance adds a Simkl-only title; and a lookup that cannot be
+    # made at all is already survivable — see this function's own last paragraph.
     data = await authz.json_body(request)
     today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
@@ -1622,9 +1675,12 @@ async def api_distrakt_add(request: Request):
             status_code=400,
         )
     try:
-        detail = await trakt_detail.fetch_season_detail(settings, (show["ids"]).get("trakt"),
-                                                        show["season"])
-    except TraktError:
+        # WHICHEVER SOURCE THIS TITLE'S OWN IDS NAME, through the same one rule
+        # the live pass uses. Asking Trakt directly handed a Simkl-only title a
+        # None id, so the record was stored with no episode total, no air dates
+        # and no way to ever acquire them.
+        detail = await live.season_detail(settings, show)
+    except SourceUnavailable:
         detail = {}
     if detail and not detail.get("started_airing"):
         await distrakt_store.add_month_record(user_id, month_key, {
@@ -1663,19 +1719,17 @@ async def api_distrakt_add_completed(request: Request):
     person saying "January had this in it", which is the case it was never meant
     to cover. Past months only: the current month is the tracker's own to bucket.
 
-    The episode total comes from Trakt's season detail, not from the caller — a
-    frozen month's counts are never recomputed, so a wrong one is wrong forever
-    and would reach the ranker import as a wrong episode count.
+    The episode total comes from a season lookup, not from the caller — a frozen
+    month's counts are never recomputed, so a wrong one is wrong forever and
+    would reach the ranker import as a wrong episode count.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
-    # instance's client id, exactly as /search and /seasons ask for the same
-    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
-    # `trakt_configured` here asked whether this account had linked Trakt — and
-    # refused the whole action to somebody signed in with Simkl alone.
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    # NO CATALOGUE GATE, for the reason api_distrakt_add gives: which source can
+    # answer for a title follows from the title's own ids, so an instance-wide
+    # precondition naming ONE service is the wrong question to ask here. This
+    # route still refuses when the lookup comes back with no episodes, which is
+    # the condition it actually cares about.
     data = await authz.json_body(request)
     today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
@@ -1690,17 +1744,25 @@ async def api_distrakt_add_completed(request: Request):
         season = int(data["season"])
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid season"}, status_code=400)
-    if not ids.get("trakt"):
+    if not ids:
         return JSONResponse({"ok": False, "error": "Missing or invalid ids"}, status_code=400)
 
     try:
-        detail = await trakt_detail.fetch_season_detail(settings, ids["trakt"], season)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
+        # The episode total has to be REAL here — a frozen month's counts are
+        # never recomputed — so unlike the ordinary add this one refuses rather
+        # than degrading. Asked of whichever source the ids name, so a
+        # Simkl-only title can be filled in by hand too; it used to require a
+        # Trakt id outright, which is why it could not be.
+        detail = await live.season_detail(settings, {"media": Media.SHOW, "ids": ids,
+                                                     "season": season})
+    except SourceUnavailable as exc:
+        return JSONResponse({"ok": False, "error": f"That season could not be read: {exc}"},
+                            status_code=exc.status or 502)
     total = int((detail or {}).get("total") or 0)
     if not total:
         return JSONResponse(
-            {"ok": False, "error": "Trakt lists no episodes for that season, so it cannot be recorded as finished."},
+            {"ok": False,
+             "error": "No source lists any episodes for that season, so it cannot be recorded as finished."},
             status_code=400)
 
     try:

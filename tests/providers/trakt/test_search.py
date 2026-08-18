@@ -1,13 +1,13 @@
 """Trakt's SearchPort implementation (app/providers/trakt/__init__.py's
 _TraktSearchPort).
 
-Guards the one thing that makes this port different from the add-show flow's
-existing `detail.search_shows`: the port delegates to `detail.search_titles`
-directly and must NOT carry forward `search_shows`'s trailing filter that
-drops any hit with no Trakt id. That filter is a byproduct of Trakt's own
-catalogue never omitting one (measured — search_shows still keeps it, and
-still would filter a bare hit out), not a rule the port's contract makes; a
-hit search_shows would have dropped must still come back from the port.
+Guards the one thing that makes this port different from how the add-show flow
+used to reach Trakt's search: it delegates to `detail.search_titles` directly
+and drops nothing. That flow used to go through a helper that filtered out any
+hit with no Trakt id — a byproduct of Trakt's own catalogue never omitting one,
+not a rule the port's contract makes. A hit that filter would have dropped must
+still come back from the port, and now genuinely can: these hits are merged
+with another service's, where a title known by tmdb alone is ordinary.
 
 No network — app.providers.trakt.detail.search_titles is patched directly, so
 these tests exercise the SHAPE the port produces rather than the HTTP call
@@ -36,9 +36,9 @@ WITH_TRAKT_ID = {
 }
 
 # search_titles keeps any hit with SOME shared id, whether or not Trakt is
-# among them — search_shows is the one that then drops it. Not measured live
-# (Phase 0 found Trakt search hits always carry a Trakt id today), but the
-# port's contract must not assume that stays true.
+# among them; the old add-flow helper was where such a hit got dropped. Not
+# measured live (Trakt search hits do carry a Trakt id today), but the port's
+# contract must not assume that stays true.
 NO_TRAKT_ID = {
     "media": "show", "ids": {"tmdb": 789}, "title": "No Trakt Id", "year": 2021,
     "network": "", "runtime": None, "overview": "",
@@ -46,7 +46,7 @@ NO_TRAKT_ID = {
 
 
 class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
-    async def test_delegates_to_search_titles_not_search_shows(self):
+    async def test_delegates_to_search_titles(self):
         spy = AsyncMock(return_value=[WITH_TRAKT_ID])
         with patch.object(detail, "search_titles", spy):
             hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
@@ -54,9 +54,9 @@ class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(hits), 1)
 
     async def test_a_hit_with_no_trakt_id_is_not_dropped(self):
-        """search_shows would have filtered NO_TRAKT_ID out entirely — its
-        last line is `if entry["ids"].get("trakt") is not None`. The port
-        must not repeat that filter."""
+        """The add flow's old search helper filtered NO_TRAKT_ID out entirely,
+        on a trailing `if entry["ids"].get("trakt") is not None`. The port must
+        not repeat that filter."""
         with patch.object(detail, "search_titles", AsyncMock(return_value=[NO_TRAKT_ID])):
             hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "x")
         self.assertEqual(len(hits), 1)

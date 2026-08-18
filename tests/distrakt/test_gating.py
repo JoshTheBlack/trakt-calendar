@@ -44,12 +44,12 @@ DISTRAKT_GETS = (
     "/api/distrakt/list",
     "/api/distrakt/month",
     "/api/distrakt/months",
-    "/api/distrakt/search",
+    "/distrakt/fragments/search",
     "/api/distrakt/seasons",
     "/api/distrakt/export",
     "/api/distrakt/share-link",
     "/api/distrakt/backfill",
-    "/api/distrakt/search-movie",
+    "/distrakt/fragments/search-movie",
 )
 
 DISTRAKT_POSTS = (
@@ -333,7 +333,8 @@ class RequestingUsersTokenTests(DistraktTestCase):
         the calling account."""
         user_id = self.tracker_user(token="LOOKUP-TOKEN")
         self.sign_in_as(user_id)
-        for path in ("/api/distrakt/search?q=test", "/api/distrakt/seasons?source=trakt&id=7"):
+        for path in ("/distrakt/fragments/search?q=test",
+                     "/api/distrakt/seasons?source=trakt&id=7"):
             with self.subTest(path=path):
                 recorder = RecordingClient()
                 with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
@@ -360,7 +361,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         recorder = RecordingClient()
         self.sign_in_as(user_id)
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            resp = self.client.get("/api/distrakt/search?q=test")
+            resp = self.client.get("/distrakt/fragments/search?q=test")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(set(recorder.authorizations), {""})
 

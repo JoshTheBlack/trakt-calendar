@@ -85,15 +85,17 @@ class _TraktSearchPort:
     """Trakt's answer to "search this catalogue" (app/providers/base.py's
     SearchPort).
 
-    DELEGATES TO `detail.search_titles`, NOT `detail.search_shows` — that
-    second function exists only for the add-show flow this port is meant to
-    replace and ends with a Trakt-id-only filter (its own last line). The
-    filter is a byproduct of Trakt's catalogue never omitting a Trakt id from
-    a search hit, not a rule about what a search result IS, and `search_titles`
-    two lines above it already says so: it stopped flattening results to a
-    Trakt id because a result flattened that way could not be stored. Copying
-    the filter into this port's contract would revive that same assumption
-    one layer down.
+    DELEGATES STRAIGHT TO `detail.search_titles`, AND DOES NOT FILTER WHAT IT
+    ANSWERS WITH. The add-show flow used to reach Trakt's search through a
+    helper that dropped any hit carrying no Trakt id; that filter was a
+    byproduct of Trakt's own catalogue never omitting one, not a rule about
+    what a search result IS, and `search_titles`'s docstring says as much for
+    the layer above it — it stopped flattening results to a Trakt id because a
+    result flattened that way could not be stored at all. THIS PORT ANSWERS FOR
+    MORE THAN TRAKT'S CALLERS NOW: its hits are merged with another service's,
+    where a title known by tmdb alone is an ordinary result, so re-adding that
+    filter here would revive the same assumption one layer down and quietly
+    lose rows the merge exists to find.
     """
 
     async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:

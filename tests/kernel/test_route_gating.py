@@ -176,9 +176,9 @@ class UnauthenticatedTests(GatingTestCase):
         """Tested route by route rather than as a group: a gap here exposes one
         specific user's private watch history."""
         for path in ("/distrakt", "/api/distrakt/list", "/api/distrakt/month",
-                     "/api/distrakt/months", "/api/distrakt/search",
+                     "/api/distrakt/months", "/distrakt/fragments/search",
                      "/api/distrakt/seasons", "/api/distrakt/backfill",
-                     "/api/distrakt/search-movie"):
+                     "/distrakt/fragments/search-movie"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/distrakt/refresh", "/api/distrakt/import",

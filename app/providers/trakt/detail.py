@@ -288,22 +288,6 @@ async def search_titles(settings: Settings, media: str, query: str) -> list[dict
     return out
 
 
-async def search_shows(settings: Settings, query: str) -> list[dict]:
-    """/search/show?query=... -> compact [{ids, title, year, network}] for the
-    add-show flow. Empty query returns [].
-
-    Carries the whole id map rather than the two ids the add flow used to need:
-    the tracker files a row under whichever shared id it can, so a result that had
-    been flattened to a Trakt id could not be stored at all.
-    """
-    return [
-        {"ids": entry["ids"], "title": entry["title"], "year": entry["year"],
-         "network": entry["network"]}
-        for entry in await search_titles(settings, "show", query)
-        if entry["ids"].get("trakt") is not None
-    ]
-
-
 async def fetch_movie_summary(settings: Settings, trakt_id) -> dict | None:
     """/movies/{id}?extended=full,images -> the raw movie object, or None.
 

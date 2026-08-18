@@ -57,8 +57,16 @@ def detail_source(rec: dict) -> str | None:
     return None
 
 
-async def _season_detail(settings, rec: dict, *, fresh: bool, client):
-    """One record's season summary, from whichever source can answer for it."""
+async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None):
+    """One record's season summary, from whichever source can answer for it.
+
+    PUBLIC BECAUSE THE ADD ROUTES ASK IT TOO. "How long is this season" is one
+    question with one answer, and the manual add used to ask Trakt directly —
+    which handed a Simkl-only title `fetch_season_detail(None, ...)` and stored
+    it with no episode total at all. A second source-picking rule beside
+    `detail_source` would be a second place for "who can answer for this record"
+    to drift, so there is one and both the live pass and the add routes call it.
+    """
     from ..providers import season as season_rules
     from ..providers.simkl import detail as simkl_detail
     from ..providers.trakt.detail import fetch_season_detail
@@ -86,7 +94,7 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
     # The app-wide shared client for the whole fan-out (no per-call client).
     client = shared_client()
     return await asyncio.gather(*(
-        _season_detail(settings, rec, fresh=fresh, client=client) for rec in records
+        season_detail(settings, rec, fresh=fresh, client=client) for rec in records
     ), return_exceptions=allow_degrade)
 
 

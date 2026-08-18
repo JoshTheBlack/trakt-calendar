@@ -33,6 +33,17 @@
 
 {% macro label(source) %}{{ 'Simkl' if source == 'simkl' else 'Trakt' }}{% endmacro %}
 
+{# SEVERAL SERVICES NAMED IN ONE SENTENCE, in prose rather than as a list. Two
+   surfaces in the add flow want this and want it identically — the search
+   field's label, which has to say what is actually being searched, and its
+   note when one of those catalogues could not be reached. Written out at
+   either of them, the conjunction and the spellings would be two copies of
+   what `label` above already owns, and a third service would be a third place
+   to remember the comma. #}
+{% macro names(sources) %}{% for source in sources %}{{ label(source) }}
+  {%- if not loop.last %}{{ ' and ' if loop.revindex == 2 else ', ' }}{% endif %}
+{%- endfor %}{% endmacro %}
+
 {% macro mark(source, css='') %}<img class="source-logo {{ css }}"
      src="/static/images/{{ 'simkllogo.svg' if source == 'simkl' else 'trakt-circlemark-dark.svg' }}"
      alt="{{ label(source) }}" loading="lazy">{% endmacro %}

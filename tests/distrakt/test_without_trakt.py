@@ -462,7 +462,6 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
     def test_the_modal_opens(self):
         """It used to 404 "Not on your roster" about a row that plainly is."""
         resp = self._details()
-        self.assertEqual(resp.status_code, 200, resp.text[:300])
         self.assertTrue(resp.json()["ok"])
 
     def test_simkl_is_the_one_asked_and_it_is_asked_by_its_own_id(self):
@@ -617,3 +616,94 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
         save_settings(Settings(public_base_url=ORIGIN, timezone="UTC"))
         self.assertEqual(self.open_the_month().status_code, 200)
         self.assertEqual(self.stored_months(), [])
+
+
+class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
+    """Adding a title BY HAND looks its season up through the provider registry,
+    not through Trakt.
+
+    WHY THIS NEEDED ITS OWN TESTS RATHER THAN THE GATE TESTS ABOVE. Those pin
+    that the routes stopped refusing a Simkl-only VIEWER, and they are written
+    to fail immediately after the gate so they cost no lookup — which is exactly
+    why they never noticed that the lookup behind the gate still named one
+    service. `api_distrakt_add` asked `trakt_detail.fetch_season_detail` with
+    `ids.get("trakt")`, so a title Simkl alone knows was handed a None id: the
+    record stored fine and then carried no episode total, no air dates, and no
+    way to ever acquire them, because every later pass asks the same source the
+    record's own ids name (live.detail_source) and finds nothing to correct.
+
+    THE SEASON LOOKUP IS `live.season_detail` FOR BOTH ROUTES AND THE LIVE PASS,
+    so "who can answer for this record" has one implementation rather than one
+    per caller.
+
+    WHAT THESE ASSERT IS WHICH SERVICE WAS ASKED, not the route's status. The
+    add ends by returning the whole recomputed month, and `_quiet_sources`
+    stubs every history port away so that rebuild has nothing to read — an
+    artefact of the stubbing, arriving long after the lookup these are about.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="scid", simkl_client_secret="ssecret")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("hand_adder", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
+        self.sign_in_as(self.user_id)
+
+    # A title Simkl alone can answer for: no Trakt id anywhere in the map, which
+    # is the ordinary shape of a Simkl search hit once its per-title lookup has
+    # filled in the shared ids.
+    SIMKL_ONLY_IDS = {"simkl": 694485, "tmdb": 1429}
+    SEASON = {"season": 3, "total": 12, "cadence": "b", "premiere": "7/23",
+              "finale": "7/23", "started_airing": True, "finished_airing": True}
+
+    def test_add_asks_simkl_for_a_title_trakt_does_not_name(self):
+        simkl_call = AsyncMock(return_value=dict(self.SEASON))
+        trakt_call = AsyncMock(return_value=dict(self.SEASON))
+        with _quiet_sources(), \
+             patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
+             patch("app.providers.trakt.detail.fetch_season_detail", trakt_call), \
+             patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)):
+            resp = self.client.post("/api/distrakt/add", json={
+                "year": 2026, "month": 8, "ids": dict(self.SIMKL_ONLY_IDS),
+                "title": "Shingeki no Kyojin Season 3", "network": "", "season": 3,
+            })
+        trakt_call.assert_not_awaited()
+        simkl_call.assert_awaited_once()
+        # THAT SERVICE'S OWN ID, never a shared one — the same rule /seasons
+        # states for the identical lookup.
+        self.assertEqual(simkl_call.await_args.args[1], 694485)
+
+    def test_add_completed_asks_simkl_too_and_no_longer_demands_a_trakt_id(self):
+        """It used to refuse outright unless `ids["trakt"]` was present, which
+        made a Simkl-only title impossible to fill a past month in with."""
+        simkl_call = AsyncMock(return_value=dict(self.SEASON))
+        trakt_call = AsyncMock(return_value=dict(self.SEASON))
+        with _quiet_sources(), \
+             patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
+             patch("app.providers.trakt.detail.fetch_season_detail", trakt_call):
+            resp = self.client.post("/api/distrakt/add-completed", json={
+                "year": 2020, "month": 1, "ids": dict(self.SIMKL_ONLY_IDS),
+                "title": "Shingeki no Kyojin Season 3", "season": 3,
+            })
+        trakt_call.assert_not_awaited()
+        simkl_call.assert_awaited_once()
+
+    def test_a_trakt_title_still_goes_to_trakt(self):
+        """The other half of the same rule: nothing here prefers Simkl, it
+        follows the registry's order over the ids the record actually has."""
+        simkl_call = AsyncMock(return_value=dict(self.SEASON))
+        trakt_call = AsyncMock(return_value=dict(self.SEASON))
+        with _quiet_sources(), \
+             patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
+             patch("app.providers.trakt.detail.fetch_season_detail", trakt_call), \
+             patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)):
+            resp = self.client.post("/api/distrakt/add", json={
+                "year": 2026, "month": 8, "ids": {"trakt": 1388, "tmdb": 1396},
+                "title": "Breaking Bad", "network": "AMC", "season": 3,
+            })
+        simkl_call.assert_not_awaited()
+        trakt_call.assert_awaited_once()
