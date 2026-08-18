@@ -72,13 +72,15 @@ class _TraktDetailPort:
 
         `named_season` IS ALWAYS None: Trakt's catalogue has no concept of a
         search hit that IS a season of a larger show, only shows and their
-        seasons as a picker would offer them. `ids` IS ALWAYS EMPTY for the
-        same reason `SeasonsAnswer`'s own docstring gives — a Trakt search hit
-        already carries every shared id `search_titles` found, so there is
-        nothing this per-title call could add.
+        seasons as a picker would offer them. `ids` AND `network` ARE ALWAYS
+        EMPTY for the same reason `SeasonsAnswer`'s own docstring gives — a
+        Trakt search hit already carries every shared id AND the network that
+        `search_titles` found, so there is nothing this per-title call could
+        add. Fetching either again to fill a field that is never the empty one
+        would spend a request to restate what the caller already has.
         """
         seasons = await detail.fetch_show_seasons(settings, source_id)
-        return SeasonsAnswer(seasons=seasons, named_season=None, ids={})
+        return SeasonsAnswer(seasons=seasons, named_season=None, ids={}, network="")
 
 
 class _TraktSearchPort:

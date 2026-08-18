@@ -321,7 +321,7 @@ class SeasonsRouteTests(AppTestCase):
         """The bare-hit case: a search hit search left without a shared id comes
         back keyable once the per-title lookup has run, with no `ids` query
         params needed at all — the lookup's own answer is enough on its own."""
-        answer = SeasonsAnswer(seasons=[], named_season=3,
+        answer = SeasonsAnswer(seasons=[], named_season=3, network="",
                                ids={"tmdb": 1429, "tvdb": 99, "imdb": "tt1", "mal": 51019})
         with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
             body = self.client.get(
@@ -332,7 +332,7 @@ class SeasonsRouteTests(AppTestCase):
         self.assertIsNone(body["unkeyable"])
 
     def test_a_hit_still_unkeyable_after_the_lookup_says_so(self):
-        answer = SeasonsAnswer(seasons=[], named_season=None, ids={})
+        answer = SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
         with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
             body = self.client.get(
                 "/api/distrakt/seasons?source=simkl&id=1&title=Obscure").json()
@@ -350,9 +350,25 @@ class SeasonsRouteTests(AppTestCase):
         self.assertEqual(body["ids"], {"tmdb": 100})
         self.assertIsNone(body["unkeyable"])
 
+    def test_the_lookup_carries_the_network_a_simkl_search_hit_never_has(self):
+        """Simkl's search hit has no network and a single-catalogue instance has
+        no other source to fill the gap from, so without this a show added by
+        hand reaches the roster with none — no emoji in the announcement post,
+        and "" registered in the viewer's emoji map."""
+        answer = SeasonsAnswer(seasons=[], named_season=2, ids={"tmdb": 209867},
+                               network="Nippon TV")
+        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            body = self.client.get("/api/distrakt/seasons?source=simkl&id=2595284").json()
+        self.assertEqual(body["network"], "Nippon TV")
+
+    def test_a_trakt_hit_adds_no_network_because_its_search_hit_already_had_one(self):
+        with patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=[])):
+            body = self.client.get("/api/distrakt/seasons?source=trakt&id=1&tmdb=100").json()
+        self.assertEqual(body["network"], "")
+
     def test_an_ambiguous_season_falls_back_to_the_picker(self):
         answer = SeasonsAnswer(seasons=[{"season": 1, "episode_count": 12}],
-                               named_season=None, ids={"tmdb": 1})
+                               named_season=None, ids={"tmdb": 1}, network="")
         with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
             body = self.client.get("/api/distrakt/seasons?source=simkl&id=1").json()
         self.assertIsNone(body["season"])

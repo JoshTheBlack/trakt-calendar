@@ -121,10 +121,17 @@ async function pickShow(row) {
             toast(d.error || 'Could not load seasons', false);
             return;
         }
-        // THREE ANSWERS FROM THE ONE LOOKUP the season list already pays for: the
+        // FOUR ANSWERS FROM THE ONE LOOKUP the season list already pays for: the
         // ids it surfaced (which is what resolves a hit search left bare), the
-        // season this title already names for itself, and the list to pick from.
+        // network the row may not have had, the season this title already names
+        // for itself, and the list to pick from.
         pickedShow.ids = d.ids || pickedShow.ids;
+        // ONLY WHERE THE ROW HAD NONE. The row's network came from whichever
+        // source led the merge; this one is the per-title record's, and it fills
+        // a gap rather than overriding a source that already answered — a Simkl
+        // search hit carries no network, so on a Simkl-only instance this is the
+        // only place the roster ever gets one.
+        pickedShow.network = pickedShow.network || d.network || '';
         if (d.unkeyable) {
             // Only now — after the lookup that had its chance to fill the gap —
             // is "this cannot be filed" a true thing to say. The server's own

@@ -45,6 +45,7 @@ never called: this app reads a person's viewing and never edits it.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
@@ -53,7 +54,7 @@ from ...config import Settings
 from ...perftrace import span
 from ..base import (LibraryEntry, LibraryRead, Media, UnlistedSeasons, collect_ids,
                     resolve_key)
-from . import _ids, transport
+from . import _ids, _naming, transport
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,11 @@ COMPLETED_STATUS = "completed"
 # television at every endpoint, and a person's anime is watch history exactly as
 # much as their television is — omitting it would silently under-count the half
 # of Simkl's library it is best at.
-EPISODE_TYPES = ("shows", "anime")
+# Named rather than spelled inline because one read treats it differently from
+# the other: an anime item's season number is Simkl's own and has to be
+# translated before anything files it (see _as_the_tracker_keys_them).
+ANIME_TYPE = "anime"
+EPISODE_TYPES = ("shows", ANIME_TYPE)
 
 # The catalogues a library read covers, in the order it reads them. Films are
 # read here as well as shows, because a play is a play whichever kind of title it
@@ -501,6 +506,97 @@ def _fold_library_item(entries: dict[str, LibraryEntry], item: dict,
         unlisted_seasons=_merged_claim(previous.unlisted_seasons, claim))
 
 
+def _own_seasons(item: dict) -> list[int]:
+    """The season numbers THIS library item uses for its own episodes, in order.
+
+    Empty for an item with no `seasons[]` block at all, which is every item in
+    the `completed` bucket — see `_unlisted_claim` for why that bucket states
+    itself in counts instead.
+    """
+    return sorted({int(season["number"]) for season in item.get("seasons") or []
+                   if season.get("number") is not None})
+
+
+def _retitled(item: dict, naming: _naming.Naming, swap: tuple[int, int]) -> dict:
+    """`item` rewritten as the SHOW the tracker knows, with its seasons renumbered.
+
+    Two edits, and they are one fact: this title's ids become the ones its own
+    per-title record knows the parent series by (a season-title's library payload
+    carries only `mal` — measured 2026-08-18, Sousou no Frieren's season-2 title
+    arrives with mal/anilist/kitsu/anidb and no tmdb at all), and its locally
+    numbered season becomes the season of that series it actually is. Doing one
+    without the other would be worse than doing neither: the ids alone would fold
+    a second season's episodes onto the first's numbers, and the season alone
+    would leave a correctly numbered season on a key nothing else uses.
+
+    The item is COPIED rather than edited in place. It came out of the response
+    cache, which hands back a parsed document that other reads may still be
+    holding, and a translation written into it would leak into them.
+    """
+    local, named = swap
+    seasons = [{**season, "number": named} if int(season.get("number")) == local else season
+               for season in item.get("seasons") or []]
+    show = item.get("show") or {}
+    return {**item, "show": {**show, "ids": {**_entry_ids(show), **naming.ids}},
+            "seasons": seasons}
+
+
+async def _as_the_tracker_keys_them(settings: Settings, items: list[dict]) -> list[dict]:
+    """`items` from an ANIME bucket, each translated out of Simkl's season-title
+    numbering and into the show-and-season the tracker files records under.
+
+    WHY ONLY ANIME. Simkl models each anime SEASON as its own catalogue title,
+    numbering its episodes from 1 and carrying the parent series' shared ids only
+    on its per-title record — `_naming` holds the measurement and the rule. The
+    television catalogue models seasons as seasons, so asking the same question
+    of 1034 `shows` items would spend a lookup each to learn nothing.
+
+    THE LOOKUP IS SKIPPED FOR AN ITEM THAT CANNOT NEED IT. A title has to state
+    exactly one season of its own before "which season is that really" is a
+    question with an answer, so an item with no `seasons[]` block (every
+    `completed` one) and an item already spanning several are both passed
+    through untouched, costing nothing.
+    THAT LEAVES A KNOWN GAP AND IT IS THE SAFE SIDE OF IT: a FINISHED anime
+    season-title stays on its own key rather than joining the series. Its
+    `completed` payload carries no season breakdown to renumber, so folding it
+    onto the parent would move an "everything not listed here is watched" claim
+    (see `_unlisted_claim`) onto a series whose OTHER seasons it says nothing
+    about — reporting seasons watched that were not. A separate row under-reports
+    a title; that would over-report several.
+
+    MEASURED COST, dev account 2026-08-18: 9 anime titles in a 1043-item library,
+    so 9 cached GETs on a day-long TTL against 12 `/sync/all-items` reads that
+    are themselves the most expensive thing this module does.
+
+    A LOOKUP THAT FAILS LEAVES ITS ITEM ALONE rather than failing the library
+    read. A library read that raised here would cost a viewer their whole Simkl
+    history for a refinement to one title's season number — and `fetch_library`'s
+    own contract is that a partial answer says so rather than shrinking.
+    """
+    namings = await asyncio.gather(
+        *(_naming.fetch(settings, _entry_ids(item.get("show") or {}).get("simkl"))
+          if len(_own_seasons(item)) == 1 else _nothing()
+          for item in items),
+        return_exceptions=True,
+    )
+    translated = []
+    for item, naming in zip(items, namings):
+        if isinstance(naming, BaseException):
+            logger.warning("simkl could not be asked which season a library title names: %s",
+                           naming)
+            translated.append(item)
+            continue
+        swap = _naming.translation(naming, _own_seasons(item))
+        translated.append(item if swap is None else _retitled(item, naming, swap))
+    return translated
+
+
+async def _nothing() -> _naming.Naming:
+    """An awaitable EMPTY, so the gather above stays one expression rather than
+    two loops that have to be kept in step by position."""
+    return _naming.EMPTY
+
+
 async def fetch_library(settings: Settings, *, start_at: str | None = None,
                         activities: dict | None = None,
                         since: dict | None = None) -> LibraryRead:
@@ -549,7 +645,14 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
                     if event is not None:
                         events.append(event)
                 continue
-            for item in document.get(media) or document.get("shows") or []:
+            items = document.get(media) or document.get("shows") or []
+            if media == ANIME_TYPE:
+                # BEFORE EITHER READER, because both of them read the season
+                # number: the plays go out as events and the per-season baseline
+                # is folded, and a translation applied to one alone would put a
+                # viewer's plays on a different season from their progress.
+                items = await _as_the_tracker_keys_them(settings, items)
+            for item in items:
                 events.extend(_episode_events(item, start_at))
                 _fold_library_item(entries, item, status)
         sp.set(unread=failed, complete=complete)

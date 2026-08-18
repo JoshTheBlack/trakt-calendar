@@ -851,10 +851,20 @@ class SeasonsAnswer(NamedTuple):
     one to merge with. Empty for a source whose search hit already carries
     every shared id it will ever have (Trakt, measured), which makes unioning
     it into whatever a caller already knew a no-op rather than a special case.
+
+    `network` IS THE SAME BARGAIN AS `ids`, FOR THE SAME REASON: what this ONE
+    lookup surfaced, "" where the source did not say or where its search hit
+    already carried it (Trakt, measured). It is on this answer rather than
+    fetched separately because a source whose search hit has no network
+    (Simkl, measured) does carry one on the per-title record the season list
+    is read from anyway — and a caller with only that source has no other
+    source to fill the gap from, which is how a show added by hand reached a
+    roster with no network at all.
     """
     seasons: list[dict]
     named_season: int | None
     ids: dict[str, Any]
+    network: str
 
 
 @runtime_checkable  # see the note on SyncPort above

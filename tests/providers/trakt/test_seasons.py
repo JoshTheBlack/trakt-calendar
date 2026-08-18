@@ -50,7 +50,7 @@ class TraktSeasonsTests(unittest.IsolatedAsyncioTestCase):
     async def test_the_answer_is_a_seasonsanswer(self):
         with patch.object(detail, "fetch_show_seasons", AsyncMock(return_value=[])):
             answer = await _TraktDetailPort().fetch_seasons(SETTINGS, "123", Media.SHOW)
-        self.assertEqual(answer, SeasonsAnswer(seasons=[], named_season=None, ids={}))
+        self.assertEqual(answer, SeasonsAnswer(seasons=[], named_season=None, ids={}, network=""))
 
 
 if __name__ == "__main__":  # pragma: no cover

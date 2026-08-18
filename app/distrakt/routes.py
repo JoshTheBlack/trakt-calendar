@@ -1573,6 +1573,16 @@ async def api_distrakt_seasons(request: Request):
     names no shared id, the same sentence api_distrakt_add's 400 uses for the
     identical refusal — one source of truth for why a title cannot be filed,
     stated here BEFORE an add is offered rather than only after it is tried.
+
+    `network` IS THE FOURTH THING THE ONE LOOKUP ANSWERS, and it is here for the
+    reason the ids are: a source whose SEARCH hit carries no network (Simkl,
+    measured) carries one on the per-title record this call already makes, and
+    on a single-catalogue instance there is no second source for the merge to
+    fill the gap from — so a show added by hand reached the roster with no
+    network, drew no emoji in the announcement post, and registered "" in the
+    viewer's emoji map. Empty from a source whose hit already had it (Trakt),
+    which is what makes the caller's "keep what I have unless this fills it"
+    a no-op rather than a special case.
     """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
     try:
@@ -1601,6 +1611,7 @@ async def api_distrakt_seasons(request: Request):
         "seasons": answer.seasons,
         "season": answer.named_season,
         "ids": resolved_ids,
+        "network": answer.network,
         "unkeyable": _unkeyable_reason(media, resolved_ids, title),
     })
 

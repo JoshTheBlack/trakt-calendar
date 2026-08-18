@@ -235,7 +235,7 @@ class SeasonPickerTests(unittest.IsolatedAsyncioTestCase):
         with patch("app.providers.simkl.transport.cached_get", new=spy):
             got = await detail.fetch_seasons(SETTINGS, 55, Media.MOVIE)
         spy.assert_not_awaited()
-        self.assertEqual(got, SeasonsAnswer(seasons=[], named_season=None, ids={}))
+        self.assertEqual(got, SeasonsAnswer(seasons=[], named_season=None, ids={}, network=""))
 
     async def test_a_title_simkl_cannot_place_answers_empty_rather_than_guessing(self):
         """Simkl's "not found" is a 200 whose body is not a title (see
@@ -243,7 +243,93 @@ class SeasonPickerTests(unittest.IsolatedAsyncioTestCase):
         reading, so a bare hit that cannot be resolved says so honestly instead
         of the lookup raising."""
         got, _calls = await self._seasons([], episodes=[])
-        self.assertEqual(got, SeasonsAnswer(seasons=[], named_season=None, ids={}))
+        self.assertEqual(got, SeasonsAnswer(seasons=[], named_season=None, ids={}, network=""))
+
+    async def test_the_network_rides_the_same_record(self):
+        """A Simkl SEARCH hit carries no network, so on an instance with no
+        second catalogue to fill the gap from this is the only place the add
+        flow can get one — and it costs no request the click was not making."""
+        got, _calls = await self._seasons({"ids": {"simkl": 55}, "network": "Nippon TV"})
+        self.assertEqual(got.network, "Nippon TV")
+
+    async def test_a_record_that_names_no_network_answers_empty_not_none(self):
+        got, _calls = await self._seasons({"ids": {"simkl": 55}})
+        self.assertEqual(got.network, "")
+
+
+class AnimeSeasonTranslationTests(unittest.IsolatedAsyncioTestCase):
+    """`fetch_season_detail` asked for the season the TRACKER knows, against a
+    title that numbers its own episodes from 1.
+
+    Simkl files each anime season as its own catalogue title carrying the parent
+    series' tmdb id — measured, simkl 39687 / 439744 / 694485 all resolve to
+    `show:tmdb:1429` — so a record filed as `show:tmdb:1429` season 3 has to be
+    asked of simkl 694485's OWN season 1, or it counts nothing for ever.
+    """
+
+    # A season-title's episode list: twelve episodes it calls season 1.
+    OWN = [{"episode": n, "season": 1, "type": "episode",
+            "date": "2026-07-%02dT01:00:00Z" % (n + 6)} for n in range(1, 13)]
+    RECORD = {"ids": {"simkl": 694485, "tmdb": 1429}, "season": 3,
+              "mapped_tvdb_seasons": [3]}
+
+    async def _detail(self, season, record=None, episodes=None, simkl_id=694485):
+        calls = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            calls.append(path)
+            if path == f"tv/{simkl_id}":
+                if isinstance(record, Exception):
+                    raise record
+                return record
+            return self.OWN if episodes is None else episodes
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)):
+            got = await detail.fetch_season_detail(SETTINGS, simkl_id, season,
+                                                   today=date(2026, 12, 1))
+        return got, calls
+
+    async def test_the_season_the_title_names_is_answered_from_its_own_season_one(self):
+        got, _calls = await self._detail(3, record=self.RECORD)
+        self.assertEqual(got["total"], 12)
+        # And it answers ABOUT the season it was asked about: the tracker files
+        # the record under the season both services agree names the same thing.
+        self.assertEqual(got["season"], 3)
+
+    async def test_the_lookup_is_not_made_when_the_title_holds_the_season_asked_for(self):
+        """The bound on what this costs. Every ordinary show and every
+        first-season anime title answers from the episode list it already has,
+        so the extra per-title GET lands only where the answer would otherwise
+        have been nothing at all."""
+        got, calls = await self._detail(1)
+        self.assertEqual(calls, ["tv/episodes/694485"])
+        self.assertEqual(got["total"], 12)
+
+    async def test_a_season_no_title_anywhere_names_still_counts_nothing(self):
+        """The lookup runs and answers "I am season 3", which is not season 9 —
+        so this stays the empty season it always was rather than being handed
+        the title's own episodes by default."""
+        got, calls = await self._detail(9, record=self.RECORD)
+        self.assertIn("tv/694485", calls)
+        self.assertEqual(got["total"], 0)
+
+    async def test_an_ambiguous_mapping_is_not_translated(self):
+        got, _calls = await self._detail(
+            3, record={"ids": {"simkl": 1}, "mapped_tvdb_seasons": [2, 3]})
+        self.assertEqual(got["total"], 0)
+
+    async def test_a_lookup_that_fails_leaves_the_season_alone_rather_than_raising(self):
+        """This function has never raised — an unanswerable season reads as an
+        empty one and the next load asks again — so a Simkl outage must not
+        start failing a whole roster render through a refinement of the answer.
+        """
+        got, _calls = await self._detail(3, record=transport.SimklError("down", 503))
+        self.assertEqual(got["total"], 0)
+
+    async def test_a_title_with_no_episodes_at_all_costs_no_lookup(self):
+        got, calls = await self._detail(3, record=self.RECORD, episodes=[])
+        self.assertEqual(calls, ["tv/episodes/694485"])
+        self.assertEqual(got["total"], 0)
 
 
 if __name__ == "__main__":  # pragma: no cover

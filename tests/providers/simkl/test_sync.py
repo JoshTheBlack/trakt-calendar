@@ -493,6 +493,127 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(call.kwargs["raise_errors"], True)
 
 
+class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
+    """A library read against Simkl's anime season-titles.
+
+    MEASURED 2026-08-18 against a real account: marking one episode of "Sousou
+    no Frieren" season 2 (simkl 2595284) put a SECOND item in the anime library
+    beside the season-1 title (1990194) already there — and its library payload
+    carried `{simkl, slug, mal, anilist, kitsu, anidb}` and NO tmdb, while its
+    per-title record carries the series' tmdb 209867 and `mapped_tvdb_seasons
+    [2]`. So untranslated it becomes its own `show:mal:...` row, numbering
+    season 2's episodes as season 1, disconnected from the series the viewer
+    actually tracks — and the add flow files that same series under
+    `show:tmdb:209867` season 2, so the two never meet.
+    """
+
+    HELD = {"show": {"title": "Sousou no Frieren",
+                     "ids": {"simkl_id": 1990194, "tmdb": "209867", "mal": "52991"}},
+            "seasons": [{"number": 1, "episodes": [
+                {"number": 1, "watched_at": "2026-03-03T18:32:21Z"}]}]}
+    SECOND = {"show": {"title": "Sousou no Frieren",
+                       "ids": {"simkl_id": 2595284, "mal": "59978"}},
+              "seasons": [{"number": 1, "episodes": [
+                  {"number": 1, "watched_at": "2026-08-18T12:00:00Z"}]}]}
+    RECORDS = {
+        "tv/1990194": {"ids": {"simkl": 1990194, "tmdb": "209867"},
+                       "mapped_tvdb_seasons": [1]},
+        "tv/2595284": {"ids": {"simkl": 2595284, "tmdb": "209867", "mal": "59978"},
+                       "season": 2, "mapped_tvdb_seasons": [2]},
+    }
+
+    async def _read(self, anime_items, records=None, shows_items=()):
+        """A library read whose only non-empty buckets are `shows/watching` and
+        `anime/watching`, with the per-title records served by path."""
+        records = self.RECORDS if records is None else records
+        buckets = iter([{"shows": list(shows_items)}] + [{}] * 3
+                       + [{"anime": list(anime_items)}] + [{}] * 7)
+        paths = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            paths.append(path)
+            if path.startswith("tv/"):
+                answer = records.get(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+            return next(buckets)
+
+        with patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(side_effect=_get)):
+            return await sync.fetch_library(SETTINGS), paths
+
+    async def test_a_season_title_joins_the_series_under_the_season_it_names(self):
+        read, _paths = await self._read([self.HELD, self.SECOND])
+        self.assertEqual(list(read.entries), ["show:tmdb:209867"])
+        entry = read.entries["show:tmdb:209867"]
+        self.assertEqual(entry.seasons, {1: {1: "2026-03-03T18:32:21Z"},
+                                         2: {1: "2026-08-18T12:00:00Z"}})
+
+    async def test_the_plays_are_translated_too_not_only_the_baseline(self):
+        """Both readers take the season number off the same item, so translating
+        one alone would put a viewer's plays on a different season from their
+        progress."""
+        read, _paths = await self._read([self.SECOND])
+        self.assertEqual([(e["episode"]["season"], e["episode"]["number"])
+                          for e in read.events], [(2, 1)])
+
+    async def test_a_title_already_numbering_itself_as_the_series_does_is_untouched(self):
+        read, _paths = await self._read([self.HELD])
+        entry = read.entries["show:tmdb:209867"]
+        self.assertEqual(entry.seasons, {1: {1: "2026-03-03T18:32:21Z"}})
+        self.assertEqual(entry.ids, {"simkl": 1990194, "tmdb": "209867", "mal": "52991"})
+
+    async def test_only_anime_items_are_asked_which_season_they_name(self):
+        """The television catalogue models seasons as seasons; asking the same
+        question of a thousand `shows` items would spend a lookup each to learn
+        nothing."""
+        _read, paths = await self._read([self.HELD], shows_items=[self.HELD])
+        self.assertEqual([p for p in paths if p.startswith("tv/")], ["tv/1990194"])
+
+    async def test_a_completed_item_costs_no_lookup_and_keeps_its_own_key(self):
+        """A `completed` item carries no `seasons[]` block at all, so there is
+        nothing to renumber — and folding it onto the series anyway would move
+        its "everything not listed is watched" claim onto seasons it says
+        nothing about, reporting watched what was not. Left where it is instead:
+        a separate row under-reports one title, the alternative over-reports
+        several.
+        """
+        finished = {"show": {"title": "Sousou no Frieren",
+                             "ids": {"simkl_id": 2595284, "mal": "59978"}}}
+        _read, paths = await self._read([finished])
+        self.assertEqual([p for p in paths if p.startswith("tv/")], [])
+
+    async def test_a_record_that_names_no_season_leaves_the_item_alone(self):
+        """The sync's fallback, and it is not a picker — there is no viewer to
+        ask. What Simkl already said stands."""
+        read, _paths = await self._read(
+            [self.SECOND], records={"tv/2595284": {"ids": {"simkl": 2595284},
+                                                   "mapped_tvdb_seasons": [2, 3]}})
+        self.assertEqual(list(read.entries), ["show:mal:59978"])
+        self.assertEqual(read.entries["show:mal:59978"].seasons,
+                         {1: {1: "2026-08-18T12:00:00Z"}})
+
+    async def test_a_failed_lookup_loses_its_title_and_not_the_library(self):
+        """A read that raised here would cost a viewer their whole Simkl history
+        to refine one title's season number."""
+        read, _paths = await self._read(
+            [self.HELD, self.SECOND],
+            records={**self.RECORDS, "tv/2595284": transport.SimklError("down", 503)})
+        self.assertTrue(read.complete)
+        self.assertEqual(sorted(read.entries), ["show:mal:59978", "show:tmdb:209867"])
+
+    async def test_the_cached_document_is_not_edited_under_the_next_reader(self):
+        """The item came out of the response cache, which hands back a parsed
+        document other reads may still be holding."""
+        item = {"show": dict(self.SECOND["show"]),
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": 1, "watched_at": "2026-08-18T12:00:00Z"}]}]}
+        await self._read([item])
+        self.assertEqual(item["seasons"][0]["number"], 1)
+        self.assertEqual(item["show"]["ids"], {"simkl_id": 2595284, "mal": "59978"})
+
+
 class ProgressTests(unittest.IsolatedAsyncioTestCase):
     """One request for a whole roster, and what comes back matched to what was
     asked."""
