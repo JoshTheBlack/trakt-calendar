@@ -300,6 +300,20 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     fields = await titles.fetch_title(settings, simkl_id, media, cache_only=cache_only) or {}
     episodes = (await fetch_episodes(settings, simkl_id, media, cache_only=cache_only)
                 if media is not Media.MOVIE else [])
+    # THE SAME RESOLUTION THE SEASON SUMMARY MAKES, for the same reason: the
+    # season a record NAMES and the Simkl title a record CARRIES are two
+    # different things, so a modal opened on `show:tmdb:90937` season 3 while
+    # the record holds season 1's title would filter its episode list to a
+    # season that list does not contain and say there is none. The tile beside
+    # it would be showing twelve.
+    # SKIPPED ENTIRELY UNDER `cache_only`, which is the public share pages'
+    # promise that a stranger's click spends no Simkl budget — the walk makes
+    # live calls, and a modal with no episode list is the degrade those pages
+    # already accept everywhere else.
+    local = None if season is None else int(season)
+    if (media is not Media.MOVIE and season is not None and not cache_only
+            and episodes and int(season) not in seasons_known(episodes)):
+        episodes, local = await _episodes_holding(settings, simkl_id, int(season), media)
     # WHICH SEASON WAS ANSWERED IS RETURNED, not assumed to be the one asked for.
     # 69 of 690 Simkl-only show entries measured on a live instance carry no
     # season at all — Simkl's calendar files omit it for anime — and a title whose
@@ -309,6 +323,13 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     # draws no episode section for it.
     known = seasons_known(episodes)
     answered = season if season is not None else (known[0] if len(known) == 1 else None)
+    # `answered` IS THE TRACKER'S SEASON AND `local` IS SIMKL'S SPELLING OF IT.
+    # They differ only for a season-title, whose episodes are numbered from 1
+    # whatever season of the show they are — so the modal must SAY 3 while
+    # FILTERING on 1, and conflating the two is what made it say there was no
+    # episode list at all.
+    if local is None:
+        local = answered
     runtime = fields.get("runtime")
     return {
         # EMPTY, AND NOT AN OVERSIGHT. What this reads is the enrichment
@@ -340,7 +361,7 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # NO SEASON MEANS NO EPISODE SECTION, rather than every season run
         # together. A list nobody can label is worse than none: the reader has no
         # way to tell which season's E01 they are looking at.
-        "episodes": _modal_episodes(episodes, answered) if answered is not None else [],
+        "episodes": _modal_episodes(episodes, local) if local is not None else [],
     }
 
 
@@ -400,7 +421,9 @@ async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media
     SEARCH hit carries none, so on an instance with no second catalogue to fill
     the gap from, a show added by hand reached the roster with an empty network
     and drew no emoji. This record carries it and the click already pays for the
-    record.
+    record — and where a season-title's own record leaves it null, which is
+    every season but the first, it is read off the series (see
+    `_naming.network_of_series`).
     """
     media = Media(media)
     if media is not Media.SHOW or not simkl_id:
@@ -413,5 +436,5 @@ async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media
         seasons=_season_counts(episodes),
         named_season=naming.season,
         ids=naming.ids,
-        network=naming.network,
+        network=await _naming.network_of_series(settings, simkl_id, naming),
     )

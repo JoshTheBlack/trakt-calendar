@@ -379,6 +379,80 @@ class WrongTitleForTheSeasonTests(unittest.IsolatedAsyncioTestCase):
         # has holds the season asked for.
         self.assertEqual(calls, ["tv/episodes/1034467"])
 
+    async def test_the_detail_modal_resolves_the_same_way_the_tile_does(self):
+        """The tile showed twelve episodes while the modal opened on the same
+        row said "no episode list available": the summary resolved the season
+        to the title that holds it and the modal did not, so it filtered a
+        season-1 list to season 3 and found nothing."""
+        async def _get(client, settings, path, params=None, **kwargs):
+            return self.EPISODES.get(path, self.RECORDS.get(path))
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.providers.simkl.titles.fetch_title",
+                   new=AsyncMock(return_value={"network": "Fuji TV"})):
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, 1034467, 3)
+        self.assertEqual(len(got["episodes"]), 8)
+        # And it still SAYS season 3 — the tracker's season — rather than the
+        # number that title's own episode list uses for it.
+        self.assertEqual(got["season"], 3)
+
+    async def test_a_share_page_read_never_walks_for_it(self):
+        """`cache_only` is the promise that a stranger's click spends no Simkl
+        budget, so the resolution is skipped and the modal degrades instead."""
+        calls = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            calls.append(path)
+            return self.EPISODES.get(path, self.RECORDS.get(path))
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.providers.simkl.titles.fetch_title", new=AsyncMock(return_value={})):
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, 1034467, 3,
+                                             cache_only=True)
+        self.assertEqual(got["episodes"], [])
+        self.assertNotIn("tv/1034467", calls)
+
+
+class SeriesNetworkTests(unittest.IsolatedAsyncioTestCase):
+    """Simkl fills `network` in on the series ROOT and leaves it null on every
+    later season-title — measured across Attack on Titan, Beastars and Frieren.
+    A Simkl-only add of a later season therefore stored no network at all, drew
+    no emoji in the announcement post, and registered "" in the viewer's map."""
+
+    RECORDS = {
+        "tv/2831384": {"ids": {"simkl": 2831384, "tmdb": "90937"},
+                       "mapped_tvdb_seasons": [3], "network": None,
+                       "relations": [{"anime_type": "tv", "ids": {"simkl": 1034467}}]},
+        "tv/1034467": {"ids": {"simkl": 1034467, "tmdb": "90937"},
+                       "mapped_tvdb_seasons": [1], "network": "Fuji TV"},
+        # Reachable through relations but its own tracker row, so not this
+        # row's network to borrow.
+        "tv/1120029": {"ids": {"simkl": 1120029, "tmdb": "313599"},
+                       "mapped_tvdb_seasons": [1], "network": "NHK"},
+    }
+
+    async def _seasons(self, simkl_id, records=None):
+        records = self.RECORDS if records is None else records
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            return [] if path.startswith("tv/episodes/") else records.get(path)
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)):
+            return await detail.fetch_seasons(SETTINGS, simkl_id, Media.SHOW)
+
+    async def test_a_season_title_takes_the_series_network(self):
+        self.assertEqual((await self._seasons(2831384)).network, "Fuji TV")
+
+    async def test_a_title_with_its_own_network_keeps_it_and_walks_nothing(self):
+        self.assertEqual((await self._seasons(1034467)).network, "Fuji TV")
+
+    async def test_a_sibling_from_a_different_tracker_row_is_not_borrowed_from(self):
+        records = {**self.RECORDS,
+                   "tv/2831384": {**self.RECORDS["tv/2831384"],
+                                  "relations": [{"anime_type": "tv",
+                                                 "ids": {"simkl": 1120029}}]}}
+        self.assertEqual((await self._seasons(2831384, records=records)).network, "")
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

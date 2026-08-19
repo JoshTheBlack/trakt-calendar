@@ -181,6 +181,42 @@ async def fetch(settings: Settings, simkl_id) -> Naming:
     return read(payload)
 
 
+async def network_of_series(settings: Settings, simkl_id, start: Naming) -> str:
+    """`start.network`, or the network of the first title of its series that
+    names one — "" when none does.
+
+    SIMKL POPULATES THIS ONCE PER SERIES, ON THE ROOT. Measured 2026-08-18
+    across three series: `network` (and `country` with it) is filled in on the
+    season-1 title and is null on every later season-title — Beastars answers
+    "Fuji TV" for simkl 1034467 and null for all three of its sequels, and
+    Attack on Titan and Frieren behave identically. That is a gap in Simkl's
+    own record rather than a statement that a later season aired nowhere, so
+    reading it off the series is the honest answer and an empty string is not.
+
+    WHAT THIS IS AND IS NOT SAYING: it is the SERIES' network, which is what
+    the tracker's field means — the roster groups and draws an emoji per
+    service, a show-level fact. It is not a claim that this particular season
+    was distributed there, and for a season Simkl reclassifies (Beastars' third
+    is an `ona` where its first was `tv`) the two can genuinely differ. An
+    empty network drew no emoji at all and registered "" in the viewer's map,
+    which is worse than the series' answer.
+    """
+    if start.network:
+        return start.network
+    ours = str(start.ids.get("tmdb") or "")
+    for sibling_id in start.siblings:
+        sibling = await fetch(settings, sibling_id)
+        if not sibling.network:
+            continue
+        # The same cross-identity guard `title_for_season` needs: `relations`
+        # reaches titles that are their own tracker row, and their network is
+        # not this row's to borrow.
+        if ours and str(sibling.ids.get("tmdb") or "") != ours:
+            continue
+        return sibling.network
+    return ""
+
+
 async def title_for_season(settings: Settings, simkl_id, season: int) -> int | None:
     """Which Simkl title holds `season` of the series `simkl_id` belongs to, or
     None when no title of it does.
