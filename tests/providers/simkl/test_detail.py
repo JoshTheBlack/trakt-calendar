@@ -128,8 +128,12 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
     that is identical for everybody.
     """
 
+    # An ordinary title, describing itself and naming its network — so nothing
+    # here reaches for the series behind it (see SeriesGapFillTests) and the two
+    # lookups this class is about stay two.
     TITLE = {"title": "A Show", "ids": {"simkl": 55}, "overview": "Words.",
-             "genres": ["Game Show"], "trailers": [{"youtube": "abc123"}]}
+             "network": "TV Tokyo", "genres": ["Game Show"],
+             "trailers": [{"youtube": "abc123"}]}
 
     async def _details(self, season=1):
         calls = []
@@ -411,6 +415,91 @@ class WrongTitleForTheSeasonTests(unittest.IsolatedAsyncioTestCase):
                                              cache_only=True)
         self.assertEqual(got["episodes"], [])
         self.assertNotIn("tv/1034467", calls)
+
+
+class SeriesGapFillTests(unittest.IsolatedAsyncioTestCase):
+    """A season-title Simkl has not written a description for yet.
+
+    Measured 2026-08-18: most season-titles carry their own overview and
+    trailers (Attack on Titan's second, third and fourth all do), but the
+    NEWEST entries do not — Beastars' 2026 season and Frieren's 2027 one answer
+    a 0-character overview and no trailers. The modal drew an episode list, a
+    row of genre chips and nothing else.
+
+    Filling from the series matches the other source rather than inventing a
+    rule: the Trakt package reads `shows/{id}` for overview, trailer, genres
+    and rating and lets the season pick only the episode list, so every Trakt
+    modal already shows the series' description.
+    """
+
+    RECORDS = {
+        "tv/2831384": {"ids": {"simkl": 2831384, "tmdb": "90937"},
+                       "mapped_tvdb_seasons": [3],
+                       "relations": [{"anime_type": "tv", "ids": {"simkl": 1034467}}]},
+        "tv/1034467": {"ids": {"simkl": 1034467, "tmdb": "90937"},
+                       "mapped_tvdb_seasons": [1]},
+    }
+    THIN = {"overview": "", "trailers": [], "network": "", "year": 2026,
+            "status": "tba", "genres": ["drama"], "rating": 7.4}
+    SERIES = {"overview": "Herbivores and carnivores.", "network": "Fuji TV",
+              "trailers": [{"youtube": "abc123"}], "year": 2019, "status": "ended",
+              "genres": ["drama", "school"], "rating": 7.8}
+
+    async def _details(self, simkl_id, season, per_title):
+        async def _get(client, settings, path, params=None, **kwargs):
+            return [] if path.startswith("tv/episodes/") else self.RECORDS.get(path)
+
+        async def _title(settings, sid, media, **kwargs):
+            return per_title.get(int(sid), {})
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.providers.simkl.titles.fetch_title", new=AsyncMock(side_effect=_title)):
+            return await detail.fetch_details(SETTINGS, Media.SHOW, simkl_id, season)
+
+    async def test_an_undescribed_season_takes_the_series_description(self):
+        got = await self._details(2831384, 3, {2831384: self.THIN, 1034467: self.SERIES})
+        self.assertEqual(got["overview"], "Herbivores and carnivores.")
+        self.assertEqual(got["trailer"], "https://www.youtube.com/watch?v=abc123")
+        self.assertEqual(got["network"], "Fuji TV")
+
+    async def test_the_seasons_own_facts_are_not_overwritten(self):
+        """`year` and `status` belong to the season. Reading 2019 and "ended"
+        off season 1 would be worse than the gap being closed."""
+        got = await self._details(2831384, 3, {2831384: self.THIN, 1034467: self.SERIES})
+        self.assertEqual(got["year"], 2026)
+        self.assertEqual(got["status"], "Tba")
+
+    async def _walked(self, own):
+        """Whether drawing a modal for a title answering `own` reached for the
+        series behind it."""
+        calls = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            calls.append(path)
+            return [] if path.startswith("tv/episodes/") else self.RECORDS.get(path)
+
+        async def _title(settings, sid, media, **kwargs):
+            return own if int(sid) == 2831384 else self.SERIES
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)), \
+             patch("app.providers.simkl.titles.fetch_title", new=AsyncMock(side_effect=_title)):
+            got = await detail.fetch_details(SETTINGS, Media.SHOW, 2831384, 3)
+        return got, "tv/2831384" in calls
+
+    async def test_a_season_answering_for_itself_entirely_costs_no_walk(self):
+        got, walked = await self._walked({**self.THIN, "overview": "Its own words.",
+                                          "network": "Fuji TV"})
+        self.assertEqual(got["overview"], "Its own words.")
+        self.assertFalse(walked)
+
+    async def test_a_season_with_its_own_words_but_no_network_still_walks(self):
+        """The two gaps have different causes and either alone leaves the modal
+        disagreeing with something — here, with the roster row beside it, which
+        `fetch_seasons` fills from the same series."""
+        got, walked = await self._walked({**self.THIN, "overview": "Its own words."})
+        self.assertTrue(walked)
+        self.assertEqual(got["overview"], "Its own words.")
+        self.assertEqual(got["network"], "Fuji TV")
 
 
 class SeriesNetworkTests(unittest.IsolatedAsyncioTestCase):

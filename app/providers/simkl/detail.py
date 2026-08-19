@@ -273,6 +273,38 @@ def _trailer_url(trailers) -> str:
     return ""
 
 
+async def _filled_from_series(settings: Settings, simkl_id, media: Media,
+                              fields: dict) -> dict:
+    """`fields` with every empty value taken from this title's series root.
+
+    A BLANK IS THE ONLY THING REPLACED. `year` and `status` are the season's own
+    and stay that way where it states them — Frieren's third season is 2027 and
+    `tba`, and reading 2023 and `ended` off season 1 would be worse than the gap
+    this exists to close.
+
+    Costs nothing for a title that already describes itself (the caller only
+    asks when the overview is empty), nothing for a title with no series behind
+    it, and one cached record otherwise. A lookup that fails leaves the gaps —
+    an under-described modal is what this is improving on, not a state worth
+    failing the modal over.
+    """
+    try:
+        naming = await _naming.fetch(settings, simkl_id)
+        root = await _naming.series_root(settings, simkl_id, naming)
+    except transport.SimklError:
+        logger.warning("simkl could not be asked what series simkl id %s belongs to; "
+                       "the modal draws what this title alone says", simkl_id)
+        return fields
+    if not root:
+        return fields
+    parent = await titles.fetch_title(settings, root, media) or {}
+    filled = dict(fields)
+    for key, value in parent.items():
+        if not filled.get(key):
+            filled[key] = value
+    return filled
+
+
 async def fetch_details(settings: Settings, media: Media | str, simkl_id,
                         season: int | None, *, cache_only: bool = False) -> dict:
     """One title as the detail modal draws it — app/providers/base.py's DetailPort.
@@ -310,6 +342,34 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     # promise that a stranger's click spends no Simkl budget — the walk makes
     # live calls, and a modal with no episode list is the degrade those pages
     # already accept everywhere else.
+    # WHAT THIS TITLE LEFT BLANK, TAKEN FROM ITS SERIES. Simkl writes a
+    # description and trailers per season-title, and for the newest entries it
+    # has not written them yet — measured, Beastars' 2026 season and Frieren's
+    # 2027 one carry a 0-character overview and no trailers while their earlier
+    # seasons carry both. That left the modal drawing an episode list and a row
+    # of genre chips and nothing else.
+    # FILLING FROM THE SERIES MATCHES THE OTHER SOURCE RATHER THAN INVENTING A
+    # RULE: the Trakt package reads `shows/{id}` for overview, trailer, genres
+    # and rating and lets the season choose only the episode list, so EVERY
+    # Trakt modal already shows the series' description. A gap filled this way
+    # makes one renderer's two sources agree, which is what DetailPort's
+    # contract asks for; a blank does not.
+    # ONLY WHAT IS EMPTY IS FILLED, so a season that does describe itself keeps
+    # its own words — which is better than the series' and is what Simkl offers
+    # that Trakt does not.
+    # `fields` EMPTY MEANS SIMKL DOES NOT KNOW THIS TITLE, which is a different
+    # thing from a title it knows and has not described — there is no series
+    # behind it to ask about, so asking would spend a request to learn nothing.
+    # THE OVERVIEW AND THE NETWORK ARE BOTH TRIGGERS, because they go missing
+    # for different reasons and either one alone leaves the modal disagreeing
+    # with something: an overview Simkl has not written yet empties the card,
+    # and a network it only ever states on the series root would leave the modal
+    # blank beside a roster row that shows one (`fetch_seasons` fills the same
+    # gap for the add).
+    if (media is not Media.MOVIE and not cache_only and fields
+            and not (str(fields.get("overview") or "").strip()
+                     and str(fields.get("network") or "").strip())):
+        fields = await _filled_from_series(settings, simkl_id, media, fields)
     local = None if season is None else int(season)
     if (media is not Media.MOVIE and season is not None and not cache_only
             and episodes and int(season) not in seasons_known(episodes)):

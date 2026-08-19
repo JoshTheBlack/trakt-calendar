@@ -181,6 +181,23 @@ async def fetch(settings: Settings, simkl_id) -> Naming:
     return read(payload)
 
 
+async def series_root(settings: Settings, simkl_id, start: Naming) -> int | None:
+    """The title that is season 1 of `start`'s series, or None when `start` is
+    already it or belongs to no series.
+
+    WHERE SIMKL STATES A SERIES' FACTS ONCE. Some of a title's record is about
+    the SEASON (its own overview, its own trailers, its air dates) and some is
+    about the SHOW — and the show-level half is filled in on the season-1 title
+    and left null on the rest. Measured 2026-08-18: `network` and `country` are
+    populated on Beastars simkl 1034467 and null on all three of its sequels,
+    with Attack on Titan and Frieren identical. So "ask the series" has one
+    address, and this is it.
+    """
+    if start.season == 1 or not start.siblings:
+        return None
+    return await title_for_season(settings, simkl_id, 1)
+
+
 async def network_of_series(settings: Settings, simkl_id, start: Naming) -> str:
     """`start.network`, or the network of the first title of its series that
     names one — "" when none does.
