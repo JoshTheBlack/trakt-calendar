@@ -243,6 +243,10 @@ async def history_records(user_id: int, settings, present: set[tuple[str, int]])
         settings, [rec for rec, _ in candidates], fresh=False, allow_degrade=False)
     out = []
     for (rec, entry), detail in zip(candidates, details):
+        # None means no source could be asked about this title at all (see
+        # live.fetch_season_details) — the row still goes on the pile, with the
+        # nothing it is known by, rather than being dropped over a credential.
+        detail = detail or {}
         total = int(detail.get("total") or 0)
         watched = int(entry.get("watched") or 0)
         if total > 0 and watched >= total:

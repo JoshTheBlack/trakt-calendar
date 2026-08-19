@@ -493,18 +493,28 @@ def _season_lookup(settings) -> lifecycle.SeasonLookup:
     lifecycle.SeasonLookup. It is paid once per season that reopened, never once
     per episode seen.
 
-    A record with no source id, or a lookup that fails, answers {}: the season
-    still comes back onto the viewer's list, on the counts the withdrawn verdict
-    had, and the next load re-derives them anyway. Failing the whole month over a
-    season that grew would be the worse trade.
+    A record no source can be asked about, or a lookup that fails, answers {}:
+    the season still comes back onto the viewer's list, on the counts the
+    withdrawn verdict had, and the next load re-derives them anyway. Failing the
+    whole month over a season that grew would be the worse trade.
+
+    ASKED OF WHOEVER THE RECORD'S OWN IDS NAME, through `live.season_detail`,
+    rather than of Trakt off a bare `ids["trakt"]`. "How long is this season" is
+    one question with one answer and one place that decides who answers it — a
+    premiere correction that only ever asked Trakt simply never happened on an
+    instance reading its catalogue from somewhere else.
     """
     async def look_up(record: dict, season: int) -> dict:
-        source_id = (record.get("ids") or {}).get("trakt")
-        if source_id is None:
+        rec = {**record, "season": season}
+        # THE EMPTY ANSWER IS CHECKED FOR RATHER THAN FETCHED. `season_detail`
+        # answers a zeroed season when nobody can be asked, which is right for a
+        # caller that has nothing else to draw; here it would overwrite a real
+        # withdrawn verdict's counts with zeros, and {} is what says "keep them".
+        if live.detail_source(rec, settings) is None:
             return {}
         try:
-            return await trakt_detail.fetch_season_detail(settings, source_id, season)
-        except TraktError:
+            return await live.season_detail(settings, rec)
+        except SourceUnavailable:
             return {}
     return look_up
 
@@ -2198,21 +2208,35 @@ async def _live_form_source(settings, record: dict, season: int) -> dict:
     Degrades to the stored record rather than failing. Giving up is a user ACTION
     and must still succeed — it is not a read to fail on — so an unreachable
     provider costs the line its live counts and nothing else.
+
+    TWO HALVES, TWO DIFFERENT QUESTIONS, AND ONLY ONE OF THEM IS PUBLIC. How long
+    the season is, is catalogue data and is asked of whoever the record's own ids
+    name (`live.season_detail`) — a form frozen on an instance that reads its
+    catalogue from somewhere other than Trakt used to carry the stored record and
+    nothing fresh at all. How much of it THIS VIEWER has watched is their own
+    data, and it is still read from Trakt alone, behind the private
+    `trakt_configured` gate that is genuinely entitled to guard it: a per-source
+    answer to that needs the watch-history state this path does not hold, which
+    is a different piece of work from swapping a season lookup. Where it cannot
+    be read the record keeps its OWN `watched`, which is the number the row the
+    viewer just pressed was drawing.
     """
+    rec = {**record, "season": season}
+    try:
+        detail = await live.season_detail(settings, rec)
+    except SourceUnavailable:
+        return dict(record)
+    form = {**record, **detail, "season": season}
     source_id = (record.get("ids") or {}).get("trakt")
     if not (settings and getattr(settings, "trakt_configured", False)) or source_id is None:
-        return dict(record)
+        return form
     try:
-        watched, detail = await asyncio.gather(
-            trakt_sync.fetch_watched_map(settings, [source_id]),
-            trakt_detail.fetch_season_detail(settings, source_id, season),
-        )
+        watched = await trakt_sync.fetch_watched_map(settings, [source_id])
     except TraktError:
-        return dict(record)
+        return form
     # fetch_watched_map answers in Trakt's own (id, season) terms, so this one
     # count is re-filed under the shared identity the record is keyed by.
-    return {**record, "watched": watched.get((int(source_id), season), 0), **detail,
-            "season": season}
+    return {**form, "watched": watched.get((int(source_id), season), 0)}
 
 
 @guard.get("/api/distrakt/export", AuthLevel.DISTRAKT_APPROVED)

@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import distrakt as distrakt_store
 from app.config import Settings
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, ORIGIN, window_fetch
 
 
 def _month(offset: int) -> tuple[int, int]:
@@ -180,7 +180,12 @@ class EveryWayInLandsOnTheChooserTests(ChooserTestCase):
         """The reported bug: opening the tracker from a calendar showing some
         other month went straight into that month, chooser and all."""
         year, month = _month(1)
-        body = self.client.get(f"/calendar?year={year}&month={month}").text
+        # The CALENDAR page, rendered only to read a link out of its header. Its
+        # month is filled from whatever source the instance can read, and a
+        # client id alone is now enough to be one — so the fill is stubbed rather
+        # than left to reach a real service for a test about an href.
+        with patch("app.calendar.cache.fetch_window_records", window_fetch([])):
+            body = self.client.get(f"/calendar?year={year}&month={month}").text
         href = self._href(body, r'<a[^>]*\bid="distraktNav"[^>]*\bhref="([^"]*)"')
         self.assertIn(f"year={year}", href)  # the year travels; the month does not
         self._lands_on_the_chooser(href)

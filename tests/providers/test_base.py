@@ -137,12 +137,40 @@ class TestRegistry:
         assert provider.capabilities.endpoints == frozenset(ENDPOINTS)
         assert provider.capabilities.private_user_data
 
-    def test_no_usable_calendar_source_until_one_is_configured(self):
-        assert providers.for_calendar_sources(Settings()) == []
+    def test_an_instance_with_no_credentials_at_all_still_has_a_calendar(self):
+        """A source whose calendar needs no credential is usable on an instance
+        that has filled nothing in, which is what a public feed means. This used
+        to answer [] — `for_calendar_sources` narrowed on `is_configured`, the
+        PRIVATE question — and a calendar page therefore explained itself away on
+        an instance that could have drawn a month."""
+        assert [p.source for p in providers.for_calendar_sources(Settings())] == [Source.SIMKL]
+
+    def test_there_is_still_a_way_to_have_nobody_to_ask(self):
+        """The negative half, and it has to exist or the gate above stops
+        meaning anything: with the one credential-free calendar switched off and
+        no client id for the other, the list is empty and the page says so."""
+        nobody = Settings(simkl_public_calendar_enabled=False)
+        assert providers.for_calendar_sources(nobody) == []
 
     def test_the_configured_source_is_the_usable_one(self):
-        configured = Settings(trakt_client_id="id", trakt_access_token="token")
+        configured = Settings(trakt_client_id="id", simkl_public_calendar_enabled=False)
         assert [p.source for p in providers.for_calendar_sources(configured)] == [Source.TRAKT]
+
+    def test_trakts_calendar_asks_for_the_client_id_and_not_the_token(self):
+        """The catalogue question, not the private one: /calendars/all/
+        authenticates with the `trakt-api-key` header and sends no bearer, so an
+        instance that has never issued a token still has Trakt's calendar."""
+        port = providers.get(Source.TRAKT).calendar_port
+        assert port.calendar_configured(Settings(trakt_client_id="id"))
+        assert not port.calendar_configured(Settings(trakt_access_token="token"))
+
+    def test_simkls_calendar_needs_no_credential_of_any_kind(self):
+        """Its months are public CDN files (app/providers/simkl/calendar.py):
+        there is no credential whose absence could make them unreadable, which
+        is why the predicate is on the PORT — `is_configured` and
+        `catalogue_is_configured` are both false here and both irrelevant."""
+        port = providers.get(Source.SIMKL).calendar_port
+        assert port.calendar_configured(Settings())
 
     def test_a_source_that_could_answer_is_listed_whether_or_not_it_is_set_up(self):
         """The two questions are different and both are asked. "Who could put
@@ -162,24 +190,21 @@ class TestRegistry:
         for provider in no_calendar:
             assert provider.source not in [p.source for p in providers.calendar_sources()]
 
-    def test_simkl_is_a_usable_calendar_source_once_its_own_credential_is_set(self):
-        """`for_calendar_sources` narrows to `is_configured`, which for Simkl
-        still asks the TRACKER's credential (client id + access token) even
-        though the calendar CDN itself needs neither. `is_configured` answers
-        for the whole source rather than per capability, so linking Simkl for
-        the tracker is what makes its calendar count as "usable" here too."""
+    def test_both_are_usable_when_both_are_set_up(self):
         both = Settings(trakt_client_id="id", trakt_access_token="token",
                         simkl_client_id="id", simkl_access_token="token")
         assert {p.source for p in providers.for_calendar_sources(both)} == {Source.TRAKT, Source.SIMKL}
 
-    def test_an_unconfigured_simkl_is_still_asked_by_the_fill_but_not_usable_yet(self):
-        """The fill (`calendar_sources`) does not ask `is_configured` at all —
-        so Simkl is admitted to the fill regardless; `for_calendar_sources`
-        is the narrower, credential-checked list a route uses to decide whether
-        there is anybody to explain the calendar with."""
+    def test_the_tracker_credential_has_no_say_over_simkls_calendar(self):
+        """`is_configured` for Simkl asks the TRACKER's credential (client id
+        plus access token), and the calendar CDN needs neither — so an instance
+        that has linked nothing gets Simkl's calendar anyway. Narrowing on the
+        provider-level predicate is what made a working public feed read as no
+        source at all."""
         trakt_only = Settings(trakt_client_id="id", trakt_access_token="token")
+        assert not providers.get(Source.SIMKL).is_configured(trakt_only)
         assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
-        assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(trakt_only)]
+        assert Source.SIMKL in [p.source for p in providers.for_calendar_sources(trakt_only)]
 
     def test_an_accounts_auto_asks_every_source_the_instance_can_fill_from(self):
         """The fill is instance-credentialed, so an account's links have no say

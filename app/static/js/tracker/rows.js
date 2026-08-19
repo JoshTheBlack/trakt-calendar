@@ -208,9 +208,15 @@ function showRow(s) {
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;
     else if (s.bucket === 'keepup') dates = s.finale || '?/?';
-    // Server couldn't refresh THIS show's totals (rate-limited/unreachable): don't
-    // present its last-known numbers as a fresh read — blank them and flag it.
-    if (s.unavailable) { counts = ''; dates = 'unavailable — refresh to retry'; }
+    // The server couldn't refresh THIS show's totals: don't present its last-known
+    // numbers as a fresh read — blank them and say why. THE SENTENCE IS THE
+    // SERVER'S, whole, because there is more than one reason and they call for
+    // different things from the reader: a service that could not be reached wants
+    // a refresh, one this instance holds no credential for wants Settings opened.
+    // Branching here between two strings written here would put the vocabulary on
+    // the side that cannot see which happened (app/distrakt/live.py's
+    // unavailable_note composes it).
+    if (s.unavailable) { counts = ''; dates = s.unavailable_note || ''; }
     // A closed month keeps its ✕ but loses the abandon toggle: what a past month
     // RECORDS can still be corrected (a season you finished years ago and
     // re-watched one episode of does not belong on its list), but its verdicts

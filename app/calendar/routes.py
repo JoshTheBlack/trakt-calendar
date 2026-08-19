@@ -57,8 +57,18 @@ guard = authz.Guard(router)
 # cards further down it that nobody has scrolled to yet.
 INITIAL_DAY_BLOCKS = 5
 
+# WHAT THE PAGE SAYS WHEN NOBODY CAN SUPPLY A CALENDAR, and it deliberately
+# names no service. The gate in front of it (`calendar_source_configured` ->
+# providers.for_calendar_sources) asks the registry whether ANY source can be
+# read, and each source answers for its own transport: one wants the instance's
+# client id, another is a public feed that wants nothing. A sentence naming Trakt
+# and its Access Token was wrong twice over on an instance reading months from
+# somewhere else — it named a service that was not the reason, and a credential
+# the calendar never sends. Reaching this state now means every source is either
+# missing its own credential or switched off, and both are settings.
 NOT_CONFIGURED = (
-    "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
+    "No calendar source is available right now. Open ⚙️ Settings to add a "
+    "service's credentials, or to switch a source back on."
 )
 
 

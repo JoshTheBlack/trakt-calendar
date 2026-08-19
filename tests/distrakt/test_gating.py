@@ -439,7 +439,12 @@ class Post1ShareLinkTests(DistraktTestCase):
 
     def setUp(self):
         super().setUp()
-        save_settings(Settings(public_base_url=self.BASE))
+        # NO CALENDAR SOURCE, WHICH IS WHAT THIS FIXTURE HAS ALWAYS MEANT. These
+        # tests are about the link a post embeds; a month with a calendar to
+        # import premieres from would go and read one, and the one source whose
+        # calendar needs no credential is on by default.
+        save_settings(Settings(public_base_url=self.BASE,
+                               simkl_public_calendar_enabled=False))
         self.user_id = self.tracker_user("poster")
         self.sign_in_as(self.user_id)
 
@@ -534,7 +539,9 @@ class Post1ShareLinkTests(DistraktTestCase):
     def test_no_public_base_url_omits_the_link_cleanly(self):
         """With nowhere to point, the post is simply the two lists it always
         was — not a line with a broken or half-built URL in it."""
-        save_settings(Settings())
+        # Still no calendar source, for setUp's reason: this is about a post with
+        # nowhere to point, not about a month reading a calendar.
+        save_settings(Settings(simkl_public_calendar_enabled=False))
         post1 = self._post1()
         self.assertNotIn("Full calendar", post1)
         self.assertNotIn("://", post1)

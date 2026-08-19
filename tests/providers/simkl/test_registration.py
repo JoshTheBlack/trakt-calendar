@@ -29,24 +29,33 @@ class RegistrationTests(unittest.TestCase):
 
     def test_registering_it_did_not_displace_trakt_as_the_calendar_source(self):
         """A second source arriving is exactly the moment the calendar could
-        start answering differently for an instance that changed nothing."""
+        start answering differently for an instance that changed nothing. Trakt
+        still leads; Simkl joins it rather than replacing it, and it takes
+        switching Simkl's public calendar off to be left with Trakt alone."""
         configured = Settings(trakt_client_id="id", trakt_access_token="token")
         self.assertEqual([p.source for p in providers.for_calendar_sources(configured)],
-                         [Source.TRAKT])
+                         [Source.TRAKT, Source.SIMKL])
+        self.assertEqual(
+            [p.source for p in providers.for_calendar_sources(
+                Settings(trakt_client_id="id", simkl_public_calendar_enabled=False))],
+            [Source.TRAKT])
 
-    def test_simkl_credentials_alone_are_now_a_calendar_source(self):
-        """Simkl's calendar module now exists. The calendar CDN itself needs no
-        credential at all, but `is_configured` still asks for the tracker's
-        client id and access token, because that is the credential the tracker
-        needs and `is_configured` is one answer for the whole source — so an
-        instance that has linked Simkl for the tracker gets its calendar read
-        too, which is what an instance configuring Simkl for the first time
-        actually sees."""
+    def test_simkls_calendar_is_a_source_with_or_without_a_credential(self):
+        """Its months are unauthenticated CDN files, so nothing about a
+        credential decides whether they can be read — `calendar_port
+        .calendar_configured` says so and `for_calendar_sources` asks it there,
+        rather than asking `is_configured`, which answers for the AUTHENTICATED
+        halves of this source and would withhold a public feed over a token the
+        fetch never sends."""
         simkl_only = Settings(simkl_client_id="id", simkl_access_token="token")
         self.assertTrue(self.simkl.is_configured(simkl_only))
         self.assertEqual([p.source for p in providers.for_calendar_sources(simkl_only)],
                          [Source.SIMKL])
         self.assertTrue(simkl_only.calendar_source_configured)
+        bare = Settings()
+        self.assertFalse(self.simkl.is_configured(bare))
+        self.assertEqual([p.source for p in providers.for_calendar_sources(bare)],
+                         [Source.SIMKL])
 
     def test_it_is_configured_only_with_both_halves_of_the_credential(self):
         self.assertFalse(self.simkl.is_configured(Settings()))

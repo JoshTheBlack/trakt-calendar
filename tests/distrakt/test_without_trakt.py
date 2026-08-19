@@ -26,13 +26,22 @@ import unittest
 from datetime import date
 from unittest.mock import AsyncMock, patch
 
-from app import db, distrakt as distrakt_store
+from app import cache, db, distrakt as distrakt_store
 from app.config import Settings, save_settings
-from app.distrakt import live
+from app.distrakt import live, routes as distrakt_routes
 from app.providers.base import PlayCounts
 from app.providers.trakt import TraktError
-from app.providers.trakt import transport
+from app.providers.trakt import detail as trakt_detail, transport
 from tests.support import AppTestCase, ORIGIN, new_db_path
+
+# THE INSTANCE'S CATALOGUE CREDENTIALS, WHICH ARE NOT ANYBODY'S TOKEN. Whether a
+# season's episode count can be looked up is a client id and nothing else (see
+# Settings.trakt_catalogue_configured), and the live pass now asks the question
+# before it makes the call — so "the service is down" and "the service is not set
+# up" are two different fixtures rather than two readings of one.
+BOTH_CATALOGUES = Settings(trakt_client_id="cid", simkl_client_id="scid")
+NO_CATALOGUES = Settings()
+SIMKL_CATALOGUE_ONLY = Settings(simkl_client_id="scid")
 
 
 class _RecordingClient:
@@ -210,10 +219,15 @@ class TheBannerNamesTheServiceTests(_CatalogueFailureTestCase):
         async def _boom(*args, **kwargs):
             raise TraktError("Could not reach Trakt")
 
+        # BOTH CATALOGUE CREDENTIALS PRESENT, which is what makes these tests
+        # about a service that was ASKED and went quiet. Whether a source can be
+        # asked at all is now read off the settings before the lookup is made
+        # (live.detail_source), so a bare None here would be the other failure
+        # entirely — that one is TheRowSaysWhichSilenceItIsTests below.
         with patch("app.providers.trakt.detail.fetch_season_detail", _boom), \
              patch("app.providers.simkl.detail.fetch_season_detail", _boom):
             return await live.compute_live_shows(
-                self.user_id, [record], None, watched_lookup={},
+                self.user_id, [record], BOTH_CATALOGUES, watched_lookup={},
                 allow_degrade=True, sources_read=("trakt",))
 
     async def test_a_failed_row_names_the_service_that_could_not_answer(self):
@@ -238,9 +252,159 @@ class TheBannerNamesTheServiceTests(_CatalogueFailureTestCase):
 
         with patch("app.providers.trakt.detail.fetch_season_detail", _season):
             rows = await live.compute_live_shows(
-                self.user_id, [dict(self.RECORD)], None, watched_lookup={},
+                self.user_id, [dict(self.RECORD)], BOTH_CATALOGUES, watched_lookup={},
                 allow_degrade=True, sources_read=("trakt",))
         self.assertEqual(live.unreadable_detail_sources(rows), [])
+
+
+class TheRowSaysWhichSilenceItIsTests(_CatalogueFailureTestCase):
+    """A ROW WHOSE SOURCE CANNOT BE ASKED AT ALL, which is not the same failure
+    as one that was asked and did not answer, and used to be indistinguishable.
+
+    Blanking one service's client id emptied almost a whole roster: the lookup
+    was made anyway, the unconfigured service answered nothing, and the zero it
+    answered with was written into the row as though it had been measured. What
+    a viewer saw was a title with no episodes and a banner naming a service that
+    was not down — and, because the response cache goes on serving what it holds,
+    they saw it some time AFTER the credential changed rather than at the moment
+    it did.
+    """
+
+    async def _rows(self, settings, *, ids=None, asked=None):
+        record = dict(self.RECORD, ids=ids or {"trakt": 7, "tmdb": 1})
+        # NOTHING IS PATCHED, DELIBERATELY. If any of these rows reached a
+        # provider the suite's own network guard would say so; the point is that
+        # the lookup is never attempted.
+        return await live.compute_live_shows(
+            self.user_id, [record], settings, watched_lookup={},
+            allow_degrade=True, sources_read=asked or ("trakt",))
+
+    async def test_a_source_with_no_catalogue_credential_is_not_asked_at_all(self):
+        row, = await self._rows(NO_CATALOGUES)
+        self.assertTrue(row["unavailable"])
+
+    async def test_the_stored_counts_and_dates_are_drawn_rather_than_blanked(self):
+        """The record already holds a last-known copy of every live field, so
+        there is a real number to show. Disappearing is never the right answer
+        for a fact the row already has on hand."""
+        record = dict(self.RECORD, total=8, cadence="Tue", premiere="7/1",
+                      finale="9/2", started_airing=True)
+        rows = await live.compute_live_shows(
+            self.user_id, [record], NO_CATALOGUES, watched_lookup={},
+            allow_degrade=True, sources_read=("trakt",))
+        self.assertEqual(rows[0]["total"], 8)
+        self.assertEqual(rows[0]["cadence"], "Tue")
+        self.assertEqual(rows[0]["premiere"], "7/1")
+        self.assertEqual(rows[0]["finale"], "9/2")
+
+    async def test_it_says_the_service_is_not_configured_rather_than_unreachable(self):
+        """The whole sentence is the server's — the browser only draws it — and
+        it has to name the settings problem rather than offer a refresh that
+        cannot fix one."""
+        row, = await self._rows(NO_CATALOGUES)
+        self.assertIn("Trakt", row["unavailable_note"])
+        self.assertIn("configured", row["unavailable_note"])
+        self.assertNotIn("refresh", row["unavailable_note"])
+
+    async def test_the_banner_does_not_report_a_service_that_is_not_down(self):
+        """`unreadable_detail_sources` is "could not be reached", and a service
+        absent from the settings was never asked. The row says what is wrong
+        with it; the banner would be saying something untrue."""
+        rows = await self._rows(NO_CATALOGUES)
+        self.assertEqual(rows[0]["unavailable_source"], "")
+        self.assertEqual(live.unreadable_detail_sources(rows), [])
+
+    async def test_a_row_with_a_second_id_asks_the_service_that_can_answer(self):
+        """The repair the roster actually needed: a record carrying both ids has
+        a second answer available, and asking only the first threw it away."""
+        asked: list = []
+
+        async def _simkl_season(settings, simkl_id, season, media="show"):
+            asked.append(simkl_id)
+            return {"season": season, "total": 12, "cadence": "Fri",
+                    "premiere": "7/4", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+
+        with patch("app.providers.simkl.detail.fetch_season_detail", _simkl_season):
+            rows = await live.compute_live_shows(
+                self.user_id, [dict(self.RECORD, ids={"trakt": 7, "simkl": 55, "tmdb": 1})],
+                SIMKL_CATALOGUE_ONLY, watched_lookup={}, allow_degrade=True,
+                sources_read=("simkl",))
+        self.assertEqual(asked, [55])
+        self.assertFalse(rows[0]["unavailable"])
+        self.assertEqual(rows[0]["total"], 12)
+
+    async def test_a_record_naming_nobody_at_all_says_that_instead(self):
+        """No id any registered source issues: there is no credential an
+        operator could add that would help, so the sentence must not send them
+        to Settings."""
+        row, = await self._rows(BOTH_CATALOGUES, ids={"tmdb": 1})
+        self.assertTrue(row["unavailable"])
+        self.assertNotIn("configured", row["unavailable_note"])
+
+
+class TheCollapseIsNotDelayedByTheCacheTests(_CatalogueFailureTestCase):
+    """WHY THIS EXISTS AT ALL, AND WHY IT MOVES A CLOCK. The roster did not empty
+    when the credential was blanked — it emptied later, and nothing on screen
+    connected the two events. The response cache is URL-keyed and went on serving
+    what it already held while the service was unaskable, so the list looked
+    perfectly healthy until those entries passed their TTL and there was nothing
+    left to serve and no way to refetch. A test that blanks an id and reloads
+    once therefore passes against the BROKEN code as readily as the fixed one.
+
+    So this one seeds the real cache, ages the row past the season TTL by
+    rewriting its `cached_at` (which is what `cache.get` compares against
+    `db.now()`), and asks for the same row on both sides of that line.
+    """
+
+    SEASON_URL = f"{transport.API_BASE}/shows/7/seasons/1?extended=full"
+    # Trakt's own episode shape, three of them: enough for the derived total to
+    # be a number no fixture could produce by accident.
+    EPISODES = [{"number": n, "first_aired": f"2026-07-0{n}T01:00:00.000Z"}
+                for n in (1, 2, 3)]
+
+    async def _seed_cache(self, *, age_seconds: int) -> None:
+        await cache.set(self.SEASON_URL, self.EPISODES)
+        await db.execute("UPDATE api_cache SET cached_at = ? WHERE cache_key = ?",
+                         (db.now() - age_seconds, self.SEASON_URL))
+
+    async def _row(self, settings):
+        rows = await live.compute_live_shows(
+            self.user_id, [dict(self.RECORD)], settings, watched_lookup={},
+            allow_degrade=True, sources_read=("trakt",))
+        return rows[0]
+
+    async def test_a_fresh_cached_answer_is_what_a_working_instance_reads(self):
+        """The control, and it is what makes the two below mean anything: with
+        the credential in place the seeded row IS the answer, so this test is
+        genuinely exercising the cache and not talking past it. No network is
+        touched — the suite's own guard would say so if it were."""
+        await self._seed_cache(age_seconds=0)
+        row = await self._row(BOTH_CATALOGUES)
+        self.assertFalse(row["unavailable"])
+        self.assertEqual(row["total"], 3)
+
+    async def test_a_missing_credential_is_reported_at_once_and_not_when_the_cache_runs_out(self):
+        """The row must not read as healthy while a stale answer happens to
+        survive. Nothing is asked, so the cached copy is never consulted, and
+        the sentence names the settings problem on the very first load."""
+        await self._seed_cache(age_seconds=0)
+        row = await self._row(NO_CATALOGUES)
+        self.assertTrue(row["unavailable"])
+        self.assertIn("configured", row["unavailable_note"])
+
+    async def test_and_it_reads_exactly_the_same_once_that_answer_has_expired(self):
+        """THE DELAYED COLLAPSE ITSELF. Past the season TTL there is nothing
+        cached to serve, which is the moment the old code fetched, got nothing
+        from an unconfigured service, and wrote the nothing down as a real zero.
+        The row is unchanged: still the record's own last-known total, still the
+        same sentence."""
+        await self._seed_cache(age_seconds=trakt_detail.SEASON_CACHE_TTL_SECONDS + 60)
+        row = await self._row(NO_CATALOGUES)
+        self.assertTrue(row["unavailable"])
+        self.assertIn("configured", row["unavailable_note"])
+        self.assertEqual(row["total"], self.RECORD["total"])
+        self.assertNotEqual(row["total"], 0)
 
 
 class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
@@ -286,6 +450,13 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
         # The page still renders — degrading is not failing — and it now says who
         # was quiet instead of only flagging every row unavailable.
         self.assertEqual(body["sources_unreadable"], ["Trakt"])
+        # AND THE ROW CARRIES ITS OWN WHOLE SENTENCE, which is what the browser
+        # draws in place of the counts. It used to carry a bare boolean and the
+        # sentence lived in JavaScript, where there was no way to say which of
+        # the two silences this was.
+        row, = body["shows"]
+        self.assertIn("Trakt", row["unavailable_note"])
+        self.assertIn("refresh", row["unavailable_note"])
 
     def test_a_month_that_read_cleanly_says_nothing(self):
         async def _season(settings, trakt_id, season, fresh=False, client=None):
@@ -612,8 +783,14 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
     def test_an_instance_with_no_calendar_source_still_builds_nothing(self):
         """The other half, unchanged: with nobody able to supply a calendar there
         are no premieres to build a month out of, and baking an empty one in
-        would stop a proper build happening once a source is configured."""
-        save_settings(Settings(public_base_url=ORIGIN, timezone="UTC"))
+        would stop a proper build happening once a source is configured.
+
+        "NOBODY TO ASK" NOW TAKES SAYING SO. One registered source's calendar is
+        public files needing no credential at all, so blank credentials no longer
+        describe an instance with no calendar — switching that source off is what
+        does, and it is the only remaining way to reach this state."""
+        save_settings(Settings(public_base_url=ORIGIN, timezone="UTC",
+                               simkl_public_calendar_enabled=False))
         self.assertEqual(self.open_the_month().status_code, 200)
         self.assertEqual(self.stored_months(), [])
 
@@ -707,3 +884,63 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
             })
         simkl_call.assert_not_awaited()
         trakt_call.assert_awaited_once()
+
+
+class TheLastTwoTraktOnlySeasonLookupsTests(unittest.IsolatedAsyncioTestCase):
+    """Two callers in app/distrakt/routes.py went on asking Trakt directly off a
+    bare `ids["trakt"]` after the add routes had stopped.
+
+    Both degraded to nothing rather than storing something wrong, which is why
+    they were twice left alone — but a Simkl-only instance got no premiere
+    correction from one and no live counts from the other, and "how long is this
+    season" is one question that already has one implementation.
+    """
+
+    SIMKL_RECORD = {"media": "show", "ids": {"simkl": 694485, "tmdb": 1429},
+                    "season": 3, "title": "Shingeki no Kyojin", "watched": 4,
+                    "total": 12}
+    SEASON = {"season": 3, "total": 12, "cadence": "b", "premiere": "7/23",
+              "finale": "7/23", "started_airing": True, "finished_airing": True}
+
+    async def test_a_reopened_season_is_measured_by_whoever_knows_the_title(self):
+        """`_season_lookup`'s callable, which the history reconciliation uses to
+        re-measure a season that has come back onto the list."""
+        simkl_call = AsyncMock(return_value=dict(self.SEASON))
+        with patch("app.providers.simkl.detail.fetch_season_detail", simkl_call):
+            look_up = distrakt_routes._season_lookup(SIMKL_CATALOGUE_ONLY)
+            answer = await look_up(dict(self.SIMKL_RECORD), 3)
+        self.assertEqual(answer["total"], 12)
+        self.assertEqual(simkl_call.await_args.args[1], 694485)
+
+    async def test_a_record_nobody_can_be_asked_about_answers_nothing_at_all(self):
+        """{} rather than a zeroed season, and the distinction is load-bearing:
+        this answer is merged over a withdrawn verdict's own counts, so a season
+        of zero episodes would erase numbers that were right."""
+        look_up = distrakt_routes._season_lookup(NO_CATALOGUES)
+        self.assertEqual(await look_up(dict(self.SIMKL_RECORD), 3), {})
+
+    async def test_the_abandoned_form_is_measured_the_same_way(self):
+        """`_live_form_source`, which freezes the line an abandoned row keeps.
+        Its catalogue half now follows the record's ids; its watched half is this
+        viewer's own data and is still Trakt's, so with no Trakt in play the
+        record's own number stands rather than being reset to zero."""
+        simkl_call = AsyncMock(return_value=dict(self.SEASON))
+        with patch("app.providers.simkl.detail.fetch_season_detail", simkl_call):
+            form = await distrakt_routes._live_form_source(
+                SIMKL_CATALOGUE_ONLY, dict(self.SIMKL_RECORD), 3)
+        self.assertEqual(form["total"], 12)
+        self.assertEqual(form["premiere"], "7/23")
+        self.assertEqual(form["watched"], 4)
+
+    async def test_the_viewers_own_progress_is_still_read_where_it_can_be(self):
+        """The half that is genuinely private, unchanged: with a Trakt token in
+        play the frozen line carries the count Trakt reports for that season."""
+        settings = Settings(trakt_client_id="cid", trakt_access_token="tok")
+        record = {"media": "show", "ids": {"trakt": 7, "tmdb": 1}, "season": 3,
+                  "title": "Silo", "watched": 4, "total": 8}
+        with patch("app.providers.trakt.detail.fetch_season_detail",
+                   AsyncMock(return_value=dict(self.SEASON, season=3))), \
+             patch("app.providers.trakt.sync.fetch_watched_map",
+                   AsyncMock(return_value={(7, 3): 9})):
+            form = await distrakt_routes._live_form_source(settings, record, 3)
+        self.assertEqual(form["watched"], 9)

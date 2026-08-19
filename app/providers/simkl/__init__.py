@@ -75,6 +75,23 @@ class _SimklCalendarPort:
     actually answers.
     """
 
+    def calendar_configured(self, settings: Settings) -> bool:
+        """TRUE UNCONDITIONALLY, AND IT IS NOT A STUB. Simkl's calendar is a set
+        of pre-baked JSON files on a separate CDN host (data.simkl.in) that takes
+        no token and no client id — calendar.py's own opening paragraph says so,
+        and nothing in that module reads `settings.simkl_client_id` or
+        `settings.simkl_access_token`; it rides `transport.cdn_client` and never
+        `api_params`. So there is no credential whose absence could make this
+        calendar unreadable, and answering anything else here would withhold a
+        month over a credential the fetch does not send.
+
+        THIS IS WHY THE PREDICATE IS ON THE PORT rather than on the provider:
+        `is_configured` and `catalogue_is_configured` are both true statements
+        about the AUTHENTICATED halves of Simkl (the viewer's library, the
+        per-title catalogue), and neither describes this one.
+        """
+        return True
+
     async def fetch_window(self, endpoint: Endpoint, settings: Settings,
                            start: date, days: int) -> list[Record]:
         return await calendar.fetch_window(endpoint, settings, start, days)

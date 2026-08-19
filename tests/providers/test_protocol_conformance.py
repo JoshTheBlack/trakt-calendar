@@ -111,6 +111,33 @@ class CalendarPortIsDeclaredAlongsideTheEndpointsTests(unittest.TestCase):
             [p for p in providers.registered().values() if p.calendar_port is not None],
             "no source implements the window fetch; the calendar cannot be filled")
 
+    def test_every_calendar_port_answers_whether_it_can_be_read_at_all(self):
+        """`for_calendar_sources` asks the PORT rather than the provider, because
+        what a calendar costs to read differs per source: one wants the instance's
+        client id, another is a public feed wanting nothing. A port without this
+        would fail as an AttributeError on whichever source an operator happens to
+        have — and it has to answer without a call, since it gates the call."""
+        for source, provider in providers.registered().items():
+            port = provider.calendar_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                self.assertIsInstance(port.calendar_configured(Settings()), bool)
+
+    def test_no_calendar_port_asks_the_private_question(self):
+        """The fault this predicate exists to remove: a calendar read never uses
+        a viewer's token, so no source may require one to be readable. Asserted
+        against a Settings carrying each source's client id and nothing else —
+        every calendar that can be read at all must be readable there."""
+        for source, provider in providers.registered().items():
+            port = provider.calendar_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                settings = Settings(**{f"{source}_client_id": "an-id"})
+                self.assertFalse(provider.is_configured(settings))
+                self.assertTrue(port.calendar_configured(settings))
+
 
 class LibraryPortIsOptionalTests(unittest.TestCase):
     """LibraryPort is deliberately NOT part of SyncPort, and this is what says so.

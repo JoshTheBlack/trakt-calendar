@@ -34,8 +34,14 @@ from tests.support import new_db_path
 # and belongs to the instance rather than to the account: whether there is a
 # CALENDAR to build a month's premieres from, which is what rollover asks before
 # it will create one.
+# The fourth pair is the CATALOGUE question, asked per source before a season
+# lookup is made at all (live.detail_source): can this instance ask that service
+# about a title, which is its client id and not anybody's token. Both true, so
+# which service answers for a record goes on being decided by the ids it carries.
 SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
                            calendar_source_configured=True,
+                           trakt_catalogue_configured=True,
+                           simkl_catalogue_configured=True,
                            network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 

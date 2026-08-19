@@ -75,8 +75,11 @@ class AssembleMonthTests(unittest.TestCase):
     def test_no_configured_source_reports_it_and_assembles_nothing(self):
         """The one path that must not touch the cache at all — there is nobody to
         ask, so it says so instead of failing a fetch."""
+        # Every credential blank is no longer enough to mean "nobody to ask":
+        # one source's calendar is public files that need none, so it has to be
+        # switched off for this to be the no-source case it is testing.
         with patch("app.calendar.cache.assemble_range") as fetch:
-            assembly = self._run(settings=Settings())
+            assembly = self._run(settings=Settings(simkl_public_calendar_enabled=False))
         fetch.assert_not_called()
         self.assertEqual(assembly.error, calendar_routes.NOT_CONFIGURED)
         self.assertEqual(assembly.grouped, [])

@@ -886,7 +886,12 @@ class SiteHeaderTests(RegressionTestCase):
 
     def setUp(self):
         super().setUp()
-        save_settings(Settings(public_base_url="https://testserver"))
+        # One source's calendar is public files needing no credential, so it is
+        # readable on an instance with nothing else set up — and these tests
+        # render the calendar page for its HEADER. Switched off so the page is
+        # drawn without going and reading a month.
+        save_settings(Settings(public_base_url="https://testserver",
+                               simkl_public_calendar_enabled=False))
         self.user_id = self.make_user("josh", is_admin=True, distrakt_approved=True)
         asyncio.run(db.transaction(lambda conn: auth.insert_linked_identity(
             conn, user_id=self.user_id, provider="trakt", provider_user_id="uuid-josh")))

@@ -797,6 +797,29 @@ class CalendarPort(Protocol):
     every viewer of every month that overlaps it.
     """
 
+    def calendar_configured(self, settings: Settings) -> bool:
+        """Whether this instance can read THIS SOURCE's calendar at all.
+
+        THE SAME SHAPE `DetailPort.catalogue_configured` DRAWS, and on the PORT
+        for a reason that is sharper here than anywhere else in this file: what a
+        calendar costs to read differs per source more than any other question
+        asked of a provider. Trakt's calendar authenticates with the instance's
+        client id; another source's is a set of public files on a CDN that takes
+        no credential of any kind. A predicate on the PROVIDER — `is_configured`
+        or `catalogue_is_configured` — answers for the source as a whole and
+        would therefore gate a calendar on a credential that calendar never
+        sends, which is how an instance with a working public calendar came to be
+        told it had no calendar source at all.
+
+        NOT `is_configured`, WHICH IS THE PRIVATE QUESTION. A calendar read never
+        uses a viewer's token — `calendar_sources` says so at length and then
+        `for_calendar_sources` used to put that filter straight back — so the
+        answer here is about the INSTANCE and never about who is looking.
+
+        Must answer without a network call: it gates the call.
+        """
+        ...
+
     async def fetch_window(self, endpoint, settings: Settings,
                            start: date, days: int) -> list["Record"]:
         """What this source says airs in [start, start + days), as Records.

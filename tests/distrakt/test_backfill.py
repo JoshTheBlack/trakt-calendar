@@ -27,8 +27,16 @@ from tests.support import ORIGIN, migrated_db, new_db_path
 # settings object has to answer both, because the selector asks every
 # registered source whether this request carries a usable credential for it
 # — see app/distrakt/routes.py's _distrakt_settings.
+#
+# THE CATALOGUE PAIR IS A DIFFERENT QUESTION AND HAS TO BE ANSWERED TOO: before
+# a season is looked up, live.detail_source asks which of the sources a record
+# names this INSTANCE can actually ask (a client id, not an account's token), and
+# a record whose only source is unconfigured is never asked about at all. Both on
+# here, so which service answers stays decided by the record's own ids.
 SETTINGS = SimpleNamespace(configured=True, timezone="UTC",
-                           trakt_configured=True, simkl_configured=False)
+                           trakt_configured=True, simkl_configured=False,
+                           trakt_catalogue_configured=True,
+                           simkl_catalogue_configured=True)
 
 
 def _ep_event(trakt_id, season, number, watched_at, title="Show", network="Net"):

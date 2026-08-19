@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 import asyncio
+import dataclasses
 import re
 from unittest.mock import patch
 
@@ -25,7 +26,10 @@ class SettingsSurfaceTestCase(AppTestCase):
     def make_settings(self):
         # The configured origin has to match the one the client speaks, or the
         # cross-site rules refuse every save below for an unrelated reason.
-        return Settings(public_base_url=ORIGIN)
+        # Built ON the shared fixture rather than beside it, so whatever "an
+        # instance with nothing set up" has to mean stays stated once (see
+        # tests/support.py — a source needing no credential is one of them).
+        return dataclasses.replace(super().make_settings(), public_base_url=ORIGIN)
 
     def setUp(self):
         super().setUp()
@@ -260,8 +264,15 @@ class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):
     def test_it_defaults_on(self):
         """An instance that never saves this field must read it back as True —
         the whole point of the default is that nobody has to go find it."""
+        # ASKED OF THE DECLARATION, NOT OF THE FIXTURE. This suite's shared
+        # settings switch this very field OFF (see tests/support.py — otherwise
+        # every page render in it would reach a real CDN), so round-tripping it
+        # through the saved instance would measure that choice instead of the
+        # default it is about.
+        self.assertIs(Settings().simkl_public_calendar_enabled, True)
         payload = self.client.get("/api/settings").json()
-        self.assertIs(payload["simkl_public_calendar_enabled"], True)
+        self.assertIs(payload["simkl_public_calendar_enabled"],
+                      load_settings().simkl_public_calendar_enabled)
 
     def test_saving_it_persists_as_a_bool(self):
         resp = self.client.post("/api/settings", json={"simkl_public_calendar_enabled": False})

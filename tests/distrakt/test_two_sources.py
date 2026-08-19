@@ -44,9 +44,17 @@ from tests.support import AppTestCase, ORIGIN, new_db_path
 # for the tracker exactly when this object carries a usable credential for it —
 # see app/distrakt/routes.py's _distrakt_settings, which is what puts one
 # person's own tokens on it.
-TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False)
-SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True)
-BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True)
+#
+# THE CATALOGUE CREDENTIALS ARE THE OPERATOR'S AND ARE ON ALL THREE. What one
+# viewer linked decides whose HISTORY can be read; whether a title's episode
+# count can be looked up is the instance's client id and nobody's token (see
+# live.detail_source, which skips a record whose only source is unconfigured).
+# Keeping both true here is what leaves these tests measuring the account
+# question they are about.
+_CATALOGUE = {"trakt_catalogue_configured": True, "simkl_catalogue_configured": True}
+TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False, **_CATALOGUE)
+SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True, **_CATALOGUE)
+BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True, **_CATALOGUE)
 
 LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
 ORDER = ("trakt", "simkl")

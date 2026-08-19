@@ -37,6 +37,15 @@ class _TraktCalendarPort:
     no test double can get at.
     """
 
+    def calendar_configured(self, settings: Settings) -> bool:
+        # The client id alone, and NOT `_TraktProvider.is_configured`. The window
+        # fetch below asks /calendars/all/, which authenticates with the
+        # `trakt-api-key` header carrying the INSTANCE's client id and sends no
+        # bearer at all (see calendar.fetch_window and transport.api_headers) —
+        # only the per-person reads under /sync/ need a token. Requiring one here
+        # took the calendar away from an instance that had never issued one.
+        return settings.trakt_catalogue_configured
+
     async def fetch_window(self, endpoint, settings: Settings,
                            start: date, days: int) -> list[Record]:
         return await calendar.fetch_window(endpoint, settings, start, days)

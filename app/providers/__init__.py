@@ -182,9 +182,22 @@ def for_calendar_sources(settings, *, prefs=None) -> list[Provider]:
     have not been filled in yet is one the calendar page has always had to render
     an explanation for, not an error — and it is the state the page explains
     rather than rendering an empty month.
+
+    IT ASKS THE PORT, NOT THE PROVIDER, AND THAT IS THE WHOLE DIFFERENCE FROM
+    WHAT IT USED TO DO. This narrowed `calendar_sources` above by
+    `Provider.is_configured` — the PRIVATE question, "has this account's own
+    token been filled in" — which is precisely the filter the function above
+    refuses to apply and says why. Blanking a Trakt client id then emptied the
+    calendar on an instance whose other source was reading months perfectly well.
+    `CalendarPort.calendar_configured` is the same question asked at the grain
+    that can answer it: Trakt's calendar wants the instance's client id, Simkl's
+    is an unauthenticated CDN feed and wants nothing, and a provider-level
+    predicate — private or catalogue — could only have given one answer for both.
+    An instance holding NO credentials at all therefore still has a calendar,
+    which is what a public feed means.
     """
     return [p for p in calendar_sources(prefs=prefs, settings=settings)
-            if p.is_configured(settings)]
+            if p.calendar_port.calendar_configured(settings)]
 
 
 def tracker_sources() -> frozenset[str]:
