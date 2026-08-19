@@ -332,5 +332,53 @@ class AnimeSeasonTranslationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(got["total"], 0)
 
 
+class WrongTitleForTheSeasonTests(unittest.IsolatedAsyncioTestCase):
+    """A record whose Simkl id is a DIFFERENT season of the series than the one
+    it names — which is what a merged search row stores, since the row's leader
+    id belongs to whichever title led it and the season can be any the picker
+    offered. Asking that id directly answers nothing and the row reads 0/0 for
+    ever; the season is resolved to the title that holds it instead."""
+
+    # Season 1's title, twelve episodes it calls season 1, naming season 1 and
+    # pointing at its sequels.
+    PARENT = [{"episode": n, "season": 1, "type": "episode",
+               "date": "2019-10-%02dT01:00:00Z" % n} for n in range(1, 13)]
+    THIRD = [{"episode": n, "season": 1, "type": "episode",
+              "date": "2026-03-%02dT01:00:00Z" % n} for n in range(1, 9)]
+    RECORDS = {
+        "tv/1034467": {"ids": {"simkl": 1034467, "tmdb": "90937"},
+                       "mapped_tvdb_seasons": [1],
+                       "relations": [{"anime_type": "tv", "ids": {"simkl": 2831384}}]},
+        "tv/2831384": {"ids": {"simkl": 2831384, "tmdb": "90937"},
+                       "mapped_tvdb_seasons": [3]},
+    }
+    EPISODES = {"tv/episodes/1034467": PARENT, "tv/episodes/2831384": THIRD}
+
+    async def _detail(self, simkl_id, season):
+        calls = []
+
+        async def _get(client, settings, path, params=None, **kwargs):
+            calls.append(path)
+            return self.EPISODES.get(path, self.RECORDS.get(path))
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)):
+            got = await detail.fetch_season_detail(SETTINGS, simkl_id, season,
+                                                   today=date(2026, 12, 1))
+        return got, calls
+
+    async def test_the_season_is_answered_by_the_title_that_holds_it(self):
+        got, calls = await self._detail(1034467, 3)
+        self.assertEqual(got["total"], 8)
+        self.assertEqual(got["season"], 3)
+        self.assertIn("tv/episodes/2831384", calls)
+
+    async def test_the_title_that_does_hold_it_is_answered_directly(self):
+        got, calls = await self._detail(1034467, 1)
+        self.assertEqual(got["total"], 12)
+        # No sibling walked, and no naming lookup at all: the list it already
+        # has holds the season asked for.
+        self.assertEqual(calls, ["tv/episodes/1034467"])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

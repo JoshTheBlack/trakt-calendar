@@ -95,13 +95,14 @@ class LeaderIdTests(unittest.TestCase):
     /api/distrakt/seasons, and the one that has to describe the title the row
     is actually showing."""
 
-    def test_a_second_hit_from_the_same_source_does_not_take_over_the_callback_id(self):
-        """MEASURED IN THE BROWSER: a Simkl-only search for "frieren" returns
+    def test_one_source_returning_a_title_twice_gives_two_rows(self):
+        """MEASURED 2026-08-18 on a Simkl-only instance: "frieren" returns
         three titles that all resolve to show:tmdb:209867 and all carry no
-        season, so all three fold into one slot. The row drew the FIRST one —
-        "Sousou no Frieren (2023)", the season-1 title, with its ids — while
-        addressing the LAST, the season-3 title. Clicking it filed season 3
-        under the season-1 id, and nothing could ever count that record.
+        season, so under one slot per (key, season) they became ONE row and
+        two were lost — Beastars season 2 could not be surfaced by any query
+        at all. A source returning three entries is saying it holds three
+        things, and this function's dedupe is about two SERVICES describing one
+        title, not about a service's own catalogue.
         """
         result = search.merge_search_hits([
             (Source.SIMKL, [
@@ -113,24 +114,139 @@ class LeaderIdTests(unittest.TestCase):
                     year=2027),
             ]),
         ])
-        row, = result.hits
-        # The row that is drawn and the id it calls back with are one title.
-        self.assertEqual(row.year, 2023)
-        self.assertEqual(row.ids["tmdb"], "209867")
-        self.assertEqual(row.source_ids[Source.SIMKL], "1990194")
+        self.assertEqual([r.source_ids[Source.SIMKL] for r in result.hits],
+                         ["1990194", "2595284", "3063278"])
+        # Each still keeps its own identity — one key, three reachable titles.
+        self.assertEqual({r.key for r in result.hits},
+                         {ItemKey("show", "tmdb", "209867")})
+        self.assertEqual([r.year for r in result.hits], [2023, 2026, 2027])
 
-    def test_a_second_source_still_gets_its_own_entry(self):
-        """The leader rule is per-source, not a refusal to record anybody
-        else: both marks are still drawn and either source could be asked."""
+    def test_a_row_addresses_the_title_it_draws(self):
+        """The failure the two rules above exist to prevent, stated as one
+        property: whatever a row shows, the id a pick sends back names it."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [
+                hit(Source.SIMKL, "1034467", tmdb="90937", title="Beastars", year=2019),
+                hit(Source.SIMKL, "1231401", tmdb="90937", title="Beastars", year=2021),
+                hit(Source.SIMKL, "2831384", tmdb="90937", title="Beastars Final Season",
+                    year=2026),
+            ]),
+        ])
+        drawn = {(r.title, r.year): r.source_ids[Source.SIMKL] for r in result.hits}
+        self.assertEqual(drawn, {("Beastars", 2019): "1034467",
+                                 ("Beastars", 2021): "1231401",
+                                 ("Beastars Final Season", 2026): "2831384"})
+
+    def test_two_services_naming_one_title_still_merge(self):
+        """The dedupe that IS wanted, unaffected: both marks on one row, and
+        registry order still decides who answers for it."""
         result = search.merge_search_hits([
             (Source.TRAKT, [hit(Source.TRAKT, "t1", tmdb="1429")]),
-            (Source.SIMKL, [hit(Source.SIMKL, "s1", tmdb="1429"),
-                            hit(Source.SIMKL, "s2", tmdb="1429")]),
+            (Source.SIMKL, [hit(Source.SIMKL, "s1", tmdb="1429")]),
         ])
         row, = result.hits
         self.assertEqual(row.source_ids, {Source.TRAKT: "t1", Source.SIMKL: "s1"})
-        # And registry order still decides who answers for the row.
         self.assertEqual(next(iter(row.source_ids)), Source.TRAKT)
+
+    def test_one_source_naming_the_same_season_twice_is_one_row(self):
+        """The other half of the rule. Simkl lists "Beastars Final Season"
+        twice — two catalogue titles, mal 49469 and 61114 — and both name
+        season 3 of show:tmdb:90937. That is one (key, season), which is the
+        single unit the tracker can file a record under, so two rows here would
+        offer two ways to add the identical record."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [
+                hit(Source.SIMKL, "1687953", tmdb="90937", season=3,
+                    title="Beastars Final Season", year=2021),
+                hit(Source.SIMKL, "2831384", tmdb="90937", season=3,
+                    title="Beastars Final Season", year=2026),
+            ]),
+        ])
+        row, = result.hits
+        self.assertEqual(row.season, 3)
+        self.assertEqual(row.source_ids[Source.SIMKL], "1687953")
+
+    def test_named_seasons_of_one_series_stay_apart(self):
+        """And naming them is what keeps the genuinely different ones
+        distinct: one key, three seasons, three rows."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [
+                hit(Source.SIMKL, "1990194", tmdb="209867", season=1, title="Frieren"),
+                hit(Source.SIMKL, "2595284", tmdb="209867", season=2, title="Frieren"),
+                hit(Source.SIMKL, "3063278", tmdb="209867", season=3, title="Frieren"),
+            ]),
+        ])
+        self.assertEqual([(r.season, r.source_ids[Source.SIMKL]) for r in result.hits],
+                         [(1, "1990194"), (2, "2595284"), (3, "3063278")])
+
+    def test_a_named_hit_does_not_join_an_unnamed_row(self):
+        """(key, 3) and (key, None) are different dedupe units, so a hit whose
+        season is known never merges into one whose season is not — the second
+        might be any season, including that one."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [
+                hit(Source.SIMKL, "a", tmdb="90937", season=None, title="Beastars"),
+                hit(Source.SIMKL, "b", tmdb="90937", season=3, title="Beastars Final"),
+            ]),
+        ])
+        self.assertEqual([(r.season, r.source_ids[Source.SIMKL]) for r in result.hits],
+                         [(None, "a"), (3, "b")])
+
+    def test_a_whole_show_row_absorbs_another_sources_season_rows(self):
+        """Trakt models a series as ONE show with a picker; Simkl files each
+        season as its own title. Left alone the viewer sees "Beastars" beside
+        "Beastars Season 2" as if they were alternatives, when the first
+        reaches all of them — and the linked row loses both its marks."""
+        result = search.merge_search_hits([
+            (Source.TRAKT, [hit(Source.TRAKT, "t1", tmdb="90937", title="Beastars",
+                                network="Netflix")]),
+            (Source.SIMKL, [hit(Source.SIMKL, "1034467", tmdb="90937", season=1),
+                            hit(Source.SIMKL, "1231401", tmdb="90937", season=2),
+                            hit(Source.SIMKL, "2831384", tmdb="90937", season=3)]),
+        ])
+        row, = result.hits
+        self.assertIsNone(row.season)
+        self.assertEqual(row.network, "Netflix")
+        # Both marks are drawn again, and Trakt still answers for the row.
+        self.assertEqual(list(row.source_ids), [Source.TRAKT, Source.SIMKL])
+        self.assertEqual(row.source_ids[Source.SIMKL], "1034467")
+
+    def test_a_season_row_is_not_absorbed_by_its_own_sources_unnamed_row(self):
+        """A source's own season-less row can mean "this is the show" OR "a
+        per-title lookup failed and nobody knows what this is". Absorbing on
+        that would let the second case swallow real results — the collapse the
+        dedupe rules exist to prevent."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [hit(Source.SIMKL, "a", tmdb="90937", season=None),
+                            hit(Source.SIMKL, "b", tmdb="90937", season=2)]),
+        ])
+        self.assertEqual([(r.season, r.source_ids[Source.SIMKL]) for r in result.hits],
+                         [(None, "a"), (2, "b")])
+
+    def test_seasons_of_a_series_no_other_source_returned_all_stand(self):
+        """The single-catalogue instance: nothing supersedes them, so every
+        season stays reachable."""
+        result = search.merge_search_hits([
+            (Source.SIMKL, [hit(Source.SIMKL, "1034467", tmdb="90937", season=1),
+                            hit(Source.SIMKL, "1231401", tmdb="90937", season=2)]),
+        ])
+        self.assertEqual([r.season for r in result.hits], [1, 2])
+
+    def test_a_later_source_joins_the_earliest_row_still_open_to_it(self):
+        """One Trakt hit against a source that returned the same key three
+        times: the Trakt hit joins the FIRST of them rather than opening a
+        fourth row or being spread across all three."""
+        result = search.merge_search_hits([
+            (Source.TRAKT, [hit(Source.TRAKT, "t1", tmdb="90937", title="Beastars")]),
+            (Source.SIMKL, [hit(Source.SIMKL, "s1", tmdb="90937", title="Beastars"),
+                            hit(Source.SIMKL, "s2", tmdb="90937", title="Beastars"),
+                            hit(Source.SIMKL, "s3", tmdb="90937", title="Beastars")]),
+        ])
+        self.assertEqual([dict(r.source_ids) for r in result.hits], [
+            {Source.TRAKT: "t1", Source.SIMKL: "s1"},
+            {Source.SIMKL: "s2"},
+            {Source.SIMKL: "s3"},
+        ])
 
 
 class FieldMergeTests(unittest.TestCase):

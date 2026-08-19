@@ -54,13 +54,37 @@ class Naming(NamedTuple):
     same record and the add flow has nowhere else to get it: a Simkl SEARCH hit
     carries no network at all, so on a Simkl-only instance a show added by hand
     reached the roster with an empty one and drew no emoji.
+
+    `siblings` is the other Simkl titles of the same series, in the order the
+    record lists them — the `relations` block, filtered to the kinds that can
+    be a SEASON. It is what makes "which title holds season 3" answerable from
+    any title of the series; see `title_for_season`.
     """
     ids: dict
     season: int | None
     network: str
+    siblings: tuple[int, ...] = ()
 
 
-EMPTY = Naming(ids={}, season=None, network="")
+EMPTY = Naming(ids={}, season=None, network="", siblings=())
+
+# Which `relations` entries could be another SEASON of the same series, by
+# Simkl's own `anime_type`. Measured 2026-08-18 against Attack on Titan, whose
+# twelve relations include four films (`summary`), an OVA (`side story`) and an
+# `alternative setting` spin-off alongside the real sequels: side material is
+# never a season the tracker files episodes under, and reading each one's record
+# to discover that would be a request spent to reject it.
+_SEASON_KINDS = frozenset({"tv", "ona", "special"})
+
+# A title's own ids, the season it maps to and the network that carried it are
+# about as static as catalogue data gets — a mapping changes when somebody
+# corrects it, which is rarer than an episode gaining an air date. So this is
+# held for a day rather than for the app's default response TTL, which is
+# measured in minutes and would make a repeated search pay the same lookups
+# over again. The same number as detail.py's episode-list TTL, arrived at
+# separately: these two records go stale for different reasons and each states
+# its own.
+CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
 def read(record: dict | None) -> Naming:
@@ -79,7 +103,29 @@ def read(record: dict | None) -> Naming:
         ids=_ids.normalize(record.get("ids") or {}),
         season=_season(record),
         network=str(record.get("network") or "").strip(),
+        siblings=_siblings(record),
     )
+
+
+def _siblings(record: dict) -> tuple[int, ...]:
+    """The other Simkl titles of this series, season-capable ones only.
+
+    THE LIST IS TRANSITIVE, NOT JUST THE NEIGHBOURS. Measured across three
+    series and eleven titles, every member's `relations` reached every other
+    member — the block carries `is_direct: false` entries precisely so one
+    record can name the whole family, which is what makes a single lookup
+    enough to start from any title and find any season.
+    """
+    out = []
+    for relation in record.get("relations") or []:
+        if not isinstance(relation, dict):
+            continue
+        if str(relation.get("anime_type") or "") not in _SEASON_KINDS:
+            continue
+        simkl_id = (relation.get("ids") or {}).get("simkl")
+        if simkl_id is not None:
+            out.append(int(simkl_id))
+    return tuple(out)
 
 
 def _season(record: dict) -> int | None:
@@ -128,8 +174,58 @@ async def fetch(settings: Settings, simkl_id) -> Naming:
         return EMPTY
     payload = await transport.cached_get(
         transport.catalog_client(), settings, f"tv/{simkl_id}", {"extended": "full"},
-        pool=transport.CATALOG_POOL, raise_errors=True,
+        pool=transport.CATALOG_POOL, ttl_seconds=CACHE_TTL_SECONDS, raise_errors=True,
     )
     if not isinstance(payload, dict) or not isinstance(payload.get("ids"), dict):
         return EMPTY
     return read(payload)
+
+
+async def title_for_season(settings: Settings, simkl_id, season: int) -> int | None:
+    """Which Simkl title holds `season` of the series `simkl_id` belongs to, or
+    None when no title of it does.
+
+    THE PROBLEM THIS SOLVES, STATED ONCE. A tracker record is keyed by the
+    identity both services share — `show:tmdb:1429` season 3 — while Simkl
+    files that season as its OWN title (simkl 694485) which numbers its episodes
+    from 1. So the Simkl id a record happens to carry need not be the title that
+    holds the season the record names: an add made from a merged search row
+    stores whichever id led the row, and a row that offers a season picker can
+    file any season under it. Asking that id for the season directly answers
+    nothing, and the row reads as 0 episodes for ever.
+    RESOLVING IT RATHER THAN PREVENTING IT is what makes this general. Guarding
+    the one path that stores a mismatched id would fix rows made after the guard
+    and leave every row made before it, and every path that has not been thought
+    of, still wrong. Answering the question properly fixes all of them.
+
+    ONE HOP AT MOST, FROM ANY MEMBER OF THE SERIES. `relations` is transitive
+    (see `_siblings`), so the starting title names every other, and the search
+    stops at the first sibling that both NAMES the season and shares the
+    starting title's tmdb id.
+
+    THE TMDB CHECK IS NOT BELT-AND-BRACES. `relations` crosses tracker
+    identities: Attack on Titan's "The Final Season" (simkl 1120029) is tmdb
+    313599, a different row entirely, and it names a season number of its own.
+    Without the check, asking `show:tmdb:1429` for a season it does not have
+    would answer with another show's episodes.
+
+    Costs one cached lookup when the starting title already IS the season asked
+    for, and one per candidate sibling otherwise — bounded by the family's size
+    and held for a day. Raises the transport's SimklError, like `fetch`.
+    """
+    if not simkl_id:
+        return None
+    start = await fetch(settings, simkl_id)
+    if start.season == season:
+        return simkl_id
+    ours = str(start.ids.get("tmdb") or "")
+    for sibling_id in start.siblings:
+        if str(sibling_id) == str(simkl_id):
+            continue
+        sibling = await fetch(settings, sibling_id)
+        if sibling.season != season:
+            continue
+        if ours and str(sibling.ids.get("tmdb") or "") != ours:
+            continue
+        return sibling_id
+    return None

@@ -140,10 +140,9 @@ async def fetch_season_detail(settings: Settings, simkl_id, season: int,
     season 1 — see `_translated_season`, which is where that lookup is decided
     and where the reason it is not paid on every call is written.
     """
-    episodes = await fetch_episodes(settings, simkl_id, media)
+    episodes, local = await _episodes_holding(settings, simkl_id, int(season), media)
     if not episodes:
         return season_rules.empty_season(int(season))
-    local = await _translated_season(settings, simkl_id, int(season), episodes)
     return {
         # THE SEASON THE CALLER ASKED ABOUT, always. `local` is Simkl's spelling
         # of it and belongs to this module; the tracker files its record under
@@ -154,33 +153,46 @@ async def fetch_season_detail(settings: Settings, simkl_id, season: int,
     }
 
 
-async def _translated_season(settings: Settings, simkl_id, season: int,
-                             episodes: list[dict]) -> int:
-    """Which season of THIS TITLE's episode list answers for `season` of the show
-    the tracker keyed the record under.
+async def _episodes_holding(settings: Settings, simkl_id, season: int,
+                            media: Media) -> tuple[list[dict], int]:
+    """The episode list that actually holds `season` of the series `simkl_id`
+    belongs to, and the number THAT list calls it.
 
-    PAID ONLY WHERE THE ANSWER WOULD OTHERWISE BE NOTHING. A title holding the
-    season it was asked about needs no lookup and gets none, which is every
-    ordinary show and every first-season anime title — so the extra per-title GET
-    lands exactly on the case this exists for, and never on a roster of rows that
-    were already answerable.
+    Simkl files each anime season as its own title numbering its episodes from
+    1, so the season a record names and the title a record carries are two
+    different things — `_naming.title_for_season` is where that is reconciled,
+    and its docstring carries the reasoning.
 
-    A LOOKUP THAT CANNOT BE MADE LEAVES THE SEASON ALONE. This function's caller
-    has never raised — an unanswerable season reads as an empty one, and the next
+    PAID ONLY WHERE THE ANSWER WOULD OTHERWISE BE NOTHING. A title already
+    holding the season it was asked about needs no lookup and gets none, which
+    is every ordinary show and every anime title asked for its own season — so
+    the extra per-title GETs land exactly on the case this exists for, and never
+    on a roster of rows that were already answerable.
+
+    A LOOKUP THAT CANNOT BE MADE LEAVES THE ANSWER ALONE. `fetch_season_detail`
+    has never raised — an unanswerable season reads as an empty one and the next
     load asks again — so a Simkl outage must not start failing a whole roster
-    render through a translation that is a refinement of the answer rather than
-    the answer itself.
+    render through a refinement of the answer rather than the answer itself.
     """
-    if season in seasons_known(episodes):
-        return season
+    episodes = await fetch_episodes(settings, simkl_id, media)
+    if not episodes or season in seasons_known(episodes):
+        return episodes, season
     try:
-        naming = await _naming.fetch(settings, simkl_id)
+        holder = await _naming.title_for_season(settings, simkl_id, season)
     except transport.SimklError:
-        logger.warning("simkl could not be asked which season simkl id %s names; "
-                       "reading season %s as its own", simkl_id, season)
-        return season
-    swap = _naming.translation(naming, seasons_known(episodes))
-    return swap[0] if swap is not None and swap[1] == season else season
+        logger.warning("simkl could not be asked which of its titles holds season %s "
+                       "of simkl id %s; reading that season as this title's own",
+                       season, simkl_id)
+        return episodes, season
+    if holder is None:
+        return episodes, season
+    if str(holder) != str(simkl_id):
+        episodes = await fetch_episodes(settings, holder, media)
+    # The holder IS this season, so whatever single season its own list uses is
+    # the one to read. A list spanning several is one that already numbers its
+    # seasons the way the show does, and needs no translation.
+    known = seasons_known(episodes)
+    return episodes, (known[0] if len(known) == 1 else season)
 
 
 # ---------------------------------------------------------------------------

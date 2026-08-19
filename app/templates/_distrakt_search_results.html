@@ -78,6 +78,16 @@
     </span>
     {%- endif %}
     <span class="distrakt-title">{{ hit.title }}</span>
+    {%- if hit.season is not none %}
+    {# WHICH SEASON THIS ROW IS, where the source said so. A catalogue that
+       files each season of a series as its own title answers one search with
+       several rows sharing a name — three "Sousou no Frieren", two "Beastars" —
+       and without this they are told apart only by a year, which says when a
+       season aired rather than which season it is. Drawn only when the source
+       named one: a row that gets a picker on click must not claim a season it
+       is about to ask about. #}
+    <span class="chip distrakt-search-season">Season {{ hit.season }}</span>
+    {%- endif %}
     <span class="distrakt-year">{{ hit.year if hit.year else '' }}</span>
     {# Films have no network and shows no runtime worth showing, so each row's
        third column carries whichever its media actually has. #}

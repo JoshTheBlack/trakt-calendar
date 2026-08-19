@@ -25,7 +25,15 @@ network, no runtime, no overview, and no season — a hit's `ids` block holds
 at most `simkl_id`, `slug` and `tmdb`, never `tvdb`, `imdb` or `mal`. A
 season-title's own season number lives on the PER-TITLE record
 (`/tv/{id}`'s `season`/`mapped_tvdb_seasons`), one lookup deeper than search
-goes, which is why `_hit` below always leaves `SearchHit.season` at None.
+goes, which is why `_hit` below leaves `SearchHit.season` at None.
+
+AND THE SEASON IS FILLED IN AFTERWARDS, BUT ONLY WHERE IT SETTLES SOMETHING.
+Simkl files each anime season as its own catalogue title carrying the parent
+series' tmdb id, so one search can answer with four titles that share one
+identity and nothing to tell them apart. `_name_the_seasons_that_collide`
+pays the per-title lookup for exactly those and no others — see its own
+docstring for why that bound is what makes the cost defensible, and why this
+service owes its caller an answer no other service has to give.
 """
 from __future__ import annotations
 
@@ -33,8 +41,8 @@ import asyncio
 import logging
 
 from ...config import Settings
-from ..base import Media, SearchHit, Source
-from . import _ids, transport
+from ..base import Media, SearchHit, Source, resolve_key
+from . import _ids, _naming, transport
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +82,65 @@ async def _search_one(settings: Settings, path: str, query: str, media: Media) -
         pool=transport.CATALOG_POOL, raise_errors=True,
     )
     return [_hit(entry, media) for entry in results] if isinstance(results, list) else []
+
+
+async def _name_the_seasons_that_collide(settings: Settings,
+                                         hits: list[SearchHit]) -> list[SearchHit]:
+    """`hits` with `season` filled in on any of them that this ONE answer names
+    more than once for the same title.
+
+    WHY THIS SOURCE OWES ITS CALLER A SEASON AND THE OTHER ONE DOES NOT. Simkl
+    files each anime season as its own catalogue title carrying the parent
+    series' tmdb id, so a single search for "beastars" answers with four titles
+    that all resolve to `show:tmdb:90937`. To anything downstream those are four
+    rows with one identity and nothing to tell them apart — the merge cannot
+    dedupe them (it would collapse four real results into one) and cannot NOT
+    dedupe them (two services naming one title must still merge). The fact that
+    settles it is which season each one is, and only this service knows: it is
+    one lookup deeper than search goes, on the per-title record `_naming` reads.
+    Answering it here rather than downstream is the same rule the rest of this
+    package follows — how Simkl spells a season is Simkl's business, and the
+    caller gets `SearchHit.season` filled in, which is what that field is for.
+
+    ONLY THE COLLIDING HITS ARE LOOKED UP, and that bound is the whole cost
+    argument. A hit no other hit shares a key with is already distinguishable
+    and is left alone, so an ordinary search — every film, every live-action
+    show, any anime query returning one title per series — makes no extra call
+    at all. Measured 2026-08-18: "beastars" costs 4, "frieren" 3, "attack on
+    titan" 3, and every non-anime query 0, each cached for a day
+    (`_naming.CACHE_TTL_SECONDS`) so a repeated search costs nothing. This is
+    deliberately not the eager resolution of a whole result list that was
+    rejected earlier: that would spend a lookup on every row to answer a
+    question most rows never get asked, while this spends one only where the
+    answer is already needed to tell two results apart.
+
+    A LOOKUP THAT FAILS OR SAYS NOTHING LEAVES ITS HIT AT None. The merge's own
+    rule for hits it cannot tell apart — keep them as separate rows — is the
+    right fallback and needs no help from here, so a Simkl hiccup costs a row
+    its season label rather than costing the search its results.
+    """
+    by_key: dict[str, list[int]] = {}
+    for index, hit in enumerate(hits):
+        key = resolve_key(hit.media, hit.ids)
+        if key is not None:
+            by_key.setdefault(str(key), []).append(index)
+    colliding = [index for indexes in by_key.values() if len(indexes) > 1
+                 for index in indexes]
+    if not colliding:
+        return hits
+    namings = await asyncio.gather(
+        *(_naming.fetch(settings, hits[index].source_id) for index in colliding),
+        return_exceptions=True,
+    )
+    named = list(hits)
+    for index, naming in zip(colliding, namings):
+        if isinstance(naming, BaseException):
+            logger.warning("Simkl could not say which season %r (simkl %s) is: %s",
+                           hits[index].title, hits[index].source_id, naming)
+            continue
+        if naming.season is not None:
+            named[index] = hits[index]._replace(season=naming.season)
+    return named
 
 
 async def search_titles(settings: Settings, media: Media, query: str) -> list[SearchHit]:
@@ -119,4 +186,12 @@ async def search_titles(settings: Settings, media: Media, query: str) -> list[Se
         raise failures[0]
     for exc in failures:
         logger.warning("Simkl search %s(%r) failed: %s", "/".join(paths), q, exc)
-    return hits
+    # SHOWS ONLY. A film has no season to name, and Simkl's film catalogue does
+    # not follow the season-title convention its anime catalogue does —
+    # measured, 41 film hits across six queries and not one of them a season of
+    # something else. So a movie query has nothing to resolve, and the lookup
+    # this would make reads `/tv/{id}`, which is the wrong question to ask about
+    # a film id even when it is cheap.
+    if media is Media.MOVIE:
+        return hits
+    return await _name_the_seasons_that_collide(settings, hits)

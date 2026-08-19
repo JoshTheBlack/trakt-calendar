@@ -160,6 +160,36 @@ class SearchFragmentTests(AppTestCase):
         self.assertNotIn("aria-disabled", html)
         self.assertEqual(rows(html)[0]["data-source-ids"], {"simkl": "694485"})
 
+    def test_a_row_says_which_season_it_is_when_its_source_named_one(self):
+        """Several titles of one series come back sharing a name — three
+        "Sousou no Frieren" — and a year says when a season aired rather than
+        which season it is. The source names the season for exactly those
+        (app/providers/simkl/search.py), and the row has to draw it or the
+        rows are still indistinguishable."""
+        named = [SearchHit(source=Source.SIMKL, source_id=sid, media="show",
+                           ids={"simkl": sid, "tmdb": 209867}, title="Sousou no Frieren",
+                           year=year, season=season, network="", runtime=None, overview="")
+                 for sid, year, season in (("1990194", 2023, 1), ("2595284", 2026, 2),
+                                           ("3063278", 2027, 3))]
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=named)):
+            html = self.client.get("/distrakt/fragments/search?q=frieren").text
+        for season in (1, 2, 3):
+            with self.subTest(season=season):
+                self.assertIn(f"Season {season}</span>", html)
+        self.assertEqual(len(rows(html)), 3)
+
+    def test_a_row_whose_source_named_no_season_claims_none(self):
+        """It is about to get a picker; claiming a season it is going to ask
+        about would be answering the question in the row."""
+        unnamed = SearchHit(source=Source.SIMKL, source_id="10452", media="show",
+                            ids={"simkl": 10452, "tmdb": 1395}, title="Gossip Girl",
+                            year=2007, season=None, network="", runtime=None, overview="")
+        with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[unnamed])):
+            html = self.client.get("/distrakt/fragments/search?q=gossip").text
+        self.assertNotIn("distrakt-search-season", html)
+
 
 TRAKT_MOVIE_HIT = {
     "media": "movie", "ids": {"trakt": 1, "tmdb": 200, "slug": "a-movie"},

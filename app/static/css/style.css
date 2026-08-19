@@ -1329,6 +1329,14 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .distrakt-search-row:hover { border-color: var(--gold); }
 .distrakt-search-row .distrakt-title { flex: 1; font-weight: 600; }
 .distrakt-search-row .distrakt-year, .distrakt-search-row .distrakt-network { color: var(--text-faint); font-size: 0.82rem; }
+/* Which season a row IS, where its source said so — a `.chip` like the ones the
+   details modal draws a title's facts with, since that is what this is, so only
+   what DIFFERS is stated here: smaller, and never wrapped or shrunk. It is not
+   given a column of its own because most rows have no season to put in one, and
+   an empty column draws a gap the width of a word nobody is saying. */
+.distrakt-search-row .distrakt-search-season {
+    flex: 0 0 auto; padding: 1px 8px; font-size: 0.74rem; white-space: nowrap;
+}
 /* A row nothing can be filed under: still readable, visibly not a button, and
    carrying its own reason rather than a tooltip nobody hovers for. */
 .distrakt-search-row.is-unkeyable { cursor: default; opacity: 0.62; flex-wrap: wrap; }

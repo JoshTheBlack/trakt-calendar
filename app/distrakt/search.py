@@ -132,12 +132,13 @@ class _Merging:
         this only ever fills what the leader left blank or adds what neither
         had. EVERY field below upholds that, `source_ids` included.
 
-        THE HIT IS NOT NECESSARILY A SECOND SOURCE'S. Two hits from the SAME
-        source land here whenever that source lists one title more than once —
-        which Simkl does for every anime series, filing each season as its own
-        catalogue title carrying the parent's tmdb id. Searching "frieren"
-        returns three such titles, all resolving to `show:tmdb:209867` and all
-        carrying no season at search time, so all three fold into one slot.
+        THE HIT IS ALWAYS A SOURCE THIS SLOT DOES NOT YET HOLD —
+        `merge_search_hits` opens a new slot rather than calling this when a
+        source is already present, for the reason written there. `source_ids`
+        still refuses to overwrite rather than trusting that: it is the one
+        field whose value a pick sends back to a service, so a slot addressing
+        a different title from the one it draws is a wrong ADD rather than a
+        wrong-looking row, and the guard belongs beside the field it protects.
         """
         if _titles_differ_materially(self.title, hit.title):
             # See risk-3-shaped reasoning in the module docstring: the season
@@ -151,14 +152,12 @@ class _Merging:
                 "season %s) — check whether the dedupe unit actually matched.",
                 self.title, next(iter(self.source_ids)), hit.title, hit.source,
                 self.key, self.season)
-        # THE LEADER'S ID SURVIVES, exactly as its title and its ids do. A
-        # source that already has an entry here is one whose FIRST hit named
-        # this row, and that hit is the one the row is showing — so taking a
-        # later hit's id would leave the row calling back about a different
-        # title from the one it drew. Observed: a "frieren" search drew
-        # "Sousou no Frieren (2023)" carrying the season-1 title's ids while
-        # addressing the season-3 title, so clicking it filed season 3 under
-        # the season-1 id and the record could never be counted.
+        # THE LEADER'S ID SURVIVES, exactly as its title and its ids do — see
+        # the docstring for why this one is guarded rather than assigned.
+        # Observed before it was: a "frieren" search drew "Sousou no Frieren
+        # (2023)" carrying the season-1 title's ids while addressing the
+        # season-3 title, so clicking it filed season 3 under the season-1 id
+        # and the record could never be counted.
         self.source_ids.setdefault(hit.source, hit.source_id)
         for id_key, id_value in hit.ids.items():
             self.ids.setdefault(id_key, id_value)
@@ -196,6 +195,28 @@ def merge_search_hits(
     `app/distrakt/store.py`'s single-record verbs file rows under, so this is
     not a rule invented for search.
 
+    AND A SOURCE IS DEDUPED AGAINST ITSELF ONLY WHERE THE SEASON IS KNOWN.
+    Two hits from one source that BOTH name a season are two descriptions of
+    one (key, season) — the same unit the tracker files a record under — so
+    merging them is right, and leaving them apart would offer two rows that add
+    the identical record. Two that do NOT name one cannot be told apart by
+    anything this function is willing to call an identity, and collapsing them
+    is how results get lost: Simkl returns three titles for "frieren", all
+    resolving to `show:tmdb:209867` and none carrying a season, and under a
+    single slot per (key, None) two of the three vanished. Measured 2026-08-18,
+    Beastars season 2 (simkl 1231401) could not be surfaced by ANY query,
+    because whichever title Simkl happened to rank first for a given query
+    string absorbed the rest — so which results existed depended on how the
+    query was spelled.
+    SO A SLOT WITH NO SEASON HOLDS AT MOST ONE HIT PER SOURCE, and a second
+    opens a new slot beside it. A title two SERVICES both returned merges
+    either way, which is the whole point of merging at all.
+    THE SEASON COMES FROM THE SOURCE, not from here — a source that lists one
+    series as several titles is the only thing that can say which season each
+    of them is, and app/providers/simkl/search.py fills it in for exactly the
+    hits where it settles something. This function does not care how; it only
+    distinguishes "named" from "not named".
+
     A HIT THAT RESOLVES TO NO KEY AT ALL IS NOT DEDUPED AGAINST ANYTHING. It
     cannot be told apart from a second keyless hit of a different title by
     anything this function is willing to call an identity, so it stands alone
@@ -216,22 +237,76 @@ def merge_search_hits(
     function honest about being pure.
     """
     slots: list[_Merging] = []
-    by_dedupe_key: dict[tuple[ItemKey, int | None], _Merging] = {}
+    # Several slots may share one (key, None): one per hit a single source
+    # returned for a title it did not name a season for. They are kept in
+    # arrival order so a later source's hit joins the earliest slot still
+    # willing to take it, which keeps registry order deciding who leads a row
+    # two services both found.
+    by_dedupe_key: dict[tuple[ItemKey, int | None], list[_Merging]] = {}
 
     for source, hits in per_source:
         for hit in hits:
             key = resolve_key(hit.media, hit.ids)
             dedupe_key = (key, hit.season) if key is not None else None
-            slot = by_dedupe_key.get(dedupe_key) if dedupe_key is not None else None
+            open_slots = by_dedupe_key.get(dedupe_key, ()) if dedupe_key is not None else ()
+            # A named season makes any slot under this dedupe key the same
+            # (key, season) as the hit, whoever is already in it; an unnamed
+            # one only matches a slot this source is not already in.
+            slot = next((s for s in open_slots
+                         if hit.season is not None or hit.source not in s.source_ids), None)
             if slot is not None:
                 slot.absorb(hit)
                 continue
             slot = _Merging.start(hit, key)
             slots.append(slot)
             if dedupe_key is not None:
-                by_dedupe_key[dedupe_key] = slot
+                by_dedupe_key.setdefault(dedupe_key, []).append(slot)
 
-    return SearchMergeResult(hits=[slot.finish() for slot in slots], failed=failed)
+    return SearchMergeResult(hits=[slot.finish() for slot in _whole_shows_absorb_seasons(slots)],
+                             failed=failed)
+
+
+def _whole_shows_absorb_seasons(slots: list[_Merging]) -> list[_Merging]:
+    """`slots` with a series' per-season rows folded into the row that is the
+    WHOLE SHOW, where another source supplied one.
+
+    WHY A SEASON-LESS ROW WINS. A source that models a series as one show can
+    answer for EVERY season of it — clicking it opens a picker — so its row does
+    everything the per-season rows do and more. Leaving both shapes standing
+    offers "Beastars" beside "Beastars Season 2" beside "Beastars Final Season"
+    as if they were alternatives, when one of them reaches all three.
+
+    ONLY WHEN IT BRINGS A SOURCE THE SEASON ROW DOES NOT HAVE, which is what
+    tells the two meanings of a missing season apart. Trakt returning no season
+    means "this is the show, ask me for any of them". Simkl returning no season
+    can mean that too — or that a per-title lookup failed and nobody knows what
+    this title is (see app/providers/simkl/search.py). A row absorbing another
+    row from its own source alone would be that second case swallowing real
+    results, which is the collapse the dedupe rules above exist to prevent.
+
+    THE ABSORBED IDS TRAVEL. The season rows' ids and marks merge in, so a
+    viewer still sees that both services hold the title and the record still
+    carries both ids — and a Simkl id that names a DIFFERENT season from the one
+    finally added is harmless, because `app/providers/simkl/_naming.py`'s
+    `title_for_season` resolves the season to whichever title holds it rather
+    than trusting the id to be the right one.
+    """
+    whole: dict[ItemKey, _Merging] = {}
+    for slot in slots:
+        if slot.key is not None and slot.season is None:
+            whole.setdefault(slot.key, slot)
+    kept = []
+    for slot in slots:
+        host = whole.get(slot.key) if slot.key is not None else None
+        if (host is None or host is slot or slot.season is None
+                or not (set(host.source_ids) - set(slot.source_ids))):
+            kept.append(slot)
+            continue
+        for source, source_id in slot.source_ids.items():
+            host.source_ids.setdefault(source, source_id)
+        for id_key, id_value in slot.ids.items():
+            host.ids.setdefault(id_key, id_value)
+    return kept
 
 
 async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,

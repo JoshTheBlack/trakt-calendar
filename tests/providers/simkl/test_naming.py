@@ -90,6 +90,109 @@ class TranslationTests(unittest.TestCase):
         self.assertIsNone(_naming.translation(_naming.EMPTY, [1]))
 
 
+class SiblingTests(unittest.TestCase):
+    """The `relations` block, filtered to what could be a season.
+
+    Measured 2026-08-18: Attack on Titan's twelve relations include four films
+    (`summary`), an OVA (`side story`) and an `alternative setting` spin-off
+    beside the real sequels, and the block is TRANSITIVE — every member of a
+    series named every other, across three series and eleven titles.
+    """
+
+    RECORD = {"ids": {"simkl": 39687, "tmdb": "1429"}, "mapped_tvdb_seasons": [1],
+              "relations": [
+                  {"relation_type": "sequel", "anime_type": "tv", "ids": {"simkl": 439744}},
+                  {"relation_type": "summary", "anime_type": "movie", "ids": {"simkl": 49394}},
+                  {"relation_type": "side story", "anime_type": "ova", "ids": {"simkl": 38688}},
+                  {"relation_type": "sequel", "anime_type": "tv", "ids": {"simkl": 694485}},
+                  {"relation_type": "sequel", "anime_type": "special", "ids": {"simkl": 1883416}},
+              ]}
+
+    def test_films_and_side_material_are_not_seasons(self):
+        self.assertEqual(_naming.read(self.RECORD).siblings, (439744, 694485, 1883416))
+
+    def test_a_record_with_no_relations_has_no_siblings(self):
+        """Ordinary television — Gossip Girl carries an empty block."""
+        self.assertEqual(_naming.read({"ids": {"simkl": 10452}}).siblings, ())
+
+
+class TitleForSeasonTests(unittest.IsolatedAsyncioTestCase):
+    """Which Simkl title holds a given season of a series, from any member."""
+
+    FAMILY = {
+        39687: {"ids": {"simkl": 39687, "tmdb": "1429"}, "mapped_tvdb_seasons": [1],
+                "relations": [
+                    {"anime_type": "tv", "ids": {"simkl": 439744}},
+                    {"anime_type": "tv", "ids": {"simkl": 694485}},
+                    # A different tracker row that shares the family: its own
+                    # tmdb id is not 1429 (measured — 313599).
+                    {"anime_type": "tv", "ids": {"simkl": 1120029}},
+                    {"anime_type": "movie", "ids": {"simkl": 49394}}]},
+        439744: {"ids": {"simkl": 439744, "tmdb": "1429"}, "mapped_tvdb_seasons": [2],
+                 "relations": [{"anime_type": "tv", "ids": {"simkl": 39687}},
+                               {"anime_type": "tv", "ids": {"simkl": 694485}}]},
+        694485: {"ids": {"simkl": 694485, "tmdb": "1429"}, "mapped_tvdb_seasons": [3],
+                 "relations": [{"anime_type": "tv", "ids": {"simkl": 39687}},
+                               {"anime_type": "tv", "ids": {"simkl": 439744}}]},
+        1120029: {"ids": {"simkl": 1120029, "tmdb": "313599"}, "mapped_tvdb_seasons": [2]},
+    }
+
+    async def _resolve(self, simkl_id, season, family=None):
+        family = self.FAMILY if family is None else family
+        asked = []
+
+        async def _get(_client, _settings, path, _params=None, **_kwargs):
+            asked.append(path)
+            answer = family.get(int(path.split("/")[1]))
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+
+        with patch("app.providers.simkl.transport.cached_get", new=AsyncMock(side_effect=_get)):
+            got = await _naming.title_for_season(SETTINGS, simkl_id, season)
+        return got, asked
+
+    async def test_the_title_that_already_is_the_season_answers_itself(self):
+        got, asked = await self._resolve(694485, 3)
+        self.assertEqual(got, 694485)
+        self.assertEqual(asked, ["tv/694485"])
+
+    async def test_a_sibling_holding_the_season_is_found_from_any_member(self):
+        for start, season, want in ((39687, 3, 694485), (694485, 2, 439744),
+                                    (439744, 1, 39687), (39687, 2, 439744)):
+            with self.subTest(start=start, season=season):
+                got, _asked = await self._resolve(start, season)
+                self.assertEqual(got, want)
+
+    async def test_a_sibling_of_a_different_tracker_row_is_refused(self):
+        """`relations` crosses tracker identities: Attack on Titan's "The Final
+        Season" is tmdb 313599, a different row, and it names a season 2 of its
+        own. Answering with it would hand `show:tmdb:1429` another show's
+        episodes."""
+        got, _asked = await self._resolve(39687, 2)
+        self.assertEqual(got, 439744)
+        family = {**self.FAMILY,
+                  439744: {**self.FAMILY[439744], "mapped_tvdb_seasons": [9]}}
+        got, _asked = await self._resolve(39687, 2, family=family)
+        self.assertIsNone(got)
+
+    async def test_a_season_no_title_of_the_series_holds_answers_none(self):
+        got, _asked = await self._resolve(39687, 7)
+        self.assertIsNone(got)
+
+    async def test_an_ordinary_show_with_no_siblings_costs_one_lookup(self):
+        family = {10452: {"ids": {"simkl": 10452, "tmdb": "1395"}}}
+        got, asked = await self._resolve(10452, 3, family=family)
+        self.assertIsNone(got)
+        self.assertEqual(asked, ["tv/10452"])
+
+    async def test_no_id_to_start_from_costs_no_request(self):
+        spy = AsyncMock()
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            self.assertIsNone(await _naming.title_for_season(SETTINGS, None, 2))
+        spy.assert_not_awaited()
+
+
 class FetchTests(unittest.IsolatedAsyncioTestCase):
     """The one call, and how it fails."""
 

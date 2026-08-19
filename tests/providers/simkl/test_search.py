@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.providers.base import Media, SearchHit, Source
-from app.providers.simkl import search, transport
+from app.providers.simkl import _naming, search, transport
 
 SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="", cache_ttl_minutes=10)
 
@@ -169,6 +169,113 @@ class SearchTitlesTests(unittest.IsolatedAsyncioTestCase):
             await search.search_titles(SETTINGS, Media.SHOW, "x")
         for call in spy.await_args_list:
             self.assertIs(call.kwargs["pool"], transport.CATALOG_POOL)
+
+
+class CollidingSeasonTests(unittest.IsolatedAsyncioTestCase):
+    """Filling in `SearchHit.season` for the hits of one answer that share an
+    identity — the anime season-title case, measured live 2026-08-18.
+
+    Simkl answers "beastars" with four titles that ALL resolve to
+    show:tmdb:90937. Downstream they are four rows with one identity and
+    nothing to tell them apart, and only this service can say which season
+    each is: it lives on the per-title record, one lookup deeper than search.
+    """
+
+    # Three season-titles of one series, as the search endpoint returns them:
+    # the parent's tmdb id on every one, no season anywhere.
+    SERIES = [
+        {"title": "Beastars", "year": 2019,
+         "ids": {"simkl_id": 1034467, "slug": "beastars", "tmdb": "90937"}},
+        {"title": "Beastars", "year": 2021,
+         "ids": {"simkl_id": 1231401, "slug": "beastars", "tmdb": "90937"}},
+        {"title": "Beastars Final Season", "year": 2026,
+         "ids": {"simkl_id": 2831384, "slug": "beastars-final", "tmdb": "90937"}},
+    ]
+    RECORDS = {
+        "tv/1034467": {"ids": {"simkl": 1034467}, "mapped_tvdb_seasons": [1]},
+        "tv/1231401": {"ids": {"simkl": 1231401}, "mapped_tvdb_seasons": [2]},
+        "tv/2831384": {"ids": {"simkl": 2831384}, "mapped_tvdb_seasons": [3]},
+    }
+
+    def _transport(self, tv=None, anime=None, records=None):
+        by_path = {"search/tv": tv if tv is not None else [],
+                   "search/anime": anime if anime is not None else []}
+        records = self.RECORDS if records is None else records
+
+        async def _get(_client, _settings, path, _params=None, **_kwargs):
+            if path.startswith("tv/"):
+                answer = records.get(path)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+            return by_path[path]
+
+        return AsyncMock(side_effect=_get)
+
+    async def _search(self, **kwargs):
+        spy = self._transport(**kwargs)
+        with patch.object(transport, "cached_get", spy):
+            hits = await search.search_titles(SETTINGS, Media.SHOW, "beastars")
+        return hits, spy
+
+    async def test_hits_sharing_one_identity_each_get_their_own_season(self):
+        hits, _spy = await self._search(anime=self.SERIES)
+        self.assertEqual([(h.source_id, h.season) for h in hits],
+                         [("1034467", 1), ("1231401", 2), ("2831384", 3)])
+
+    async def test_a_hit_nothing_else_collides_with_costs_no_lookup(self):
+        """The cost bound, asserted rather than described: an ordinary search —
+        every film, every live-action show, any anime query answering one title
+        per series — makes no extra call at all."""
+        hits, spy = await self._search(tv=[SEVERANCE], anime=[BARE_ANIME])
+        self.assertEqual([h.season for h in hits], [None, None])
+        self.assertEqual({call.args[2] for call in spy.await_args_list},
+                         {"search/tv", "search/anime"})
+
+    async def test_only_the_colliding_hits_are_looked_up(self):
+        hits, spy = await self._search(tv=[SEVERANCE], anime=self.SERIES)
+        looked_up = sorted(call.args[2] for call in spy.await_args_list
+                           if call.args[2].startswith("tv/"))
+        self.assertEqual(looked_up, ["tv/1034467", "tv/1231401", "tv/2831384"])
+        # Severance shares its key with nothing, so it keeps its unnamed season.
+        self.assertIsNone(next(h.season for h in hits if h.source_id == "1203662"))
+
+    async def test_the_lookup_is_held_for_a_day_not_the_default_ttl(self):
+        """A repeated search must not pay these again: a title's season mapping
+        is about as static as catalogue data gets."""
+        _hits, spy = await self._search(anime=self.SERIES)
+        for call in spy.await_args_list:
+            if call.args[2].startswith("tv/"):
+                with self.subTest(path=call.args[2]):
+                    self.assertEqual(call.kwargs["ttl_seconds"], _naming.CACHE_TTL_SECONDS)
+
+    async def test_a_record_that_names_no_season_leaves_its_hit_unnamed(self):
+        """Falls back to what the merge already does with hits it cannot tell
+        apart — keep them as separate rows — rather than guessing."""
+        records = {**self.RECORDS,
+                   "tv/1231401": {"ids": {"simkl": 1231401},
+                                  "mapped_tvdb_seasons": [2, 3]}}
+        hits, _spy = await self._search(anime=self.SERIES, records=records)
+        self.assertEqual([h.season for h in hits], [1, None, 3])
+
+    async def test_a_failed_lookup_costs_a_season_label_and_not_the_search(self):
+        records = {**self.RECORDS, "tv/1231401": transport.SimklError("down", 503)}
+        hits, _spy = await self._search(anime=self.SERIES, records=records)
+        self.assertEqual([h.source_id for h in hits], ["1034467", "1231401", "2831384"])
+        self.assertEqual([h.season for h in hits], [1, None, 3])
+
+    async def test_a_movie_query_never_asks_which_season_a_film_is(self):
+        """Simkl's film catalogue does not follow the season-title convention,
+        and this lookup reads /tv/{id} — a wrong question about a film id."""
+        films = [{"title": "Beastars", "year": 2019,
+                  "ids": {"simkl_id": 1, "tmdb": "500"}},
+                 {"title": "Beastars", "year": 2020,
+                  "ids": {"simkl_id": 2, "tmdb": "500"}}]
+        spy = AsyncMock(side_effect=lambda *a, **k: films)
+        with patch.object(transport, "cached_get", spy):
+            hits = await search.search_titles(SETTINGS, Media.MOVIE, "beastars")
+        self.assertEqual({call.args[2] for call in spy.await_args_list}, {"search/movie"})
+        self.assertEqual([h.season for h in hits], [None, None])
 
 
 if __name__ == "__main__":  # pragma: no cover
