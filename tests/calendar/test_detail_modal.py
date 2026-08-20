@@ -320,9 +320,12 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
 
     def test_a_simkl_only_card_on_a_public_page_serves_what_is_cached(self):
         from app import cache
-        base = simkl_transport.API_BASE
-        asyncio.run(cache.set(f"{base}/tv/3204421?client_id=scid", SIMKL_TITLE))
-        asyncio.run(cache.set(f"{base}/tv/episodes/3204421?client_id=scid", SIMKL_EPISODES))
+        # Seeded through the transport's own key builder rather than a spelled-out
+        # URL: the address a stored answer lives at is that function's to state,
+        # and a copy here would go on passing while the real one moved.
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/3204421"), SIMKL_TITLE))
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/episodes/3204421"),
+                              SIMKL_EPISODES))
         with self._no_network():
             resp = self.client.get(
                 f"/s/{self.token}/details?media=show&simkl=3204421&season=1")

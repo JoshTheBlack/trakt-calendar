@@ -116,18 +116,57 @@ def api_headers(settings: Settings) -> dict:
     return headers
 
 
+# The query parameters that carry THIS INSTANCE'S CREDENTIAL rather than
+# describing what is being asked for. `api_params` is what puts them on a
+# request and `cache_key` is what leaves them off the address the answer is
+# filed under; both read this one tuple, because "is this parameter a
+# credential" is a single fact and a second copy of it is exactly how the client
+# id came to be part of the cache key in the first place.
+CREDENTIAL_PARAMS = ("client_id",)
+
+
 def api_params(settings: Settings, params: dict | None = None) -> dict:
     """`params` with this instance's client id added.
 
     Simkl takes the client id as a QUERY PARAMETER rather than a header, which
-    means it is part of the URL — and the response cache is keyed by URL, so it
-    is also part of the cache key. That is correct: a different client id is a
-    different application talking to Simkl, and its answers are not this one's
-    to serve.
+    means it is part of the URL that goes out. Trakt sends the same fact in a
+    header; the difference is Simkl's and every request has to honour it, because
+    a cold origin request without one answers 412 client_id_failed.
+
+    IT IS NOT PART OF THE CACHE KEY, and that is `cache_key`'s business — see
+    there for why a public catalogue answer does not belong to the credential
+    that happened to fetch it.
     """
     merged = dict(params or {})
     merged["client_id"] = settings.simkl_client_id
     return merged
+
+
+def cache_key(path: str, params: dict | None = None) -> str:
+    """The address a cached answer for `path` is filed under.
+
+    THE CREDENTIAL IS NOT IN IT. A cached answer is a PUBLIC catalogue response —
+    a title, an episode list, a search — and measured against the live service,
+    `GET /tv/{id}?extended=full` returns the same 23 fields with no client id, an
+    empty one, a bogus one and the real one. The id identifies the APPLICATION for
+    rate limiting and attribution; it does not select the content. Keying on it
+    made every stored answer the property of the credential that fetched it, so
+    rotating or clearing the client id stranded thousands of rows describing
+    titles whose content never depended on it — which is why a modal could not
+    fall back to what this instance was already holding.
+    A RESPONSE THAT GENUINELY DEPENDS ON WHO ASKED IS NOT CACHED AT ALL. That is
+    `private=True` in `cached_get`, and it is the case the old rule was reaching
+    for: it cannot occur on the path this key governs, because such a response is
+    never written here.
+
+    Same URL shape as the request so the key stays legible next to a log line and
+    cannot collide with the other transport's, minus the credential. The
+    remaining parameters are SORTED, so two callers spelling the same question in
+    a different order address one entry rather than two.
+    """
+    describing = sorted((name, value) for name, value in (params or {}).items()
+                        if name not in CREDENTIAL_PARAMS)
+    return f"{API_BASE}/{path}?{urlencode(describing)}"
 
 
 # ---------------------------------------------------------------------------
@@ -750,16 +789,18 @@ async def cached_get(
     private: bool = False,
     cache_only: bool = False,
 ):
-    """GET a Simkl path (with disk caching keyed by the full URL). Returns parsed
-    JSON or None.
+    """GET a Simkl path (with disk caching keyed by the path and the parameters
+    that describe the question — see `cache_key`). Returns parsed JSON or None.
 
     `private=True` MEANS THE RESPONSE DEPENDS ON WHOSE TOKEN ASKED — a watch
-    history, a library bucket, an activity beacon. The cache is keyed by URL and
-    shared by the whole instance, and Simkl carries the token in a HEADER, so
-    every user's /sync/ request has the IDENTICAL URL: a response written to the
-    cache without this flag would be served back to the wrong person. Every call
-    under /sync/ and /users/ passes it. Nothing that reads personal data may
-    reach this function without it.
+    history, a library bucket, an activity beacon. The cache is keyed by the
+    request and shared by the whole instance, and Simkl carries the token in a
+    HEADER, so every user's /sync/ request asks the IDENTICAL question: a
+    response written to the cache without this flag would be served back to the
+    wrong person. Every call under /sync/ and /users/ passes it. Nothing that
+    reads personal data may reach this function without it — which is also why
+    leaving the client id out of the key is safe: a response that depended on the
+    caller is never written here at all.
 
     POST RESPONSES ARE NEVER CACHED AT ALL, which is why this function is GET
     only: /sync/watched is a POST whose meaning is in the request BODY, and a
@@ -780,17 +821,22 @@ async def cached_get(
     owner's own views already fetched without a stranger being able to make this
     instance spend its Simkl budget on demand.
     """
+    # TWO ADDRESSES, DELIBERATELY. The request carries the client id because
+    # Simkl will not answer a cold one without it; the cached copy is filed
+    # without it because the content behind it does not vary by credential. See
+    # `cache_key`.
     url = f"{API_BASE}/{path}?{urlencode(api_params(settings, params))}"
+    key = cache_key(path, params)
     ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
     if not fresh and not private:
-        cached = await cache.get(url, ttl)
+        cached = await cache.get(key, ttl)
         if cached is not None:
             _perf.debug("cacheHIT  %s", path)
             return cached
     if cache_only:
         # Stale beats blank here: this caller can never trigger a refresh to fix
         # a hard miss anyway.
-        return await cache.get_stale(url)
+        return await cache.get_stale(key)
     data = await _fetch_json(client, settings, url, path, pool,
                              fresh=fresh, raise_errors=raise_errors)
     if data is None:
@@ -800,5 +846,5 @@ async def cached_get(
         # served as a hit anyway.
         return None
     if not private:
-        await cache.set(url, data)
+        await cache.set(key, data)
     return data

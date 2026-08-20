@@ -340,10 +340,11 @@ class BreakerTests(TransportStateTestCase):
 
 
 class PrivateCachingTests(TransportStateTestCase):
-    """The response cache is URL-keyed and shared by the whole instance, and
-    Simkl carries the token in a header — so every user's /sync/ request has the
-    same URL. `private=True` is what keeps one person's answer from being served
-    to another, and nothing personal may reach cached_get without it."""
+    """The response cache is keyed by the request and shared by the whole
+    instance, and Simkl carries the token in a header — so every user's /sync/
+    request asks the same question. `private=True` is what keeps one person's
+    answer from being served to another, and nothing personal may reach
+    cached_get without it."""
 
     async def test_a_private_get_neither_reads_nor_writes_the_cache(self):
         client = FakeClient([httpx.Response(200, json={"ok": True})])
@@ -371,9 +372,9 @@ class PrivateCachingTests(TransportStateTestCase):
                 client, FAKE_SETTINGS, "tv/1234", {}, pool=transport.CATALOG_POOL)
         self.assertEqual(out, {"title": "A Show"})
         self.assertEqual(list(stored.values()), [{"title": "A Show"}])
-        # The client id is part of the URL and therefore part of the key: another
-        # application's answers are not this one's to serve.
-        self.assertIn("client_id=cid", next(iter(stored)))
+        # Filed under the question, not under the credential that asked it — see
+        # TheCredentialIsNotPartOfTheAddressTests below.
+        self.assertNotIn("client_id", next(iter(stored)))
 
     async def test_a_rate_limited_read_raises_rather_than_reading_as_empty(self):
         """A swallowed 429 would look exactly like "Simkl has nothing here",
@@ -604,6 +605,94 @@ class HeaderTests(unittest.TestCase):
         params = {"extended": "full"}
         transport.api_params(FAKE_SETTINGS, params)
         self.assertEqual(params, {"extended": "full"})
+
+
+class TheCredentialIsNotPartOfTheAddressTests(TransportStateTestCase):
+    """A cached Simkl answer is filed under the QUESTION, never under the
+    credential that happened to ask it.
+
+    Measured against the live service: `GET /tv/{id}?extended=full` returns the
+    same fields with no client id, an empty one, a bogus one and the real one.
+    The id identifies the application for rate limiting, not the content. Keying
+    on it made every stored row the property of one credential, so rotating it
+    stranded thousands of descriptions of titles that never depended on it.
+    """
+
+    def test_every_parameter_api_params_adds_is_one_cache_key_leaves_off(self):
+        """The two halves of one fact, pinned against each other rather than
+        restated: whatever `api_params` contributes is a credential, and a
+        credential is what the key drops. A parameter added to one and forgotten
+        in the other is the drift this phase exists to undo."""
+        added = set(transport.api_params(FAKE_SETTINGS, {"extended": "full"})) - {"extended"}
+        self.assertEqual(added, set(transport.CREDENTIAL_PARAMS))
+        key = transport.cache_key("tv/1234", {"extended": "full"})
+        for name in transport.CREDENTIAL_PARAMS:
+            self.assertNotIn(name, key)
+
+    def test_it_still_addresses_the_question_being_asked(self):
+        """Dropping the credential must not drop what the answer is ABOUT — two
+        different lookups have to stay two entries."""
+        self.assertNotEqual(transport.cache_key("tv/1234", {"extended": "full"}),
+                            transport.cache_key("tv/5678", {"extended": "full"}))
+        self.assertNotEqual(transport.cache_key("tv/1234", {"extended": "full"}),
+                            transport.cache_key("tv/1234", {}))
+
+    def test_the_same_question_spelled_in_a_different_order_is_one_entry(self):
+        self.assertEqual(transport.cache_key("search/tv", {"q": "silo", "extended": "full"}),
+                         transport.cache_key("search/tv", {"extended": "full", "q": "silo"}))
+
+    def test_a_credential_passed_in_by_a_caller_is_dropped_too(self):
+        """The filter is on the NAME, not on which function put it there, so a
+        caller spelling it out itself cannot smuggle it back into the key."""
+        self.assertEqual(transport.cache_key("tv/1234", {"client_id": "other"}),
+                         transport.cache_key("tv/1234", {}))
+
+    async def _fetch(self, settings, *, stored, scripted=None):
+        """One catalogue read against a cache that only these tests write to."""
+        client = FakeClient(scripted or [httpx.Response(200, json={"title": "A Show"})])
+
+        async def _get(key, ttl):
+            return stored.get(key)
+
+        async def _set(key, data):
+            stored[key] = data
+
+        with patch("app.cache.get", _get), patch("app.cache.set", _set):
+            out = await transport.cached_get(client, settings, "tv/1234",
+                                             {"extended": "full"},
+                                             pool=transport.CATALOG_POOL)
+        return out, client
+
+    async def test_a_second_client_id_reads_the_first_ones_cached_answer(self):
+        stored: dict = {}
+        out, client = await self._fetch(FAKE_SETTINGS, stored=stored)
+        self.assertEqual(out, {"title": "A Show"})
+        self.assertEqual(len(client.requests), 1)
+        other = SimpleNamespace(simkl_client_id="a-different-application",
+                                simkl_access_token="tok", cache_ttl_minutes=10)
+        # No scripted response at all: a request here would raise IndexError, so
+        # this asserts the read was served rather than repeated.
+        out, client = await self._fetch(other, stored=stored, scripted=[])
+        self.assertEqual(out, {"title": "A Show"})
+        self.assertEqual(client.requests, [])
+
+    async def test_the_answer_survives_the_credential_being_cleared(self):
+        """THE ROTATION CASE, WHICH IS WHAT THIS IS FOR. An instance that has lost
+        its client id can still read back what it already described."""
+        stored: dict = {}
+        await self._fetch(FAKE_SETTINGS, stored=stored)
+        blank = SimpleNamespace(simkl_client_id="", simkl_access_token="",
+                                cache_ttl_minutes=10)
+        out, client = await self._fetch(blank, stored=stored, scripted=[])
+        self.assertEqual(out, {"title": "A Show"})
+        self.assertEqual(client.requests, [])
+
+    async def test_the_outgoing_request_still_carries_the_real_client_id(self):
+        """Stripped from the ADDRESS, never from the request: a cold origin GET
+        without one answers 412 client_id_failed."""
+        _out, client = await self._fetch(FAKE_SETTINGS, stored={})
+        request, = client.requests
+        self.assertIn("client_id=cid", str(request.url))
 
 
 if __name__ == "__main__":  # pragma: no cover
