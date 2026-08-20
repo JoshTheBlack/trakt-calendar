@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import date
 from enum import StrEnum
 
@@ -1103,6 +1103,64 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
         conn.execute(f"DELETE FROM distrakt_month_records {_SEASON_WHERE}", address)
         conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
         return months
+
+    return await db.transaction(_work)
+
+
+# ---------------------------------------------------------------------------
+# an id a record did not have when it was written
+# ---------------------------------------------------------------------------
+
+async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
+    """Fill in ids a stored record was written without, on EVERY row of one title.
+    Returns how many rows changed, which is 0 on every pass after the first.
+
+    The verb for a caller that has LEARNED an id with no record in hand to write.
+    `_coerce_update` is the same rule on the upsert path — a record learning an id
+    it did not have when it was written is the one way an identity can be improved
+    later — and it can only improve a record something is already writing. A title
+    whose record nothing on this pass is rewriting (a month's premiere record is
+    corrected from the catalogue fields alone, and a settled verdict is not
+    rewritten at all) would never learn one through it.
+
+    AN ID IS A FACT ABOUT THE TITLE, so this addresses the IDENTITY and not a
+    season: a title's `simkl` id is as true of the premiere record on last March
+    as it is of the row on the viewer's list today. Teaching one row and not the
+    others leaves the same title answering "who can be asked about this" differently
+    depending on which section of the page it was drawn in.
+
+    NOTHING IS EVER OVERWRITTEN — only a column that is NULL or empty is filled,
+    and that is the WHERE clause rather than a check the caller could forget. A
+    value already stored is what every per-title path has been calling with, and it
+    is usually the service's own statement about the title, taken straight off the
+    payload the record was built from. A value arriving here has been matched
+    across services on the shared identity, which is a JOIN rather than a
+    statement: one service can list a series as several titles that all resolve to
+    one tracker key, so a match can legitimately name a different title from the
+    one the record came from. Adding what is missing cannot make a working record
+    worse; replacing what is there can.
+
+    THE IDENTITY COLUMNS ARE NOT REACHABLE FROM HERE. `media`, `match_source` and
+    `match_id` are what a row is ADDRESSED by, so they are in the WHERE clause and
+    never in the SET, and a record learning an id stays filed exactly where it was.
+    That is what makes this a repair rather than a re-identification.
+    """
+    fillable = {column: value for column, id_key in ID_COLUMNS.items()
+                if (value := (ids or {}).get(id_key)) not in (None, "")}
+    if not fillable:
+        return 0
+    address = (user_id, key.media, key.match_source, key.match_id)
+
+    def _work(conn: db.Connection) -> int:
+        changed = 0
+        for table in ("distrakt_month_records", "distrakt_user_seasons"):
+            for column, value in fillable.items():
+                changed += conn.execute(
+                    f"UPDATE {table} SET {column} = ? "
+                    f"WHERE user_id = ? AND {_IDENTITY_MATCH} "
+                    f"AND ({column} IS NULL OR {column} = '')",
+                    (value, *address)).rowcount
+        return changed
 
     return await db.transaction(_work)
 

@@ -420,6 +420,84 @@ class FrozenMonthTests(TwoSourceTestCase):
                                              5, LABELS, ORDER, ORDER), "5/5")
 
 
+def _trakt_only_record(tid, season=1, **fields) -> dict:
+    """A roster record as a title that entered from Trakt alone carries it: the
+    shared id it is filed under, Trakt's own id, and NOTHING naming Simkl.
+
+    Which is every title on a roster built before the account linked a second
+    service — and the shape that made the failure this class is about: Simkl can
+    answer for it, the library match proves so, and the record has never said so."""
+    return {"media": "show", "match_source": "tmdb", "match_id": str(tid),
+            "season": season, "title": f"Show {tid}",
+            "ids": {"trakt": tid, "tmdb": tid}, **fields}
+
+
+# An instance whose Trakt credential has gone: the account still admits both
+# services, but only Simkl's catalogue can be asked about a title. This is the
+# question live.detail_source puts, and the state the reported row was in.
+SIMKL_CATALOGUE_ONLY = SimpleNamespace(
+    trakt_configured=True, simkl_configured=True,
+    trakt_catalogue_configured=False, simkl_catalogue_configured=True)
+
+
+class TheIdALibraryMatchTeachesTests(TwoSourceTestCase):
+    """A library match names a title with the matching service's OWN id, and that
+    id has to reach the ROSTER RECORD — not only the watch state.
+
+    The record is what source selection reads. A row could therefore report counts
+    from both services (proof Simkl holds history for it) and still degrade to
+    "Trakt isn't configured" the moment Trakt's credential went away, because
+    nothing had written down what the match already knew.
+    """
+
+    async def _sync(self, record, tid=101):
+        return await self._baseline(BOTH, [record],
+                                    trakt={tid: {1: _episodes(1, 2, 3)}},
+                                    simkl={tid: {1: _episodes(1, 2)}})
+
+    async def test_the_record_learns_the_matching_services_own_id(self):
+        record = _trakt_only_record(101, kind=store.RecordKind.KEEPUP)
+        await store.add_user_record(self.user_id, record)
+        before, = await store.user_records(self.user_id)
+        self.assertNotIn("simkl", before["ids"])
+        await self._sync(record)
+        after, = await store.user_records(self.user_id)
+        self.assertEqual(after["ids"]["simkl"], 101)
+        # and the id it already had is untouched — this only ever adds.
+        self.assertEqual(after["ids"]["trakt"], 101)
+
+    async def test_the_row_then_degrades_to_the_other_service(self):
+        """THE REPAIR, END TO END. Before the write the record names one service
+        and losing that credential leaves nobody to ask; after it, the service that
+        was answering all along can be."""
+        record = _trakt_only_record(101, kind=store.RecordKind.KEEPUP)
+        await store.add_user_record(self.user_id, record)
+        before, = await store.user_records(self.user_id)
+        self.assertIsNone(live.detail_source(before, SIMKL_CATALOGUE_ONLY))
+        await self._sync(record)
+        after, = await store.user_records(self.user_id)
+        self.assertEqual(live.detail_source(after, SIMKL_CATALOGUE_ONLY), "simkl")
+
+    async def test_a_month_premiere_record_learns_it_too(self):
+        """The case the upsert path could not reach. A premiere record is corrected
+        from the catalogue fields alone on every load and its ids are never
+        restated, so an id it was filed without could arrive no other way."""
+        record = _trakt_only_record(101, kind=store.RecordKind.SERIES_PREMIERE)
+        await store.add_month_record(self.user_id, "2026-07", record)
+        await self._sync(record)
+        stored, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual(stored["ids"]["simkl"], 101)
+
+    async def test_a_title_no_library_holds_learns_nothing(self):
+        """Silence is not an id. A title the matching service does not hold comes
+        away exactly as it arrived, rather than gaining anything derived."""
+        record = _trakt_only_record(102, kind=store.RecordKind.KEEPUP)
+        await store.add_user_record(self.user_id, record)
+        await self._sync(record, tid=101)
+        after, = await store.user_records(self.user_id)
+        self.assertEqual(after["ids"], {"trakt": 102, "tmdb": 102})
+
+
 class OneServiceIsUnchangedTests(TwoSourceTestCase):
     """The regression that matters most. An account that has linked one service
     reads, renders and freezes exactly as it did before there could be two — and

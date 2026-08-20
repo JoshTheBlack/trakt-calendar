@@ -1651,6 +1651,51 @@ async def _baseline_from_library(settings, state: dict, name: str, library,
     return True
 
 
+async def _learn_source_ids(user_id: int, state: dict, roster: list[dict]) -> None:
+    """Write onto each roster record the SERVICE IDS this state has since learned.
+
+    A LIBRARY MATCH IS HOW A SECOND SERVICE'S OWN ID ARRIVES for a title that was
+    filed from somewhere else — see _baseline_from_library, where a matched entry's
+    ids are merged into the cached state — and until this ran, that was the only
+    place it landed. The ROSTER RECORD is what decides who can be asked about a
+    title: live.detail_source and live.named_sources both read `ids[source]` off
+    the record. So a row whose watch history one service was answering for could
+    still report that service unconfigured the moment the OTHER service's
+    credential went away, because nothing had written down what the match already
+    proved — that this service knows the title and could be asked about it
+    directly. The id costs nothing to obtain here: it has already been obtained.
+
+    ONLY THE IDS THAT NAME A REGISTERED SOURCE. Those are what place a call and
+    what the choice of who to ask is made from. The shared ids are what a record is
+    KEYED on, and improving one of those is a different question with different
+    consequences — the same fact arriving from a library match has no business
+    anywhere near the identity waterfall.
+
+    EVERY PASS, NOT ONLY ONE THAT BASELINED. The state may have held an id for
+    sessions while the record went without it, and reading a state this pass merely
+    loaded is what repairs those. Costs nothing when there is nothing to write:
+    the comparison is in memory and the database is reached only for a title that
+    is actually short of an id.
+    """
+    shows = state.get("shows") or {}
+    sources = [str(source) for source in providers.registered()]
+    written: set[str] = set()
+    for record in roster or []:
+        key = record_key(record)
+        if str(key) in written:
+            continue
+        known = (shows.get(str(key)) or {}).get("ids") or {}
+        carried = record.get("ids") or {}
+        learned = {name: known[name] for name in sources
+                   if known.get(name) not in (None, "")
+                   and carried.get(name) in (None, "")}
+        if learned:
+            # Every row of this identity is written at once, so the other seasons
+            # of the same title need no pass of their own.
+            written.add(str(key))
+            await store.learn_ids(user_id, key, learned)
+
+
 async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: bool = False,
                             today: date | None = None,
                             since_month: str | None = None) -> dict:
@@ -1661,7 +1706,10 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
 
     Takes the roster RECORDS rather than a list of ids, because filing a baseline
     needs the shared identity and fetching one needs the source's id, and only the
-    record carries both."""
+    record carries both. And it hands one BACK: a service's own id learned from a
+    library match is written onto the record before this returns, which is what
+    lets the per-title paths keep asking that service about the title (see
+    _learn_source_ids)."""
     from ..perftrace import span
     state = await sync(settings, user_id, force=force, today=today,
                        since_month=since_month)
@@ -1730,4 +1778,7 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
         saved = True
     if saved:
         await _save(user_id, state)
+    # THE ID GOES BACK TO THE ROSTER as well as into the state, because the state
+    # answers "what has been watched" and the record answers "who can be asked".
+    await _learn_source_ids(user_id, state, roster)
     return state

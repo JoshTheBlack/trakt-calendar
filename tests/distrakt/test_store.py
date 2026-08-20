@@ -770,5 +770,84 @@ class StoredIdentityTests(DistraktTestCase):
         self.assertEqual(rec["watched"], 3)
 
 
+class LearningAnIdWithNoRecordToWriteTests(DistraktTestCase):
+    """store.learn_ids — the verb for an id learned somewhere that holds no
+    record, which is how a service's own id arrives off a library match."""
+
+    def setUp(self):
+        self.month = month_back(0)
+        self.key = ItemKey("show", "tmdb", "900")
+
+    async def _month_ids(self, season=1, kind=distrakt.RecordKind.SERIES_PREMIERE):
+        rec = await distrakt.find_month_record(self.user_id, self.month, kind,
+                                               self.key, season)
+        return rec["ids"]
+
+    async def test_it_fills_an_id_the_record_was_written_without(self):
+        """The whole point: the record named one service, the library match named
+        the other, and until the id is on the record nothing can ask that service
+        about the title."""
+        await distrakt.add_month_record(self.user_id, self.month,
+                                        a_record(ids={"tmdb": 900, "trakt": 111}))
+        self.assertEqual(await store.learn_ids(self.user_id, self.key, {"simkl": 222}), 1)
+        self.assertEqual(await self._month_ids(), {"tmdb": 900, "trakt": 111, "simkl": 222})
+
+    async def test_it_reaches_every_row_of_the_title_in_both_tables(self):
+        """An id is a fact about the TITLE. A season on the viewer's list, another
+        season's premiere record and last month's verdict are three rows of one
+        title, and teaching one of them would leave the same title answering
+        differently depending on which section drew it."""
+        await distrakt.add_month_record(self.user_id, self.month, a_record(season=1))
+        await distrakt.add_month_record(self.user_id, self.month,
+                                        a_record(season=2, kind=distrakt.RecordKind.COMPLETED))
+        await distrakt.add_user_record(self.user_id,
+                                       a_record(season=3, kind=distrakt.RecordKind.KEEPUP))
+        self.assertEqual(await store.learn_ids(self.user_id, self.key, {"simkl": 222}), 3)
+        self.assertEqual((await self._month_ids())["simkl"], 222)
+        self.assertEqual((await self._month_ids(2, distrakt.RecordKind.COMPLETED))["simkl"], 222)
+        listed, = await distrakt.user_records(self.user_id)
+        self.assertEqual(listed["ids"]["simkl"], 222)
+
+    async def test_it_never_overwrites_an_id_the_record_already_carries(self):
+        """A stored value is what every per-title path has been calling with, and
+        it came off the service's own payload. What arrives here was matched across
+        services on the shared identity, which one service can legitimately point
+        at several of its own titles."""
+        await distrakt.add_month_record(self.user_id, self.month,
+                                        a_record(ids={"tmdb": 900, "simkl": 222}))
+        self.assertEqual(await store.learn_ids(self.user_id, self.key, {"simkl": 999}), 0)
+        self.assertEqual((await self._month_ids())["simkl"], 222)
+
+    async def test_a_second_pass_writes_nothing(self):
+        """It runs on every load, so an id already written has to cost no write at
+        all rather than re-stating itself."""
+        await distrakt.add_month_record(self.user_id, self.month, a_record())
+        self.assertEqual(await store.learn_ids(self.user_id, self.key, {"simkl": 222}), 1)
+        self.assertEqual(await store.learn_ids(self.user_id, self.key, {"simkl": 222}), 0)
+
+    async def test_gaining_a_simkl_id_does_not_change_where_the_record_is_filed(self):
+        """THE THING TO PROVE BEFORE WRITING ANY OF THIS. `simkl` is excluded from
+        MATCH_SOURCES precisely because it is an id you need to CALL a service
+        rather than one two services share, so a record gaining one must resolve to
+        the same key it always did — otherwise this repair would be a silent
+        re-identification and the row would part company with its own history."""
+        await distrakt.add_month_record(self.user_id, self.month,
+                                        a_record(ids={"tmdb": 900, "tvdb": 5,
+                                                      "imdb": "tt42", "mal": 7}))
+        before = await distrakt.find_month_record(
+            self.user_id, self.month, distrakt.RecordKind.SERIES_PREMIERE, self.key, 1)
+        await store.learn_ids(self.user_id, self.key, {"simkl": 222})
+        after = await distrakt.find_month_record(
+            self.user_id, self.month, distrakt.RecordKind.SERIES_PREMIERE, self.key, 1)
+        self.assertEqual(before["key"], after["key"])
+        self.assertEqual(store.record_key(after), store.record_key(before))
+        # and the record as a caller would restate it — ids and all — still keys
+        # the same way, which is the form record_key falls back to the waterfall
+        # for.
+        self.assertEqual(
+            store.record_key({"media": "show", "season": 1, "ids": after["ids"]}),
+            self.key)
+
+
 if __name__ == "__main__":
     unittest.main()
