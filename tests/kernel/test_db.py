@@ -511,6 +511,103 @@ class MigrationTests(DbTestCase):
         self.assertNotIn("play_counts_json", columns)
 
 
+    async def test_migration_28_readdresses_a_cached_answer_off_its_credential(self):
+        """A stored Simkl answer keyed by the client id that fetched it is
+        unreachable the moment that credential changes — and it never leaves on
+        its own, because these rows carry no per-row TTL and the size sweep does
+        not fire until a gigabyte. So they are re-addressed rather than left, and
+        rather than deleted: the payloads are good answers about titles whose
+        content never depended on the credential.
+
+        THE KEY IT LANDS ON IS THE ONE THE TRANSPORT WILL ASK FOR, asserted
+        against that function rather than against a spelled-out string — a
+        migration that produced a plausible-looking key nothing reads would pass
+        every test written the other way.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        from app.providers.simkl import transport
+
+        path = TMP / "migration-28-test.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 27]):
+                db.migrate_sync(conn)
+            now = db.now()
+            rows = [
+                ("https://api.simkl.com/tv/10009?client_id=abc", b"a"),
+                ("https://api.simkl.com/tv/55?extended=full&client_id=abc", b"b"),
+                # Two parameters in an order urlencode would not have chosen, so
+                # the sort is exercised rather than merely described.
+                ("https://api.simkl.com/search/tv?q=silo&extended=full&client_id=abc", b"c"),
+                # Not this migration's business, and proof it is not a blanket
+                # rewrite: Trakt sends its key as a header, so its URLs carry no
+                # credential at all.
+                ("https://api.trakt.tv/shows/7?extended=full", b"d"),
+            ]
+            for key, payload in rows:
+                conn.execute(
+                    "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, "
+                    "byte_size) VALUES (?, ?, ?, NULL, ?)", (key, payload, now, len(payload)))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            keys = {r["cache_key"] for r in conn.execute("SELECT cache_key FROM api_cache")}
+            self.assertEqual(keys, {
+                transport.cache_key("tv/10009"),
+                transport.cache_key("tv/55", {"extended": "full"}),
+                transport.cache_key("search/tv", {"q": "silo", "extended": "full"}),
+                "https://api.trakt.tv/shows/7?extended=full",
+            })
+            # The ANSWER travelled with the address — a rekey that lost the
+            # payload would be a delete wearing a better name.
+            self.assertEqual(
+                conn.execute("SELECT payload FROM api_cache WHERE cache_key = ?",
+                             (transport.cache_key("tv/10009"),)).fetchone()[0], b"a")
+        finally:
+            conn.close()
+
+    async def test_migration_28_collapses_two_credentials_answers_onto_one_row(self):
+        """`cache_key` is the primary key, so an instance that rotated its client
+        id holds two rows for one question and they cannot both survive. Both are
+        answers to the same public question and neither is more this instance's
+        than the other, so the collision resolves rather than raising."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        from app.providers.simkl import transport
+
+        path = TMP / "migration-28-collision-test.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 27]):
+                db.migrate_sync(conn)
+            now = db.now()
+            for key in ("https://api.simkl.com/tv/10009?client_id=old",
+                        "https://api.simkl.com/tv/10009?client_id=new"):
+                conn.execute(
+                    "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, "
+                    "byte_size) VALUES (?, ?, ?, NULL, 1)", (key, b"x", now))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            self.assertEqual(
+                [r["cache_key"] for r in conn.execute("SELECT cache_key FROM api_cache")],
+                [transport.cache_key("tv/10009")])
+        finally:
+            conn.close()
+
 class PragmaTests(DbTestCase):
     async def test_foreign_keys_are_actually_on(self):
         """Asserted, not assumed: the setting is per-connection and defaults off,

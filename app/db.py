@@ -2140,6 +2140,63 @@ CREATE INDEX ix_trakt_releases_fetched ON trakt_releases(fetched_at);
 """
 
 
+def MIGRATION_28(conn: sqlite3.Connection) -> None:
+    """Re-address every cached Simkl answer that was filed under a client id.
+
+    Simkl takes its client id as a QUERY PARAMETER, so it was part of the URL the
+    response cache keys on and every stored catalogue answer belonged to the
+    credential that fetched it. It does not: the same public title comes back
+    with no client id, a bogus one and the real one, so the credential selects
+    nothing and only ever narrowed who could read the row back. The key is built
+    without it now (app/providers/simkl/transport.py's `cache_key` is the one
+    statement of the shape), which leaves every row written before that change
+    addressed by a key nothing will ever ask for again.
+
+    WITHOUT THIS THEY WOULD NEVER LEAVE. `cache.set` writes these rows with no
+    per-row TTL, so the age sweep skips them by design, and the size sweep does
+    not fire until `api_cache_max_bytes` — a gigabyte. On a real instance holding
+    a few dozen megabytes that is never, so 13,470 unreachable rows would sit
+    there for the life of the database while the same titles were fetched again
+    beside them.
+
+    REKEYED RATHER THAN DELETED. The payloads are perfectly good answers about
+    titles whose content never depended on the credential, and they are exactly
+    what the modal falls back to when a source cannot be reached. Deleting them
+    would throw away the thing the change was made to make reachable.
+
+    THE SHAPE IS RESTATED HERE, NOT IMPORTED, and that is deliberate rather than
+    duplication: a migration transforms the keys as they were WRITTEN at a
+    particular time into the shape they had to become at that time. If `cache_key`
+    changes again, this must go on doing what it does now — following it would
+    make an already-applied migration mean something different. (The kernel also
+    may not import a provider package; that rule points the same way.)
+
+    UPDATE OR REPLACE, because `cache_key` is the primary key: an instance that
+    had rotated its client id can hold two rows for one question, and they
+    collapse onto the one address. Keeping the later-written one is right — both
+    are answers to the same question and neither is more this instance's than the
+    other.
+    """
+    from urllib.parse import parse_qsl, urlencode
+
+    rows = conn.execute(
+        "SELECT cache_key FROM api_cache WHERE cache_key LIKE ?",
+        ("https://api.simkl.com/%client_id=%",),
+    ).fetchall()
+    for row in rows:
+        old = row[0]
+        base, _, query = old.partition("?")
+        # Sorted, which is what `cache_key` does: with the credential no longer
+        # appended last there is nothing else making the order canonical, and two
+        # spellings of one question must not become two rows.
+        kept = sorted((name, value) for name, value in parse_qsl(query, keep_blank_values=True)
+                      if name != "client_id")
+        new = f"{base}?{urlencode(kept)}"
+        if new != old:
+            conn.execute("UPDATE OR REPLACE api_cache SET cache_key = ? WHERE cache_key = ?",
+                         (new, old))
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2168,6 +2225,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (25, MIGRATION_25),
     (26, MIGRATION_26),
     (27, MIGRATION_27),
+    (28, MIGRATION_28),
 ]
 
 
