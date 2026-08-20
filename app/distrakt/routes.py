@@ -614,20 +614,23 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     the stale-but-real fallback — this function does not degrade, so that decision
     lives in exactly one place.
     """
-    committed = distrakt_store.month_committed(month_key, today)
     standing = distrakt_store.month_standing(month_key, today)
-    # A PREVIEW month (before the 1st) keeps auto-populating from premieres so it
-    # tracks the calendar (and un-turning-away re-adds a previously excluded
-    # premiere). A COMMITTED month is stable — premieres only re-import on demand.
-    # THE INSTANCE'S SETTINGS FOR THE CALENDAR HALF, not the per-viewer ones this
-    # function is working with: a calendar window is fetched under the instance's
-    # own credentials and served to everybody, so a viewer who has not linked
-    # Trakt must not be the reason a preview month stops tracking the calendar.
-    # calendar_import.premiere_records states that contract.
-    instance_settings = load_settings()
-    if not committed and instance_settings.calendar_source_configured:
-        await distrakt_store.import_premieres(user_id, month_key, instance_settings)
-        doc = await distrakt_store.load_month(user_id, month_key) or doc
+    # NOTHING IS IMPORTED BY LOOKING. A month that has not begun is populated when
+    # somebody ASKS — the Import control, which is also the only thing that builds
+    # such a month in the first place (see rollover.can_initialize, which says the
+    # ask is the safeguard). This load used to re-import a preview month's
+    # premieres on every visit, on the reasoning that a preview should track the
+    # calendar; what that meant in practice is that the calendar's list for a month
+    # goes on growing right up to the 1st, so opening next month filed everything
+    # the calendar had learned since the last look — 85 titles in one visit on the
+    # instance this was found on, none of them chosen. Reading a month must not
+    # decide what is in it.
+    #
+    # THE MIRROR IS NOW ONE-WAY BEFORE THE 1st, and that is the cost of this being
+    # right. reconcile_turn_aways below still takes a title turned away on the
+    # calendar OFF a preview month; taking a mark BACK no longer puts the title
+    # back there by itself, because that would be an import and imports are asked
+    # for. Import from calendar re-adds it.
 
     # BEFORE the records are read, because it changes them: a title turned away on
     # the main calendar becomes a verdict here, and one whose mark has been taken
