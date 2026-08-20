@@ -2197,6 +2197,83 @@ def MIGRATION_28(conn: sqlite3.Connection) -> None:
                          (new, old))
 
 
+MIGRATION_29 = """
+-- GIVE EVERY STORED RECORD THE SERVICE IDS ITS WATCH STATE ALREADY KNOWS.
+--
+-- A baseline that matches a roster title against another service's library gets
+-- that service's own id back on the matched entry and keeps it on the watch
+-- state. Source selection reads the RECORD, so a row could report counts from
+-- both services -- proof the second one holds history for it -- and still say
+-- the first was not configured the moment that credential went away. The live
+-- pass writes the id onto the record now, but it only reaches what it renders:
+-- the open month's premieres and the viewer's own list. It never sees a SETTLED
+-- verdict (deliberately kept out, so a verdict keeps the counts it was reached
+-- on) or anything in a FROZEN month (which renders from its snapshot and runs no
+-- live pass at all). Those records would keep their gap for ever.
+--
+-- ADD-ONLY, WHICH IS THE SAME RULE store.learn_ids APPLIES. Only a column that
+-- is NULL is filled: a stored id is what every per-title path has been calling
+-- with and normally came off that service's own payload, while the one arriving
+-- here was matched across services on the shared identity -- a join, not a
+-- statement, and one service can list a series as several titles that resolve to
+-- one tracker key.
+--
+-- THE IDENTITY IS UNTOUCHED. media/match_source/match_id are the WHERE clause
+-- and never the SET, so a record learning an id stays filed exactly where it
+-- was. MATCH_SOURCES excludes `simkl` for precisely this reason, so gaining one
+-- cannot move a row.
+--
+-- MIN() RATHER THAN A BARE SUBQUERY because there is one progress row per
+-- (season, source) and any of them can carry the id. They agree in every case
+-- measured -- the ids describe the TITLE, not the season -- but an unordered
+-- pick from several rows is a result that could differ between two runs of the
+-- same migration, which is not a property a migration may have.
+UPDATE distrakt_month_records AS r
+   SET simkl_id = (SELECT MIN(p.simkl_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.simkl_id IS NOT NULL)
+ WHERE r.simkl_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.simkl_id IS NOT NULL);
+
+UPDATE distrakt_month_records AS r
+   SET trakt_id = (SELECT MIN(p.trakt_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.trakt_id IS NOT NULL)
+ WHERE r.trakt_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.trakt_id IS NOT NULL);
+
+UPDATE distrakt_user_seasons AS r
+   SET simkl_id = (SELECT MIN(p.simkl_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.simkl_id IS NOT NULL)
+ WHERE r.simkl_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.simkl_id IS NOT NULL);
+
+UPDATE distrakt_user_seasons AS r
+   SET trakt_id = (SELECT MIN(p.trakt_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.trakt_id IS NOT NULL)
+ WHERE r.trakt_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.trakt_id IS NOT NULL);
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2226,6 +2303,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (26, MIGRATION_26),
     (27, MIGRATION_27),
     (28, MIGRATION_28),
+    (29, MIGRATION_29),
 ]
 
 
