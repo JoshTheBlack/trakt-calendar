@@ -19,6 +19,7 @@ from ...config import Settings
 from .. import season as season_rules
 from ..base import Media
 from . import transport
+from .transport import TraktError
 
 logger = logging.getLogger(__name__)
 
@@ -191,13 +192,33 @@ async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: 
                               client: httpx.AsyncClient | None = None) -> dict:
     """One /shows/{id}/seasons/{season}?extended=full call (short TTL) reduced to
     the fields: total (y), cadence, premiere, finale, started/finished. Pass a
-    shared `client` when batching (else a throwaway one is created)."""
+    shared `client` when batching (else a throwaway one is created).
+
+    "TRAKT SAYS THIS SEASON HAS NO EPISODES" AND "TRAKT DID NOT ANSWER" ARE NOT
+    THE SAME ANSWER, and this used to give both of them as a season of zero
+    episodes with no dates. That is a FABRICATED NUMBER: the caller cannot tell it
+    from a real one, so it renders as fact, moves the row into a different bucket
+    (a total of 0 is not a season anybody is keeping up with) and can be written
+    down by the transitions that run afterwards. Measured with a corrupted client
+    id, which is the ordinary way to reach it — Trakt answers 401, `cached_get`
+    without `raise_errors` reports that as None, and a roster lost most of its
+    rows to seasons it had been counting correctly a minute earlier.
+    SO A FAILURE RAISES and the caller degrades the row to its last-known counts
+    (app/distrakt/live.py), while the one status that genuinely MEANS "there is
+    nothing here" — 404, no such show or season — keeps answering an empty
+    season, which is what it has always meant.
+    """
     tz = ZoneInfo(settings.timezone)
     c = client or transport.shared_client()
-    episodes = await transport.cached_get(
-        c, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
-        ttl_seconds=SEASON_CACHE_TTL_SECONDS, fresh=fresh,
-    )
+    try:
+        episodes = await transport.cached_get(
+            c, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
+            ttl_seconds=SEASON_CACHE_TTL_SECONDS, fresh=fresh, raise_errors=True,
+        )
+    except TraktError as exc:
+        if getattr(exc, "status", None) == 404:
+            return _empty_season(season)
+        raise
     if not isinstance(episodes, list):
         return _empty_season(season)
     return {"season": season, **_derive_season(episodes, tz)}

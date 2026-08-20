@@ -72,7 +72,11 @@ def detail_source(rec: dict, settings) -> str | None:
     # aliased into something neither name means.
     from ..calendar import detail_source as catalogue_answerer
     chosen = catalogue_answerer.choose(settings, rec.get("ids") or {})
-    return str(chosen[0]) if chosen else None
+    # A STORED-ONLY ANSWERER IS NOT ONE THIS CAN USE. That one means "nobody can
+    # be reached, but the modal can still draw what is on disk" — and a season
+    # lookup is a live call, so following it would ask an unconfigured source
+    # over the network, which is the whole thing this function exists to stop.
+    return str(chosen.source) if chosen and not chosen.stored_only else None
 
 
 def named_sources(rec: dict) -> list[str]:
@@ -90,22 +94,96 @@ def named_sources(rec: dict) -> list[str]:
             if str(ids.get(str(source)) or "").strip()]
 
 
-def unavailable_note(rec: dict, settings, *, asked: str | None) -> str:
-    """The whole sentence a row draws in place of its counts when this pass could
-    not refresh them.
+# Why one row's counts are not this pass's. Three states rather than a boolean,
+# because they call for different things from the reader and from the operator:
+# a service that could not be reached wants another go, one this instance holds
+# no credential for wants Settings opened, and a record no registered source has
+# an id for wants neither — nothing an operator does will count it.
+UNREACHABLE = "unreachable"
+NOT_CONFIGURED = "not_configured"
+UNANSWERABLE = "unanswerable"
 
-    COMPOSED HERE, SENT AS ONE STRING, AND THE BROWSER ONLY DRAWS IT. The row
-    used to carry a bare `unavailable` boolean and the client owned the words
-    ("unavailable — refresh to retry"), which was already one sentence living
-    where it could not be checked — and it is now two sentences, because "this
-    service could not be reached" and "this service is not configured" are
-    different facts with different remedies: one asks for a refresh, the other
-    asks the operator to open Settings, and offering the first for the second is
-    how an afternoon goes into looking for an outage that was never there. Two
-    hardcoded strings in the browser with a flag to choose between them would be
-    the same duplication twice over, so the server says the sentence and the
-    client escapes it — the shape `routes._unkeyable_reason` already uses for the
-    other refusal a viewer reads.
+
+def and_list(names) -> str:
+    """Several names in one sentence: "A", "A and B", "A, B, and C".
+
+    WRITTEN FOR ANY NUMBER RATHER THAN FOR TWO, because two is what this instance
+    happens to have registered today and nothing about it is a rule — the registry
+    is a set a source joins by registering, and a sentence that reads "both" or
+    joins on " and " alone starts lying the moment a third one exists. The
+    template side has its own copy of this question for source MARKS
+    (_source_logo.html's `names`); this is the Python one, and they are separate
+    because neither language can call the other's.
+    """
+    names = [str(name) for name in names if name]
+    if len(names) <= 2:
+        return " and ".join(names)
+    return ", ".join(names[:-1]) + ", and " + names[-1]
+
+
+def counting_sources(show: dict) -> list[str]:
+    """Every service a row's numbers actually came from, in declared order.
+
+    BOTH HALVES OF "x/y" AND THEY CAN DIFFER. The episode total comes from ONE
+    source (see detail_source — paying two catalogue calls to discover they count
+    slightly differently would spend the budget on a disagreement nothing
+    renders), while the watched count can come from every service the viewer has
+    linked. So a row is frequently counted by more services than answered for its
+    total, and a reader asking "where did this come from" wants all of them.
+    """
+    named = {*(show.get("total_by_source") or {}), *(show.get("watched_by_source") or {})}
+    return [name for name in source_order() if name in named]
+
+
+def fresh_note(show: dict, *, missing=()) -> str:
+    """One row's sentence when its counts ARE this pass's — the tooltip behind
+    the mark that says so.
+
+    A ROW SAYS WHETHER ITS NUMBERS ARE CURRENT, WHICHEVER WAY THE ANSWER GOES,
+    and the pair matters more than either half: a mark that appears only when
+    something is wrong is one a reader has to already know the meaning of, while
+    a mark that is always there and changes colour is read at a glance. The words
+    are the server's for `unavailable_note`'s reason, and they NAME THE SERVICES,
+    which is the question a two-source instance actually raises — a single number
+    on a row says nothing about whether one service answered or both agreed.
+
+    `missing` is any service that WAS asked for this account and could not be
+    read. Its absence does not make the row's stored numbers wrong, but it does
+    make "up to date" untrue: what is on the page is what could be read without
+    it, and the mark has to say so.
+    """
+    labels = source_labels()
+    counted = counting_sources(show)
+    if missing:
+        # THE SERVICE THAT WENT QUIET IS NOT ONE OF THE SURVIVORS, obvious as
+        # that sounds: its name is still on the row's `total_by_source` when the
+        # season lookup was served from cache, so counting it here said "Trakt
+        # could not be read, so these counts are Trakt and Simkl's alone" — a
+        # sentence that contradicts itself inside its own clause.
+        absent = and_list(labels.get(name, name) for name in missing)
+        spoke = and_list(labels.get(name, name) for name in counted
+                         if name not in set(missing))
+        return (f"{absent} could not be read just now, so these counts are "
+                + (f"{spoke}'s alone." if spoke else "the last ones read."))
+    read_from = and_list(labels.get(name, name) for name in counted)
+    if not read_from:
+        return "Counts are up to date."
+    return f"Counts are up to date, read from {read_from}."
+
+
+def unavailable_note(rec: dict, settings, *, asked: str | None) -> str:
+    """One row's own sentence for why its counts are the stored ones — the whole
+    sentence, composed here, drawn by the browser and nowhere composed twice.
+
+    THE ROW STILL DRAWS ITS NUMBERS, so this is a note ON a row rather than a
+    replacement for one: it is the tooltip behind the row's mark, while the page
+    says the same thing once, out loud, through `unavailable_notices`. It used to
+    be a bare `unavailable` boolean with the words living in JavaScript, which had
+    one register for three states and no way to tell an outage from a missing
+    credential. Two hardcoded strings in the browser with a flag to choose
+    between them would have been the same fault again, so the server says the
+    sentence and the client escapes it — the shape `routes._unkeyable_reason`
+    already uses for the other refusal a viewer reads.
 
     `asked` is the source that WAS asked and failed, or None when nobody could be
     asked at all — the caller knows which of the two happened and this function
@@ -113,16 +191,63 @@ def unavailable_note(rec: dict, settings, *, asked: str | None) -> str:
     """
     labels = source_labels()
     if asked is not None:
-        return f"couldn't reach {labels.get(asked, asked)} — refresh to retry"
+        return f"{labels.get(asked, asked)} could not be reached — these are the last counts read."
     knows = [labels.get(name, name) for name in named_sources(rec)]
     if not knows:
         # No id any registered source issues, so there is nobody to configure
         # that would help — see providers.base.MATCH_SOURCES for how a record
         # comes to be filed under an id no service can be asked by.
-        return "no service can be asked about this title"
+        return "No registered service knows this title, so nothing can count it."
     joined = knows[0] if len(knows) == 1 else " and ".join(knows)
     verb = "isn't" if len(knows) == 1 else "aren't"
-    return f"{joined} {verb} configured — showing the last counts we had"
+    return (f"{joined} {verb} configured on this instance, so these are the last "
+            f"counts read.")
+
+
+def unavailable_reason(rec: dict, *, asked: str | None) -> str:
+    """Which of the three states above a degraded row is in."""
+    if asked is not None:
+        return UNREACHABLE
+    return NOT_CONFIGURED if named_sources(rec) else UNANSWERABLE
+
+
+def unavailable_notices(shows, *, unreadable=()) -> list[str]:
+    """What the PAGE says about what it could not refresh, as finished sentences.
+
+    ONLY THE TRANSIENT SILENCE IS SAID OUT LOUD, and deciding that is the point
+    of this function existing rather than the page enumerating every reason it
+    can find. A service that could not be READ is news: it was working, it is not
+    now, and the numbers on the page are short of it until it comes back. A
+    service this instance holds no credential for is not news and never becomes
+    news — it is a standing fact about the instance, most viewers cannot act on
+    it (only an administrator can fill a credential in), and an instance that has
+    deliberately configured one service would carry a banner about the other for
+    ever. That fact belongs on the rows it applies to, where it is a mark and a
+    tooltip rather than a permanent bar across the page, and the same goes for a
+    title no registered service can look up.
+
+    `unreadable` IS THE OTHER SILENCE, HANDED IN. A service whose HISTORY could
+    not be read is the caller's own finding (watch_history.unreadable_sources)
+    and this module cannot see it — but to a reader it is the same sentence as a
+    service whose EPISODE COUNTS could not be read, so the two are joined here
+    rather than rendered as two notices saying one thing. That join used to be
+    the browser's, which is why the wording could not be checked against the
+    rule that chooses it.
+    """
+    labels = source_labels()
+    down = {str(name) for name in unreadable}
+    down |= {show.get("unavailable_source") for show in shows
+             if show.get("unavailable")
+             and show.get("unavailable_reason") == UNREACHABLE}
+    named = [labels.get(name, name) for name in source_order() if name in down]
+    if not named:
+        return []
+    # Worded so it is true whether or not anything else answered. When a second
+    # service did, the counts on the page are its alone; when nothing did, they
+    # are the last ones written down. Either way the honest statement is that
+    # this service is not in them.
+    return [and_list(named) + " could not be read just now — the counts below "
+            "are only what could be read without it."]
 
 
 async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None):
@@ -189,11 +314,23 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
 
 
 def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
-                     asked=()) -> dict:
+                     asked=(), *, missing=()) -> dict:
     show = {**rec, "key": str(record_key(rec)), "unavailable": False,
-            "unavailable_source": "", "unavailable_note": ""}
+            "unavailable_source": "", "unavailable_reason": ""}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
     _apply_counts(show, rec, watched, settings, asked)
+    # AFTER the counts, not before: the note names the services the numbers came
+    # from and those are what `_apply_counts` has just decided.
+    #
+    # `counts_current` IS NOT `not unavailable`. This title's own season lookup
+    # answered — that is what brought it here — but a service whose HISTORY could
+    # not be read is one whose watched count is missing from the row anyway, and
+    # a mark reading "up to date" over numbers that are short of a service nobody
+    # could reach is the same false reassurance the whole distinction exists to
+    # remove. One question ("are these numbers this load's"), both ways of
+    # failing it.
+    show["counts_current"] = not missing
+    show["counts_note"] = fresh_note(show, missing=missing)
     return show
 
 
@@ -207,21 +344,23 @@ def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *
     asked and could not answer — a rate limit, an outage — or None when no source
     this record names could be asked at all, which is a settings problem and not
     an outage. Both render identically otherwise, because the record's last-known
-    numbers are the best answer in either case; what differs is the sentence, and
-    `unavailable_note` carries it whole (see that function for why the browser
-    does not compose it).
+    numbers are the best answer in either case; what differs is
+    `unavailable_reason`, which is what lets the page state each cause once, in
+    its own words (see unavailable_notices).
 
-    `unavailable_source` NAMES ONLY A SERVICE THAT WAS ACTUALLY ASKED. Which one
-    it was is decided per record (see detail_source), so the row is the only
-    place that knows, and a page full of these otherwise says "unavailable" over
-    and over without ever saying who was quiet — see unreadable_detail_sources,
-    which is what turns these into the banner. A source nobody could ask is left
-    out of it deliberately: the banner's sentence is "that service could not be
-    reached", and a service absent from the settings is not down.
+    `unavailable_source` IS THE SERVICE THIS ROW WANTED, asked or not. Which one
+    it is is decided per record (see detail_source), so the row is the only place
+    that knows, and a page full of these otherwise says "unavailable" over and
+    over without ever naming anybody. What must NOT be conflated is why it is
+    silent, which is why the reason travels beside the name rather than being
+    inferred from whether a name is there at all.
     """
+    wanted = source or next(iter(named_sources(rec)), "")
     show = {**rec, "key": str(record_key(rec)), "unavailable": True,
-            "unavailable_source": source or "",
-            "unavailable_note": unavailable_note(rec, settings, asked=source)}
+            "counts_current": False,
+            "unavailable_source": wanted,
+            "unavailable_reason": unavailable_reason(rec, asked=source),
+            "counts_note": unavailable_note(rec, settings, asked=source)}
     show.update({
         "total": int(rec.get("total") or 0),
         "cadence": rec.get("cadence"),
@@ -232,6 +371,36 @@ def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *
     })
     _apply_counts(show, rec, watched, settings, asked)
     return show
+
+
+def stored_shows(records: list[dict], settings) -> list[dict]:
+    """Every record rendered from what it already holds, with NO provider call at
+    all — the whole-page version of what one degraded row does.
+
+    FOR THE FALLBACK THAT USED TO DROP THE VIEWER'S LIST ENTIRELY. When a shared
+    prerequisite fails there is no per-title answer to be had, and the page used
+    to render the month's own records and leave the list off, on the stated
+    reasoning that every row on it "would need the season lookup that has just
+    failed". That reasoning does not survive a row being able to draw its own
+    last-known counts: the seasons somebody is keeping up with are the whole
+    point of the page, and having them vanish on a refresh and return on a
+    reload is worse than showing the numbers they were showing a moment ago —
+    which are real, and are the numbers the row had either way.
+
+    Every row comes back marked not-current, with the sentence saying so, because
+    that is exactly what they are.
+    """
+    shows = []
+    for rec in records:
+        source = detail_source(rec, settings)
+        show = _merge_unavailable(rec, {source or "": int(rec.get("watched") or 0)},
+                                  settings, (), source=source)
+        show["bucket"] = discord_fmt.bucket_of(show, show)
+        # No history was read on this pass, so nothing can say when a season was
+        # finished; the stored record's own bucket is what it was last time.
+        show.setdefault("completed_on", "")
+        shows.append(show)
+    return shows
 
 
 def source_order() -> tuple[str, ...]:
@@ -258,14 +427,14 @@ def unreadable_detail_sources(shows) -> list[str]:
     Without this, a whole roster whose only source is unreachable renders every
     row flagged unavailable with nothing anywhere on the page naming what to fix.
 
-    A SERVICE THAT WAS NEVER ASKED IS NOT NAMED HERE. A record whose only source
-    has no catalogue credential on this instance carries no `unavailable_source`
-    at all (see _merge_unavailable), so it cannot reach this list — the banner
-    says "could not be reached", and a service missing from the settings is not
-    down. That row says so itself, in its own sentence, because it is the row
-    that knows which service it wanted.
+    A SERVICE THAT WAS NEVER ASKED IS NOT NAMED HERE, which is what
+    `unavailable_reason` is read for: a record whose only source has no catalogue
+    credential on this instance names that source too (it is the one the row
+    wanted), and calling it unreadable would send an operator looking for an
+    outage that is not there. It gets its own sentence in `unavailable_notices`.
     """
-    down = {show.get("unavailable_source") for show in shows if show.get("unavailable")}
+    down = {show.get("unavailable_source") for show in shows
+            if show.get("unavailable") and show.get("unavailable_reason") == UNREACHABLE}
     return [name for name in source_order() if name in down]
 
 
@@ -339,7 +508,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                              watched_lookup: dict | None = None,
                              allow_degrade: bool = False,
                              completed_lookup: dict | None = None,
-                             sources_read=()) -> list[dict]:
+                             sources_read=(), sources_unread=()) -> list[dict]:
     """Merge each stored record with its live Trakt-derived fields into the flat
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
 
@@ -365,6 +534,13 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     agree", which arrive as the same single number and mean different things (see
     counts.counts_label). A caller that hands in a pre-synced lookup knows what it
     asked and says so; one that leaves the sync to this function does not have to.
+
+    `sources_unread` IS WHICH OF THOSE COULD NOT BE READ, and it is the same
+    caller's finding for the same reason — the sync that produced `watched_lookup`
+    is where a service goes quiet, and a row cannot tell from the lookup alone
+    whether a missing count means "nothing watched" or "nobody could ask". It
+    decides only what a row SAYS about itself: the counts are still whatever could
+    be read, and the mark stops claiming they are current.
 
     Every show that comes back carries `key`, whether or not the record handed in
     did: it is what the browser names a row by, and deriving it here means a
@@ -400,6 +576,10 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                 settings, records, fresh=fresh, allow_degrade=allow_degrade,
                 sources=sources)
     asked = tuple(str(source) for source in sources_read or ())
+    # Narrowed to what was actually ASKED for this account: a service nobody
+    # asked did not go quiet, and naming it would put a stranger's outage on a
+    # row that never wanted it.
+    unread = tuple(name for name in asked if name in {str(s) for s in sources_unread})
 
     shows = []
     matched = 0
@@ -418,14 +598,18 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             unreachable += failed
             unaskable += not failed
             # No live count for this title: fall back to the number its stored
-            # record last settled on, filed under the source that can answer for
-            # it so the row still renders one number rather than none.
-            fallback = {source or "": int(rec.get("watched") or 0)}
+            # record last settled on, filed under the source that answers for it
+            # so the row still renders one number rather than none. The source
+            # the record NAMES when none could be asked — filing it under "" put
+            # a number outside the declared order, where a row drawing two of
+            # them could not have labelled it.
+            fallback = {source or next(iter(named_sources(rec)), ""):
+                        int(rec.get("watched") or 0)}
             show = _merge_unavailable(rec, watched_lookup.get(key) or fallback,
                                       settings, asked, source=source if failed else None)
         else:
             show = _merge_available(rec, detail, watched_lookup.get(key) or {},
-                                    settings, asked)
+                                    settings, asked, missing=unread)
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # WHEN the season was finished, and only for a season that IS finished:
         # on a partly-watched season the same date is just "last time I watched

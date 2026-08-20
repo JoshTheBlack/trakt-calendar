@@ -302,17 +302,45 @@ class TheRowSaysWhichSilenceItIsTests(_CatalogueFailureTestCase):
         it has to name the settings problem rather than offer a refresh that
         cannot fix one."""
         row, = await self._rows(NO_CATALOGUES)
-        self.assertIn("Trakt", row["unavailable_note"])
-        self.assertIn("configured", row["unavailable_note"])
-        self.assertNotIn("refresh", row["unavailable_note"])
+        self.assertIn("Trakt", row["counts_note"])
+        self.assertIn("configured", row["counts_note"])
+        self.assertNotIn("could not be reached", row["counts_note"])
 
-    async def test_the_banner_does_not_report_a_service_that_is_not_down(self):
-        """`unreadable_detail_sources` is "could not be reached", and a service
-        absent from the settings was never asked. The row says what is wrong
-        with it; the banner would be saying something untrue."""
+    async def test_the_row_names_the_service_and_the_page_stays_quiet(self):
+        """The row still NAMES the service it wanted — it is the only thing that
+        knows — and the reason beside that name is what keeps it out of the "could
+        not be read" sentence. Saying a service was unreachable when it is simply
+        absent is what sent an operator looking for an outage.
+
+        AND THE PAGE SAYS NOTHING AT ALL about it, which is a decision rather than
+        an oversight: a missing credential is a standing fact about the instance,
+        not news, most viewers cannot act on it, and an instance deliberately
+        running one service would otherwise carry a banner about the other for
+        ever. It belongs on the rows it applies to."""
         rows = await self._rows(NO_CATALOGUES)
-        self.assertEqual(rows[0]["unavailable_source"], "")
+        self.assertEqual(rows[0]["unavailable_source"], "trakt")
+        self.assertEqual(rows[0]["unavailable_reason"], live.NOT_CONFIGURED)
+        self.assertIn("Trakt", rows[0]["counts_note"])
         self.assertEqual(live.unreadable_detail_sources(rows), [])
+        self.assertEqual(live.unavailable_notices(rows), [])
+
+    async def test_a_service_that_was_read_and_went_quiet_is_still_announced(self):
+        """The other half of the same decision. THIS one is news — it was working
+        and is not now — so it keeps its banner, and one sentence covers however
+        many rows are short of it."""
+        records = [dict(self.RECORD, title=f"Show {n}", ids={"trakt": n, "tmdb": n})
+                   for n in range(1, 6)]
+
+        async def _boom(*args, **kwargs):
+            raise TraktError("Could not reach Trakt")
+
+        with patch("app.providers.trakt.detail.fetch_season_detail", _boom):
+            rows = await live.compute_live_shows(
+                self.user_id, records, BOTH_CATALOGUES, watched_lookup={},
+                allow_degrade=True, sources_read=("trakt",))
+        self.assertEqual(len(rows), 5)
+        notice, = live.unavailable_notices(rows)
+        self.assertIn("Trakt could not be read just now", notice)
 
     async def test_a_row_with_a_second_id_asks_the_service_that_can_answer(self):
         """The repair the roster actually needed: a record carrying both ids has
@@ -340,7 +368,131 @@ class TheRowSaysWhichSilenceItIsTests(_CatalogueFailureTestCase):
         to Settings."""
         row, = await self._rows(BOTH_CATALOGUES, ids={"tmdb": 1})
         self.assertTrue(row["unavailable"])
-        self.assertNotIn("configured", row["unavailable_note"])
+        self.assertNotIn("configured", row["counts_note"])
+
+
+class TheRowSaysWhereItsNumbersCameFromTests(_CatalogueFailureTestCase):
+    """A single number on a row says nothing about who counted it, which is the
+    question a second service raises and a third makes worse."""
+
+    async def _row(self, watched, *, unread=(), asked=("trakt", "simkl")):
+        async def _season(settings, source_id, season, *a, **k):
+            return {"season": season, "total": 8, "cadence": "Tue",
+                    "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+
+        with patch("app.providers.trakt.detail.fetch_season_detail", _season):
+            rows = await live.compute_live_shows(
+                self.user_id, [dict(self.RECORD)], BOTH_CATALOGUES,
+                watched_lookup={live.live_key(self.RECORD): watched},
+                allow_degrade=True, sources_read=asked, sources_unread=unread)
+        return rows[0]
+
+    async def test_it_names_every_service_that_counted_it(self):
+        """Both halves of x/y and they differ: the total comes from ONE source by
+        design, the watched count from every service the viewer linked."""
+        row = await self._row({"trakt": 4, "simkl": 4})
+        self.assertTrue(row["counts_current"])
+        self.assertEqual(row["counts_note"],
+                         "Counts are up to date, read from Trakt and Simkl.")
+
+    async def test_a_service_that_could_not_be_read_stops_it_claiming_currency(self):
+        """The reported case: a bogus client id left every row wearing a green
+        mark while the service behind them was failing. The counts on the row are
+        real — they are what could be read without it — but "up to date" is not
+        true of them."""
+        row = await self._row({"simkl": 4}, unread=("trakt",))
+        self.assertFalse(row["counts_current"])
+        # AND THE SERVICE THAT WENT QUIET IS NOT LISTED AMONG THE SURVIVORS. Its
+        # name is still on `total_by_source` whenever the season lookup came out
+        # of the cache, which had the sentence contradict itself inside its own
+        # clause: "Trakt could not be read, so these counts are Trakt and
+        # Simkl's alone".
+        self.assertEqual(row["counts_note"],
+                         "Trakt could not be read just now, so these counts are Simkl's alone.")
+        # The numbers themselves are untouched: this is about what the row SAYS.
+        self.assertEqual(row["total"], 8)
+
+    async def test_a_service_nobody_asked_for_is_not_reported_missing(self):
+        """`sources_unread` is narrowed to what was asked FOR THIS ACCOUNT, so
+        one viewer's outage cannot appear on another's row."""
+        row = await self._row({"trakt": 4}, unread=("simkl",), asked=("trakt",))
+        self.assertTrue(row["counts_current"])
+
+    def test_the_list_reads_as_a_sentence_at_any_number_of_services(self):
+        """Two is what is registered today and nothing about it is a rule — a
+        third source joins by registering, and "both" would start lying then."""
+        self.assertEqual(live.and_list(["Trakt"]), "Trakt")
+        self.assertEqual(live.and_list(["Trakt", "Simkl"]), "Trakt and Simkl")
+        self.assertEqual(live.and_list(["Trakt", "Simkl", "Watchstate"]),
+                         "Trakt, Simkl, and Watchstate")
+        self.assertEqual(live.and_list(["Trakt", "Simkl", "Watchstate", "Movietrack"]),
+                         "Trakt, Simkl, Watchstate, and Movietrack")
+
+
+class ADegradedRefreshKeepsTheListOnTheScreenTests(AppTestCase):
+    """REPORTED FROM A BROWSER, 2026-08-19: with a bad Trakt client id, pressing
+    ⟳ Refresh emptied the list and a plain reload brought it back.
+
+    A shared prerequisite failing takes the whole month down the degraded path,
+    and that path rendered the month's own records while leaving the viewer's
+    list off entirely — so the seasons somebody is keeping up with, which are the
+    point of the page, vanished and returned depending on which button was
+    pressed. The rows have their own last-known counts either way; drawing them
+    is the same answer a single degraded row has always given.
+    """
+
+    def make_settings(self):
+        # The public calendar is switched off for the shared fixture's reason
+        # (tests/support.py): this is about the roster, and a month rebuild would
+        # otherwise go and read a real CDN.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        trakt_access_token="tok", simkl_public_calendar_enabled=False)
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("refresher", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "user-token")
+        asyncio.run(distrakt_store.add_user_record(self.user_id, {
+            "ids": {"trakt": 7, "tmdb": 1, "slug": "silo"}, "season": 3,
+            "title": "Silo", "network": "Apple TV", "media": "show",
+            "kind": distrakt_store.RecordKind.KEEPUP, "watched": 4, "total": 8,
+        }))
+        self.sign_in_as(self.user_id)
+
+    def _degraded_month(self):
+        """The month with the shared history read failing, which is what a bad
+        client id does to every path that needs it."""
+        async def _boom(*args, **kwargs):
+            raise TraktError("Trakt rejected the credentials")
+
+        today = date.today()
+        # STUBBED AT THE TRACKER'S OWN BOUNDARY rather than at one provider call:
+        # what sends a month down this path is the shared history read failing,
+        # whichever of its calls was the one to raise.
+        with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))), \
+             patch("app.distrakt.rollover.history_records", AsyncMock(return_value=[])), \
+             patch("app.distrakt.watch_history.sync_and_baseline", _boom):
+            return self.client.post(
+                "/api/distrakt/refresh",
+                json={"year": today.year, "month": today.month}).json()
+
+    def test_the_row_is_still_there(self):
+        body = self._degraded_month()
+        self.assertTrue(body["ok"])
+        self.assertEqual([show["title"] for show in body["shows"]], ["Silo"])
+
+    def test_it_draws_the_counts_the_record_already_had(self):
+        row, = self._degraded_month()["shows"]
+        self.assertEqual(row["total"], 8)
+        self.assertIn("4/8", row["counts"])
+
+    def test_and_says_they_are_not_this_pass_s(self):
+        """Showing them is only honest with the mark that says what they are."""
+        row, = self._degraded_month()["shows"]
+        self.assertFalse(row["counts_current"])
+        self.assertIn("Trakt", row["counts_note"])
 
 
 class TheCollapseIsNotDelayedByTheCacheTests(_CatalogueFailureTestCase):
@@ -391,7 +543,7 @@ class TheCollapseIsNotDelayedByTheCacheTests(_CatalogueFailureTestCase):
         await self._seed_cache(age_seconds=0)
         row = await self._row(NO_CATALOGUES)
         self.assertTrue(row["unavailable"])
-        self.assertIn("configured", row["unavailable_note"])
+        self.assertIn("configured", row["counts_note"])
 
     async def test_and_it_reads_exactly_the_same_once_that_answer_has_expired(self):
         """THE DELAYED COLLAPSE ITSELF. Past the season TTL there is nothing
@@ -402,7 +554,7 @@ class TheCollapseIsNotDelayedByTheCacheTests(_CatalogueFailureTestCase):
         await self._seed_cache(age_seconds=trakt_detail.SEASON_CACHE_TTL_SECONDS + 60)
         row = await self._row(NO_CATALOGUES)
         self.assertTrue(row["unavailable"])
-        self.assertIn("configured", row["unavailable_note"])
+        self.assertIn("configured", row["counts_note"])
         self.assertEqual(row["total"], self.RECORD["total"])
         self.assertNotEqual(row["total"], 0)
 
@@ -449,14 +601,14 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
         self.assertTrue(body["ok"])
         # The page still renders — degrading is not failing — and it now says who
         # was quiet instead of only flagging every row unavailable.
-        self.assertEqual(body["sources_unreadable"], ["Trakt"])
-        # AND THE ROW CARRIES ITS OWN WHOLE SENTENCE, which is what the browser
-        # draws in place of the counts. It used to carry a bare boolean and the
-        # sentence lived in JavaScript, where there was no way to say which of
-        # the two silences this was.
+        self.assertIn("Trakt could not be read just now", body["source_notices"][0])
+        # AND THE ROW CARRIES ITS OWN SENTENCE TOO, as the tooltip behind the
+        # mark that says its numbers are not this load's. It used to carry a
+        # bare boolean with the words in JavaScript, where there was no way to
+        # say which of the three silences this was.
         row, = body["shows"]
-        self.assertIn("Trakt", row["unavailable_note"])
-        self.assertIn("refresh", row["unavailable_note"])
+        self.assertIn("Trakt", row["counts_note"])
+        self.assertIn("could not be reached", row["counts_note"])
 
     def test_a_month_that_read_cleanly_says_nothing(self):
         async def _season(settings, trakt_id, season, fresh=False, client=None):
@@ -478,7 +630,7 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
             body = self.client.get(
                 f"/api/distrakt/month?year={today.year}&month={today.month}").json()
 
-        self.assertEqual(body["sources_unreadable"], [])
+        self.assertEqual(body["source_notices"], [])
 
 
 class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):

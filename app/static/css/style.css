@@ -1179,10 +1179,20 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     border: 1px solid var(--card-border); border-radius: 8px; background: rgba(255,255,255,0.02);
 }
 .distrakt-show-row.abandoned { opacity: 0.5; }
-/* A show whose totals couldn't be refreshed this pass: dim it and tint the
-   "unavailable — refresh to retry" note so its last-known counts aren't trusted. */
-.distrakt-show-row.unavailable { opacity: 0.6; }
-.distrakt-show-row.unavailable .distrakt-dates { color: var(--danger, #e0736b); font-style: italic; }
+/* WHETHER THIS ROW'S NUMBERS ARE THIS LOAD'S. Drawn on every row, green or red,
+   because a mark that only appears when something is wrong is one the reader has
+   to learn the meaning of first — and because the numbers themselves stay put
+   either way, so the mark is the only thing carrying the difference. The sentence
+   behind it is the row's own title attribute, composed server-side: the reason
+   differs (unreachable, not configured, or a title nothing can look up) and only
+   the server knows which. The row is NOT dimmed for this: it used to be, back
+   when its counts were blanked too, and dimming real numbers only makes them
+   harder to read. */
+.distrakt-freshness {
+    flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok, #5cb85c); opacity: 0.75;
+}
+.distrakt-freshness.stale { background: var(--danger, #e0736b); opacity: 1; }
 /* A season that was finished and now has more of it. Quiet enough not to compete
    with the title, loud enough that the row does not read as a mistake. It is a
    button — pressing it is the only thing that clears the mark — so the browser's

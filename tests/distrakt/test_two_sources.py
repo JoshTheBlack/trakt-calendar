@@ -1272,7 +1272,10 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["sources_unreadable"], ["Simkl"])
+        # The page states it as a finished sentence rather than as a list of
+        # names for the browser to build one out of — there is more than one
+        # reason a count can be missing and they do not share a wording.
+        self.assertIn("Simkl could not be read just now", body["source_notices"][0])
 
     def test_the_other_services_counts_still_render(self):
         """Degrading is not failing. The row shows what Trakt reported, and the
@@ -1396,7 +1399,7 @@ class TheOtherServiceSaysSoTooTests(AppTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["sources_unreadable"], ["Trakt"])
+        self.assertIn("Trakt could not be read just now", body["source_notices"][0])
 
     def test_the_other_services_counts_still_render(self):
         """Degrading is not failing. The row shows what the service that answered

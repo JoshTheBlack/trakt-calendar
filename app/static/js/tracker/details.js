@@ -33,7 +33,12 @@ async function openDistraktDetails(row, event) {
     } catch (e) {
         console.error(e);
         document.getElementById('distraktDetailsBody').innerHTML =
-            '<div class="d-empty">⚠️ Could not load details from Trakt.</div>';
+            // NAMES NO SERVICE, because it does not know which one would have
+            // answered and there is more than one: the server picks a source
+            // from the row's own ids (app/calendar/detail_source.py), so this
+            // said "Trakt" over a title Trakt never listed. The calendar's own
+            // modal has always worded it this way.
+            '<div class="d-empty">⚠️ Could not load details for this item.</div>';
     }
 }
 

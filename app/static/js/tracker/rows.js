@@ -208,15 +208,16 @@ function showRow(s) {
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;
     else if (s.bucket === 'keepup') dates = s.finale || '?/?';
-    // The server couldn't refresh THIS show's totals: don't present its last-known
-    // numbers as a fresh read — blank them and say why. THE SENTENCE IS THE
-    // SERVER'S, whole, because there is more than one reason and they call for
-    // different things from the reader: a service that could not be reached wants
-    // a refresh, one this instance holds no credential for wants Settings opened.
-    // Branching here between two strings written here would put the vocabulary on
-    // the side that cannot see which happened (app/distrakt/live.py's
-    // unavailable_note composes it).
-    if (s.unavailable) { counts = ''; dates = s.unavailable_note || ''; }
+    // A ROW WHOSE TOTALS THE SERVER COULD NOT REFRESH KEEPS ITS NUMBERS. They are
+    // the last ones actually read, which is a real fact about the season, and
+    // blanking them was worse than showing them: a roster whose one catalogue
+    // credential went missing rendered as rows with no counts at all, which reads
+    // as "nothing here" rather than as "nothing new here". What the row owes the
+    // reader is not silence but a mark saying the numbers are not current —
+    // `distrakt-freshness` below, red or green, carrying the server's own
+    // sentence as its tooltip (app/distrakt/live.py composes both, because the
+    // reason differs — unreachable, unconfigured, or a title nothing can look up
+    // — and only the server knows which).
     // A closed month keeps its ✕ but loses the abandon toggle: what a past month
     // RECORDS can still be corrected (a season you finished years ago and
     // re-watched one episode of does not belong on its list), but its verdicts
@@ -248,6 +249,19 @@ function showRow(s) {
         <div class="distrakt-show-row${s.abandoned ? ' abandoned' : ''}${s.unavailable ? ' unavailable' : ''}" title="${esc(net)}"
              data-key="${esc(s.key)}" data-season="${s.season}" data-title="${esc(s.title)}"
              onclick="openDistraktDetails(this, event)">
+            <!-- Whether these numbers are this load's, first in the row so the
+                 column reads down as one thing rather than being hunted for
+                 beside each row's counts. Green or red on every row, so the mark
+                 means something on sight rather than only when it appears; the
+                 sentence behind it names the services the numbers came from and
+                 is composed server-side, where the reason is known.
+                 A CLOSED MONTH GETS NONE. What a frozen month recorded is not
+                 waiting on anybody, so freshness is not a question it has —
+                 asked of the month rather than inferred from a missing field,
+                 which is how a row that had one arrived here wearing it. -->
+            ${!monthClosed && s.counts_note ? `<span class="distrakt-freshness${s.counts_current === false ? ' stale' : ''}"
+                  role="img" title="${esc(s.counts_note)}"
+                  aria-label="${esc(s.counts_note)}"></span>` : ''}
             <span class="distrakt-badge">${badge}</span>
             <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}</span>
             <span class="distrakt-season">S${String(s.season).padStart(2, '0')}</span>

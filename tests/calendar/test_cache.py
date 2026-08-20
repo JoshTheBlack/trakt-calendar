@@ -66,7 +66,13 @@ class CacheTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         new_db_path("calcache")
         await db.migrate()
-        self.settings = Settings()
+        # A TRAKT CLIENT ID, because this file's subject is the fill and the read
+        # against a TRAKT response and the fill now asks only sources whose
+        # calendar this instance can actually read (cache._window_sources ->
+        # CalendarPort.calendar_configured). Without one, Trakt is not in play at
+        # all and every fetch below has nobody to answer it — which is correct
+        # behaviour and the opposite of what these tests are about.
+        self.settings = Settings(trakt_client_id="cid")
         # This file is about the FILL AND READ PATH, exercised against a Trakt
         # response — it is not about Simkl, which is now a second admitted
         # source for every endpoint here (Capabilities.endpoints is no longer
@@ -299,6 +305,59 @@ class FetchShapeTests(CacheTestCase):
         self.assertTrue(any("pagination" in m.lower() for m in logged.output))
 
 
+class ASingleSourceInstanceIsNotPartialTests(CacheTestCase):
+    """REPORTED FROM A BROWSER: on an instance with one calendar credential, every
+    day fragment drew "Some calendar data couldn't be loaded — showing what we
+    have", for ever, with nothing wrong.
+
+    "In play" used to mean "could publish this endpoint" and nothing about
+    whether this instance can read it, so the fill asked a source with no client
+    id, was refused, and stored a window naming it as asked-but-silent. Partial
+    then meant "somebody who was never going to answer did not answer", which is
+    every window on that instance and always will be.
+    """
+
+    async def _window(self, settings):
+        client = _CaptureClient([StoredRecordTests.RICH])
+        # Simkl refuses, which is what an unconfigured or unreachable second
+        # source does; whether it is ASKED at all is the subject.
+        with patch("app.providers.simkl.calendar.fetch_window",
+                   AsyncMock(side_effect=base.SourceUnavailable("no"))):
+            with patch("app.providers.trakt.transport.shared_client", return_value=client):
+                window, _cached_at = await calendar_cache.load_window(
+                    SHOWS, settings, date(2026, 7, 13))
+        return window
+
+    async def test_a_source_with_no_credential_is_never_recorded_as_asked(self):
+        """The stored envelope is what the read path judges completeness from,
+        so this is the fact the banner is drawn off."""
+        window = await self._window(Settings(trakt_client_id="cid",
+                                             simkl_public_calendar_enabled=False))
+        self.assertEqual(list(window.asked), ["trakt"])
+        self.assertEqual(list(window.sources), ["trakt"])
+
+    async def test_a_source_that_was_asked_and_refused_still_reads_partial(self):
+        """The other half, and the reason this is not simply "stop marking things
+        partial": a source that CAN be read and did not answer is a real gap, and
+        the banner is how it gets said."""
+        window = await self._window(Settings(trakt_client_id="cid",
+                                             simkl_client_id="scid"))
+        self.assertEqual(list(window.asked), ["trakt", "simkl"])
+        self.assertEqual(list(window.sources), ["trakt"])
+
+    async def test_filling_the_credential_in_refills_rather_than_waiting(self):
+        """The recovery this leaves working, and it needs no special case: a
+        source that becomes readable is in play and absent from the stored
+        window's `asked`, which is exactly the condition load_window already
+        refills on."""
+        stored = await self._window(Settings(trakt_client_id="cid",
+                                             simkl_public_calendar_enabled=False))
+        self.assertEqual(list(stored.asked), ["trakt"])
+        refilled = await self._window(Settings(trakt_client_id="cid",
+                                               simkl_client_id="scid"))
+        self.assertEqual(list(refilled.asked), ["trakt", "simkl"])
+
+
 class SimklPublicCalendarSwitchTests(CacheTestCase):
     """simkl_public_calendar_enabled: whether Simkl contributes to this
     instance's calendar at all. Default settings (self.settings, plain
@@ -324,7 +383,10 @@ class SimklPublicCalendarSwitchTests(CacheTestCase):
         fill still succeeds from whatever source remains rather than erroring
         or coming back empty."""
         simkl_mock = AsyncMock(side_effect=base.SourceUnavailable("must not be called"))
-        off = Settings(simkl_public_calendar_enabled=False)
+        # The Trakt client id is what keeps Trakt in play at all now (see
+        # asyncSetUp): these tests are about the SIMKL switch, and they need
+        # the other source present to be the one that still answers.
+        off = Settings(trakt_client_id="cid", simkl_public_calendar_enabled=False)
         client = _CaptureClient([StoredRecordTests.RICH])
         with patch("app.providers.simkl.calendar.fetch_window", simkl_mock):
             with patch("app.providers.trakt.transport.shared_client", return_value=client):
@@ -341,7 +403,7 @@ class SimklPublicCalendarSwitchTests(CacheTestCase):
         configured or not."""
         simkl_mock = AsyncMock(return_value=[])
         configured_off = Settings(
-            simkl_client_id="id", simkl_access_token="token",
+            trakt_client_id="cid", simkl_client_id="id", simkl_access_token="token",
             simkl_public_calendar_enabled=False)
         client = _CaptureClient([StoredRecordTests.RICH])
         with patch("app.providers.simkl.calendar.fetch_window", simkl_mock):
@@ -356,7 +418,8 @@ class SimklPublicCalendarSwitchTests(CacheTestCase):
         operator who never opens the setting already has, and it must keep
         asking Simkl exactly as it did."""
         simkl_mock = AsyncMock(return_value=[])
-        configured_on = Settings(simkl_client_id="id", simkl_access_token="token")
+        configured_on = Settings(trakt_client_id="cid", simkl_client_id="id",
+                                 simkl_access_token="token")
         client = _CaptureClient([StoredRecordTests.RICH])
         with patch("app.providers.simkl.calendar.fetch_window", simkl_mock):
             with patch("app.providers.trakt.transport.shared_client", return_value=client):

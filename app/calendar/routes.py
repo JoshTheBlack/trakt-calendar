@@ -901,17 +901,23 @@ async def api_details(request: Request):
         # nobody who can answer it. The modal says so in its own words.
         return JSONResponse({"ok": False, "error": "No source can describe this title"},
                             status_code=404)
-    source, source_id = chosen
     try:
-        details = await detail_source.fetch(
-            settings, source, media, source_id,
+        # NO SOURCE REACHABLE MEANS DRAW WHAT IS ALREADY HELD, which `describe`
+        # decides: reading the store back needs no credential and makes no
+        # request, and refusing instead threw away a description this instance
+        # had already fetched once. None is the genuinely empty case.
+        details = await detail_source.describe(
+            settings, chosen, media,
             route_params.season(request.query_params.get("season")))
     except SourceUnavailable as exc:
         # The shared degradation contract rather than one service's error type:
         # this route can now be answered by either of two sources and catching
         # only Trakt's would let Simkl's escape as a 500.
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "source": str(source), **details})
+    if details is None:
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    return JSONResponse({"ok": True, "source": str(chosen.source), **details})
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

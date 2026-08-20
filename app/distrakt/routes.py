@@ -372,20 +372,34 @@ def _rows_for(shape: lifecycle.MonthShape,
 
 async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, default_emoji: str,
                                link_url: str | None, rate_limited: bool,
-                               standing: distrakt_store.MonthStanding) -> dict:
-    """Render a month WITHOUT any Trakt call, from whatever is last persisted — the
-    top-level fallback when a shared refresh prerequisite hit Trakt's rate limit or
+                               standing: distrakt_store.MonthStanding,
+                               settings) -> dict:
+    """Render a month WITHOUT any provider call, from whatever is last persisted —
+    the top-level fallback when a shared refresh prerequisite hit a rate limit or
     was unreachable. Stored records already carry each show's last-known
-    watched/total/cadence/dates, so this projects them offline (frozen_shows),
-    attaching a visible notice so stale-but-real beats a false 0/0 or a 500.
-    `rate_limited` only chooses the notice wording; both cases degrade identically
-    and return HTTP 200.
+    watched/total/cadence/dates, so this projects them offline, attaching a
+    visible notice so stale-but-real beats a false 0/0 or a 500. `rate_limited`
+    only chooses the notice wording; both cases degrade identically and return
+    HTTP 200.
 
-    The viewer's own list is left out on purpose: reading it is cheap, but every
-    row on it would need the season lookup that has just failed, so it could only
-    be rendered from counts nothing has refreshed."""
+    THE VIEWER'S OWN LIST IS RENDERED TOO, and it used to be left out. The stated
+    reason was that every row on it would need the season lookup that had just
+    failed — true, and it does not follow that the rows cannot be drawn: each one
+    carries its own last-known counts and dates (live.stored_shows), which is
+    what the degraded LIVE path has always drawn for a single failed title. What
+    the old shape produced instead was a page whose whole list vanished on a
+    refresh and came back on a reload, which reads as data loss rather than as a
+    service being briefly unreachable.
+
+    ONLY FOR THE MONTH UNDER WAY, the same rule the live path follows: what
+    somebody is keeping up with belongs to no month, so a month that is over or
+    has not begun has no list to show.
+    """
     doc = await distrakt_store.load_month(user_id, month_key)
-    shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [])
+    listed = (await distrakt_store.user_records(user_id)
+              if standing is distrakt_store.MonthStanding.CURRENT else [])
+    shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [],
+                               live.stored_shows(listed, settings))
     shows = _rows_for(shape, standing)
     notice = (
         "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
@@ -682,8 +696,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             user_id, everything, settings, fresh=season_fresh, watched_lookup=watched_lookup,
             allow_degrade=True, completed_lookup=completed_lookup,
             # The services this pass actually read, which is what tells a season
-            # only one of them knows about from one they agree on.
-            sources_read=[source for source, _port in ports]) if everything else []
+            # only one of them knows about from one they agree on — and which of
+            # them went quiet, which is what stops a row claiming its counts are
+            # current when one service's history could not be read at all.
+            sources_read=[source for source, _port in ports],
+            sources_unread=unreadable) if everything else []
     # compute_live_shows answers in the order it was asked, so the split is where
     # the two inputs were joined.
     live_premieres, live_listed = computed[:len(premieres)], computed[len(premieres):]
@@ -793,10 +810,16 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # reached that the services have stopped backing. Present only on the
         # month under way, and only until it is answered either way.
         "unbacked_verdicts": _unbacked_rows(unbacked),
-        # The services that could not be read on this pass, under the names they
-        # are shown by. Present so a season showing one number says WHY that is
-        # all there is, instead of reading as two services agreeing.
-        "sources_unreadable": [live.source_labels().get(name, name) for name in unreadable],
+        # WHAT THE PAGE SAYS ABOUT WHAT IT COULD NOT REFRESH, as finished
+        # sentences rather than as names for the browser to build one from. A
+        # season showing one number has to say WHY that is all there is, instead
+        # of reading as two services agreeing — and there is more than one why:
+        # a service that could not be read, one this instance has no credential
+        # for, and a title no registered service can look up. Composed here
+        # because the rule for choosing between them is the same rule the row's
+        # own tooltip is written from (app/distrakt/live.py), and a second copy
+        # in JavaScript could not be tested against it.
+        "source_notices": live.unavailable_notices(computed, unreadable=unreadable),
         "post1": post1,
         "post2": post2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -889,11 +912,13 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     except TraktRateLimitError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt rate-limited): %s", month_key, exc)
         return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
-                                          rate_limited=True, standing=standing), 200
+                                          rate_limited=True, standing=standing,
+                                          settings=settings), 200
     except TraktError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt unreachable): %s", month_key, exc)
         return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
-                                          rate_limited=False, standing=standing), 200
+                                          rate_limited=False, standing=standing,
+                                          settings=settings), 200
 
 
 @guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)
@@ -1117,9 +1142,15 @@ async def api_distrakt_details(request: Request):
     if chosen is None:
         return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
                             status_code=404)
-    source, source_id = chosen
+    source = chosen.source
     try:
-        details = await detail_source.fetch(settings, source, Media.SHOW, source_id, season)
+        # See the calendar's own modal: with nobody reachable, what this
+        # instance already holds beats a blank card, and None is the case where
+        # it holds nothing either.
+        details = await detail_source.describe(settings, chosen, Media.SHOW, season)
+        if details is None:
+            return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
+                                status_code=404)
     except TraktError as exc:
         # Trakt's own error type carries a status worth passing on; every other
         # source raises something this route has no special reading of, and a
