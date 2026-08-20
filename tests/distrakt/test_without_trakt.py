@@ -392,7 +392,7 @@ class TheRowSaysWhereItsNumbersCameFromTests(_CatalogueFailureTestCase):
         """Both halves of x/y and they differ: the total comes from ONE source by
         design, the watched count from every service the viewer linked."""
         row = await self._row({"trakt": 4, "simkl": 4})
-        self.assertTrue(row["counts_current"])
+        self.assertEqual(row["counts_freshness"], "current")
         self.assertEqual(row["counts_note"],
                          "Counts are up to date, read from Trakt and Simkl.")
 
@@ -402,7 +402,7 @@ class TheRowSaysWhereItsNumbersCameFromTests(_CatalogueFailureTestCase):
         real — they are what could be read without it — but "up to date" is not
         true of them."""
         row = await self._row({"simkl": 4}, unread=("trakt",))
-        self.assertFalse(row["counts_current"])
+        self.assertEqual(row["counts_freshness"], "stale")
         # AND THE SERVICE THAT WENT QUIET IS NOT LISTED AMONG THE SURVIVORS. Its
         # name is still on `total_by_source` whenever the season lookup came out
         # of the cache, which had the sentence contradict itself inside its own
@@ -417,7 +417,40 @@ class TheRowSaysWhereItsNumbersCameFromTests(_CatalogueFailureTestCase):
         """`sources_unread` is narrowed to what was asked FOR THIS ACCOUNT, so
         one viewer's outage cannot appear on another's row."""
         row = await self._row({"trakt": 4}, unread=("simkl",), asked=("trakt",))
-        self.assertTrue(row["counts_current"])
+        self.assertEqual(row["counts_freshness"], "current")
+
+    async def test_a_number_from_a_service_nobody_asked_is_not_called_up_to_date(self):
+        """THE REPORTED CASE. `watched_by_source` comes off the STORED watch state,
+        so a service whose credential has since been removed goes on contributing
+        a number — and the row said "up to date, read from Trakt and Simkl" over
+        one number that had been read and one that had merely been kept.
+
+        It is not the `missing` case and must not render as one: nothing failed,
+        nothing is waiting, and no refresh will move that number. So the mark is
+        its own state and the sentence is two clauses, one per tense."""
+        row = await self._row({"trakt": 4, "simkl": 4}, asked=("simkl",))
+        self.assertEqual(row["counts_freshness"], "partial")
+        self.assertEqual(row["counts_note"],
+                         "Counts are up to date, read from Simkl. "
+                         "Trakt's number is the last one read.")
+        # The number itself still shows — this is about what the row SAYS.
+        self.assertIn("4", row["counts"])
+
+    async def test_a_row_whose_every_number_is_stored_says_only_that(self):
+        """No first clause when nothing was read for it: "up to date, read from"
+        with an empty list would be a sentence about nobody."""
+        row = await self._row({"trakt": 4}, asked=("simkl",))
+        self.assertEqual(row["counts_freshness"], "partial")
+        self.assertEqual(row["counts_note"], "Trakt's number is the last one read.")
+
+    async def test_a_service_that_failed_outranks_one_nobody_asked(self):
+        """Both at once: one asked-and-quiet, one never asked. The failure is the
+        actionable half — something is wrong right now — so it is what the mark
+        and the sentence report."""
+        row = await self._row({"trakt": 4, "simkl": 4}, unread=("simkl",),
+                              asked=("simkl",))
+        self.assertEqual(row["counts_freshness"], "stale")
+        self.assertIn("could not be read", row["counts_note"])
 
     def test_the_list_reads_as_a_sentence_at_any_number_of_services(self):
         """Two is what is registered today and nothing about it is a rule — a
@@ -491,7 +524,7 @@ class ADegradedRefreshKeepsTheListOnTheScreenTests(AppTestCase):
     def test_and_says_they_are_not_this_pass_s(self):
         """Showing them is only honest with the mark that says what they are."""
         row, = self._degraded_month()["shows"]
-        self.assertFalse(row["counts_current"])
+        self.assertEqual(row["counts_freshness"], "stale")
         self.assertIn("Trakt", row["counts_note"])
 
 

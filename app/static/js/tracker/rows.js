@@ -251,15 +251,21 @@ function showRow(s) {
              onclick="openDistraktDetails(this, event)">
             <!-- Whether these numbers are this load's, first in the row so the
                  column reads down as one thing rather than being hunted for
-                 beside each row's counts. Green or red on every row, so the mark
-                 means something on sight rather than only when it appears; the
+                 beside each row's counts. On every row, so the mark means
+                 something on sight rather than only when it appears; the
                  sentence behind it names the services the numbers came from and
                  is composed server-side, where the reason is known.
+                 THREE STATES, NAMED BY THE SERVER: current, partial (a number
+                 here belongs to a service nobody asked, so no refresh will move
+                 it) and stale (a service was asked and could not be read). The
+                 class IS the server's word — branching here on a flag would put
+                 the vocabulary in two places, which is what the sentence itself
+                 already avoids.
                  A CLOSED MONTH GETS NONE. What a frozen month recorded is not
                  waiting on anybody, so freshness is not a question it has —
                  asked of the month rather than inferred from a missing field,
                  which is how a row that had one arrived here wearing it. -->
-            ${!monthClosed && s.counts_note ? `<span class="distrakt-freshness${s.counts_current === false ? ' stale' : ''}"
+            ${!monthClosed && s.counts_note ? `<span class="distrakt-freshness ${esc(s.counts_freshness || 'current')}"
                   role="img" title="${esc(s.counts_note)}"
                   aria-label="${esc(s.counts_note)}"></span>` : ''}
             <span class="distrakt-badge">${badge}</span>

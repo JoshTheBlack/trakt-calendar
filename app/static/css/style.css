@@ -1192,6 +1192,11 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
     background: var(--ok, #5cb85c); opacity: 0.75;
 }
+/* Amber sits between the two on purpose: nothing is broken and nothing is
+   waiting, so red would send somebody looking for an outage that is not there —
+   but one of the numbers is older than the row otherwise reads, and green says
+   it is not. */
+.distrakt-freshness.partial { background: var(--warn, #d8a33a); opacity: 1; }
 .distrakt-freshness.stale { background: var(--danger, #e0736b); opacity: 1; }
 /* A season that was finished and now has more of it. Quiet enough not to compete
    with the title, loud enough that the row does not read as a mistake. It is a

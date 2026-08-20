@@ -135,7 +135,29 @@ def counting_sources(show: dict) -> list[str]:
     return [name for name in source_order() if name in named]
 
 
-def fresh_note(show: dict, *, missing=()) -> str:
+def unasked_sources(show: dict, asked=()) -> list[str]:
+    """The services whose number on this row was NOT read this pass, in declared
+    order.
+
+    A ROW'S NUMBERS AND THIS PASS'S READS ARE DIFFERENT SETS, which is the thing
+    that made a row lie. `watched_by_source` comes off the STORED watch state, so
+    a service that has ever been synced goes on contributing a number long after
+    its credential was removed — and a row naming it read "up to date, read from
+    Trakt and Simkl" over one number nobody had asked for. This is the difference
+    between the two sets, and it is what the row has to say out loud.
+
+    Empty when nothing was asked, rather than "everything is stale": a caller that
+    did not say what it read (a frozen month, a test) has told us nothing about
+    these numbers, and inferring staleness from its silence would put the mark on
+    every row of a month that is not waiting on anybody.
+    """
+    names = {str(name) for name in asked}
+    if not names:
+        return []
+    return [name for name in counting_sources(show) if name not in names]
+
+
+def fresh_note(show: dict, *, missing=(), asked=()) -> str:
     """One row's sentence when its counts ARE this pass's — the tooltip behind
     the mark that says so.
 
@@ -151,6 +173,14 @@ def fresh_note(show: dict, *, missing=()) -> str:
     read. Its absence does not make the row's stored numbers wrong, but it does
     make "up to date" untrue: what is on the page is what could be read without
     it, and the mark has to say so.
+
+    `asked` is which services were read at all, and it separates a number that is
+    THIS PASS'S from one that is merely the last one taken. A service nobody asked
+    — its credential removed since the sync that stored its count — did not fail
+    and is not missing, so neither of the two sentences above is true of it: the
+    row went on claiming its numbers were "read from" a service that was never
+    contacted. Such a number is still worth showing, and it is still that
+    service's, but the sentence says which half of the row it applies to.
     """
     labels = source_labels()
     counted = counting_sources(show)
@@ -165,7 +195,18 @@ def fresh_note(show: dict, *, missing=()) -> str:
                          if name not in set(missing))
         return (f"{absent} could not be read just now, so these counts are "
                 + (f"{spoke}'s alone." if spoke else "the last ones read."))
-    read_from = and_list(labels.get(name, name) for name in counted)
+    stored_only = unasked_sources(show, asked)
+    read_from = and_list(labels.get(name, name) for name in counted
+                         if name not in set(stored_only))
+    if stored_only:
+        # TWO CLAUSES, because the row is two statements: what was read now, and
+        # what is being shown from last time. One sentence covering both would
+        # have to pick a tense for numbers that do not share one.
+        kept = and_list(labels.get(name, name) for name in stored_only)
+        tail = (f"{kept}'s number is the last one read." if len(stored_only) == 1
+                else f"{kept}'s numbers are the last ones read.")
+        return (f"Counts are up to date, read from {read_from}. {tail}"
+                if read_from else tail)
     if not read_from:
         return "Counts are up to date."
     return f"Counts are up to date, read from {read_from}."
@@ -322,15 +363,24 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
     # AFTER the counts, not before: the note names the services the numbers came
     # from and those are what `_apply_counts` has just decided.
     #
-    # `counts_current` IS NOT `not unavailable`. This title's own season lookup
-    # answered — that is what brought it here — but a service whose HISTORY could
-    # not be read is one whose watched count is missing from the row anyway, and
-    # a mark reading "up to date" over numbers that are short of a service nobody
-    # could reach is the same false reassurance the whole distinction exists to
-    # remove. One question ("are these numbers this load's"), both ways of
-    # failing it.
-    show["counts_current"] = not missing
-    show["counts_note"] = fresh_note(show, missing=missing)
+    # FRESHNESS IS NOT `not unavailable`, AND IT IS NOT A BOOLEAN. This title's own
+    # season lookup answered — that is what brought it here — but the numbers
+    # beside it can still be short in two different ways, and a row that renders
+    # them identically is telling the reader the same thing about two situations
+    # they would act on differently:
+    #   STALE   a service was ASKED and could not be read. Something is wrong right
+    #           now; refreshing may fix it.
+    #   PARTIAL every service asked answered, but a number on this row belongs to a
+    #           service nobody asked — its credential is gone, so the number is the
+    #           last one taken and no refresh will move it. Nothing is broken; the
+    #           row is simply older than it looks in one place.
+    # Both are false under a green mark, which is what "up to date" would claim.
+    # THE SERVER NAMES THE STATE rather than shipping a flag for the browser to
+    # branch on: the vocabulary and the sentence behind it are one decision.
+    stored_only = unasked_sources(show, asked)
+    show["counts_freshness"] = ("stale" if missing
+                                else "partial" if stored_only else "current")
+    show["counts_note"] = fresh_note(show, missing=missing, asked=asked)
     return show
 
 
@@ -357,7 +407,7 @@ def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *
     """
     wanted = source or next(iter(named_sources(rec)), "")
     show = {**rec, "key": str(record_key(rec)), "unavailable": True,
-            "counts_current": False,
+            "counts_freshness": "stale",
             "unavailable_source": wanted,
             "unavailable_reason": unavailable_reason(rec, asked=source),
             "counts_note": unavailable_note(rec, settings, asked=source)}
