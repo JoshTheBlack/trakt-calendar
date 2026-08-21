@@ -227,6 +227,51 @@ class WhatTheServicesSayNowTests(unittest.IsolatedAsyncioTestCase):
 # The question the month raises, and what a frozen month does about it.
 # ---------------------------------------------------------------------------
 
+class WhatTheDecidingServiceSaysTests(unittest.TestCase):
+    """The SECOND way a verdict stops being backed: nobody changed their mind,
+    the account changed which service it counts first.
+
+    Not the same shape as a retraction, and told apart from one deliberately —
+    saying "Trakt no longer reports finishing this" about a service that never
+    reported it would be a plain falsehood.
+    """
+
+    def test_the_first_service_that_answers_and_does_not_say_finished_is_named(self):
+        """The measured case: a season finished on Simkl, credited to Simkl, with
+        Trakt made the account's primary afterwards and holding none of it."""
+        self.assertEqual(
+            counts.unbacked_by_decider({"trakt": 0, "simkl": 10}, TOTAL,
+                                       ["trakt", "simkl"]),
+            "trakt")
+
+    def test_a_decider_that_does_say_finished_names_nobody(self):
+        self.assertEqual(
+            counts.unbacked_by_decider({"trakt": 10, "simkl": 10}, TOTAL,
+                                       ["trakt", "simkl"]),
+            "")
+
+    def test_the_order_is_what_decides_who_is_asked(self):
+        """The same numbers, the other way round: with Simkl counted first and
+        Simkl reporting the whole season, nothing is unbacked."""
+        self.assertEqual(
+            counts.unbacked_by_decider({"trakt": 0, "simkl": 10}, TOTAL,
+                                       ["simkl", "trakt"]),
+            "")
+
+    def test_a_service_that_said_nothing_hands_the_decision_down(self):
+        """Absence is "not read, or read and had no answer", never a zero — the
+        same reading no_longer_finished takes of the same absence. So a decider
+        that went quiet must not fail the verdict on the strength of it."""
+        self.assertEqual(
+            counts.unbacked_by_decider({"simkl": 10}, TOTAL, ["trakt", "simkl"]),
+            "")
+
+    def test_nothing_decides_when_no_order_is_given(self):
+        """Which is what every account got before an order could be stated, and
+        what keeps this from firing on a caller that never asked the question."""
+        self.assertEqual(counts.unbacked_by_decider({"trakt": 0}, TOTAL), "")
+
+
 class TheQuestionAMonthRaisesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         new_db_path("settled-verdicts-question")
@@ -245,10 +290,10 @@ class TheQuestionAMonthRaisesTests(unittest.IsolatedAsyncioTestCase):
         await store.add_month_record(self.user_id, month, record)
         return await store.month_records(self.user_id, month, store.SETTLED_KINDS)
 
-    async def _ask(self, month: str, record: dict, now: dict):
+    async def _ask(self, month: str, record: dict, now: dict, order=()):
         settled = await self._settled(month, record)
         return await lifecycle.unbacked_verdicts(
-            self.user_id, month, settled, lambda _record, _season: now)
+            self.user_id, month, settled, lambda _record, _season: now, order)
 
     async def test_a_double_retracted_verdict_is_raised(self):
         """The regression, as the record and the numbers really were."""
@@ -283,6 +328,43 @@ class TheQuestionAMonthRaisesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await self._ask(_month_back(0), _verdict({"trakt": 10, "simkl": 3}),
                             {"trakt": 10, "simkl": 7}),
+            [])
+
+    async def test_a_verdict_the_new_decider_does_not_back_is_raised(self):
+        """THE MEASURED CASE. A season finished on Simkl and credited to Simkl,
+        with Trakt counted first afterwards and holding none of it. Nobody
+        retracted anything — the question moved — so it is asked about rather
+        than migrated, and the record travels untouched either way."""
+        question, = await self._ask(_month_back(0), _verdict({"simkl": 10}),
+                                    {"trakt": 0, "simkl": 10},
+                                    order=["trakt", "simkl"])
+        self.assertEqual(question.decider, "trakt")
+        self.assertEqual(question.sources, [])
+
+    async def test_a_retraction_is_reported_as_a_retraction_and_not_as_a_decider(self):
+        """Both can be true at once, and a service changing its mind is the more
+        specific thing to tell somebody."""
+        question, = await self._ask(_month_back(0),
+                                    _verdict({"trakt": 10, "simkl": 10}),
+                                    {"trakt": 0, "simkl": 0},
+                                    order=["trakt", "simkl"])
+        self.assertEqual(question.sources, ["simkl", "trakt"])
+        self.assertEqual(question.decider, "")
+
+    async def test_the_decider_backing_it_raises_nothing(self):
+        """The same numbers with the account's order the other way round: Simkl
+        decides, Simkl finished it, nothing to ask."""
+        self.assertEqual(
+            await self._ask(_month_back(0), _verdict({"simkl": 10}),
+                            {"trakt": 0, "simkl": 10}, order=["simkl", "trakt"]),
+            [])
+
+    async def test_an_account_that_stated_no_order_is_never_asked_this(self):
+        """Which is every account before the preference existed — the question
+        cannot be answered without knowing who decides, so it is not raised."""
+        self.assertEqual(
+            await self._ask(_month_back(0), _verdict({"simkl": 10}),
+                            {"trakt": 0, "simkl": 10}),
             [])
 
     async def test_an_abandoned_verdict_is_never_raised(self):
@@ -579,6 +661,22 @@ class TheSentenceTests(unittest.TestCase):
     def test_two_services_withdrawing_read_as_two(self):
         self.assertIn("Trakt and Simkl no longer report finishing this",
                       self._note(["trakt", "simkl"], {"trakt": 0, "simkl": 0}))
+
+    def test_a_decider_change_does_not_accuse_anybody_of_changing_their_mind(self):
+        """The verdict stands exactly as the service that made it left it. Saying
+        Trakt "no longer reports" finishing a season Trakt never reported would be
+        a plain falsehood, so this is its own sentence rather than the same one
+        with a different name in it."""
+        note = distrakt_routes._unbacked_note(lifecycle.UnbackedVerdict(
+            _verdict({"simkl": 10}), "2026-08", [], {"trakt": 0, "simkl": 10},
+            "trakt"))
+        self.assertIn("Trakt is the service you count first now", note)
+        self.assertNotIn("no longer report", note)
+        # And it still says both readings, which is the whole reason the ordinary
+        # sentence says them.
+        self.assertIn("2026-08", note)
+        self.assertIn("10/10", note)
+        self.assertIn("0/10", note)
 
 
 class TheControlsACompletedRowOffersTests(unittest.TestCase):

@@ -512,8 +512,19 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     season only one of two of them knows about from a season both agree on — see
     counts.counts_label. It is threaded down rather than looked up here because
     it is one answer for the whole pass, not one per row.
+
+    IT IS ALSO THE ORDER THE PRIMARY IS PICKED IN, and those are one fact rather
+    than two: `asked` arrives most-trusted first (watch_history.tracker_sources),
+    so the service that decides is the first one this ACCOUNT trusts that has a
+    number for this season. The registry's order is the fallback for a caller
+    that did not say what it asked — a frozen month re-rendered, a test — and
+    that is exactly the behaviour every row had before an account could state a
+    preference. Reading the registry here regardless is what let a service decide
+    from a number it left behind after its link lapsed: it was never asked, no
+    refresh would ever move its number, and it still outranked the service the
+    viewer actually reads.
     """
-    order = source_order()
+    order = tuple(str(source) for source in asked) or source_order()
     total = int(show.get("total") or 0)
     # RESOLVED ONCE, HERE, BEFORE ANY OF THE THREE FORMS IS WRITTEN. A service can
     # report a title finished without itemizing it, and that answer travels as a

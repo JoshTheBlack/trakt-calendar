@@ -2274,6 +2274,37 @@ UPDATE distrakt_user_seasons AS r
 """
 
 
+MIGRATION_30 = """
+-- WHICH LINKED TRACKER DECIDES, WHEN MORE THAN ONE ANSWERS FOR A SEASON.
+--
+-- Two services can report different counts for one season and both be right,
+-- and one number has to be picked: it is what the bucket rule reads to decide a
+-- season is finished, and it is what a frozen month and an announcement post
+-- carry for ever. That pick has always been the REGISTRY's declared order --
+-- app-wide, identical for everybody, and not a thing an account could state.
+--
+-- WHY THAT NEEDED TO BECOME A PREFERENCE. The registry order is a fact about
+-- what this app supports, not about whose viewing an account trusts. Somebody
+-- migrating between services has the order backwards and cannot say so; worse,
+-- the registry order does not follow a LINK, so a service unlinked long ago
+-- goes on deciding from whatever number it last left behind, and a season
+-- finished at the service the viewer actually uses can never complete.
+--
+-- A LIST OF SOURCE NAMES, MOST TRUSTED FIRST, AND IT IS A REORDERING RATHER
+-- THAN A SELECTION -- the same shape and the same rule as precedence_json's
+-- field order beside it. A source this account does not name still answers when
+-- it is the only one that can; a name this version does not recognise falls out
+-- on the way past. So an empty list is the honest default for an account that
+-- has said nothing, and it reads as "use the declared order", which is exactly
+-- what every account got before this column existed.
+--
+-- WHAT IT DELIBERATELY DOES NOT REACH: a month already frozen. Those numbers
+-- are the answer to "what did that month decide", not a live claim, and a
+-- preference changed today must not re-answer an earlier year's record.
+ALTER TABLE source_prefs ADD COLUMN tracker_order_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2304,6 +2335,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (27, MIGRATION_27),
     (28, MIGRATION_28),
     (29, MIGRATION_29),
+    (30, MIGRATION_30),
 ]
 
 

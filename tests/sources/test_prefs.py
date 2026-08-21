@@ -281,6 +281,78 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         await db.execute("DELETE FROM users WHERE id = ?", (self.user_id,))
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM source_prefs"), 0)
 
+    async def test_a_stated_tracker_order_survives_a_round_trip(self):
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_priority=["simkl", "trakt"]))
+        self.assertEqual((await prefs.load(self.user_id)).tracker_priority,
+                         ["simkl", "trakt"])
+
+    async def test_a_row_predating_the_column_reads_as_no_opinion(self):
+        """The column has a default, so the migration gave every existing row an
+        empty list rather than a NULL nothing can read — and an empty list is
+        exactly what every account had before it could state one."""
+        await db.execute(
+            "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
+            "precedence_json) VALUES (?, 'auto', 'auto', '{}')",
+            (self.user_id,))
+        self.assertEqual((await prefs.load(self.user_id)).tracker_priority, [])
+
+    async def test_an_order_naming_an_unknown_service_is_refused(self):
+        """Refused rather than coerced, the same way a bad selection is: an order
+        naming a service this app has never heard of is a bug in the screen, and
+        dropping it quietly would hide the screen sending the wrong name."""
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     tracker_priority=["trakt", "letterboxd"]))
+
+    async def test_an_order_naming_a_service_twice_is_refused(self):
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     tracker_priority=["trakt", "trakt"]))
+
+
+class TrackerOrderTests(unittest.TestCase):
+    """Which linked tracker decides. Pure, like the selection rules above — the
+    reordering takes the services that answer rather than looking them up."""
+
+    def _prefs(self, priority):
+        return prefs.SourcePrefs(user_id=1, tracker_priority=priority)
+
+    def test_an_account_with_no_opinion_gets_the_declared_order_back(self):
+        """Which is what every account had before this could be stated, and what
+        keeps a single-service account behaving exactly as it did."""
+        self.assertEqual(self._prefs([]).tracker_order(["trakt", "simkl"]),
+                         ["trakt", "simkl"])
+
+    def test_the_named_service_leads(self):
+        self.assertEqual(self._prefs(["simkl"]).tracker_order(["trakt", "simkl"]),
+                         ["simkl", "trakt"])
+
+    def test_it_reorders_and_never_filters(self):
+        """THE RULE THAT MAKES ONE PREFERENCE WORK ACROSS MIXED ROWS. A season
+        only the un-preferred service knows about still has that service's
+        number, because it is still in the list — just not first."""
+        self.assertEqual(sorted(self._prefs(["simkl"]).tracker_order(["trakt", "simkl"])),
+                         ["simkl", "trakt"])
+
+    def test_a_preferred_service_that_does_not_answer_decides_nothing(self):
+        """`sources` is already the set that answers for this account, so a
+        service named here but not linked is simply absent — which is the whole
+        fix for a service deciding from the number it left behind when its link
+        lapsed."""
+        self.assertEqual(self._prefs(["trakt", "simkl"]).tracker_order(["simkl"]),
+                         ["simkl"])
+
+    def test_a_name_this_version_does_not_know_falls_out(self):
+        """A row written by a newer version must not stop an older one rendering
+        a page — the same degrade rule the selections take."""
+        self.assertEqual(self._prefs(["letterboxd", "simkl"]).tracker_order(
+            ["trakt", "simkl"]), ["simkl", "trakt"])
+
+    def test_a_document_that_is_not_a_list_reads_as_no_opinion(self):
+        self.assertEqual(self._prefs("simkl").tracker_order(["trakt", "simkl"]),
+                         ["trakt", "simkl"])
+
 
 if __name__ == "__main__":
     unittest.main()

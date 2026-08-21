@@ -1035,7 +1035,25 @@ async def forget_movie_watch(user_id: int, key) -> str | None:
 
 
 async def tracker_ports(settings, user_id: int) -> list:
-    """Every (source, port) pair this account's tracker should read, in order.
+    """Every (source, port) pair this account's tracker should read, MOST TRUSTED
+    FIRST.
+
+    THE ORDER IS THE ACCOUNT'S AND IT IS LOAD-BEARING IN ONE NARROW PLACE, which
+    is the one `providers.for_tracker_ports` already names: the FIRST entry that
+    has a number for a season is the source whose count the bucket rule acts on
+    and a frozen month keeps (counts.primary_count). Registry order answered that
+    for everybody — a fact about what this app supports rather than about whose
+    viewing this viewer trusts — and, worse, it did not follow a LINK: a service
+    unlinked long ago went on deciding from the number it last left behind, so a
+    season finished at the service the viewer actually uses could never complete.
+    Narrowing to the linked ports is what fixes that; `prefs.tracker_order` is
+    where the viewer says which way round they want what remains.
+
+    APPLIED HERE, ONCE, so it reaches every caller rather than each of them
+    remembering to reorder: the live pass takes `sources_read` off this list, the
+    settle-on-drain path asks for the names, and the month payload hands the same
+    list to the verdict check. A second application anywhere else is how one of
+    them comes to disagree with the rest about who decides.
 
     THE PREFERENCE IS READ HERE rather than threaded through every caller: it is
     one small query against the account this sync is already for, so asking for
@@ -1061,13 +1079,15 @@ async def tracker_ports(settings, user_id: int) -> list:
     prefs = await source_prefs.load(user_id)
     linked = frozenset(str(source) for source, provider in providers.registered().items()
                        if provider.is_configured(settings))
-    return providers.for_tracker_ports(prefs, linked, settings)
+    ports = providers.for_tracker_ports(prefs, linked, settings)
+    wanted = prefs.tracker_order([source for source, _port in ports])
+    return sorted(ports, key=lambda pair: wanted.index(str(pair[0])))
 
 
 async def tracker_sources(settings, user_id: int) -> list:
-    """Just the source names of tracker_ports, for callers that need to know WHO
-    answers rather than how to ask them — the season lookups, which are catalogue
-    reads on a different seam entirely."""
+    """The source names of tracker_ports, most trusted first, for callers that
+    need to know WHO answers rather than how to ask them — the season lookups,
+    which are catalogue reads on a different seam entirely."""
     return [source for source, _port in await tracker_ports(settings, user_id)]
 
 
@@ -1097,6 +1117,16 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
     THE UNIT IS THE TITLE BECAUSE THAT IS WHAT A SERVICE ANSWERS ABOUT. A progress
     record covers every season at once and there is no cheaper call for one of
     them, so a caller that cares about a single season pays exactly the same.
+
+    ONE CALL PER SOURCE, WHICH IS WHAT THE PER-TITLE READ IS FOR. Simkl names
+    "checking a small handful of specific titles" as this endpoint's own case, and
+    adding a show is exactly that. The alternative — reading a whole library to
+    learn about one title — is the traffic Simkl names as a reason a client id is
+    suspended, and it was briefly what this function did.
+
+    A SOURCE THAT SAYS NOTHING ABOUT THE TITLE LEAVES IT ALONE, which is the
+    contract above: an id absent from the answer means the service had nothing to
+    tell us, never that the viewer has watched none of it.
     """
     ports = await tracker_ports(settings, user_id)
     state = await _load(user_id)

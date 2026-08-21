@@ -29,6 +29,7 @@ ordinary failure — see the login and register handlers for why.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 from urllib.parse import quote
 
@@ -70,6 +71,24 @@ INVALID_INVITE = "This invite link is not valid. Ask your admin for a new one."
 # app_meta key, set when setup could not adopt the Trakt token already in
 # settings.json, so the Settings screen can prompt for a reconnect.
 TRAKT_RECONNECT_NOTICE = "trakt_reconnect_notice"
+
+
+def _source_prefs():
+    """app/sources/prefs, imported at the point of use rather than at the top.
+
+    THE PLACEMENT IS THE WHOLE REASON THIS IS A FUNCTION. app/sources/routes.py
+    imports THIS package for its access levels, so naming that package at load
+    time here would close an import cycle — and auth is a layer every feature may
+    depend on, which only stays true while it names none of them at module level.
+
+    Reached at all because the account page is where somebody says which of their
+    linked trackers decides a season is finished: it is the page that shows what
+    they have linked. The preference itself is stored with the other per-account
+    source preferences rather than in a second place that answers "which service
+    leads".
+    """
+    from ..sources import prefs
+    return prefs
 
 
 # ---------------------------------------------------------------------------
@@ -582,6 +601,12 @@ async def me_page(request: Request):
     identities = await auth.list_identities(user.user_id)
     linked = {row["provider"]: row["display_name"] for row in identities}
     account = await auth.get_user(user.user_id)
+    # The tracker services this account has actually linked, in the app's declared
+    # order, which is what `tracker_order` reorders and what decides whether there
+    # is a choice to offer at all.
+    linked_trackers = [str(source) for source in providers.registered()
+                       if str(source) in providers.tracker_sources() and str(source) in linked]
+    tracker_prefs = await _source_prefs().load(user.user_id)
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
@@ -607,6 +632,22 @@ async def me_page(request: Request):
         "tracker_services_missing": [
             provider.label for source, provider in providers.registered().items()
             if str(source) in providers.tracker_sources() and str(source) not in linked],
+        # WHICH LINKED TRACKER DECIDES, in the order it is currently asked in.
+        # Only the ones this account has LINKED, because the choice is between
+        # services that actually answer — a service with no identity here decides
+        # nothing, and offering it would be offering a preference with no effect.
+        # Empty when fewer than two are linked, which is what hides the control:
+        # there is no order to state when one service answers.
+        #
+        # ORDERED THROUGH THE SAME FUNCTION THE TRACKER DECIDES WITH
+        # (prefs.tracker_order) rather than by reading the stored list here. A
+        # screen with its own reading of the preference could disagree with the
+        # one acting on it, and the viewer would have no way to tell which of the
+        # two was lying.
+        "tracker_priority": [
+            {"source": name, "label": providers.registered()[name].label}
+            for name in tracker_prefs.tracker_order(linked_trackers)
+        ] if len(linked_trackers) > 1 else [],
         "trakt_login_configured": settings.trakt_login_configured,
         "simkl_login_configured": settings.simkl_login_configured,
         # Whether unlinking is offered at all. Without a password an account's
@@ -695,6 +736,38 @@ async def unlink_identity(request: Request):
         return authz.error("That account isn't linked.", 404)
     warning = await trakt_routes.revoke_token_value(token)
     return JSONResponse({"ok": True, "redirect": "/me", "warning": warning})
+
+
+@guard.post("/api/me/tracker-order", AuthLevel.SESSION)
+async def set_own_tracker_order(request: Request):
+    """State which linked tracker decides, when more than one answers for a season.
+
+    THE ORDER IS STORED WHOLE rather than as "promote this one", because that is
+    what it means: with a third service registered, "Simkl first" says nothing
+    about the other two. `source_prefs.save` is what refuses a name this app has
+    never heard of and one named twice.
+
+    NOT NARROWED TO WHAT IS LINKED TODAY, deliberately, and this is the whole
+    reason the preference is worth storing rather than derived. Somebody who
+    unlinks Trakt for a month has not stopped preferring it; dropping it from the
+    stored order on the way in would silently rewrite their choice into one they
+    never made, and re-linking would come back in registry order. What is linked
+    decides who is ASKED (watch_history.tracker_ports); this decides who leads
+    among those that answer.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    order = data.get("order")
+    if not isinstance(order, list):
+        return authz.error("An order must be a list of service names.")
+    source_prefs = _source_prefs()
+    prefs = await source_prefs.load(user.user_id)
+    try:
+        saved = await source_prefs.save(dataclasses.replace(
+            prefs, tracker_priority=[str(name) for name in order]))
+    except ValueError as exc:
+        return authz.error(str(exc))
+    return JSONResponse({"ok": True, "order": list(saved.tracker_priority)})
 
 
 @guard.post("/api/me/username", AuthLevel.SESSION)

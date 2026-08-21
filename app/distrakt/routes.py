@@ -551,7 +551,7 @@ def _unknown_episode_rows(plays) -> list[dict]:
 
 
 def _unbacked_note(question: lifecycle.UnbackedVerdict) -> str:
-    """The sentence a settled row whose services have withdrawn is offered with.
+    """The sentence a settled row nothing stands behind any more is offered with.
 
     IT SAYS BOTH NUMBERS, not just that something changed. "This no longer adds
     up" leaves the viewer to open the row, remember what it used to say and work
@@ -560,11 +560,28 @@ def _unbacked_note(question: lifecycle.UnbackedVerdict) -> str:
     function the row itself is drawn with — so the two can never disagree about
     how a per-service reading is spelled.
 
+    TWO SENTENCES, BECAUSE THERE ARE TWO REASONS AND THEY ARE NOT THE SAME NEWS.
+    A RETRACTION is a service changing its mind: it said you had finished this and
+    now says you have not, and the viewer may well want to know which one. A
+    DECIDER CHANGE is nobody changing their mind at all — the verdict stands
+    exactly as the service that made it left it, and what moved is which service
+    this account counts first. Telling somebody "Trakt no longer reports finishing
+    this" when Trakt never reported it in the first place would be a plain
+    falsehood, which is why the shape is chosen here rather than the two being
+    forced into one wording.
+
     Written here for the reason MONTH_AWAITS_IMPORT is: it is a sentence this page
     says about its own state, and the page's states are this module's.
     """
     labels, order = live.source_labels(), live.source_order()
     total = question.record.get("total")
+    if question.decider and not question.sources:
+        was = counts.counts_label(question.record.get("watched_by_source") or {},
+                                  total, labels, order)
+        now = counts.counts_label(question.now, total, labels, order)
+        return (f"{labels.get(question.decider, question.decider)} is the service "
+                f"you count first now, and it does not report this finished. "
+                f"{question.month} recorded it as {was}, and it now reads {now}.")
     # Named in the registry's declared order, which is the order every other
     # per-service reading on the page is written in (counts.counts_label takes the
     # same one). The rule that produced them answers alphabetically because a set
@@ -770,7 +787,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             # The record's own flat identity, which is the key the watch state
             # files everything under — not re-resolved from its ids, which would
             # be a second answer to a question the record already carries.
-            live_counts)
+            live_counts,
+            # Which services this account trusts, most first — the same list the
+            # rows' own numbers were picked with, so a verdict is only ever
+            # questioned against the service the page is already showing.
+            order=[source for source, _port in ports])
 
     shows = _rows_for(shape, standing)
     if premieres and season_fresh:

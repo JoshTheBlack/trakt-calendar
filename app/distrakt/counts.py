@@ -136,6 +136,43 @@ def finished_by(per_source: Mapping[str, int] | int | None, total) -> set[str]:
     return {name for name, count in resolve(per_source, y).items() if count >= y}
 
 
+def unbacked_by_decider(now: Mapping[str, int] | int | None, total, order=()) -> str:
+    """The service that DECIDES this account's counts and does not say the season
+    is finished, or "" when it does say so — or when nothing decides.
+
+    A SECOND WAY FOR A VERDICT TO STOP BEING BACKED, and it is not the same shape
+    as `no_longer_finished` above. That one is a RETRACTION: a service the record
+    credits with finishing the season now reports otherwise. This one is a CHANGE
+    OF WHO IS ASKED — the record still stands exactly as the service that made it
+    left it, but the account has since made a different service its decider, and
+    that service does not report the season finished. Nobody withdrew anything;
+    the question moved.
+
+    IT NEEDS THE ORDER BECAUSE "THE DECIDER" IS NOT A PROPERTY OF THE NUMBERS.
+    It is the first service this account trusts that has anything to say about
+    this season — the same rule and the same order `primary_count` picks with, so
+    the service named here is always the one whose number the row is showing.
+
+    A SERVICE THAT SAID NOTHING THIS PASS DOES NOT DECIDE, which is why this walks
+    the order looking for one that is PRESENT. Absence is "not read, or read and
+    had no answer", never a zero, so a decider that went quiet hands the decision
+    down rather than failing the verdict — the same reading `no_longer_finished`
+    takes of the same absence, for the same reason.
+
+    STILL NOT A DECISION. Like everything else here this only reports; whether to
+    ask the viewer about it is lifecycle's, and withdrawing a verdict is only ever
+    reopen(), and only ever because somebody said so.
+    """
+    if not isinstance(now, Mapping):
+        return ""
+    y = int(total or 0)
+    still = finished_by(now, y)
+    for name in order:
+        if str(name) in now:
+            return "" if str(name) in still else str(name)
+    return ""
+
+
 def no_longer_finished(recorded: Mapping[str, int] | int | None,
                        now: Mapping[str, int] | int | None, total) -> list[str]:
     """The services a settled verdict credits with FINISHING a season and which do

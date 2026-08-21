@@ -1,6 +1,6 @@
 """One account's source preferences, read and written.
 
-Backs the `source_prefs` table. Four facts live here:
+Backs the `source_prefs` table. Five facts live here:
 
   - CALENDAR SOURCE and TRACKER SOURCE: which services each half of the app
     asks. Separately, because they are separate decisions — somebody can
@@ -15,6 +15,12 @@ Backs the `source_prefs` table. Four facts live here:
     changing it is instant and invalidates nothing. `field_order` is the whole
     of what this module decides about it; what the FIELDS are is
     app/calendar/resolve.py's vocabulary, and deliberately not restated here.
+  - TRACKER PRIORITY: which LINKED tracker decides, when several answer for one
+    season. Separate from PRECEDENCE beside it because they settle different
+    arguments — precedence picks whose description of a title a viewer reads,
+    this one picks whose COUNT the bucket rule acts on and a frozen month keeps.
+    `tracker_order` is the whole of it, and it is a reordering of the services
+    that already answer rather than a selection among them.
 
 AN ACCOUNT WITH NO ROW HAS NO OPINION, and `load` returns the defaults for one
 rather than creating anything. That is what keeps this free for the overwhelming
@@ -154,6 +160,11 @@ class SourcePrefs:
     precedence: dict = field(default_factory=dict)
     # {endpoint key: selection}. See `calendar_selection`.
     endpoint_sources: dict = field(default_factory=dict)
+    # Tracker service names, most trusted first. See `tracker_order`, which is
+    # the whole of what it does. Empty means "no opinion" and leaves the app's
+    # declared order standing, which is what every account had before this
+    # existed — it is NOT a claim that no service decides.
+    tracker_priority: list = field(default_factory=list)
 
     def calendar_selection(self, endpoint=None) -> str:
         """Which services answer for `endpoint`, falling back to the
@@ -245,6 +256,86 @@ class SourcePrefs:
                 preferred.append(candidate)
         return preferred + [name for name in names if name not in preferred]
 
+    def tracker_order(self, sources) -> list[str]:
+        """`sources` reordered so the tracker this account trusts most comes
+        first — WHICH LINKED SERVICE DECIDES when several answer for one season.
+
+        THE SAME REORDERING RULE AS `field_order`, AND FOR THE SAME REASON: it
+        can only decide which of several answers leads, never remove the only
+        answer there is. A season only one service knows about is still that
+        service's number whatever this says, so an account that names Trakt first
+        does not lose the seasons only Simkl holds. That is what makes one
+        preference work across a roster of mixed rows — some from both services,
+        some from either alone — without a rule per row.
+
+        `sources` IS ALREADY THE SET THAT ANSWERS FOR THIS ACCOUNT — the linked,
+        admitted, credentialled ones (watch_history.tracker_sources) — so a
+        service named here but not linked is simply absent from `names` and
+        cannot decide anything. THAT IS THE WHOLE FIX for a service deciding from
+        a number it left behind when its link lapsed: unlinking removes it from
+        the candidates, so the next one down decides, and re-linking hands it
+        back.
+
+        A name this version does not recognise falls out on the way past, and an
+        account that has stated nothing gets `sources` back untouched — the
+        caller's own order, which is the app's declared one. Same degrade rule as
+        everything else here, for the same reason: a row written by a newer
+        version must not stop an older one rendering a page.
+        """
+        names = [str(source) for source in sources]
+        stated = self.tracker_priority if isinstance(self.tracker_priority, list) else []
+        preferred = []
+        for candidate in stated:
+            if isinstance(candidate, str) and candidate in names and candidate not in preferred:
+                preferred.append(candidate)
+        return preferred + [name for name in names if name not in preferred]
+
+
+def _stored_tracker_priority(document) -> list[str]:
+    """The stated tracker order read back, or an empty list.
+
+    Empty on anything unreadable, which reads as "no opinion" and leaves the
+    declared order standing — the same answer an account that never opened the
+    screen gets, and nothing here that cannot be restated by opening it again.
+    Entries are kept as written rather than filtered against the registry:
+    `tracker_order` already ignores a name it cannot place, and dropping an
+    unknown service HERE would quietly forget a preference belonging to a
+    provider this version happens not to have registered.
+    """
+    if not document:
+        return []
+    try:
+        parsed = json.loads(document)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [str(name) for name in parsed if isinstance(name, str)]
+
+
+def _tracker_priority(value) -> list[str]:
+    """A supplied tracker order, validated on the way IN.
+
+    REFUSED RATHER THAN COERCED, exactly as `_selection` is and for the same
+    reason: an order naming a service this app has never heard of is a bug in
+    the caller, and silently dropping it would hide the screen sending the wrong
+    name. Duplicates are refused too — an order that names one service twice has
+    no single meaning.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"tracker_order must be a list of service names, not {value!r}")
+    names = [str(name) for name in value]
+    unknown = [name for name in names if name not in SOURCE_NAMES]
+    if unknown:
+        raise ValueError(
+            f"tracker_order names {', '.join(sorted(unknown))}, which is not among "
+            f"{', '.join(sorted(SOURCE_NAMES))}")
+    if len(set(names)) != len(names):
+        raise ValueError(f"tracker_order names a service more than once: {names}")
+    return names
+
 
 def _selection(value, column: str) -> str:
     """A stored or supplied selection, validated.
@@ -300,8 +391,8 @@ def _stored_precedence(document) -> dict:
 async def load(user_id: int) -> SourcePrefs:
     """This account's preferences, or the defaults if it has stated none."""
     row = await db.fetch_one(
-        "SELECT calendar_source, tracker_source, precedence_json, endpoint_sources_json "
-        "FROM source_prefs WHERE user_id = ?",
+        "SELECT calendar_source, tracker_source, precedence_json, endpoint_sources_json, "
+        "tracker_order_json FROM source_prefs WHERE user_id = ?",
         (user_id,),
     )
     if row is None:
@@ -312,6 +403,7 @@ async def load(user_id: int) -> SourcePrefs:
         tracker_source=_stored_selection(row["tracker_source"]),
         precedence=_stored_precedence(row["precedence_json"]),
         endpoint_sources=_stored_endpoint_sources(row["endpoint_sources_json"]),
+        tracker_priority=_stored_tracker_priority(row["tracker_order_json"]),
     )
 
 
@@ -334,17 +426,21 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
     # would leave a screen showing a choice that was never stored.
     endpoint_sources = {str(key): _selection(value, f"endpoint_sources[{key}]")
                         for key, value in endpoint_sources.items()}
+    tracker_priority = _tracker_priority(prefs.tracker_priority)
     await db.execute(
         "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
-        "precedence_json, endpoint_sources_json) VALUES (?, ?, ?, ?, ?) "
+        "precedence_json, endpoint_sources_json, tracker_order_json) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET "
         "calendar_source = excluded.calendar_source, "
         "tracker_source = excluded.tracker_source, "
         "precedence_json = excluded.precedence_json, "
-        "endpoint_sources_json = excluded.endpoint_sources_json",
+        "endpoint_sources_json = excluded.endpoint_sources_json, "
+        "tracker_order_json = excluded.tracker_order_json",
         (prefs.user_id, calendar_source, tracker_source, json.dumps(precedence),
-         json.dumps(endpoint_sources)),
+         json.dumps(endpoint_sources), json.dumps(tracker_priority)),
     )
     return replace(prefs, calendar_source=calendar_source,
                    tracker_source=tracker_source, precedence=precedence,
-                   endpoint_sources=endpoint_sources)
+                   endpoint_sources=endpoint_sources,
+                   tracker_priority=tracker_priority)

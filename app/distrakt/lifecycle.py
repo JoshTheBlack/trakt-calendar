@@ -163,6 +163,14 @@ class UnbackedVerdict(NamedTuple):
     beside it, so the two numbers can be shown side by side rather than the viewer
     being told something changed and left to work out what.
 
+    `decider` NAMES THE SERVICE THAT DECIDES THIS ACCOUNT'S COUNTS when the
+    verdict is unbacked because the QUESTION MOVED rather than because anything
+    was retracted — the viewer made a different service their primary and it does
+    not report the season finished. Empty for the ordinary retraction, and the
+    two are told apart by it: `sources` names services that changed their minds,
+    `decider` names one that never made the claim and is now the one being asked.
+    A verdict can be both, and a retraction is the more specific thing to say.
+
     THE RECORD ITSELF TRAVELS UNTOUCHED. Nothing here is a decision — a verdict is
     only ever withdrawn by reopen(), and only ever because somebody said so.
     """
@@ -170,6 +178,7 @@ class UnbackedVerdict(NamedTuple):
     month: str
     sources: list[str]
     now: dict[str, int]
+    decider: str = ""
 
 
 def listed_kind(show: Mapping) -> RecordKind:
@@ -668,7 +677,8 @@ async def catch_up_settled(user_id: int, month: str, settled: Sequence[dict],
 
 
 async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
-                            live_counts: LiveCounts) -> list[UnbackedVerdict]:
+                            live_counts: LiveCounts,
+                            order=()) -> list[UnbackedVerdict]:
     """The COMPLETED verdicts among `settled` that the services no longer back.
 
     THE RECORD IS NOT TOUCHED AND MUST NOT BE. A settled record does not recompute
@@ -699,6 +709,14 @@ async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
     already loaded, so a month with no unbacked verdict costs one dictionary
     lookup per settled row and a month with one costs the same.
 
+    `order` IS WHICH SERVICES THIS ACCOUNT TRUSTS, MOST FIRST — the same order the
+    row's own number was picked with (watch_history.tracker_sources). It is what
+    makes the second shape answerable at all: "does the decider back this" cannot
+    be read off the numbers, because which service decides is the account's
+    statement rather than a property of what came back. Empty means nothing
+    decides and only a real retraction is asked about, which is what every account
+    got before the order could be stated.
+
     A SEASON THE VIEWER HAS ALREADY REFUSED IS NOT RAISED AGAIN, through the very
     refusal the page's other two questions are refused through
     (store.dismiss_prompt). The three questions differ in what they say and agree
@@ -716,13 +734,19 @@ async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
         now = dict(live_counts(record, season) or {})
         withdrawn = counts.no_longer_finished(
             record.get("watched_by_source") or {}, now, record.get("total"))
-        if not withdrawn:
+        # THE SECOND SHAPE, and it is only asked about when nothing was actually
+        # retracted: a retraction is the more specific thing to tell somebody, so
+        # a verdict that is both says so as a retraction. See
+        # counts.unbacked_by_decider for what makes them different.
+        decider = "" if withdrawn else counts.unbacked_by_decider(
+            now, record.get("total"), order)
+        if not withdrawn and not decider:
             continue
         if declined is None:
             declined = await store.dismissed_prompts(user_id)
         if (record["key"], season) in declined:
             continue
-        questions.append(UnbackedVerdict(record, month, withdrawn, now))
+        questions.append(UnbackedVerdict(record, month, withdrawn, now, decider))
     return questions
 
 

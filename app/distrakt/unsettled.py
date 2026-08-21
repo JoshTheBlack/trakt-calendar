@@ -224,6 +224,13 @@ async def _record_completions(user_id: int, settings) -> None:
     state = await watch_history.sync_and_baseline(settings, user_id, listed)
     watched = watch_history.watched_map(state)
     completed_on = watch_history.season_completed_map(state)
+    # WHICH SERVICE DECIDES, ONCE FOR THE WHOLE DRAIN — the account's linked
+    # trackers, most trusted first (watch_history.tracker_sources). The same
+    # question the live pass asks, so a season settled here and one settled by
+    # lifecycle.advance are settled on the same service's number; asking the
+    # registry here instead would have this path record a verdict the open month
+    # would then disagree with.
+    order = await watch_history.tracker_sources(settings, user_id)
     settled = 0
     for record in listed:
         # ONE NUMBER, THE PRIMARY SOURCE'S. Deciding whether a season is finished
@@ -234,7 +241,7 @@ async def _record_completions(user_id: int, settings) -> None:
         # season's total — see counts.ALL_EPISODES. The record's own total is the
         # one this verdict is being measured against anyway.
         row = {**record, "watched": counts.primary_count(
-            watched.get(live.live_key(record)), live.source_order(),
+            watched.get(live.live_key(record)), order,
             int(record.get("total") or 0))}
         settled += await lifecycle.finish_if_done(user_id, row, completed_on)
     if settled:

@@ -987,6 +987,15 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 
 .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* Which linked tracker decides. An ordered list because the ORDER is the whole
+   content — the numbers say "first, then this" without a caption having to. */
+.tracker-priority-list {
+    list-style: decimal; margin: 0; padding: 0 0 0 20px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.tracker-priority-item { display: flex; align-items: center; gap: 8px; }
+.tracker-priority-name { color: var(--text); }
+
 .avatar-row .row-main { display: flex; align-items: center; gap: 10px; }
 .avatar-thumb {
     width: 40px; height: 40px; border-radius: 999px; object-fit: cover;
