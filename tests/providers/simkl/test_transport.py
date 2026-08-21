@@ -207,8 +207,20 @@ class CatalogPacerTests(TransportStateTestCase):
                 transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
                 for _ in range(5)))
         self.assertEqual(len(sleep.durations), 4)
-        for i, waited in enumerate(sorted(sleep.durations), start=1):
-            self.assertAlmostEqual(waited, i * transport.CATALOG_MIN_INTERVAL, places=2)
+        # ORDER AND SPACING, NOT WALL-CLOCK VALUES. The property under test is
+        # that the five callers claimed FIVE DIFFERENT slots rather than agreeing
+        # on one — that is what a check-then-sleep pacer would get wrong, and it
+        # is visible in the waits being strictly increasing and one interval
+        # apart. Asserting each duration against an absolute deadline instead
+        # measured how long the test itself took to get here: the slots are
+        # claimed against a real monotonic clock, so ordinary scheduler jitter
+        # moved every value by a few milliseconds and the assertion flaked at
+        # 10ms precision.
+        waits = sorted(sleep.durations)
+        self.assertEqual(waits, sorted(set(waits)), "two callers shared a slot")
+        gaps = [b - a for a, b in zip(waits, waits[1:])]
+        for gap in gaps:
+            self.assertAlmostEqual(gap, transport.CATALOG_MIN_INTERVAL, places=2)
 
     async def test_the_interval_stays_under_the_published_ceiling(self):
         """10 GET/second is what Simkl publishes; the margin is because the cap is
@@ -289,6 +301,36 @@ class RetryTests(TransportStateTestCase):
 class BreakerTests(TransportStateTestCase):
     """412 client_id_failed is instance-wide, and retrying into it makes it
     worse. So it stops the calls locally instead."""
+
+    async def test_a_block_does_not_follow_a_corrected_client_id(self):
+        """A 412 belongs to the client id that earned it. Simkl counts its limits
+        per `client_id` and answers 412 `client_id_failed` for both an invalid id
+        and an active throttle block, so a DIFFERENT id is a different bucket.
+        Without this an operator who fixed a mistyped id had to restart the app:
+        the breaker outlived the credential that opened it."""
+        blocked = f"{URL}?client_id=old-id"
+        client = FakeClient([_resp(412)])
+        with _patch_sleep(RecordingSleep()):
+            with self.assertRaises(SimklBlockedError):
+                await transport.send(client, "GET", blocked, pool=transport.CATALOG_POOL)
+        self.assertGreater(transport.blocked_seconds_remaining("old-id"), 0)
+        self.assertEqual(transport.blocked_seconds_remaining("new-id"), 0.0)
+        # And a call made with the corrected id actually goes out.
+        fresh = FakeClient([_resp(200)])
+        resp = await transport.send(fresh, "GET", f"{URL}?client_id=new-id",
+                                    pool=transport.CATALOG_POOL)
+        self.assertEqual(resp.status_code, 200)
+
+    async def test_a_caller_that_does_not_say_which_id_gets_the_cautious_answer(self):
+        """"I did not say" must not read as "I am somebody else" — a caller with
+        no id in hand (the enrichment drain asks before it starts) still sees the
+        block."""
+        client = FakeClient([_resp(412)])
+        with _patch_sleep(RecordingSleep()):
+            with self.assertRaises(SimklBlockedError):
+                await transport.send(client, "GET", f"{URL}?client_id=old-id",
+                                     pool=transport.CATALOG_POOL)
+        self.assertGreater(transport.blocked_seconds_remaining(), 0)
 
     async def test_a_412_raises_blocked_and_is_never_retried(self):
         sleep = RecordingSleep()
@@ -735,3 +777,84 @@ class TheCredentialIsNotPartOfTheAddressTests(TransportStateTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class PagedReadTests(TransportStateTestCase):
+    """A paginated endpoint, assembled into one answer and cached as one.
+
+    THE PAGINATION IS INVISIBLE TO THE CALLER AND TO THE CACHE, which is the
+    whole design. Simkl serves search ten results at a time and states the real
+    total in `X-Pagination-Page-Count`; storing page one alone would make a cache
+    hit serve a silently truncated answer with nothing to say it was short.
+    """
+
+    def _page(self, items, page_count):
+        return httpx.Response(200, json=items,
+                              headers={"x-pagination-page-count": str(page_count)})
+
+    async def test_every_page_is_fetched_and_joined(self):
+        client = FakeClient([self._page([1, 2], 3), self._page([3, 4], 3),
+                             self._page([5], 3)])
+        got = await transport.cached_paged_get(
+            client, FAKE_SETTINGS, "search/tv", {"q": "joined"},
+            pool=transport.CATALOG_POOL)
+        self.assertEqual(got, [1, 2, 3, 4, 5])
+        self.assertEqual(len(client.requests), 3)
+
+    async def test_one_page_costs_one_request(self):
+        """The ordinary query. A header saying there is one page ends the walk,
+        and so does no header at all."""
+        client = FakeClient([self._page([1, 2], 1)])
+        got = await transport.cached_paged_get(
+            client, FAKE_SETTINGS, "search/tv", {"q": "single"},
+            pool=transport.CATALOG_POOL)
+        self.assertEqual(got, [1, 2])
+        self.assertEqual(len(client.requests), 1)
+
+    async def test_the_assembled_answer_is_what_gets_cached(self):
+        """NOT PAGE ONE — the whole list. Storing the first page would make a
+        cache hit serve a silently truncated answer, which is worse than not
+        caching at all: nothing downstream could tell it was short."""
+        stored = {}
+
+        async def _get(key, ttl):
+            return stored.get(key)
+
+        async def _set(key, value):
+            stored[key] = value
+
+        client = FakeClient([self._page([1], 2), self._page([2], 2)])
+        with patch("app.cache.get", new=_get), patch("app.cache.set", new=_set):
+            await transport.cached_paged_get(client, FAKE_SETTINGS, "search/tv",
+                                             {"q": "x"}, pool=transport.CATALOG_POOL)
+            self.assertEqual(list(stored.values()), [[1, 2]])
+            # And a second ask is served whole, without a request.
+            again = FakeClient([])
+            got = await transport.cached_paged_get(again, FAKE_SETTINGS, "search/tv",
+                                                   {"q": "x"}, pool=transport.CATALOG_POOL)
+        self.assertEqual(got, [1, 2])
+        self.assertEqual(len(again.requests), 0)
+
+    async def test_the_page_number_is_not_part_of_the_address(self):
+        key = transport.cache_key("search/tv", {"q": "x", "limit": "50"})
+        self.assertNotIn("page=", key)
+
+    async def test_the_walk_is_bounded(self):
+        """Simkl caps `page` at 20 server-side. A payload claiming more must not
+        turn one search into an unbounded run of requests."""
+        client = FakeClient([self._page([n], 500) for n in range(40)])
+        await transport.cached_paged_get(
+            client, FAKE_SETTINGS, "search/tv", {"q": "bounded"},
+            pool=transport.CATALOG_POOL, max_pages=3)
+        self.assertEqual(len(client.requests), 3)
+
+    async def test_pages_go_out_one_at_a_time(self):
+        """Search answers `cf-cache-status: DYNAMIC` — it is not edge-cached, and
+        Simkl names parallelizing uncached endpoints as a reason a client id is
+        suspended. The requests are therefore strictly ordered."""
+        client = FakeClient([self._page([1], 3), self._page([2], 3), self._page([3], 3)])
+        await transport.cached_paged_get(
+            client, FAKE_SETTINGS, "search/tv", {"q": "ordered"},
+            pool=transport.CATALOG_POOL)
+        pages = [r.url.split("page=")[1].split("&")[0] for r in client.requests]
+        self.assertEqual(pages, ["1", "2", "3"])

@@ -73,15 +73,30 @@ def _hit(entry: dict, media: Media) -> SearchHit:
     )
 
 
+# How many results one page of a search asks for. Simkl serves 10 by default and
+# caps this at 50 — asking for the cap makes the common query one request
+# instead of several, and `cached_paged_get` walks the rest when there are more.
+PAGE_SIZE = 50
+
+
 async def _search_one(settings: Settings, path: str, query: str, media: Media) -> list[SearchHit]:
-    """One endpoint's hits. Raises transport.SimklError on a failure — caught
-    and weighed by `search_titles`, which is the one place that gets to
-    decide whether a failed endpoint fails the whole search."""
-    results = await transport.cached_get(
-        transport.catalog_client(), settings, path, {"q": query},
+    """One endpoint's hits, EVERY page of them. Raises transport.SimklError on
+    a failure — caught and weighed by `search_titles`, which is the one place
+    that gets to decide whether a failed endpoint fails the whole search.
+
+    THE PAGES ARE ASSEMBLED AND CACHED AS ONE ANSWER by the transport, so
+    nothing here or above knows this endpoint paginates at all. Simkl serves
+    ten results by default and states the real total in
+    `X-Pagination-Page-Count`; taking the first page alone silently truncated
+    every query with more matches than that, and somebody searching a common
+    word got whichever ten Simkl ranked first with nothing to say the rest
+    existed."""
+    results = await transport.cached_paged_get(
+        transport.catalog_client(), settings, path,
+        {"q": query, "limit": str(PAGE_SIZE)},
         pool=transport.CATALOG_POOL, raise_errors=True,
     )
-    return [_hit(entry, media) for entry in results] if isinstance(results, list) else []
+    return [_hit(entry, media) for entry in results]
 
 
 async def _name_the_seasons_that_collide(settings: Settings,

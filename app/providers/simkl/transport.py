@@ -21,7 +21,7 @@ import asyncio
 import logging
 import re
 import time as _time
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode
 
 import httpx
 
@@ -334,6 +334,8 @@ _post_ready_at = 0.0
 # operator noticing anything.
 BLOCK_COOLDOWN_SECONDS = 900.0
 _blocked_until = 0.0
+# WHOSE block it is. See `blocked_seconds_remaining`.
+_blocked_client_id = ""
 
 
 def catalog_client() -> httpx.AsyncClient:
@@ -491,20 +493,51 @@ def redirect_pool(origin_url: str, target_url: str) -> http_pool.Pool | None:
 # The circuit breaker.
 # ---------------------------------------------------------------------------
 
-def blocked_seconds_remaining() -> float:
+def _client_id_of(url: str) -> str:
+    """The client id a request carries, or "" when it names none."""
+    query = url.split("?", 1)[1] if "?" in url else ""
+    for name, value in parse_qsl(query):
+        if name == "client_id":
+            return value
+    return ""
+
+
+def blocked_seconds_remaining(client_id: str | None = None) -> float:
     """How long the breaker stays open, or 0.0 when Simkl may be called.
 
     PUBLIC because a caller about to spend a whole batch needs to ask before it
     starts, not discover it one failure at a time: app/calendar/enrich.py's
     drain reads this so a blocked pass costs nothing and — the part that
     matters — records nothing against the titles it would have looked up.
+
+    A BLOCK BELONGS TO THE CLIENT ID THAT EARNED IT, which is why `client_id` is
+    worth passing. Simkl counts its limits per `client_id` (and per access token
+    for authenticated calls) and answers 412 `client_id_failed` for both an
+    invalid id AND an active throttle block — so a DIFFERENT id is a different
+    bucket, and the old one's cooldown says nothing about it. Without this an
+    operator who corrected a mistyped client id still had to restart the app to
+    get it working, because the breaker outlived the credential that opened it.
+
+    NOT A WAY TO ROTATE OUT OF A BLOCK. Simkl extends a block on repeated
+    overage and suspends an id for sustained abuse; what this serves is an
+    operator FIXING a credential, where local state about the previous one has
+    simply stopped applying.
+
+    A caller that does not say which id it is asking about gets the cautious
+    answer — still blocked — because "I did not say" must not read as "I am
+    somebody else".
     """
+    if client_id is not None and str(client_id) != _blocked_client_id:
+        return 0.0
     return max(0.0, _blocked_until - _time.monotonic())
 
 
-def _open_breaker(path: str) -> None:
-    global _blocked_until, _pace_until
+def _open_breaker(path: str, client_id: str = "") -> None:
+    global _blocked_until, _pace_until, _blocked_client_id
     _blocked_until = _time.monotonic() + BLOCK_COOLDOWN_SECONDS
+    # Recorded so the block can be told apart from one belonging to a credential
+    # this instance no longer uses — see blocked_seconds_remaining.
+    _blocked_client_id = str(client_id or "")
     # The refusal is also what turns pacing ON — see _pace_catalog. It stays on
     # past the block itself, because the moment the block lifts is exactly when
     # a full-speed drain would go straight back at whatever earned it.
@@ -537,9 +570,10 @@ def _close_breaker() -> None:
 
     Clears the pacing window too, since `_open_breaker` sets both: a test that
     left pacing armed would slow an unrelated one and look like a hang."""
-    global _blocked_until, _pace_until
+    global _blocked_until, _pace_until, _blocked_client_id
     _blocked_until = 0.0
     _pace_until = 0.0
+    _blocked_client_id = ""
 
 
 # ---------------------------------------------------------------------------
@@ -726,7 +760,11 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
     impossible rather than merely unlikely.
     """
     path = url.split("?", 1)[0].replace(API_BASE, "") or url
-    remaining_block = blocked_seconds_remaining()
+    # Read off the URL rather than taken as an argument: every Simkl request
+    # carries the client id as a query parameter (api_params), so the request
+    # itself already says whose block would apply to it.
+    asked_with = _client_id_of(url)
+    remaining_block = blocked_seconds_remaining(asked_with)
     if remaining_block > 0:
         # Refused HERE, before the gate and before any socket: the whole point
         # of the breaker is that this request never reaches Simkl.
@@ -770,7 +808,7 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
                 resp = await client.request(method, url, headers=headers, json=json,
                                             timeout=attempt_timeout)
             if resp.status_code == 412:
-                _open_breaker(path)
+                _open_breaker(path, asked_with)
                 raise SimklBlockedError(
                     f"Simkl refused this instance's client id on {path} (HTTP 412).", 412)
             if resp.status_code != 429:
@@ -802,12 +840,20 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
 async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, path: str,
                       pool: http_pool.Pool, fresh: bool, raise_errors: bool,
                       private: bool = False):
-    """One GET, reduced to "the parsed body, or None". No caching.
+    """One GET, reduced to "(the parsed body or None, how many pages there are)".
+    No caching.
 
     Split out of cached_get so that function is only the CACHE POLICY and this
     one is only the call and what its answer means. The two change for different
     reasons: a new caching mode touches the policy alone, and a change in how
     Simkl reports a failure touches this alone.
+
+    THE PAGE COUNT COMES BACK BESIDE THE BODY because it is not IN the body:
+    Simkl states it in the `X-Pagination-Page-Count` response header, and a
+    caller assembling a paginated answer cannot ask for it afterwards — by then
+    the response is gone. 1 when the header is absent or unreadable, which is
+    every unpaginated endpoint and is the answer that stops a loop after one
+    pass.
     """
     t0 = _time.perf_counter()
     try:
@@ -822,6 +868,10 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
         # the same reason — their callers degrade them deliberately.)
         logger.warning("Simkl GET %s failed: %s", path, exc)
         raise SimklError(f"Could not reach Simkl: {exc}") from exc
+    try:
+        pages = max(1, int(resp.headers.get("x-pagination-page-count") or 1))
+    except (TypeError, ValueError):
+        pages = 1
     _perf.debug("netGET    %s -> %s  %.0fms%s", path, resp.status_code,
                 (_time.perf_counter() - t0) * 1000.0, " (fresh)" if fresh else " (miss)")
     if resp.status_code != 200:
@@ -832,14 +882,81 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
                     "Simkl rejected the credentials (401). Simkl issues no refresh "
                     "token, so the link has to be made again.", 401)
             raise SimklError(f"Simkl API returned HTTP {resp.status_code}.", resp.status_code)
-        return None
+        return None, pages
     try:
-        return resp.json()
+        return resp.json(), pages
     except ValueError:
         logger.warning("Simkl GET %s -> unreadable JSON body", path)
         if raise_errors:
             raise SimklError("Simkl API returned an unreadable response.")
-        return None
+        return None, pages
+
+
+# How many pages one paginated read may walk. Simkl caps `page` at 20 server
+# side, so this is that cap rather than a policy of ours — a query that would
+# need more has already returned five hundred results and the viewer is going to
+# refine it rather than scroll.
+MAX_PAGES = 20
+
+
+async def cached_paged_get(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    path: str,
+    params: dict | None = None,
+    *,
+    pool: http_pool.Pool,
+    ttl_seconds: int | None = None,
+    raise_errors: bool = False,
+    app: str = DEFAULT_APP_NAME,
+    max_pages: int = MAX_PAGES,
+) -> list:
+    """Every page of a paginated GET, joined into one list and cached as ONE
+    ANSWER.
+
+    THE PAGINATION IS INVISIBLE TO EVERY CALLER AND TO THE CACHE, which is the
+    whole design. What gets stored is "the results for this query", not "page one
+    of this query" — so a cache hit returns the complete list and nothing
+    downstream has to know how many requests it took to build, or re-derive that
+    from headers it no longer has. Caching page one alone would be worse than not
+    caching: a hit would silently serve a truncated answer with nothing to say it
+    was short.
+
+    `page` IS THEREFORE NOT PART OF THE KEY. `params` names the question — the
+    query text, the size of a page — and the key is built from it before any page
+    is asked for, so every page of one search writes into one entry.
+
+    SEQUENTIALLY, and for search that is a rule rather than a preference: Simkl
+    permits parallel requests only against the edge-cached endpoints, and
+    `/search/*` answers `cf-cache-status: DYNAMIC`. Walking pages in parallel is
+    the shape Simkl names as a reason a client id is suspended.
+
+    A PAGE THAT FAILS ENDS THE WALK rather than failing what came before it,
+    unless `raise_errors` says the caller would rather know. Partial results are
+    the honest answer to "the first two pages arrived and the third did not", and
+    they are what the viewer would have seen had the query been narrower.
+    """
+    key = cache_key(path, params)
+    ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
+    cached = await cache.get(key, ttl)
+    if cached is not None:
+        _perf.debug("cacheHIT  %s", path)
+        return cached if isinstance(cached, list) else []
+    out: list = []
+    page = 1
+    while page <= max_pages:
+        query = {**(params or {}), "page": str(page)}
+        url = f"{API_BASE}/{path}?{urlencode(api_params(settings, query, app=app))}"
+        data, pages = await _fetch_json(client, settings, url, path, pool,
+                                        fresh=False, raise_errors=raise_errors)
+        if not isinstance(data, list):
+            break
+        out.extend(data)
+        if page >= min(pages, max_pages):
+            break
+        page += 1
+    await cache.set(key, out)
+    return out
 
 
 async def cached_get(
@@ -904,8 +1021,8 @@ async def cached_get(
         # Stale beats blank here: this caller can never trigger a refresh to fix
         # a hard miss anyway.
         return await cache.get_stale(key)
-    data = await _fetch_json(client, settings, url, path, pool,
-                             fresh=fresh, raise_errors=raise_errors, private=private)
+    data, _pages = await _fetch_json(client, settings, url, path, pool,
+                                     fresh=fresh, raise_errors=raise_errors, private=private)
     if data is None:
         # None is how a swallowed failure comes back, and it is also what a
         # literal `null` body would parse to. Neither is worth storing: the read
