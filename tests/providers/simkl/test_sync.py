@@ -494,265 +494,155 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
-    """A library read against Simkl's anime season-titles.
+    """Simkl's anime season-titles, and the parameter that resolves them.
 
-    MEASURED 2026-08-18 against a real account: marking one episode of "Sousou
-    no Frieren" season 2 (simkl 2595284) put a SECOND item in the anime library
-    beside the season-1 title (1990194) already there — and its library payload
-    carried `{simkl, slug, mal, anilist, kitsu, anidb}` and NO tmdb, while its
-    per-title record carries the series' tmdb 209867 and `mapped_tvdb_seasons
-    [2]`. So untranslated it becomes its own `show:mal:...` row, numbering
+    THE PROBLEM, MEASURED 2026-08-18. Simkl models each anime season as its own
+    catalogue title: "Beastars" season 2 is simkl 1231401, a different title from
+    season 1's 1034467, and it numbers its own episodes from 1. Under
+    `extended=full` its library payload arrives as `{simkl, slug, mal}` with no
+    tmdb at all — so untranslated it becomes its own `show:mal:` row, numbering
     season 2's episodes as season 1, disconnected from the series the viewer
-    actually tracks — and the add flow files that same series under
-    `show:tmdb:209867` season 2, so the two never meet.
+    tracks under `show:tmdb:90937`.
+
+    THE ANSWER IS `extended=full_anime_seasons`, MEASURED 2026-08-21. Asked that
+    way the same entry carries the PARENT SERIES' ids (tmdb and tvdb included)
+    and every episode carries a `tvdb: {season, episode}` block giving its real
+    coordinates. This package used to derive both with a per-title lookup; the
+    payload states them outright. These tests pin the reading of that payload,
+    and the parameters that ask for it.
     """
 
-    HELD = {"show": {"title": "Sousou no Frieren",
-                     "ids": {"simkl_id": 1990194, "tmdb": "209867", "mal": "52991"}},
-            "seasons": [{"number": 1, "episodes": [
-                {"number": 1, "watched_at": "2026-03-03T18:32:21Z"}]}]}
-    SECOND = {"show": {"title": "Sousou no Frieren",
-                       "ids": {"simkl_id": 2595284, "mal": "59978"}},
-              "seasons": [{"number": 1, "episodes": [
-                  {"number": 1, "watched_at": "2026-08-18T12:00:00Z"}]}]}
-    RECORDS = {
-        "tv/1990194": {"ids": {"simkl": 1990194, "tmdb": "209867"},
-                       "mapped_tvdb_seasons": [1]},
-        "tv/2595284": {"ids": {"simkl": 2595284, "tmdb": "209867", "mal": "59978"},
-                       "season": 2, "mapped_tvdb_seasons": [2]},
-    }
+    # Beastars season 2 as `full_anime_seasons` really returns it: the series'
+    # ids on a season-title, its own numbering as season 1, and the true
+    # coordinates on each episode.
+    SEASON_TWO = {"show": {"title": "Beastars",
+                           "ids": {"simkl_id": 1231401, "mal": "40935",
+                                   "tmdb": "90937", "tvdb": "361013"}},
+                  "mapped_tvdb_seasons": [2],
+                  "seasons": [{"number": 1, "episodes": [
+                      {"number": 1, "watched_at": "2026-08-18T12:00:00Z",
+                       "tvdb": {"season": 2, "episode": 1}}]}]}
+    SEASON_ONE = {"show": {"title": "Beastars",
+                           "ids": {"simkl_id": 1034467, "mal": "39195",
+                                   "tmdb": "90937", "tvdb": "361013"}},
+                  "mapped_tvdb_seasons": [1],
+                  "seasons": [{"number": 1, "episodes": [
+                      {"number": 1, "watched_at": "2022-04-25T03:58:43Z",
+                       "tvdb": {"season": 1, "episode": 1}}]}]}
 
-    async def _read(self, anime_items, records=None, shows_items=(), finished_items=()):
+    async def _read(self, anime_items=(), finished=(), shows_items=()):
         """A library read whose only non-empty buckets are `shows/watching`,
-        `anime/watching` and `anime/completed`, with the per-title records served
-        by path.
-
-        The two anime buckets are adjacent in the declared read order, and which
-        of them an item came out of decides what its silence means — so a test
-        states the bucket rather than the item's own status field.
-        """
-        records = self.RECORDS if records is None else records
+        `anime/watching` and `anime/completed`. Returns the read, the paths asked
+        for and the parameters each was asked with."""
         buckets = iter([{"shows": list(shows_items)}] + [{}] * 3
                        + [{"anime": list(anime_items)},
-                          {"anime": list(finished_items)}] + [{}] * 6)
-        paths = []
+                          {"anime": list(finished)}] + [{}] * 6)
+        paths, params = [], []
 
-        async def _get(client, settings, path, params=None, **kwargs):
+        async def _get(client, settings, path, param=None, **kwargs):
             paths.append(path)
-            if path.startswith("tv/"):
-                answer = records.get(path)
-                if isinstance(answer, Exception):
-                    raise answer
-                return answer
+            params.append(dict(param or {}))
             return next(buckets)
 
         with patch("app.providers.simkl.transport.cached_get",
                    new=AsyncMock(side_effect=_get)):
-            return await sync.fetch_library(SETTINGS), paths
+            return await sync.fetch_library(SETTINGS), paths, params
 
-    async def test_a_season_title_joins_the_series_under_the_season_it_names(self):
-        read, _paths = await self._read([self.HELD, self.SECOND])
-        self.assertEqual(list(read.entries), ["show:tmdb:209867"])
-        entry = read.entries["show:tmdb:209867"]
-        self.assertEqual(entry.seasons, {1: {1: "2026-03-03T18:32:21Z"},
-                                         2: {1: "2026-08-18T12:00:00Z"}})
+    async def test_a_season_title_files_under_the_series_and_the_real_season(self):
+        """Both halves at once: the entry keys by the series' tmdb because the
+        payload carries it, and the episode lands on season 2 because its own
+        `tvdb` block says so."""
+        read, _paths, _params = await self._read([self.SEASON_ONE, self.SEASON_TWO])
+        self.assertEqual(list(read.entries), ["show:tmdb:90937"])
+        self.assertEqual(read.entries["show:tmdb:90937"].seasons,
+                         {1: {1: "2022-04-25T03:58:43Z"}, 2: {1: "2026-08-18T12:00:00Z"}})
 
     async def test_the_plays_are_translated_too_not_only_the_baseline(self):
-        """Both readers take the season number off the same item, so translating
-        one alone would put a viewer's plays on a different season from their
-        progress."""
-        read, _paths = await self._read([self.SECOND])
+        """Both readers take the coordinates from the same place, so a viewer's
+        plays can never sit on a different season from their progress."""
+        read, _paths, _params = await self._read([self.SEASON_TWO])
         self.assertEqual([(e["episode"]["season"], e["episode"]["number"])
                           for e in read.events], [(2, 1)])
 
-    async def test_a_title_already_numbering_itself_as_the_series_does_is_untouched(self):
-        read, _paths = await self._read([self.HELD])
-        entry = read.entries["show:tmdb:209867"]
-        self.assertEqual(entry.seasons, {1: {1: "2026-03-03T18:32:21Z"}})
-        self.assertEqual(entry.ids, {"simkl": 1990194, "tmdb": "209867", "mal": "52991"})
-
-    async def test_only_anime_items_are_asked_which_season_they_name(self):
-        """The television catalogue models seasons as seasons; asking the same
-        question of a thousand `shows` items would spend a lookup each to learn
-        nothing."""
-        _read, paths = await self._read([self.HELD], shows_items=[self.HELD])
-        self.assertEqual([p for p in paths if p.startswith("tv/")], ["tv/1990194"])
-
-    async def test_a_record_that_names_no_season_leaves_the_item_alone(self):
-        """The sync's fallback, and it is not a picker — there is no viewer to
-        ask. What Simkl already said stands."""
-        read, _paths = await self._read(
-            [self.SECOND], records={"tv/2595284": {"ids": {"simkl": 2595284},
-                                                   "mapped_tvdb_seasons": [2, 3]}})
-        self.assertEqual(list(read.entries), ["show:mal:59978"])
-        self.assertEqual(read.entries["show:mal:59978"].seasons,
-                         {1: {1: "2026-08-18T12:00:00Z"}})
-
-    async def test_a_failed_lookup_loses_its_title_and_not_the_library(self):
-        """A read that raised here would cost a viewer their whole Simkl history
-        to refine one title's season number."""
-        read, _paths = await self._read(
-            [self.HELD, self.SECOND],
-            records={**self.RECORDS, "tv/2595284": transport.SimklError("down", 503)})
-        self.assertTrue(read.complete)
-        self.assertEqual(sorted(read.entries), ["show:mal:59978", "show:tmdb:209867"])
-
-    async def test_the_cached_document_is_not_edited_under_the_next_reader(self):
-        """The item came out of the response cache, which hands back a parsed
-        document other reads may still be holding."""
-        item = {"show": dict(self.SECOND["show"]),
+    async def test_an_episode_renumbered_by_simkl_takes_both_coordinates(self):
+        """A series numbered absolutely — One Piece is one title with a thousand
+        episodes — maps each episode to a season AND a number of its own. Taking
+        the season from the mapping and the number from the item would produce a
+        coordinate that exists in neither numbering."""
+        item = {"show": {"title": "One Piece",
+                         "ids": {"simkl_id": 38636, "tmdb": "37854"}},
                 "seasons": [{"number": 1, "episodes": [
-                    {"number": 1, "watched_at": "2026-08-18T12:00:00Z"}]}]}
-        await self._read([item])
-        self.assertEqual(item["seasons"][0]["number"], 1)
-        self.assertEqual(item["show"]["ids"], {"simkl_id": 2595284, "mal": "59978"})
+                    {"number": 878, "watched_at": "2026-01-02T00:00:00Z",
+                     "tvdb": {"season": 20, "episode": 1}}]}]}
+        read, _paths, _params = await self._read([item])
+        self.assertEqual(read.entries["show:tmdb:37854"].seasons,
+                         {20: {1: "2026-01-02T00:00:00Z"}})
 
+    async def test_an_item_with_no_mapping_keeps_its_own_numbering(self):
+        """Television carries no `tvdb` block and needs none — its seasons are
+        already the show's. The fallback is the item's own numbers, which is what
+        every non-anime item has always used."""
+        plain = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                 "seasons": [{"number": 3, "episodes": [
+                     {"number": 4, "watched_at": "2026-07-01"}]}]}
+        read, _paths, _params = await self._read(shows_items=[plain])
+        self.assertEqual(read.entries["show:tmdb:900"].seasons, {3: {4: "2026-07-01"}})
 
-class FinishedAnimeSeasonTests(unittest.IsolatedAsyncioTestCase):
-    """A season-title the viewer has FINISHED, which is the half of the anime
-    translation the itemized case cannot reach.
+    async def test_only_the_anime_buckets_ask_for_the_mapping(self):
+        """`full_anime_seasons` is a superset of `full` and costs a larger
+        payload; television gains nothing from it, so it is asked for where it
+        answers something."""
+        _read, paths, params = await self._read()
+        asked = dict(zip(paths, params))
+        self.assertEqual(asked["sync/all-items/anime/watching"]["extended"],
+                         sync.ANIME_EXTENDED)
+        self.assertEqual(asked["sync/all-items/shows/watching"]["extended"], "full")
 
-    MEASURED 2026-08-19 end to end on a real account: Beastars season 2 (simkl
-    1231401) marked watched translated and counted correctly, and then marking it
-    COMPLETE took it off the count entirely. The `completed` payload carries no
-    `seasons[]` block at all — Simkl states a finished title in counts — so there
-    was nothing to renumber, the item stayed on its own bare `show:mal:40935`
-    key, and the roster row for a season the viewer had just finished read 0 of
-    12 while their real progress sat on a row nothing renders.
+    async def test_every_bucket_asks_for_the_episodes_of_a_finished_title(self):
+        """`include_all_episodes=yes` is what makes the `completed` and `dropped`
+        buckets carry episodes at all — without it they state counts, and this
+        app spent a phase reconstructing the episodes from them by hand."""
+        _read, _paths, params = await self._read()
+        for param in params:
+            self.assertEqual(param.get("include_all_episodes"), "yes")
+            self.assertEqual(param.get("episode_watched_at"), "yes")
 
-    WHAT MAKES IT ANSWERABLE IS THE NAMING RECORD, WHICH STILL SAYS WHICH SEASON
-    IT IS: `mapped_tvdb_seasons [2]` on the per-title record, present whether or
-    not the library payload itemizes anything. So the season is known, the count
-    is total (`watched == total`, nothing left to air), and the episodes it comes
-    to are 1..total in the title's own numbering — the same numbering the
-    itemized case renumbers the season of and leaves the episodes alone in.
-    """
-
-    SERIES = {"tv/1034467": {"ids": {"simkl": 1034467, "tmdb": "90937", "mal": "39195"},
-                             "mapped_tvdb_seasons": [1]},
-              "tv/1231401": {"ids": {"simkl": 1231401, "tmdb": "90937", "mal": "40935"},
-                             "season": 2, "mapped_tvdb_seasons": [2]},
-              # Simkl files Beastars' third season as TWO titles, both mapping to
-              # season 3 with twelve episodes each — measured, not hypothetical.
-              "tv/1687953": {"ids": {"simkl": 1687953, "tmdb": "90937", "mal": "49469"},
-                             "mapped_tvdb_seasons": [3]},
-              "tv/2831384": {"ids": {"simkl": 2831384, "tmdb": "90937", "mal": "61114"},
-                             "mapped_tvdb_seasons": [3]}}
-
-    def _finished(self, simkl_id, mal, total=12, watched=None, unaired=0):
-        return {"show": {"title": "Beastars",
-                         "ids": {"simkl_id": simkl_id, "mal": mal}},
-                "status": "completed", "total_episodes_count": total,
-                "watched_episodes_count": total if watched is None else watched,
-                "not_aired_episodes_count": unaired}
-
-    def _watching(self, simkl_id, mal, episodes):
-        return {"show": {"title": "Beastars",
-                         "ids": {"simkl_id": simkl_id, "mal": mal}},
-                "seasons": [{"number": 1, "episodes": [
-                    {"number": n, "watched_at": at} for n, at in episodes.items()]}]}
-
-    async def _read(self, *, watching=(), finished=(), records=None):
-        records = self.SERIES if records is None else records
-        buckets = iter([{}] * 4 + [{"anime": list(watching)},
-                                   {"anime": list(finished)}] + [{}] * 6)
-
-        async def _get(client, settings, path, params=None, **kwargs):
-            if path.startswith("tv/"):
-                return records.get(path)
-            return next(buckets)
-
-        with patch("app.providers.simkl.transport.cached_get",
-                   new=AsyncMock(side_effect=_get)):
-            return await sync.fetch_library(SETTINGS)
-
-    async def test_a_finished_season_title_joins_the_series_as_that_season(self):
-        """THE REGRESSION, in the data. Twelve episodes of season 2 on the
-        series' own key, not a bare `show:mal:` row nothing renders."""
-        read = await self._read(finished=[self._finished(1231401, "40935")])
-        self.assertEqual(list(read.entries), ["show:tmdb:90937"])
+    async def test_a_finished_season_title_needs_no_special_handling_now(self):
+        """THE PHASE THIS REPLACES. A completed season-title used to arrive with
+        no seasons block at all, and had to be rebuilt from
+        `watched_episodes_count` against a per-title season lookup. Asked
+        correctly it arrives itemized and translated like any other item."""
+        finished = {"show": {"title": "Beastars",
+                             "ids": {"simkl_id": 1231401, "mal": "40935",
+                                     "tmdb": "90937"}},
+                    "status": "completed", "mapped_tvdb_seasons": [2],
+                    "watched_episodes_count": 12, "total_episodes_count": 12,
+                    "not_aired_episodes_count": 0,
+                    "seasons": [{"number": 1, "episodes": [
+                        {"number": n, "watched_at": "2026-08-21T15:49:06Z",
+                         "tvdb": {"season": 2, "episode": n}}
+                        for n in range(1, 13)]}]}
+        read, paths, _params = await self._read(finished=[finished])
         entry = read.entries["show:tmdb:90937"]
         self.assertEqual(sorted(entry.seasons), [2])
         self.assertEqual(sorted(entry.seasons[2]), list(range(1, 13)))
+        # And it costs no per-title lookup at all: the payload said everything.
+        self.assertEqual([p for p in paths if p.startswith("tv/")], [])
 
-    async def test_the_claim_is_scoped_to_that_season_and_not_to_the_series(self):
-        """The whole reason this was left unbuilt once. `WATCHED` means "every
-        season not listed here is fully watched", and carrying that onto the
-        SERIES would report its other seasons finished on the strength of one
-        season being finished. Stating the season's episodes says exactly as much
-        as the payload does and no more, which leaves the ordinary claim every
-        other translated season-title makes."""
-        read = await self._read(finished=[self._finished(1231401, "40935")])
-        self.assertEqual(read.entries["show:tmdb:90937"].unlisted_seasons,
-                         UnlistedSeasons.ZERO)
-
-    async def test_no_date_is_invented_and_no_play_is_reported(self):
-        """Simkl hands over counts and not timestamps for a finished title. WHICH
-        episodes is not a guess when the count is total; WHEN each was seen still
-        is, so the dates stay empty and nothing reaches the history as a play —
-        an undated play cannot be placed in a month, which is all the history
-        sweep is for."""
-        read = await self._read(finished=[self._finished(1231401, "40935")])
-        self.assertEqual(set(read.entries["show:tmdb:90937"].seasons[2].values()), {""})
-        self.assertEqual(read.events, [])
-
-    async def test_two_titles_of_one_season_union_their_episodes(self):
-        """Beastars' third season is two Simkl titles, and a viewer can hold
-        both. Each states of its own episodes that they were watched, so an
-        episode either names is watched — and the second to fold must not be able
-        to retract the first's."""
-        read = await self._read(finished=[self._finished(1687953, "49469"),
-                                          self._finished(2831384, "61114", total=10)])
-        entry = read.entries["show:tmdb:90937"]
-        self.assertEqual(sorted(entry.seasons), [3])
-        self.assertEqual(sorted(entry.seasons[3]), list(range(1, 13)))
-
-    async def test_an_undated_episode_never_blanks_a_dated_one(self):
-        """Two titles of one season can arrive from DIFFERENT buckets — one
-        part-watched and itemized with real timestamps, one finished and stating
-        counts. Letting the undated one win would throw away the dates that say
-        which month the season was finished in."""
-        read = await self._read(
-            watching=[self._watching(2831384, "61114", {1: "2026-08-01T00:00:00Z"})],
-            finished=[self._finished(1687953, "49469")])
-        entry = read.entries["show:tmdb:90937"]
-        self.assertEqual(entry.seasons[3][1], "2026-08-01T00:00:00Z")
-        self.assertEqual(entry.seasons[3][2], "")
-
-    async def test_a_title_still_airing_is_left_exactly_as_it_was(self):
-        """`not_aired_episodes_count` is Simkl saying more is coming, and the
-        totals this app renders against are the season's PLANNED counts — so
-        neither the episodes nor the claim can be stated. The existing answer for
-        that shape is silence, and this changes nothing about it."""
-        read = await self._read(
-            finished=[self._finished(1231401, "40935", total=12, watched=8, unaired=4)])
-        self.assertEqual(list(read.entries), ["show:mal:40935"])
-        self.assertEqual(read.entries["show:mal:40935"].unlisted_seasons,
-                         UnlistedSeasons.SILENT)
-
-    async def test_a_title_whose_record_names_no_season_keeps_its_whole_claim(self):
-        """A title mapping onto SEVERAL of the show's seasons is one that already
-        spans them — a long-running series filed as one title — so there is no
-        one season to scope to, and its "all of it is watched" is true of
-        everything the key names. Left alone — ids included, so it keys where its
-        own payload puts it — exactly as the itemized case is."""
-        read = await self._read(
-            finished=[self._finished(1231401, "40935")],
-            records={"tv/1231401": {"ids": {"simkl": 1231401, "tmdb": "90937"},
-                                    "mapped_tvdb_seasons": [1, 2, 3]}})
-        entry = read.entries["show:mal:40935"]
-        self.assertEqual(entry.seasons, {})
-        self.assertEqual(entry.unlisted_seasons, UnlistedSeasons.WATCHED)
-
-    async def test_a_finished_title_in_another_bucket_is_not_read_as_finished(self):
-        """The status comes from the BUCKET that was asked for and never from the
-        item's own field: a payload whose status drifts or goes missing must not
-        be able to turn a part-watched title into a finished one."""
-        strays = [dict(self._finished(1231401, "40935"), seasons=[])]
-        read = await self._read(watching=strays)
-        self.assertEqual(list(read.entries), ["show:mal:40935"])
-        self.assertEqual(read.entries["show:mal:40935"].unlisted_seasons,
-                         UnlistedSeasons.ZERO)
+    async def test_the_do_not_remember_placeholder_is_not_a_date(self):
+        """Simkl writes 1970-01-01T00:00:01Z for "watched it, no idea when".
+        Read literally it files a season as finished in January 1970 — a real
+        month, on a real page, sorted before everything. The episode still
+        counts; the date does not."""
+        item = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": 1, "watched_at": "1970-01-01T00:00:01Z"},
+                    {"number": 2, "watched_at": "2026-07-02"}]}]}
+        read, _paths, _params = await self._read(shows_items=[item])
+        self.assertEqual(read.entries["show:tmdb:900"].seasons[1],
+                         {1: "", 2: "2026-07-02"})
+        # And it never becomes a play, which is what would carry it into a month.
+        self.assertEqual([e["episode"]["number"] for e in read.events], [2])
 
 
 class ProgressTests(unittest.IsolatedAsyncioTestCase):
@@ -783,20 +673,45 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             got = await sync.fetch_progress_details(SETTINGS, [91])
         self.assertEqual(got, {91: {2: {4: ""}}})
 
-    async def test_a_season_with_no_breakdown_contributes_no_episodes(self):
+    async def test_a_season_with_no_breakdown_says_nothing_rather_than_zero(self):
         """Turning a watched COUNT into "episodes 1..n" would invent both the
-        numbers and the dates.
-
-        THE TITLE IS STILL PRESENT IN THE ANSWER, holding nothing. Simkl answered
-        about it, and an id that was answered about is present however empty the
-        answer — absence is reserved for an id that could not be read at all, which
-        is what stops a failed request being read as a viewer who has watched
-        nothing (see SyncPort.fetch_progress_details).
+        numbers and the dates — so there is nothing to report. What that means is
+        "I cannot say", NOT "none of it was watched", and the title is therefore
+        ABSENT: Simkl has just said four episodes of season 1 were seen, and
+        answering the caller with a zero would have it retire every season it had
+        stored for the title on the strength of a payload that says the opposite.
         """
         send = AsyncMock(return_value=_Response(
             [{"ids": {"simkl": 5}, "seasons": [{"number": 1, "total_episodes_watched": 4}]}]))
         with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {5: {}})
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
+
+    async def test_an_answer_with_no_seasons_at_all_says_nothing(self):
+        """THE SHAPE EVERY REAL ANSWER TAKES, measured 2026-08-21: this endpoint
+        reports WHETHER a title has been watched and never HOW MUCH, whatever
+        `episode_watched_at` asks for. Twin Peaks comes back like this while the
+        library read itemizes eight episodes of it."""
+        send = AsyncMock(return_value=_Response(
+            [{"simkl": 203, "result": True, "list": "watching",
+              "last_watched_at": "2020-02-02T19:07:39Z"}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [203]), {})
+
+    async def test_a_title_the_viewer_does_not_hold_is_a_real_zero(self):
+        """The ONE answer from here that means "seen none of it", and it has to
+        stay distinguishable from the rest: a title that has left the library is
+        how stored counts are correctly retired."""
+        send = AsyncMock(return_value=_Response([{"simkl": 9, "result": False}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [9]), {9: {}})
+
+    async def test_ids_simkl_could_not_resolve_say_nothing_rather_than_zero(self):
+        """`not_found` is Simkl saying it does not know what was asked about,
+        which is the opposite of "this viewer has watched none of it" — and this
+        app had the two the wrong way round."""
+        send = AsyncMock(return_value=_Response([{"simkl": 9, "result": "not_found"}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [9]), {})
 
     async def test_a_batch_that_failed_names_none_of_its_ids(self):
         """The other half of the same rule, and the one that protects stored

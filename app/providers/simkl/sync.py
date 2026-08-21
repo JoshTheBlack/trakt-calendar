@@ -54,7 +54,7 @@ from ...config import Settings
 from ...perftrace import span
 from ..base import (LibraryEntry, LibraryRead, Media, UnlistedSeasons, collect_ids,
                     resolve_key)
-from . import _ids, _naming, transport
+from . import _ids, transport
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +79,9 @@ COMPLETED_STATUS = "completed"
 # television at every endpoint, and a person's anime is watch history exactly as
 # much as their television is — omitting it would silently under-count the half
 # of Simkl's library it is best at.
-# Named rather than spelled inline because one read treats it differently from
-# the other: an anime item's season number is Simkl's own and has to be
-# translated before anything files it (see _as_the_tracker_keys_them).
+# Named rather than spelled inline because one read asks for more than the
+# other: an anime item's season number is Simkl's own, and only the anime buckets
+# ask for the mapping that translates it (see ANIME_EXTENDED).
 ANIME_TYPE = "anime"
 EPISODE_TYPES = ("shows", ANIME_TYPE)
 
@@ -102,11 +102,74 @@ ACTIVITY_LISTS = {"shows": "tv_shows", "anime": "anime", "movies": "movies"}
 # second, so an unbounded body on a very large roster would be one slow request
 # instead of several, and a timeout would lose all of it. Chunking bounds the
 # blast radius of a single failure without materially changing the cost.
-PROGRESS_BATCH = 200
+# SIMKL'S OWN CAP, NOT A CHOICE. A `POST /sync/watched` asking for episode data
+# takes at most 100 items; over that it answers `400 max_items`. (Without episode
+# data there is no documented limit, but this read always asks for episodes — the
+# counts alone are not what it is for.)
+PROGRESS_BATCH = 100
+
+# What every library read asks for, and each one earns its place:
+#
+#   extended=full            episodes at all. Without it a bucket carries summary
+#                            fields only and no `seasons[].episodes[]` anywhere.
+#   episode_watched_at=yes   the per-episode timestamp. Simkl documents it as
+#                            requiring `extended=full`, and it is what turns a
+#                            library into the play events this module publishes.
+#   include_all_episodes=yes episodes for the `completed` and `dropped` buckets,
+#                            which by DEFAULT carry counts and nothing else. This
+#                            app used to reconstruct those episodes from the
+#                            counts by hand; the parameter is Simkl doing it
+#                            server-side, and doing it better — measured
+#                            2026-08-21, a dropped title lists exactly the
+#                            episodes actually watched (9 of 47, 15 of 49) rather
+#                            than everything up to the count.
+LIBRARY_PARAMS = {
+    "extended": "full",
+    "episode_watched_at": "yes",
+    "include_all_episodes": "yes",
+}
+
+# What the ANIME buckets ask for instead, and it is a superset of `full`.
+#
+# WHY ONLY ANIME NEEDS IT. Simkl models each anime season as its own catalogue
+# title, numbering its own episodes from 1 — so a viewer's plays on "Beastars
+# season 2" arrive as season 1 of a title the tracker has never heard of. This
+# parameter is Simkl answering both halves of that itself: `mapped_tvdb_seasons`
+# on the entry, a `tvdb: {season, episode}` block on EVERY episode, and — the
+# part that removes the most code — the PARENT SERIES' shared ids on the entry.
+# Measured 2026-08-21: Beastars season 2 (simkl 1231401) arrives under
+# `extended=full` as `{simkl, slug, mal}` and under this one as the same plus
+# `imdb`, `tmdb` and `tvdb`. Everything this package used to derive with a
+# per-title lookup is in the payload.
+ANIME_EXTENDED = "full_anime_seasons"
+
+# What `POST /sync/watched` puts in its `result` field, and the three values are
+# three different answers that must not be run together:
+#
+#   true          the viewer has watched or is watching this title.
+#   false         the title is IN SIMKL'S CATALOGUE and this viewer has not
+#                 watched it. A real, safe zero — the one answer from here that
+#                 may retire what the app had stored.
+#   "not_found"   the ids could not be resolved to a title at all. NOT a zero:
+#                 Simkl is saying it does not know what was asked about, which is
+#                 "I cannot say" and must leave stored counts alone.
+#
+# The middle one is easy to mistake for the last, and this app did: a `not_found`
+# was read as the safe zero and a `false` was not read at all.
+UNWATCHED = False
+UNRESOLVED = "not_found"
 
 
 def _api_url(path: str, settings: Settings, params: dict | None = None) -> str:
-    return f"{transport.API_BASE}/{path}?{urlencode(transport.api_params(settings, params))}"
+    """A URL for one of this module's calls, named for the TRACKER.
+
+    Everything here reads one person's watch history with that person's own
+    token, which is the half Simkl knows as `distrakkt` — see
+    transport.APP_NAME_TRACKER for why the two halves identify themselves
+    differently at all.
+    """
+    return (f"{transport.API_BASE}/{path}?"
+            f"{urlencode(transport.api_params(settings, params, app=transport.APP_NAME_TRACKER))}")
 
 
 def _latest(*values) -> str | None:
@@ -159,7 +222,8 @@ async def fetch_last_activities(settings: Settings) -> dict:
     """
     data = await transport.cached_get(
         transport.sync_client(), settings, "sync/activities", {},
-        pool=transport.SYNC_POOL, private=True, raise_errors=True)
+        pool=transport.SYNC_POOL, private=True, raise_errors=True,
+        app=transport.APP_NAME_TRACKER)
     if not isinstance(data, dict):
         return {}
     shows = data.get("tv_shows") or {}
@@ -197,6 +261,59 @@ def _entry_ids(payload: dict) -> dict:
     return _ids.normalize(payload.get("ids") or {})
 
 
+# Before this, a Simkl watch timestamp is not a date at all. Simkl writes
+# `1970-01-01T00:00:01Z` when somebody says they watched a thing but cannot
+# remember when, and documents the reading as "any timestamp before 2000-01-01
+# signals this placeholder" — so it is a range rather than one literal value.
+#
+# IT MATTERS BECAUSE THIS APP FILES BY MONTH. A season whose last episode carries
+# the placeholder would be recorded as finished in JANUARY 1970 — a real month,
+# on a real page, sorted before everything. "I don't remember when" and "the
+# first of January 1970" are the same bytes and opposite facts, and only one of
+# them belongs in a month.
+UNREMEMBERED_BEFORE = "2000-01-01"
+
+
+def _placeholder_date(watched_at: str) -> bool:
+    """Whether `watched_at` is Simkl's "very long time ago" placeholder rather
+    than a date. See UNREMEMBERED_BEFORE."""
+    return bool(watched_at) and watched_at[:10] < UNREMEMBERED_BEFORE
+
+
+def _coordinates(season: dict, episode: dict) -> tuple[int, int] | None:
+    """Where one episode of one library item files IN THE TRACKER'S NUMBERING —
+    (season, episode) — or None when the payload does not say.
+
+    SIMKL'S OWN ANSWER IS PREFERRED OVER THE ITEM'S. An anime season-title
+    numbers its episodes from 1 whatever season of the show it really is, and
+    `extended=full_anime_seasons` puts the real coordinates on every episode as a
+    `tvdb` block — Beastars season 2 episode 1 arrives as season 1 episode 1 with
+    `tvdb: {season: 2, episode: 1}`. Taking that block is the whole translation
+    this package used to spend a per-title lookup deriving, and it is better than
+    what the lookup could do: it is per EPISODE, so a series numbered absolutely
+    (One Piece, one title with a thousand episodes) maps each episode to the
+    season it belongs to rather than being declared untranslatable.
+
+    THE EPISODE NUMBER TRAVELS WITH THE SEASON, NEVER ALONE. Simkl's mapping
+    renumbers both — episode 878 of One Piece is season 20 episode 1 — so taking
+    the season from the `tvdb` block and the number from the item would produce a
+    coordinate that exists in neither numbering.
+
+    IT IS TVDB'S NUMBERING, and this app files records under TMDB ids. Simkl
+    publishes no TMDB equivalent, and its own guide says the two "occasionally
+    disagree on season numbering for newer or split-cour anime". So a title where
+    they diverge is filed under a TMDB id with a TVDB season number — which is
+    not new, it is what `_naming` already produced from `mapped_tvdb_seasons`,
+    and there is nothing better on offer to replace it with.
+    """
+    tvdb = episode.get("tvdb")
+    if isinstance(tvdb, dict) and tvdb.get("season") is not None and tvdb.get("episode") is not None:
+        return int(tvdb["season"]), int(tvdb["episode"])
+    if season.get("number") is None or episode.get("number") is None:
+        return None
+    return int(season["number"]), int(episode["number"])
+
+
 def _episode_events(item: dict, start_at: str | None) -> list[dict]:
     """One library item flattened into the episode plays it records.
 
@@ -213,12 +330,12 @@ def _episode_events(item: dict, start_at: str | None) -> list[dict]:
     title = str(show.get("title") or "")
     events = []
     for season in item.get("seasons") or []:
-        number = season.get("number")
-        if number is None:
-            continue
         for episode in season.get("episodes") or []:
             watched_at = str(episode.get("watched_at") or "")
-            if not watched_at or episode.get("number") is None:
+            if not watched_at or _placeholder_date(watched_at):
+                continue
+            where = _coordinates(season, episode)
+            if where is None:
                 continue
             # `date_from` bounds which ITEMS come back, not which episodes inside
             # them — an item that moved yesterday arrives carrying its whole
@@ -229,7 +346,7 @@ def _episode_events(item: dict, start_at: str | None) -> list[dict]:
             events.append({
                 "type": "episode",
                 "show": {"ids": ids, "title": title},
-                "episode": {"season": int(number), "number": int(episode["number"])},
+                "episode": {"season": where[0], "number": where[1]},
                 "watched_at": watched_at,
             })
     return events
@@ -273,13 +390,16 @@ async def _all_items(settings: Settings, media: str, status: str,
     per bucket would tolerate it twelve times and call the result a read. See
     transport.is_credential_failure.
     """
-    params = {"episode_watched_at": "yes", "extended": "full"}
+    params = dict(LIBRARY_PARAMS)
+    if media == ANIME_TYPE:
+        params["extended"] = ANIME_EXTENDED
     if start_at:
         params["date_from"] = start_at
     try:
         data = await transport.cached_get(
             transport.sync_client(), settings, f"sync/all-items/{media}/{status}",
-            params, pool=transport.SYNC_POOL, private=True, raise_errors=True)
+            params, pool=transport.SYNC_POOL, private=True, raise_errors=True,
+            app=transport.APP_NAME_TRACKER)
     except transport.SimklError as exc:
         if transport.is_credential_failure(exc):
             raise
@@ -433,14 +553,12 @@ def _unlisted_claim(item: dict, status: str) -> UnlistedSeasons:
     out.
 
     A COMPLETED ITEM THAT ITEMIZES HAS STOPPED COUNTING AND STARTED LISTING, and
-    is read as an itemized one. A finished anime SEASON-title arrives from this
-    bucket stating no seasons at all and is rewritten with the one season it is
-    (see `_as_the_tracker_keys_it`), which turns its whole-title "everything
-    here is watched" into the ordinary statement every other translated
-    season-title makes: these episodes of this season, and nothing said about the
-    others beyond what the rest of the library says. Keeping WATCHED on such an
-    item would carry that claim onto the SERIES' other seasons, which is the one
-    outcome the rewrite exists to avoid.
+    is read as an itemized one. THAT IS NOW THE ORDINARY CASE rather than the
+    exception: `include_all_episodes=yes` (see LIBRARY_PARAMS) has Simkl list the
+    episodes of a finished title itself, so the bucket's silence about seasons —
+    the thing this claim exists to interpret — is no longer what a completed item
+    arrives with. The claim still has to be read, because a title Simkl declines
+    to itemize would otherwise fall through as a count of none.
 
     AN UNFINISHED SEASON IS NOT CLAIMED AT ALL. "Completed" means every episode
     that has AIRED, and `not_aired_episodes_count` is the service saying more are
@@ -535,199 +653,6 @@ def _fold_library_item(entries: dict[str, LibraryEntry], item: dict,
         unlisted_seasons=_merged_claim(previous.unlisted_seasons, claim))
 
 
-def _own_seasons(item: dict) -> list[int]:
-    """The season numbers THIS library item uses for its own episodes, in order.
-
-    Empty for an item with no `seasons[]` block at all, which is every item in
-    the `completed` bucket — see `_unlisted_claim` for why that bucket states
-    itself in counts instead.
-    """
-    return sorted({int(season["number"]) for season in item.get("seasons") or []
-                   if season.get("number") is not None})
-
-
-def _retitled(item: dict, naming: _naming.Naming, seasons: list[dict]) -> dict:
-    """`item` rewritten as the SHOW the tracker knows, carrying `seasons`.
-
-    Two edits, and they are one fact: this title's ids become the ones its own
-    per-title record knows the parent series by (a season-title's library payload
-    carries only `mal` — measured 2026-08-18, Sousou no Frieren's season-2 title
-    arrives with mal/anilist/kitsu/anidb and no tmdb at all), and its locally
-    numbered season becomes the season of that series it actually is. Doing one
-    without the other would be worse than doing neither: the ids alone would fold
-    a second season's episodes onto the first's numbers, and the season alone
-    would leave a correctly numbered season on a key nothing else uses.
-
-    WHAT THE SEASONS BLOCK SHOULD BE IS THE CALLER'S QUESTION, because there are
-    two answers to it and they come from opposite directions: a part-watched title
-    already lists its episodes and only needs them renumbered (`_renumbered`),
-    while a finished one lists nothing and states a count instead
-    (`_all_of_season`). Both produce the same shape, and everything downstream of
-    here reads that shape and never asks which of the two made it.
-
-    The item is COPIED rather than edited in place. It came out of the response
-    cache, which hands back a parsed document that other reads may still be
-    holding, and a translation written into it would leak into them.
-    """
-    show = item.get("show") or {}
-    return {**item, "show": {**show, "ids": {**_entry_ids(show), **naming.ids}},
-            "seasons": seasons}
-
-
-def _renumbered(item: dict, swap: tuple[int, int]) -> list[dict]:
-    """`item`'s own `seasons[]` block with the season it numbers locally rewritten
-    as the season of the series it really is."""
-    local, named = swap
-    return [{**season, "number": named} if int(season.get("number")) == local else season
-            for season in item.get("seasons") or []]
-
-
-def _finished_episode_count(item: dict) -> int | None:
-    """How many episodes a `completed` item states it has watched IN FULL, or None
-    when it states no such thing.
-
-    THE "DO NOT INVENT EPISODE NUMBERS" RULE (see `_progress_from_seasons`) IS AN
-    ARGUMENT ABOUT A PARTIAL COUNT AND DOES NOT REACH THIS ONE. Turning "4
-    episodes watched" into "episodes 1-4" picks four of the season's numbers out
-    of the air. `watched == total` with nothing left to air picks nothing: it is
-    every episode the title has, and which ones they are is not in question. The
-    DATES remain unknown and stay unknown — this answers how many episodes there
-    are, never when any of them was seen.
-
-    None for every shape that falls short of that: a count short of the total, a
-    title still airing (`not_aired_episodes_count`), a total of zero, and a
-    payload whose numbers will not parse. Each of them leaves the item alone,
-    which is the answer `_unlisted_claim` already gives for the same shapes.
-    """
-    try:
-        watched = int(item.get("watched_episodes_count") or 0)
-        total = int(item.get("total_episodes_count") or 0)
-        unaired = int(item.get("not_aired_episodes_count") or 0)
-    except (TypeError, ValueError):  # a shape we do not understand is not a count
-        return None
-    return total if total > 0 and watched == total and unaired == 0 else None
-
-
-def _all_of_season(season: int, total: int) -> list[dict]:
-    """A `seasons[]` block saying every episode of `season` was watched, undated.
-
-    THE NUMBERS ARE 1..total BECAUSE THAT IS THE SEASON-TITLE'S OWN NUMBERING —
-    Simkl gives each anime season-title its own episode list starting at 1, which
-    is precisely why `_renumbered` rewrites the SEASON and leaves the episode
-    numbers alone. A finished title's numbering is the same numbering; the only
-    difference is that it was never itemized.
-
-    NO `watched_at` ANYWHERE, deliberately. Simkl hands over counts and not
-    timestamps for a completed title, so there is no date to carry and inventing
-    one would place a play in a month nobody watched it in. An undated play is a
-    shape the tracker already has an answer for: it counts, it does not date the
-    season's completion, and it never overwrites a dated play of the same episode
-    (see `_fold_library_item`).
-    """
-    return [{"number": season,
-             "episodes": [{"number": number} for number in range(1, total + 1)]}]
-
-
-def _needs_naming(item: dict, status: str) -> bool:
-    """Whether asking Simkl what season a title is could change how it files.
-
-    Two shapes can be answered and everything else cannot. A title stating exactly
-    ONE season of its own is a candidate for renumbering — a title spanning several
-    is already numbering them the way the show does. A title from the `completed`
-    bucket stating a whole-title count is a candidate for scoping, and it is the
-    one place a title's season has to come from the naming record alone, because
-    the payload itemizes nothing to read it off.
-    """
-    if len(_own_seasons(item)) == 1:
-        return True
-    return status == COMPLETED_STATUS and _finished_episode_count(item) is not None
-
-
-def _as_the_tracker_keys_it(item: dict, naming: _naming.Naming, status: str) -> dict:
-    """One anime library item as the tracker's show and season, or unchanged.
-
-    THE SEASON IT LISTS AND THE SEASON IT IS ARE THE SAME QUESTION ASKED OF
-    DIFFERENT PAYLOADS, which is why one function answers both: an itemized title
-    is renumbered from what it lists, and a finished one — which lists nothing —
-    is given the season the naming record names outright. Neither computes a
-    second translation; `_naming` is asked once and both readings come off the one
-    `Naming`.
-
-    UNCHANGED IS ALWAYS AN AVAILABLE ANSWER and is the one every unrecognised
-    shape gets: no season named, an ambiguous mapping, a season the title already
-    uses, a completed title still airing. `_naming.translation` states why that is
-    the right fallback rather than a guess.
-    """
-    own = _own_seasons(item)
-    if own:
-        swap = _naming.translation(naming, own)
-        return item if swap is None else _retitled(item, naming, _renumbered(item, swap))
-    if status != COMPLETED_STATUS or naming.season is None:
-        return item
-    total = _finished_episode_count(item)
-    return item if total is None else _retitled(item, naming, _all_of_season(naming.season, total))
-
-
-async def _as_the_tracker_keys_them(settings: Settings, items: list[dict],
-                                    status: str) -> list[dict]:
-    """`items` from one ANIME bucket, each translated out of Simkl's season-title
-    numbering and into the show-and-season the tracker files records under.
-
-    WHY ONLY ANIME. Simkl models each anime SEASON as its own catalogue title,
-    numbering its episodes from 1 and carrying the parent series' shared ids only
-    on its per-title record — `_naming` holds the measurement and the rule. The
-    television catalogue models seasons as seasons, so asking the same question
-    of 1034 `shows` items would spend a lookup each to learn nothing.
-
-    `status` IS THE BUCKET THAT WAS ASKED FOR, not the item's own status field,
-    for the reason `_unlisted_claim` gives: the request named the list, so a
-    payload whose status drifts cannot flip what a whole bucket means.
-
-    A FINISHED SEASON-TITLE IS TRANSLATED TOO, AND IT COSTS THE SAME LOOKUP. It
-    states no seasons to renumber, so what it gets instead is the season its
-    naming record names and every episode of it (`_all_of_season`) — the two
-    halves of the same rewrite that a part-watched title gets. Left alone, such a
-    title stays on its own bare `mal` key, permanently apart from the series it
-    belongs to, holding the viewer's real progress where nothing renders it: a
-    season finished on Simkl read as none of it watched. Rewriting it WITHOUT
-    stating its episodes would be worse still — the bucket's "everything here is
-    watched" would land on the series and claim its OTHER seasons finished.
-
-    MEASURED COST, dev account 2026-08-18: 9 anime titles in a 1043-item library,
-    so 9 cached GETs on a day-long TTL against 12 `/sync/all-items` reads that
-    are themselves the most expensive thing this module does. Reading the
-    `completed` bucket the same way adds one per finished anime title, once a day
-    and only in a pass that reads that bucket at all — `_wanted_buckets` skips a
-    list Simkl says has not moved.
-
-    A LOOKUP THAT FAILS LEAVES ITS ITEM ALONE rather than failing the library
-    read. A library read that raised here would cost a viewer their whole Simkl
-    history for a refinement to one title's season number — and `fetch_library`'s
-    own contract is that a partial answer says so rather than shrinking.
-    """
-    namings = await asyncio.gather(
-        *(_naming.fetch(settings, _entry_ids(item.get("show") or {}).get("simkl"))
-          if _needs_naming(item, status) else _nothing()
-          for item in items),
-        return_exceptions=True,
-    )
-    translated = []
-    for item, naming in zip(items, namings):
-        if isinstance(naming, BaseException):
-            logger.warning("simkl could not be asked which season a library title names: %s",
-                           naming)
-            translated.append(item)
-            continue
-        translated.append(_as_the_tracker_keys_it(item, naming, status))
-    return translated
-
-
-async def _nothing() -> _naming.Naming:
-    """An awaitable EMPTY, so the gather above stays one expression rather than
-    two loops that have to be kept in step by position."""
-    return _naming.EMPTY
-
-
 async def fetch_library(settings: Settings, *, start_at: str | None = None,
                         activities: dict | None = None,
                         since: dict | None = None) -> LibraryRead:
@@ -777,12 +702,6 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
                         events.append(event)
                 continue
             items = document.get(media) or document.get("shows") or []
-            if media == ANIME_TYPE:
-                # BEFORE EITHER READER, because both of them read the season
-                # number: the plays go out as events and the per-season baseline
-                # is folded, and a translation applied to one alone would put a
-                # viewer's plays on a different season from their progress.
-                items = await _as_the_tracker_keys_them(settings, items, status)
             for item in items:
                 events.extend(_episode_events(item, start_at))
                 _fold_library_item(entries, item, status)
@@ -800,30 +719,53 @@ def _progress_from_seasons(entry: dict) -> dict[int, dict[int, str]]:
     A season with no episode breakdown contributes nothing rather than a guessed
     set: Simkl reports a watched COUNT beside the breakdown, and turning "4
     episodes" into "episodes 1-4" would invent four dates and four episode
-    numbers that may not be the ones actually seen. That is an argument about a
-    PARTIAL count and it is not one this function has to distinguish: a count
-    equal to the title's total names no episodes to choose between, and where
-    that case is acted on the block is written out first, before anything reaches
-    here (see `_finished_episode_count` and `_all_of_season`).
+    numbers that may not be the ones actually seen. THAT CASE NO LONGER ARISES
+    ON THE LIBRARY PATH: `include_all_episodes=yes` has Simkl itemize the
+    completed and dropped buckets itself, so an episode list arrives where a bare
+    count used to (see LIBRARY_PARAMS). It still arises on the per-title read,
+    which is why the rule stays.
+
+    THE SEASON AND EPISODE NUMBERS ARE `_coordinates`', not the payload's, so an
+    anime season-title's own numbering is translated here exactly as it is for
+    the play events beside it — one rule, read by both, rather than a
+    translation applied to one and forgotten for the other.
     """
     out: dict[int, dict[int, str]] = {}
     for season in entry.get("seasons") or []:
-        number = season.get("number")
-        if number is None:
-            continue
-        episodes: dict[int, str] = {}
         for episode in season.get("episodes") or []:
-            if episode.get("number") is None:
+            where = _coordinates(season, episode)
+            if where is None:
                 continue
-            episodes[int(episode["number"])] = str(episode.get("watched_at") or "")
-        if episodes:
-            out[int(number)] = dict(sorted(episodes.items()))
-    return out
+            watched_at = str(episode.get("watched_at") or "")
+            # THE PLACEHOLDER IS NOT A DATE AND IS STORED AS NO DATE. The episode
+            # still counts — the viewer watched it — but "I don't remember when"
+            # must not become a play in January 1970. See UNREMEMBERED_BEFORE.
+            if _placeholder_date(watched_at):
+                watched_at = ""
+            out.setdefault(where[0], {})[where[1]] = watched_at
+    return {season: dict(sorted(episodes.items()))
+            for season, episodes in sorted(out.items()) if episodes}
 
 
 async def fetch_progress_details(settings: Settings,
                                  show_ids) -> dict[int, dict[int, dict[int, str]]]:
     """{simkl_id: {season: {episode: watched_at}}} for several shows at once.
+
+    IN PRACTICE THIS ANSWERS ABOUT NOTHING, and that is a fact about the endpoint
+    rather than about this account. Measured 2026-08-21: `POST /sync/watched`
+    returns `{"simkl": id, "result": true, "list": ..., "last_watched_at": ...}`
+    and no `seasons` block for any title — finished or part-way through, anime or
+    television, `episode_watched_at=yes` notwithstanding. It says WHETHER a title
+    has been watched, never HOW MUCH. So every id comes back absent (see the loop
+    below for why absent and not empty), and a caller that needs Simkl's per-title
+    progress reads the library instead — which is the one read that has it, and
+    the only shape that can carry "finished, episode numbers unknown".
+
+    KEPT RATHER THAN DELETED because SyncPort declares it and because the parsing
+    is what would be needed if the endpoint ever did itemize: a title that comes
+    back WITH a breakdown is still read and still answered for. What changed is
+    only that a title without one is no longer reported as a viewer having seen
+    none of it.
 
     ONE REQUEST FOR A WHOLE ROSTER. `POST /sync/watched` takes the items you
     already know about and answers about each of them, which makes it the batched
@@ -857,7 +799,14 @@ async def fetch_progress_details(settings: Settings,
         return {}
     out: dict[int, dict[int, dict[int, str]]] = {}
     client = transport.sync_client()
-    url = _api_url("sync/watched", settings, {"episode_watched_at": "yes"})
+    # `episodes` IS THE DOCUMENTED VALUE. This app sent `extended=full`, which
+    # Simkl accepts as an alias and answers identically — but `full` is not among
+    # the values this endpoint documents (`counters`, `episodes`, `specials`), and
+    # an undocumented spelling is one deprecation away from silently returning
+    # counts. `specials` is deliberately not asked for: season 0 has no place in a
+    # season's episode count and every reader here already drops it.
+    url = _api_url("sync/watched", settings, {"extended": "episodes",
+                                              "episode_watched_at": "yes"})
     with span("simkl.progress_details", n=len(unique)):
         for offset in range(0, len(unique), PROGRESS_BATCH):
             batch = unique[offset:offset + PROGRESS_BATCH]
@@ -867,7 +816,7 @@ async def fetch_progress_details(settings: Settings,
             # viewing, which is the other reason.
             resp = await transport.send(
                 client, "POST", url, pool=transport.SYNC_POOL,
-                headers=transport.api_headers(settings),
+                headers=transport.api_headers(settings, private=True),
                 json=[{"simkl": show_id} for show_id in batch])
             if resp.status_code != 200:
                 logger.warning("simkl fetch_progress_details -> HTTP %s: %s",
@@ -888,7 +837,41 @@ async def fetch_progress_details(settings: Settings,
                     stated = batch[position]
                 if stated in (None, ""):
                     continue
-                out[int(stated)] = _progress_from_seasons(entry)
+                seasons = _progress_from_seasons(entry)
+                if seasons:
+                    out[int(stated)] = seasons
+                elif entry.get("result") is UNWATCHED:
+                    # THE ONE ANSWER THAT REALLY IS A ZERO: Simkl knows the title
+                    # and this viewer has not watched it. Retiring what was stored
+                    # is exactly right. `not_found` is NOT this — see UNRESOLVED —
+                    # and neither is a title that answered with no breakdown.
+                    out[int(stated)] = {}
+                # OTHERWISE ABSENT, AND THAT IS THE WHOLE FIX. An answer with no
+                # episode numbers in it is not an answer of zero: Simkl HOLDS the
+                # title and has simply not said how much of it was watched. Absence
+                # is what says so — see SyncPort.fetch_progress_details, where it
+                # means "I have nothing to tell you about this one" and the caller
+                # leaves the stored counts alone, while an empty map means "seen
+                # none of it" and retires every season of the title.
+                #
+                # MEASURED 2026-08-21, AND IT IS EVERY TITLE THE VIEWER HOLDS.
+                # `POST /sync/watched` answers `{"simkl": id, "result": true,
+                # "list": ..., "last_watched_at": ...}` with no `seasons` block —
+                # for a finished title, for one part-way through, for anime and
+                # for television alike, `episode_watched_at=yes` notwithstanding.
+                # Twin Peaks, itemized down to eight episodes by the library read,
+                # comes back from here with nothing. So this endpoint says WHETHER
+                # a title has been watched and never HOW MUCH, and every answer it
+                # gave was being read as a count of none.
+                #
+                # NOT SOMETHING THIS SHAPE COULD CARRY ANYWAY, for the finished
+                # half of it: "all of it, episode numbers unknown" is a claim
+                # rather than a count, and the only shape in this app that holds
+                # one is LibraryEntry.unlisted_seasons, which fetch_library
+                # produces and this return type has no room for. A caller that
+                # needs a real answer reads the library — see
+                # watch_history.baseline_show, which falls back to one for a
+                # source that has it — and this says honestly that it cannot say.
     return out
 
 

@@ -167,17 +167,26 @@ async def search_titles(settings: Settings, media: Media, query: str) -> list[Se
         return []
     media = Media(media)
     paths = _MOVIE_PATHS if media is Media.MOVIE else _SHOW_PATHS
-    outcomes = await asyncio.gather(
-        *(_search_one(settings, path, q, media) for path in paths),
-        return_exceptions=True,
-    )
+    # ONE AT A TIME, NOT GATHERED, AND THAT IS SIMKL'S RULE RATHER THAN A
+    # PREFERENCE. Parallel requests are allowed only against the endpoints served
+    # from Cloudflare's edge — the calendar files, `/tv/{id}`, `/anime/{id}` and
+    # the episode lists — and search is explicitly not among them. Measured
+    # 2026-08-21: `GET /search/tv` answers `cf-cache-status: DYNAMIC`, so every
+    # one of these reaches the origin. Simkl names "parallelizing uncached
+    # endpoints" as a common reason a client id is suspended, without warning and
+    # with no appeal, which is not a risk worth one round trip.
+    #
+    # THE COST IS ONE EXTRA ROUND TRIP PER SEARCH, because a show query asks two
+    # endpoints (Simkl's /search/tv returns no anime) and a film query asks one.
+    # A search is a deliberate act by one person, not something a page load
+    # spends, so serializing it is the cheap side of this trade.
     hits: list[SearchHit] = []
     failures: list[BaseException] = []
-    for outcome in outcomes:
-        if isinstance(outcome, BaseException):
-            failures.append(outcome)
-            continue
-        hits.extend(outcome)
+    for path in paths:
+        try:
+            hits.extend(await _search_one(settings, path, q, media))
+        except Exception as exc:  # noqa: BLE001 — weighed below, per endpoint
+            failures.append(exc)
     if failures and len(failures) == len(paths):
         # Nothing answered at all — raise rather than reading as an honest
         # empty result. The first failure is as good as any to surface: they

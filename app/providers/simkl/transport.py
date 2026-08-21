@@ -26,6 +26,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ... import cache
+from ... import changelog
 from ... import http_pool
 from ...config import Settings
 from ..base import SourceUnavailable
@@ -39,9 +40,43 @@ API_BASE = "https://api.simkl.com"
 # alongside the client id so an instance misbehaving can be identified and told
 # about it rather than silently blocked; the User-Agent is the same courtesy for
 # anything reading raw logs.
-APP_NAME = "trakt-new-shows"
-APP_VERSION = "2.0"
-USER_AGENT = "trakt-new-shows-py/2.0"
+#
+# TWO NAMES, BECAUSE THIS APP IS TWO THINGS IN SIMKL'S LOGS. The tracker reads
+# ONE PERSON'S watch history with that person's token; the calendar and the
+# catalogue lookups behind it read PUBLIC data with the instance's own client id.
+# When Simkl asks which half of an instance is leaning on them, those are
+# genuinely different answers, and a single name would lose the distinction at
+# exactly the moment it matters. The split is the same one that runs through this
+# whole package — see `cached_get`'s `private` flag, which asks the identical
+# question about the RESPONSE.
+APP_NAME_TRACKER = "distrakkt"
+APP_NAME_CALENDAR = "distrakkl"
+
+# What a caller that did not say gets: the public half's name. Deliberately the
+# safer default of the two — the catalogue reads are shared by both halves, so a
+# call that has not stated which one it belongs to is being made on behalf of
+# something public more often than not, and mislabelling a public read as the
+# tracker would put the tracker's name on traffic no viewer's token was spent on.
+DEFAULT_APP_NAME = APP_NAME_CALENDAR
+
+# The version reported when the changelog cannot be read at all. Not a second
+# statement of the version — `app_version` prefers the real one and this only
+# stands in when there is none to prefer.
+APP_VERSION_FALLBACK = "0"
+
+USER_AGENT = f"{APP_NAME_CALENDAR}-py/{APP_VERSION_FALLBACK}"
+
+
+def app_version() -> str:
+    """The running version, for Simkl's `app-version` parameter.
+
+    READ FROM THE CHANGELOG rather than restated here, because the app already
+    has one place that answers "what version is this" and a constant beside it
+    would be a second copy to keep in step — one that goes stale silently, since
+    nothing renders it. `changelog.current_version` answers "" when the file
+    cannot be parsed, which is what the fallback is for.
+    """
+    return changelog.current_version() or APP_VERSION_FALLBACK
 
 
 class SimklError(SourceUnavailable):
@@ -97,48 +132,77 @@ def is_credential_failure(error: SimklError) -> bool:
     return error.status in CREDENTIAL_STATUSES
 
 
-def api_headers(settings: Settings) -> dict:
+def api_headers(settings: Settings, *, private: bool = False) -> dict:
     """Simkl request headers.
 
-    The Authorization header is added only when there is a token to send, because
-    the calendar and catalog halves of this source are unauthenticated by design
-    — sending an empty bearer would turn a public lookup into a rejected one.
+    THE BEARER GOES ONLY ON A PRIVATE READ, and that is a caching decision as
+    much as a correctness one. `private` asks the same question `cached_get`
+    asks — does this answer depend on WHOSE token asked — and a public catalogue
+    lookup does not.
+
+    SENDING IT ANYWAY COSTS THE EDGE CACHE, measured 2026-08-21 against the live
+    service: `GET /tv/1687953` answers `cf-cache-status: BYPASS` with the
+    Authorization header and `MISS` then `HIT` without it. Cloudflare will still
+    SERVE an entry somebody else's traffic warmed — Chuck answers HIT either way
+    — but it will not STORE one for an authenticated request. So every cold title
+    this app looked up went to the origin and left nothing behind for the next
+    caller, which is exactly the traffic Simkl's docs allow parallel requests for
+    ON THE GROUNDS THAT IT IS EDGE-CACHED. The header made that untrue.
+
+    A token is still only sent when there IS one: the calendar and catalogue
+    halves are unauthenticated by design, and an empty bearer turns a public
+    lookup into a rejected one.
     """
     headers = {
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
-        "app-name": APP_NAME,
-        "app-version": APP_VERSION,
     }
     token = (settings.simkl_access_token or "").strip()
-    if token:
+    if private and token:
         headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
-# The query parameters that carry THIS INSTANCE'S CREDENTIAL rather than
-# describing what is being asked for. `api_params` is what puts them on a
-# request and `cache_key` is what leaves them off the address the answer is
-# filed under; both read this one tuple, because "is this parameter a
-# credential" is a single fact and a second copy of it is exactly how the client
-# id came to be part of the cache key in the first place.
-CREDENTIAL_PARAMS = ("client_id",)
+# The query parameters that say WHO IS ASKING rather than WHAT IS BEING ASKED
+# FOR. `api_params` is what puts them on a request and `cache_key` is what leaves
+# them off the address the answer is filed under; both read this one tuple,
+# because "does this parameter describe the question" is a single fact and a
+# second copy of it is exactly how the client id came to be part of the cache key
+# in the first place.
+#
+# THE APP NAME IS IN HERE FOR A REASON THAT BIT ONCE ALREADY. Two halves of this
+# app now identify themselves differently (APP_NAME_TRACKER / APP_NAME_CALENDAR)
+# and both ask for the same titles, so a key that included the name would file
+# one public answer under two addresses — the same defect the client id caused,
+# in a new spelling.
+CALLER_PARAMS = ("client_id", "app-name", "app-version")
 
 
-def api_params(settings: Settings, params: dict | None = None) -> dict:
-    """`params` with this instance's client id added.
+def api_params(settings: Settings, params: dict | None = None, *,
+               app: str = DEFAULT_APP_NAME) -> dict:
+    """`params` with the three things Simkl asks every request to carry: this
+    instance's client id, and the name and version of the app making the call.
 
-    Simkl takes the client id as a QUERY PARAMETER rather than a header, which
-    means it is part of the URL that goes out. Trakt sends the same fact in a
-    header; the difference is Simkl's and every request has to honour it, because
-    a cold origin request without one answers 412 client_id_failed.
+    ALL THREE ARE QUERY PARAMETERS, which is Simkl's own spelling of them
+    ("appended to every request URL"). Trakt sends the equivalent facts in
+    headers; the difference is Simkl's and every request has to honour it,
+    because a cold origin request without a client id answers 412
+    client_id_failed. This app previously sent the name and version as HEADERS,
+    which is not where the docs put them.
 
-    IT IS NOT PART OF THE CACHE KEY, and that is `cache_key`'s business — see
-    there for why a public catalogue answer does not belong to the credential
-    that happened to fetch it.
+    `app` NAMES WHICH HALF IS CALLING — see APP_NAME_TRACKER / APP_NAME_CALENDAR
+    for why there are two of them and why the public one is the default.
+
+    NONE OF THE THREE IS PART OF THE CACHE KEY, and that is `cache_key`'s
+    business — see there for why a public catalogue answer does not belong to the
+    caller that happened to fetch it. That matters more now than it did with the
+    client id alone: two halves of this app ask for the same title, and keying on
+    the name would file one answer twice.
     """
     merged = dict(params or {})
     merged["client_id"] = settings.simkl_client_id
+    merged["app-name"] = app
+    merged["app-version"] = app_version()
     return merged
 
 
@@ -165,7 +229,7 @@ def cache_key(path: str, params: dict | None = None) -> str:
     a different order address one entry rather than two.
     """
     describing = sorted((name, value) for name, value in (params or {}).items()
-                        if name not in CREDENTIAL_PARAMS)
+                        if name not in CALLER_PARAMS)
     return f"{API_BASE}/{path}?{urlencode(describing)}"
 
 
@@ -736,7 +800,8 @@ async def _send_once(client: httpx.AsyncClient, method: str, url: str, *,
 
 
 async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, path: str,
-                      pool: http_pool.Pool, fresh: bool, raise_errors: bool):
+                      pool: http_pool.Pool, fresh: bool, raise_errors: bool,
+                      private: bool = False):
     """One GET, reduced to "the parsed body, or None". No caching.
 
     Split out of cached_get so that function is only the CACHE POLICY and this
@@ -746,7 +811,8 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
     """
     t0 = _time.perf_counter()
     try:
-        resp = await send(client, "GET", url, pool=pool, headers=api_headers(settings))
+        resp = await send(client, "GET", url, pool=pool,
+                          headers=api_headers(settings, private=private))
     except httpx.HTTPError as exc:
         # A transport failure means we never got a real answer. Unlike a 404 or
         # an empty list that is NOT "Simkl says there is nothing here", so it
@@ -788,6 +854,7 @@ async def cached_get(
     raise_errors: bool = False,
     private: bool = False,
     cache_only: bool = False,
+    app: str = DEFAULT_APP_NAME,
 ):
     """GET a Simkl path (with disk caching keyed by the path and the parameters
     that describe the question — see `cache_key`). Returns parsed JSON or None.
@@ -825,7 +892,7 @@ async def cached_get(
     # Simkl will not answer a cold one without it; the cached copy is filed
     # without it because the content behind it does not vary by credential. See
     # `cache_key`.
-    url = f"{API_BASE}/{path}?{urlencode(api_params(settings, params))}"
+    url = f"{API_BASE}/{path}?{urlencode(api_params(settings, params, app=app))}"
     key = cache_key(path, params)
     ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
     if not fresh and not private:
@@ -838,7 +905,7 @@ async def cached_get(
         # a hard miss anyway.
         return await cache.get_stale(key)
     data = await _fetch_json(client, settings, url, path, pool,
-                             fresh=fresh, raise_errors=raise_errors)
+                             fresh=fresh, raise_errors=raise_errors, private=private)
     if data is None:
         # None is how a swallowed failure comes back, and it is also what a
         # literal `null` body would parse to. Neither is worth storing: the read

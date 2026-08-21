@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import httpx
 
+from app import changelog
 from app.providers.simkl import SimklBlockedError, SimklRateLimitError
 from app.providers.simkl import transport
 
@@ -580,9 +581,20 @@ class RedirectRoutingTests(TransportStateTestCase):
 class HeaderTests(unittest.TestCase):
     """What goes out on every request."""
 
-    def test_a_token_is_sent_when_there_is_one(self):
-        headers = transport.api_headers(FAKE_SETTINGS)
+    def test_a_token_is_sent_on_a_private_read(self):
+        headers = transport.api_headers(FAKE_SETTINGS, private=True)
         self.assertEqual(headers["Authorization"], "Bearer tok")
+
+    def test_no_token_is_sent_on_a_public_one_even_when_there_is_one(self):
+        """THE EDGE CACHE IS THE REASON. Measured 2026-08-21: the same
+        `GET /tv/{id}` answers `cf-cache-status: BYPASS` with an Authorization
+        header and `MISS` then `HIT` without it — Cloudflare will serve an entry
+        somebody warmed, but will not STORE one for an authenticated request. So
+        the header turned every cold catalogue lookup into an origin hit that
+        left nothing behind, on exactly the endpoints Simkl allows parallel
+        requests for BECAUSE they are edge-cached."""
+        headers = transport.api_headers(FAKE_SETTINGS)
+        self.assertNotIn("Authorization", headers)
 
     def test_no_empty_bearer_is_sent(self):
         """The calendar and catalog halves are unauthenticated by design, and an
@@ -591,15 +603,31 @@ class HeaderTests(unittest.TestCase):
             SimpleNamespace(simkl_client_id="cid", simkl_access_token="", cache_ttl_minutes=10))
         self.assertNotIn("Authorization", headers)
 
-    def test_the_application_names_itself(self):
-        headers = transport.api_headers(FAKE_SETTINGS)
-        self.assertEqual(headers["app-name"], transport.APP_NAME)
-        self.assertEqual(headers["app-version"], transport.APP_VERSION)
-        self.assertIn("trakt-new-shows", headers["User-Agent"])
+    def test_the_application_names_itself_in_the_query_where_simkl_asks_for_it(self):
+        """Simkl documents the name and version as parameters "appended to every
+        request URL", not as headers — which is where this app used to put
+        them."""
+        params = transport.api_params(FAKE_SETTINGS, {"extended": "full"})
+        self.assertEqual(params["app-name"], transport.DEFAULT_APP_NAME)
+        self.assertEqual(params["app-version"], transport.app_version())
+        self.assertIn(transport.APP_NAME_CALENDAR, transport.USER_AGENT)
+
+    def test_the_two_halves_name_themselves_differently(self):
+        """The tracker reads one person's history with their token; the calendar
+        reads public data with the instance's. When Simkl asks which half is
+        leaning on them those are different answers."""
+        tracker = transport.api_params(FAKE_SETTINGS, app=transport.APP_NAME_TRACKER)
+        self.assertEqual(tracker["app-name"], "distrakkt")
+        self.assertEqual(transport.api_params(FAKE_SETTINGS)["app-name"], "distrakkl")
+
+    def test_the_version_is_the_running_one_rather_than_a_second_copy(self):
+        self.assertEqual(transport.app_version(),
+                         changelog.current_version() or transport.APP_VERSION_FALLBACK)
 
     def test_the_client_id_travels_as_a_query_parameter(self):
-        self.assertEqual(transport.api_params(FAKE_SETTINGS, {"extended": "full"}),
-                         {"extended": "full", "client_id": "cid"})
+        params = transport.api_params(FAKE_SETTINGS, {"extended": "full"})
+        self.assertEqual(params["extended"], "full")
+        self.assertEqual(params["client_id"], "cid")
 
     def test_the_callers_params_are_not_mutated(self):
         params = {"extended": "full"}
@@ -624,10 +652,20 @@ class TheCredentialIsNotPartOfTheAddressTests(TransportStateTestCase):
         credential is what the key drops. A parameter added to one and forgotten
         in the other is the drift this phase exists to undo."""
         added = set(transport.api_params(FAKE_SETTINGS, {"extended": "full"})) - {"extended"}
-        self.assertEqual(added, set(transport.CREDENTIAL_PARAMS))
+        self.assertEqual(added, set(transport.CALLER_PARAMS))
         key = transport.cache_key("tv/1234", {"extended": "full"})
-        for name in transport.CREDENTIAL_PARAMS:
+        for name in transport.CALLER_PARAMS:
             self.assertNotIn(name, key)
+
+    def test_the_two_app_names_address_one_answer_rather_than_two(self):
+        """The same defect the client id caused, in a new spelling: both halves
+        of this app ask for the same titles, so a key carrying the caller's name
+        would file one public answer under two addresses."""
+        self.assertEqual(
+            transport.cache_key("tv/1234", transport.api_params(
+                FAKE_SETTINGS, {"extended": "full"}, app=transport.APP_NAME_TRACKER)),
+            transport.cache_key("tv/1234", transport.api_params(
+                FAKE_SETTINGS, {"extended": "full"}, app=transport.APP_NAME_CALENDAR)))
 
     def test_it_still_addresses_the_question_being_asked(self):
         """Dropping the credential must not drop what the answer is ABOUT — two
