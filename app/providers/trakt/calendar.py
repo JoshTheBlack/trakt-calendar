@@ -24,8 +24,8 @@ from urllib.parse import urlencode
 
 from ...config import Settings
 from ...endpoints import Endpoint
-from ..base import Media, Record, Source, collect_ids
-from . import transport
+from ..base import Media, Record, Source
+from . import _ids, transport
 from .transport import TraktError
 
 logger = logging.getLogger(__name__)
@@ -168,7 +168,7 @@ def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
         source=Source.TRAKT,
         media=endpoint.media,
         id=ids.get("slug") or str(ids.get("trakt") or ""),
-        ids=collect_ids(ids),
+        ids=_ids.normalize(ids),
         detail_url=(
             f"https://trakt.tv/{'movies' if endpoint.media == Media.MOVIE else 'shows'}/{ids.get('slug')}"
             if ids.get("slug") else "https://trakt.tv"

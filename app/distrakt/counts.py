@@ -207,6 +207,77 @@ def no_longer_finished(recorded: Mapping[str, int] | int | None,
                   if name in now and name not in still)
 
 
+def counts_detail(per_source: Mapping[str, int] | int | None, total,
+                  labels: Mapping[str, str] | None = None, order=(),
+                  asked=(), dates: Mapping[str, str] | None = None,
+                  linked=()) -> str:
+    """The whole story behind "x/y", one line per service, for a row's tooltip.
+
+    WHAT THE ROW ITSELF CANNOT SAY. `counts_label` has one line to work with, so
+    it shows the numbers and nothing else — and three different situations look
+    identical in it: a service that agrees, a service nobody asked whose number
+    is a leftover from before its link lapsed, and a service that reported "all
+    of it" without itemizing an episode. Telling those apart meant reading the
+    database, which is not something a viewer can do.
+
+    ONE LINE PER LINKED SERVICE, INCLUDING THE ONES HOLDING NOTHING. A service
+    with no record of a title is exactly what somebody is looking for when they
+    open this, and omitting its line would read as a rendering fault rather than
+    as an answer.
+
+    COMPOSED HERE, SERVER-SIDE, AS FINISHED TEXT that the client only displays.
+    That is the same rule the row's other sentences follow, and for the same
+    reason: a flag plus a branch in the browser is how two renderings of one fact
+    come to disagree, and the one in JavaScript is the one no test covers.
+
+    THE DATE IS EACH SERVICE'S OWN LAST WATCH rather than the season's finish
+    date. The two differ precisely when the services disagree, which is when
+    somebody is reading this. And "no watch dates" earns its place: a season can
+    be complete and still never settle onto a month, because a month is named by
+    the day the last episode was watched and not every service records one — so
+    that line is the whole answer to "why is this finished thing still on my
+    list".
+
+    `asked` NARROWS TO THIS PASS and is what "not asked" is drawn from. Empty
+    means the caller did not say — a frozen month re-rendered, a test — and then
+    nothing is marked, because inferring staleness from silence would put the
+    mark on every row of a month that is waiting on nobody.
+    """
+    label_of = labels or {}
+    counts = resolve(per_source, total) if isinstance(per_source, Mapping) else {}
+    when = dates or {}
+    asked_names = {str(name) for name in asked}
+    linked_names = {str(name) for name in linked}
+    y = int(total or 0)
+
+    # DECLARED ORDER FIRST, then anything else that turned up — the same ordering
+    # every other per-service reading on the page uses, so a row and its tooltip
+    # cannot name the services in two different sequences.
+    ordered: list[str] = []
+    for name in [str(n) for n in order] + sorted(counts) + sorted(linked_names):
+        if name in ordered:
+            continue
+        if name in counts or name in linked_names:
+            ordered.append(name)
+
+    lines = []
+    for name in ordered:
+        shown = label_of.get(name, name)
+        if name not in counts:
+            lines.append(f"{shown}: nothing recorded")
+            continue
+        notes = []
+        if asked_names and name not in asked_names:
+            notes.append("not asked")
+        if when.get(name):
+            notes.append(f"last watched {when[name]}")
+        elif int(counts[name]) > 0:
+            notes.append("no watch dates")
+        line = f"{shown}: {int(counts[name])} of {y}"
+        lines.append(line + (" — " + ", ".join(notes) if notes else ""))
+    return "\n".join(lines)
+
+
 def counts_label(per_source: Mapping[str, int] | int | None, total,
                  labels: Mapping[str, str] | None = None, order=(), asked=()) -> str:
     """The "x/y" a row shows, which is two of them when the services disagree.

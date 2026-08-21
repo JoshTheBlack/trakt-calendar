@@ -203,6 +203,12 @@ function showRow(s) {
     // already carrying both numbers, each named, and drawing it is all that is
     // left to do. The announcement post deliberately does NOT follow: it is prose
     // rather than a ledger and carries one number or none (app/distrakt/live.py).
+    // AND THE WHOLE STORY BEHIND IT HANGS OFF IT AS A TOOLTIP. One line has room
+    // for the numbers and nothing else, so a service nobody asked, a service that
+    // agrees, and a service that said "all of it" without itemizing all look
+    // identical in the cell — see app/distrakt/counts.py's counts_detail, which
+    // composes the long form server-side. This draws it and decides nothing: the
+    // sentence arrives finished, the same way `counts_note` beside it does.
     let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}` : xy;
     // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     let dates = '';
@@ -275,7 +281,8 @@ function showRow(s) {
                  string the emoji map is keyed on, so seeing it is what makes the
                  map editable without guessing. -->
             <span class="distrakt-network">${esc(net || '—')}</span>
-            <span class="distrakt-counts">${counts ? '(' + esc(counts) + ')' : ''}</span>
+            <span class="distrakt-counts"${counts && s.counts_detail
+                ? ` title="${esc(s.counts_detail)}"` : ''}>${counts ? '(' + esc(counts) + ')' : ''}</span>
             <span class="distrakt-dates">${esc(dates)}</span>
             <span class="distrakt-row-actions">${actions}</span>
         </div>`;

@@ -58,10 +58,30 @@ function traktEpisodeUrl(slug, season, number) {
 // which is as deep as an id from a roster row reaches. A service the row carries
 // no id for gets no link at all and its tick is drawn as plain text rather than
 // as a link somewhere unhelpful.
+// EACH SERVICE'S OWN SLUG, FALLING BACK TO THE OLD SHARED ONE. Trakt and Simkl
+// both call a title's readable name `slug` and disagree on what it is —
+// `the-traitors-2023` against `the-traitors` — so the one field a row used to
+// carry held whichever service synced last, and a link built from it was wrong
+// for the other. Rows written before the two were told apart have only the
+// shared value, which is usually but not provably Trakt's; it stays the fallback
+// so nothing regresses while the namespaced ones fill in.
+function serviceSlug(service, d) {
+    if (service === 'trakt') return d.trakt_slug || d.slug || '';
+    if (service === 'simkl') return d.simkl_slug || '';
+    return '';
+}
+
 function serviceEpisodeUrl(service, d, number) {
     const ids = d.source_ids || {};
-    if (service === 'trakt') return traktEpisodeUrl(d.slug, d.season, number);
-    if (service === 'simkl' && ids.simkl) return `https://simkl.com/tv/${encodeURIComponent(ids.simkl)}`;
+    if (service === 'trakt') return traktEpisodeUrl(serviceSlug('trakt', d), d.season, number);
+    if (service === 'simkl' && ids.simkl) {
+        // THE ID IS THE STABLE IDENTIFIER AND THE SLUG IS DECORATION — Simkl says
+        // so outright, and asks that the slug be included when it is known. So a
+        // title we have no Simkl slug for still links, by id alone.
+        const slug = serviceSlug('simkl', d);
+        const base = `https://simkl.com/tv/${encodeURIComponent(ids.simkl)}`;
+        return slug ? `${base}/${encodeURIComponent(slug)}` : base;
+    }
     return '';
 }
 

@@ -1032,3 +1032,51 @@ class ASettledRowLearnsACountThatWentUpTests(AppTestCase):
             (self.user_id, self.month)))
         self._month()
         self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 9})
+
+
+class AddingASeasonWithdrawsARefusalTests(AppTestCase):
+    """A dismissal says "do not put this season back on my list, stop asking".
+    Adding the season by hand is the viewer doing the very thing that refusal
+    refused, so the refusal has lapsed.
+
+    THE OBSERVED CASE: a verdict was questioned, refused, and the season later
+    removed and re-added by hand. It could not be questioned again, because a
+    refusal made about the row that used to be there still applied to the one
+    that replaced it — so the page held a settled record it would never ask
+    about.
+
+    NOT CLEARED ON REMOVAL, which is the other place it could go: removing a
+    season is the viewer saying they do not want it, and clearing there would set
+    the history prompt asking about it again on the very next load.
+
+    SYNCHRONOUS, like everything else on AppTestCase — it is a plain TestCase, so
+    an `async def test_` here would return a coroutine nobody awaits and pass
+    without running an assertion.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+
+    def test_adding_a_season_clears_a_refusal_about_it(self):
+        asyncio.run(store.dismiss_prompt(self.user_id, ITEM, SEASON))
+        self.assertIn((str(ITEM), SEASON),
+                      asyncio.run(store.dismissed_prompts(self.user_id)))
+        asyncio.run(store.clear_prompt_dismissal(self.user_id, ITEM, SEASON))
+        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)), set())
+
+    def test_it_clears_only_the_season_that_was_added(self):
+        """Per season, like the refusal itself — an answer about one season of a
+        show says nothing about the viewer's answer for another."""
+        asyncio.run(store.dismiss_prompt(self.user_id, ITEM, SEASON))
+        asyncio.run(store.dismiss_prompt(self.user_id, ITEM, SEASON + 1))
+        asyncio.run(store.clear_prompt_dismissal(self.user_id, ITEM, SEASON))
+        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)),
+                         {(str(ITEM), SEASON + 1)})
+
+    def test_clearing_one_that_was_never_refused_is_harmless(self):
+        """The add path calls this unconditionally rather than checking first — a
+        delete of nothing is cheaper than a read plus a delete."""
+        asyncio.run(store.clear_prompt_dismissal(self.user_id, ITEM, SEASON))
+        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)), set())

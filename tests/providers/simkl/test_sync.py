@@ -83,17 +83,26 @@ class PrivacyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_batched_progress_read_is_a_post_and_is_never_cached(self):
         """A POST whose meaning is entirely in its body cannot be expressed by a
-        URL key, and this one is also one person's viewing. It goes through
-        `send`, which does not cache at all — so a test that it never reaches
-        cached_get is the whole assertion."""
+        URL key, and this one is also one person's viewing.
+
+        THE PERSONAL READ IS THE POST, AND IT IS THE ONE THAT MAY NOT BE CACHED.
+        This function also asks the PUBLIC per-title record whether an id names
+        one season of a series (`_speaks_for_one_season`), and that answer is
+        cached and travels on the catalogue pool exactly as every other catalogue
+        lookup does. So the assertion is not "nothing is cached" — it is that the
+        watch history goes out on `send`, to the sync pool, and never through the
+        cache, while everything that DOES reach the cache is public."""
         send = AsyncMock(return_value=_Response([]))
-        cached = _cached_get()
+        cached = _cached_get({"ids": {"simkl": 1}}, {"ids": {"simkl": 2}})
         with patch("app.providers.simkl.transport.send", new=send), \
              patch("app.providers.simkl.transport.cached_get", new=cached):
             await sync.fetch_progress_details(SETTINGS, [1, 2])
-        cached.assert_not_awaited()
         self.assertEqual(send.await_args.args[1], "POST")
         self.assertIs(send.await_args.kwargs["pool"], transport.SYNC_POOL)
+        for call in cached.await_args_list:
+            with self.subTest(path=call.args[2]):
+                self.assertTrue(call.args[2].startswith("tv/"))
+                self.assertIsNot(call.kwargs.get("pool"), transport.SYNC_POOL)
 
     async def test_nothing_here_writes_to_simkl(self):
         """This build reads a person's viewing and never edits it. The write path
@@ -657,7 +666,9 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             {"number": 1, "episodes": [{"number": 1, "watched_at": "2026-07-01"}]}]}
             for n in range(1, 71)]
         send = AsyncMock(return_value=_Response(answers))
-        with patch("app.providers.simkl.transport.send", new=send):
+        # Every title stands alone, so none of them declines the per-title read.
+        with patch("app.providers.simkl.transport.send", new=send),              patch("app.providers.simkl.transport.cached_get",
+                   new=_cached_get(*[{"ids": {"simkl": n}} for n in range(1, 71)])):
             got = await sync.fetch_progress_details(SETTINGS, list(range(1, 71)))
         self.assertEqual(send.await_count, 1)
         self.assertEqual(len(got), 70)

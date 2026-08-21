@@ -28,4 +28,11 @@ def normalize(raw: dict) -> dict:
     mapped = dict(raw)
     if mapped.get("simkl") in (None, "") and mapped.get("simkl_id") not in (None, ""):
         mapped["simkl"] = mapped["simkl_id"]
+    # THE SLUG IS THIS SERVICE'S, AND IS NAMED SO. Trakt and Simkl both call a
+    # title's readable name `slug` and do not agree on it — Simkl writes
+    # `the-traitors` where Trakt writes `the-traitors-2023` — so an unnamespaced
+    # one collides in any id map holding both, and whichever service wrote last
+    # decided what a link built from it pointed at.
+    if mapped.get("slug") not in (None, ""):
+        mapped["simkl_slug"] = mapped["slug"]
     return collect_ids(mapped)

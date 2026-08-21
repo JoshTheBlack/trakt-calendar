@@ -46,8 +46,8 @@ import httpx
 
 from ...config import Settings
 from ...perftrace import span
-from ..base import PlayCounts, collect_ids
-from . import transport
+from ..base import PlayCounts
+from . import _ids, transport
 from .transport import TraktError
 
 logger = logging.getLogger(__name__)
@@ -433,7 +433,7 @@ def watched_progress_from(events: list[dict]) -> list[dict]:
         if tid is None or season is None or int(season) == 0:  # skip specials
             continue
         rec = agg.setdefault((int(tid), int(season)), {
-            "eps": set(), "ids": collect_ids(ids),
+            "eps": set(), "ids": _ids.normalize(ids),
             "title": show.get("title") or "", "network": show.get("network") or "",
         })
         if num is not None:
@@ -456,7 +456,7 @@ def movie_plays_from(events: list[dict]) -> list[dict]:
         if event.get("type") != "movie":
             continue
         movie = event.get("movie") or {}
-        ids = collect_ids(movie.get("ids") or {})
+        ids = _ids.normalize(movie.get("ids") or {})
         if not ids:
             continue
         out.append({"ids": ids, "title": movie.get("title") or "",

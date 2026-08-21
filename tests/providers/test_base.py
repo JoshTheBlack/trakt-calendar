@@ -70,7 +70,12 @@ class TestNormalizeProducesARecord:
     def test_provenance_is_source_ids_and_detail_url(self):
         record = trakt_calendar.to_record(ENTRY, SHOWS)
         assert record.source == Source.TRAKT
-        assert record.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
+        # `trakt_slug` beside `slug`: both services call a title's readable
+        # name `slug` and disagree on it, so each one's is namespaced at the
+        # boundary and the shared key stays for rows written before the two
+        # were told apart.
+        assert record.ids == {"slug": "a-show", "trakt_slug": "a-show",
+                              "trakt": 123, "tvdb": 456,
                               "tmdb": 789, "imdb": "tt42"}
         assert record.detail_url == "https://trakt.tv/shows/a-show"
 

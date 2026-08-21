@@ -2305,6 +2305,63 @@ ALTER TABLE source_prefs ADD COLUMN tracker_order_json TEXT NOT NULL DEFAULT '[]
 """
 
 
+MIGRATION_31 = """
+-- A SLUG BELONGS TO ONE SERVICE, AND THE COLUMN THAT HELD IT DID NOT SAY WHICH.
+--
+-- Trakt and Simkl both call a title's readable name `slug` and do not agree on
+-- it: Trakt writes `the-traitors-2023` where Simkl writes `the-traitors`. A
+-- roster row knows a title by BOTH services, so both wrote into the one `slug`
+-- column and whichever synced last won. Every link built from it was then wrong
+-- for the other service — the tracker's episode ticks open `app.trakt.tv/shows/
+-- {slug}`, which lands nowhere when the value came from Simkl, and the same
+-- would have been true in reverse the moment Simkl's link used it.
+--
+-- ADD-ONLY, AND THE BACKFILL REFUSES TO GUESS. A row only ONE service knows must
+-- have taken its slug from that service, which is provable and is what these two
+-- statements copy. A row BOTH services know is genuinely ambiguous — the value
+-- is whichever wrote last and nothing recorded which — so it is left NULL and
+-- re-learned from the next sync, which writes the namespaced key. Guessing there
+-- would bake in the exact ambiguity this migration exists to remove, and a
+-- confidently wrong slug is what the bug already was.
+--
+-- `slug` IS NOT DROPPED. It is the only value the ambiguous rows have until a
+-- sync fills the new ones in, and readers fall back to it — so dropping it would
+-- break links this migration is meant to fix, to reclaim one column.
+ALTER TABLE distrakt_user_seasons  ADD COLUMN trakt_slug TEXT;
+ALTER TABLE distrakt_user_seasons  ADD COLUMN simkl_slug TEXT;
+ALTER TABLE distrakt_month_records ADD COLUMN trakt_slug TEXT;
+ALTER TABLE distrakt_month_records ADD COLUMN simkl_slug TEXT;
+
+-- THE HELD-ROWS TABLE CARRIES THE SAME IDS AND MUST GROW WITH THEM. Its reader
+-- (unsettled._record) builds a record by walking store.ID_COLUMNS and taking each
+-- named column off the row, so a column named there and missing here is not a
+-- missing slug — it is an IndexError on every held row.
+ALTER TABLE distrakt_unsettled_rows ADD COLUMN trakt_slug TEXT;
+ALTER TABLE distrakt_unsettled_rows ADD COLUMN simkl_slug TEXT;
+
+UPDATE distrakt_unsettled_rows
+   SET trakt_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND simkl_id IS NULL;
+UPDATE distrakt_unsettled_rows
+   SET simkl_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND trakt_id IS NULL AND simkl_id IS NOT NULL;
+
+UPDATE distrakt_user_seasons
+   SET trakt_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND simkl_id IS NULL;
+UPDATE distrakt_user_seasons
+   SET simkl_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND trakt_id IS NULL AND simkl_id IS NOT NULL;
+
+UPDATE distrakt_month_records
+   SET trakt_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND simkl_id IS NULL;
+UPDATE distrakt_month_records
+   SET simkl_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND trakt_id IS NULL AND simkl_id IS NOT NULL;
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2336,6 +2393,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (28, MIGRATION_28),
     (29, MIGRATION_29),
     (30, MIGRATION_30),
+    (31, MIGRATION_31),
 ]
 
 

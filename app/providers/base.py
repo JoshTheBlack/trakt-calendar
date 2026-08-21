@@ -88,7 +88,20 @@ class Source(StrEnum):
 # name an ID SPACE, not a provider: `tmdb` means "this title's id at TMDB",
 # which two different sources can both supply and agree on. That is the property
 # that lets the same title arriving from two services be recognized as one.
-ID_KEYS = ("trakt", "slug", "simkl", "tvdb", "tmdb", "imdb", "mal")
+#
+# A SLUG IS NAMESPACED PER SERVICE, unlike every shared id beside it, and for the
+# same reason `trakt` and `simkl` are: it is a name you CALL one service with,
+# and the two services do not agree on it. Trakt writes `the-traitors-2023` where
+# Simkl writes `the-traitors`. A single `slug` key made the two collide in any
+# merged id map — whichever service wrote last won — and BOTH links built from it
+# were then wrong half the time, Trakt's as readily as Simkl's.
+#
+# `slug` IS STILL READ, never written. Rows predate the split and their value is
+# usually but not provably Trakt's, so it stays a legitimate fallback for a
+# reader that has no namespaced one yet (see store.ID_COLUMNS and the migration
+# that backfills only what it can prove).
+ID_KEYS = ("trakt", "slug", "trakt_slug", "simkl", "simkl_slug",
+           "tvdb", "tmdb", "imdb", "mal")
 
 
 def collect_ids(raw: Mapping[str, Any]) -> dict[str, Any]:

@@ -366,6 +366,18 @@ def _rows_for(shape: lifecycle.MonthShape,
         rows.append({**show, "returned": bool(show.get("came_back")),
                      "counts": show.get("counts") or counts.counts_label(
                          show.get("watched_by_source") or show.get("watched"),
+                         show.get("total"), live.source_labels(), live.source_order()),
+                     # THE SAME BREAKDOWN IN FULL, for the row's tooltip — a peek
+                     # at what this month actually recorded, which is the most
+                     # useful thing a frozen row can offer.
+                     #
+                     # WITH NO FRESHNESS AND NO DATES, deliberately. Nothing was
+                     # asked this pass, so "not asked" would be true of every
+                     # service and would say nothing; and the dates live on the
+                     # watch state, which a frozen month deliberately does not
+                     # consult — it renders what it froze.
+                     "counts_detail": show.get("counts_detail") or counts.counts_detail(
+                         show.get("watched_by_source") or show.get("watched"),
                          show.get("total"), live.source_labels(), live.source_order())})
     return rows
 
@@ -1235,7 +1247,14 @@ async def api_distrakt_details(request: Request):
         # WHO ANSWERED, told to the client the same way the calendar's modal
         # tells it, because the panel renders a service's name and its links.
         "source": str(source),
+        # EACH SERVICE'S OWN SLUG, because they do not agree on one. A single
+        # `slug` held whichever service wrote last, which made the Trakt link
+        # land nowhere whenever the value had come from Simkl. `slug` still
+        # travels as the fallback for rows written before the two were told
+        # apart — see store.ID_COLUMNS.
         "slug": str(ids.get("slug") or ""),
+        "trakt_slug": str(ids.get("trakt_slug") or ""),
+        "simkl_slug": str(ids.get("simkl_slug") or ""),
         "season": season,
         "watched_episodes": watched,
         "watched_by_source": by_source,
@@ -1751,6 +1770,14 @@ async def api_distrakt_add(request: Request):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid ids/season"}, status_code=400)
+    # ADDING A SEASON WITHDRAWS ANY REFUSAL ABOUT IT. A dismissal says "do not put
+    # this season back on my list, stop asking", and adding it by hand is the
+    # viewer doing exactly the thing that refusal refused — so the refusal has
+    # lapsed. Left standing it silences the page's questions about a season the
+    # viewer has visibly changed their mind about, which is what happened to a
+    # re-added verdict: it could not be questioned again because a refusal made
+    # about the row that used to be there still applied to the one replacing it.
+    await distrakt_store.clear_prompt_dismissal(user_id, key, int(show["season"]))
     month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
         # No backfill: refuse to create a never-tracked PAST month even via a

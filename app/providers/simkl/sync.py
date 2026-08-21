@@ -54,7 +54,7 @@ from ...config import Settings
 from ...perftrace import span
 from ..base import (LibraryEntry, LibraryRead, Media, UnlistedSeasons, collect_ids,
                     resolve_key)
-from . import _ids, transport
+from . import _ids, _naming, transport
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +272,33 @@ def _entry_ids(payload: dict) -> dict:
 # first of January 1970" are the same bytes and opposite facts, and only one of
 # them belongs in a month.
 UNREMEMBERED_BEFORE = "2000-01-01"
+
+
+def _was_watched(episode: dict) -> bool:
+    """Whether this episode was actually WATCHED, across the two shapes Simkl
+    answers in.
+
+    THE TWO READS DISAGREE ABOUT WHAT AN EPISODE LIST CONTAINS, and reading one
+    like the other is a silent overcount. `/sync/all-items` lists only the
+    episodes a viewer has seen, so appearing in it IS the claim. `POST
+    /sync/watched` lists EVERY episode of the title and marks each one — measured
+    2026-08-21, Beastars season 1 comes back as twelve episodes of which three
+    say `watched: true`, beside a `episodes_watched: 3` that agrees. Read as the
+    library shape it counted all twelve, and a viewer three episodes into a
+    season had it recorded as finished.
+
+    ABSENT MEANS WATCHED, which is the library's shape and the safe reading of
+    it: a list that only contains watched episodes cannot mark them, and treating
+    an unmarked episode as unwatched would empty every library entry.
+    """
+    return bool(episode.get("watched", True))
+
+
+def _watched_at(episode: dict) -> str:
+    """When this episode was watched, across the same two shapes — `watched_at`
+    on the library read, `last_watched_at` on the per-title one. Two spellings of
+    one fact, and taking only the first lost every date the second carried."""
+    return str(episode.get("watched_at") or episode.get("last_watched_at") or "")
 
 
 def _placeholder_date(watched_at: str) -> bool:
@@ -733,10 +760,12 @@ def _progress_from_seasons(entry: dict) -> dict[int, dict[int, str]]:
     out: dict[int, dict[int, str]] = {}
     for season in entry.get("seasons") or []:
         for episode in season.get("episodes") or []:
+            if not _was_watched(episode):
+                continue
             where = _coordinates(season, episode)
             if where is None:
                 continue
-            watched_at = str(episode.get("watched_at") or "")
+            watched_at = _watched_at(episode)
             # THE PLACEHOLDER IS NOT A DATE AND IS STORED AS NO DATE. The episode
             # still counts — the viewer watched it — but "I don't remember when"
             # must not become a play in January 1970. See UNREMEMBERED_BEFORE.
@@ -745,6 +774,44 @@ def _progress_from_seasons(entry: dict) -> dict[int, dict[int, str]]:
             out.setdefault(where[0], {})[where[1]] = watched_at
     return {season: dict(sorted(episodes.items()))
             for season, episodes in sorted(out.items()) if episodes}
+
+
+async def _speaks_for_one_season(settings: Settings, simkl_ids) -> set[int]:
+    """Which of `simkl_ids` name ONE SEASON of a series rather than a whole show.
+
+    THE CALLER TREATS THIS READ AS A SOURCE'S COMPLETE STATEMENT ABOUT A TITLE
+    and replaces everything it had stored for that source (see
+    watch_history._set_show_baseline). That is sound when the id names the whole
+    show, and destructive when it names one season of it: Simkl models each anime
+    season as its own title, so asking about Beastars' season-1 title answers
+    about season 1 and NOTHING about seasons 2 or 3 — which the caller then reads
+    as "this service has seen none of them" and retires. Observed twice on a live
+    account: re-adding a season left the other two showing one service's numbers
+    and none of Simkl's until a full refresh put them back.
+
+    SO SUCH AN ID IS ANSWERED FOR AT ALL, and the caller reads the library
+    instead — the one read that has every title of the series in it and files
+    each under the shared identity. `relations` is what says a title is one of a
+    family; a show that stands alone has none and takes the cheap per-title path,
+    which is every ordinary television title and Simkl's own documented case for
+    this endpoint.
+
+    ONE CACHED LOOKUP PER ID, on the edge-cached per-title record and held for a
+    day. A lookup that fails answers "not partial", which keeps a transient
+    failure from turning every add into a library read.
+    """
+    namings = await asyncio.gather(
+        *(_naming.fetch(settings, simkl_id) for simkl_id in simkl_ids),
+        return_exceptions=True)
+    partial = set()
+    for simkl_id, naming in zip(simkl_ids, namings):
+        if isinstance(naming, BaseException):
+            logger.warning("simkl could not be asked whether %s is one season of a series: %s",
+                           simkl_id, naming)
+            continue
+        if naming.siblings:
+            partial.add(int(simkl_id))
+    return partial
 
 
 async def fetch_progress_details(settings: Settings,
@@ -798,6 +865,7 @@ async def fetch_progress_details(settings: Settings,
     if not unique:
         return {}
     out: dict[int, dict[int, dict[int, str]]] = {}
+    partial = await _speaks_for_one_season(settings, unique)
     client = transport.sync_client()
     # `episodes` IS THE DOCUMENTED VALUE. This app sent `extended=full`, which
     # Simkl accepts as an alias and answers identically — but `full` is not among
@@ -838,6 +906,9 @@ async def fetch_progress_details(settings: Settings,
                 if stated in (None, ""):
                     continue
                 seasons = _progress_from_seasons(entry)
+                if int(stated) in partial:
+                    # SAYS NOTHING RATHER THAN SAYING PART. See `_speaks_for_one_season`.
+                    continue
                 if seasons:
                     out[int(stated)] = seasons
                 elif entry.get("result") is UNWATCHED:

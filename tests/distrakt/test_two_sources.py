@@ -1620,3 +1620,69 @@ class SourceNamesTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheCountsTooltipTests(unittest.TestCase):
+    """The long form behind "x/y", composed server-side for a row's tooltip.
+
+    WHAT THE CELL CANNOT SAY. One line has room for the numbers and nothing else,
+    so three different situations are indistinguishable in it: a service that
+    agrees, a service nobody asked whose number is a leftover from before its link
+    lapsed, and a service that reported a title finished without itemizing an
+    episode of it. Telling them apart meant reading the database.
+    """
+
+    LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
+    ORDER = ("trakt", "simkl")
+
+    def _detail(self, per_source, total=12, asked=ORDER, dates=None, linked=()):
+        return counts.counts_detail(per_source, total, self.LABELS, self.ORDER,
+                                    asked, dates, linked=linked)
+
+    def test_each_service_gets_its_own_line_with_its_own_number(self):
+        note = self._detail({"trakt": 0, "simkl": 12},
+                            dates={"simkl": "2026-08-21"})
+        self.assertEqual(note.splitlines()[0], "Trakt: 0 of 12")
+        self.assertIn("Simkl: 12 of 12", note)
+        self.assertIn("last watched 2026-08-21", note)
+
+    def test_a_service_nobody_asked_says_so(self):
+        """The amber mark says a number belongs to a service nobody asked; this
+        says WHICH number. Without it a stale zero is indistinguishable from a
+        service that genuinely has none of the season."""
+        note = self._detail({"trakt": 0, "simkl": 12}, asked=("simkl",))
+        self.assertIn("Trakt: 0 of 12 — not asked", note)
+        self.assertNotIn("Simkl: 12 of 12 — not asked", note)
+
+    def test_a_linked_service_holding_nothing_still_gets_a_line(self):
+        """Its absence is exactly what somebody has opened this to find out, and
+        an omitted line reads as a rendering fault rather than as an answer."""
+        note = self._detail({"trakt": 3}, dates={"trakt": "2022-04-27"},
+                            linked=("trakt", "simkl"))
+        self.assertIn("Simkl: nothing recorded", note)
+
+    def test_a_complete_season_with_no_dates_says_so(self):
+        """THE ANSWER TO "why is this finished thing still on my list". A month is
+        named by the day the last episode was watched, and a service that records
+        no date leaves a season that counts in full and can never settle."""
+        self.assertIn("Simkl: 12 of 12 — no watch dates",
+                      self._detail({"simkl": 12}, asked=("simkl",)))
+
+    def test_a_whole_title_claim_is_shown_as_the_number_it_comes_to(self):
+        """A service can report a title finished without itemizing it. That claim
+        travels as a sentinel and must never reach a viewer wearing one."""
+        note = self._detail({"simkl": counts.ALL_EPISODES}, total=8, asked=("simkl",))
+        self.assertIn("Simkl: 8 of 8", note)
+        self.assertNotIn(str(counts.ALL_EPISODES), note)
+
+    def test_nothing_is_marked_when_the_caller_did_not_say_what_it_asked(self):
+        """A frozen month re-rendered, or a test. Inferring staleness from silence
+        would put the mark on every row of a month waiting on nobody."""
+        note = self._detail({"trakt": 0, "simkl": 12}, asked=())
+        self.assertNotIn("not asked", note)
+
+    def test_the_services_are_named_in_the_declared_order(self):
+        """The same order every other per-service reading uses, so a row and its
+        tooltip cannot list them differently."""
+        note = self._detail({"simkl": 12, "trakt": 3})
+        self.assertTrue(note.splitlines()[0].startswith("Trakt"))

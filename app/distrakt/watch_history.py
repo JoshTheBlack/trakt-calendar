@@ -892,6 +892,35 @@ def season_counts(state: dict, key, season: int, sources=()) -> dict[str, int]:
     return out
 
 
+def season_dates_by_source(state: dict) -> dict[tuple[str, int], dict[str, str]]:
+    """{(item key, season): {source: 'YYYY-MM-DD'}} — the last day EACH service
+    reported an episode of that season.
+
+    A SECOND READER RATHER THAN A WIDER season_completed_map, because the two
+    answer different questions. That one asks "when was this season finished",
+    which has one answer whichever service saw the last episode go by, and it
+    takes the newest across all of them. This one asks "what does each service
+    say", which is what a row has to show when it is naming services — the same
+    reason watched_map is a dict per season rather than a number.
+
+    A SERVICE WITH NO DATED EPISODE IS ABSENT rather than dated "". "I have not
+    said when" and "I said the epoch" must not be confused, and a service that
+    holds a season with no dates at all is exactly the case a reader wants to
+    show: it is why such a season counts in full and still never settles.
+    """
+    out: dict[tuple[str, int], dict[str, str]] = {}
+    for key, entry in (state.get("shows") or {}).items():
+        for season_s, slots in _seasons_by_source(entry).items():
+            per_source = {}
+            for source, eps in slots.items():
+                days = [str(when)[:10] for when in (eps or {}).values() if when]
+                if days:
+                    per_source[str(source)] = max(days)
+            if per_source:
+                out[(key, int(season_s))] = per_source
+    return out
+
+
 def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
     watched, which is the day it was finished.
@@ -1127,7 +1156,18 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
     A SOURCE THAT SAYS NOTHING ABOUT THE TITLE LEAVES IT ALONE, which is the
     contract above: an id absent from the answer means the service had nothing to
     tell us, never that the viewer has watched none of it.
+
+    AND A SOURCE WITH A LIBRARY IS ASKED FOR IT WHEN THE PER-TITLE READ DECLINED.
+    One service can hold a tracker title's seasons under SEVERAL of its own
+    titles — Simkl files each anime season separately — and a per-title read that
+    can only speak for one of them must not be handed to the baseline, which
+    replaces everything that source had stored. The provider says so by leaving
+    the id out (simkl.sync._speaks_for_one_season); the library read is what has
+    every title of the series in it. Ordinary television never reaches this: the
+    id names the whole show, the POST answers for it, and the expensive read
+    stays unspent.
     """
+    from ..perftrace import span
     ports = await tracker_ports(settings, user_id)
     state = await _load(user_id)
     touched = False
@@ -1140,11 +1180,14 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
         except SourceUnavailable as exc:
             logger.warning("baseline_show: %s could not be read: %s", source, exc)
             continue
-        if int(source_id) not in details:
-            continue
-        _set_show_baseline(state, record_key(record), record.get("ids") or {},
-                           details[int(source_id)], str(source))
-        touched = True
+        if int(source_id) in details:
+            _set_show_baseline(state, record_key(record), record.get("ids") or {},
+                               details[int(source_id)], str(source))
+            touched = True
+        elif isinstance(port, LibraryPort):
+            touched = await _baseline_from_library(
+                settings, state, str(source), port,
+                {str(record_key(record)): record}, span) or touched
     if touched:
         await _save(user_id, state)
 

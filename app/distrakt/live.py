@@ -355,11 +355,11 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
 
 
 def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
-                     asked=(), *, missing=()) -> dict:
+                     asked=(), *, missing=(), dates=None) -> dict:
     show = {**rec, "key": str(record_key(rec)), "unavailable": False,
             "unavailable_source": "", "unavailable_reason": ""}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
-    _apply_counts(show, rec, watched, settings, asked)
+    _apply_counts(show, rec, watched, settings, asked, dates)
     # AFTER the counts, not before: the note names the services the numbers came
     # from and those are what `_apply_counts` has just decided.
     #
@@ -385,7 +385,7 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
 
 
 def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *,
-                       source: str | None) -> dict:
+                       source: str | None, dates=None) -> dict:
     """This one title's totals are not this pass's. Render it from its stored
     record's last-known fields and flag it, rather than presenting a fabricated
     0/0 as real.
@@ -419,7 +419,7 @@ def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *
         "started_airing": bool(rec.get("started_airing")),
         "finished_airing": bool(rec.get("finished_airing")),
     })
-    _apply_counts(show, rec, watched, settings, asked)
+    _apply_counts(show, rec, watched, settings, asked, dates)
     return show
 
 
@@ -496,7 +496,7 @@ def source_labels() -> dict[str, str]:
 
 
 def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
-                  asked=()) -> None:
+                  asked=(), dates=None) -> None:
     """Put the watched counts on a live show, in all three forms it is read in.
 
     `watched` is the primary source's number and is what every existing reader
@@ -546,6 +546,14 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     detail_from = detail_source(rec, settings)
     show["total_by_source"] = {detail_from: total} if detail_from else {}
     show["counts"] = counts.counts_label(watched, total, source_labels(), order, asked)
+    # THE SAME NUMBERS, SAID IN FULL, for the row's tooltip. One line has room
+    # for the counts and nothing else, so a service nobody asked and a service
+    # that agrees look identical in it — see counts.counts_detail, which is where
+    # that is spelled out. Composed here beside the label so the two can never
+    # name the services differently or disagree about what a number means.
+    show["counts_detail"] = counts.counts_detail(
+        per_source or watched, total, source_labels(), order, asked, dates,
+        linked=asked)
 
 
 def _log_watched_coverage(records: list[dict], watched_lookup: dict, matched: int) -> None:
@@ -569,6 +577,7 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                              watched_lookup: dict | None = None,
                              allow_degrade: bool = False,
                              completed_lookup: dict | None = None,
+                             dates_lookup: dict | None = None,
                              sources_read=(), sources_unread=()) -> list[dict]:
     """Merge each stored record with its live Trakt-derived fields into the flat
     "LIVE SHOW SHAPE" discord_fmt expects (+ computed `bucket`).
@@ -625,6 +634,10 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             )
         watched_lookup = watch_history.watched_map(state)
         completed_lookup = watch_history.season_completed_map(state)
+        # PER SERVICE, unlike completed_lookup beside it, because the tooltip
+        # names services and the two answer different questions — see
+        # watch_history.season_dates_by_source.
+        dates_lookup = watch_history.season_dates_by_source(state)
         # WHICH SERVICES ANSWER FOR THIS ACCOUNT — asked here because this branch
         # has just synced them, so it is one preference read on a path that has
         # already gone to the database. The other branch is handed it by the
@@ -667,10 +680,12 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
             fallback = {source or next(iter(named_sources(rec)), ""):
                         int(rec.get("watched") or 0)}
             show = _merge_unavailable(rec, watched_lookup.get(key) or fallback,
-                                      settings, asked, source=source if failed else None)
+                                      settings, asked, source=source if failed else None,
+                                      dates=(dates_lookup or {}).get(key))
         else:
             show = _merge_available(rec, detail, watched_lookup.get(key) or {},
-                                    settings, asked, missing=unread)
+                                    settings, asked, missing=unread,
+                                    dates=(dates_lookup or {}).get(key))
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # WHEN the season was finished, and only for a season that IS finished:
         # on a partly-watched season the same date is just "last time I watched

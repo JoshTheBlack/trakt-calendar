@@ -193,6 +193,12 @@ IDENTITY_COLUMNS = ("media", "match_source", "match_id")
 ID_COLUMNS = {
     "trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb",
     "tvdb": "tvdb", "imdb": "imdb", "mal": "mal", "slug": "slug",
+    # A SLUG IS PER SERVICE, and these two are why. Both services call a title's
+    # readable name `slug` and disagree on it, so the single column above held
+    # whichever one wrote last — and a link built from it was wrong for the other
+    # service, in both directions. `slug` is kept because rows predate the split
+    # and it is still the only value they have; nothing writes it any more.
+    "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug",
 }
 
 # The fields both tables share, in insert order. Split out because the two record
@@ -1184,6 +1190,31 @@ async def dismiss_prompt(user_id: int, key: ItemKey, season: int) -> None:
         "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
         (user_id, key.media, key.match_source, key.match_id, int(season), db.now()),
+    )
+
+
+async def clear_prompt_dismissal(user_id: int, key: ItemKey, season: int) -> None:
+    """Forget that the viewer declined this season, because they have just put it
+    ON their list.
+
+    A DISMISSAL SAYS "DO NOT PUT THIS SEASON BACK ON MY LIST, STOP ASKING" — one
+    sentence, shared by all three prompts that can be refused (see
+    lifecycle.unbacked_verdicts). Adding the season is the viewer doing the very
+    thing that refusal refused, so the refusal has been withdrawn by the clearest
+    means available and keeping it would silence questions about a season they
+    have visibly changed their mind about. That is not hypothetical: a verdict
+    re-added by hand went on being unquestionable afterwards, because a refusal
+    made about the row that used to be there still applied to the one that
+    replaced it.
+
+    CLEARED ON THE WAY IN RATHER THAN ON THE WAY OUT, deliberately. Removing a
+    season is the viewer saying they do not want it, and clearing the refusal
+    there would set the history prompt asking about it again on the next load —
+    the opposite of what removing it meant.
+    """
+    await db.execute(
+        f"DELETE FROM distrakt_prompt_dismissals {_SEASON_WHERE}",
+        (user_id, key.media, key.match_source, key.match_id, int(season)),
     )
 
 

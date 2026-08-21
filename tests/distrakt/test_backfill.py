@@ -145,7 +145,8 @@ class SurveyTests(BackfillTestCase):
         self.assertEqual(row["added_by"], distrakt.ADDED_BY_HISTORY)
         # The whole id map the sweep reported travels into the record, so the row
         # it becomes is keyed on the shared id and not on Trakt's own.
-        self.assertEqual(row["ids"], {"trakt": 101, "tmdb": 1001, "slug": "slug-101"})
+        self.assertEqual(row["ids"], {"trakt": 101, "tmdb": 1001,
+                                      "slug": "slug-101", "trakt_slug": "slug-101"})
 
     async def test_an_unfinished_season_belongs_to_no_month(self):
         events = [_ep_event(102, 1, 2, "2026-03-14T20:00:00Z")]

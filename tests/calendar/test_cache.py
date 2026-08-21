@@ -170,7 +170,13 @@ class StoredRecordTests(unittest.TestCase):
         been dropped on the way in and the matcher would simply never have
         matched."""
         supplied = {k for k in self.RICH["show"]["ids"] if k in base.ID_KEYS}
-        self.assertEqual(set(self.record().ids), supplied)
+        # A SUBSET, NOT AN EQUALITY, and the difference is deliberate. The
+        # invariant is that nothing the source supplied is DROPPED; a provider may
+        # also DERIVE a key on the way past — Trakt's normalizer namespaces the
+        # slug it was given as `trakt_slug`, because both services call that field
+        # `slug` and disagree on it. Requiring exact equality would make that
+        # correction look like a defect.
+        self.assertLessEqual(supplied, set(self.record().ids))
         self.assertNotIn("unused", self.record().ids)
 
     def test_a_window_stored_before_a_field_existed_still_reads(self):
