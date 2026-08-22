@@ -337,6 +337,39 @@
     </div>
     {% endif %}
 
+    {# WHOSE NUMBERS STILL COUNT. Unlinking a service stops it being ASKED, but
+       the numbers it already contributed stay in the watch history and go on
+       being shown — correctly flagged as belonging to a service nobody asked,
+       and with no way to ever stop. This is the way to stop. It never deletes
+       anything: the numbers stay, the rows mark them "retired, not counted", and
+       switching one back on puts it straight back. A frozen month is never
+       touched — what a month recorded is not a live claim. #}
+    {% if tracker_retirable %}
+    <div class="auth-list" id="trackerRetired">
+      <div class="row">
+        <span class="label">Count history from</span>
+        <div class="row-main">
+          <ul class="tracker-retired-list" id="trackerRetiredList">
+            {% for entry in tracker_retirable %}
+            <li class="tracker-retired-item">
+              <label>
+                <input type="checkbox" data-source="{{ entry.source }}"
+                       {% if entry.counted %}checked{% endif %}>
+                <span>{{ entry.label }}</span>
+                {% if not entry.linked %}<span class="auth-sub">(not linked)</span>{% endif %}
+              </label>
+            </li>
+            {% endfor %}
+          </ul>
+          <p class="auth-sub">Turn one off if you have moved off that service. Its
+            episodes stay recorded and stop counting towards your rows; months you
+            have already finished keep what they recorded.</p>
+          <span class="auth-error" id="trackerRetiredError" role="alert"></span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
     <div class="auth-list">
       {% if not user.username %}
       {# An account made through Plex or Trakt has no username. Claiming one is
@@ -512,6 +545,41 @@ if (trackerPriorityList) {
     }
     redraw();
     save();
+  });
+}
+
+// WHOSE STORED NUMBERS STILL COUNT. Each box is one service; unchecked means
+// "I have moved off this one, stop counting what it left behind". The whole set
+// is sent every time rather than a single toggle, because that is what the
+// preference IS — "retire this one" says nothing about the others, and a partial
+// message would leave a service in a state nobody chose.
+const trackerRetiredList = document.getElementById('trackerRetiredList');
+if (trackerRetiredList) {
+  const err = document.getElementById('trackerRetiredError');
+  trackerRetiredList.addEventListener('change', async (e) => {
+    if (!e.target.matches('input[type="checkbox"]')) { return; }
+    err.textContent = '';
+    const retired = [...trackerRetiredList.querySelectorAll('input[type="checkbox"]')]
+      .filter((box) => !box.checked)
+      .map((box) => box.dataset.source);
+    try {
+      const resp = await fetch('/api/me/tracker-retired', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({retired}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        err.textContent = data.error || 'Could not save that.';
+        // Put the box back: unlike the order control above, there is no partial
+        // state worth showing here — a box that stayed flipped after a failed
+        // save would claim a service had been retired when it had not.
+        e.target.checked = !e.target.checked;
+      }
+    } catch (_e) {
+      err.textContent = 'Could not reach the server.';
+      e.target.checked = !e.target.checked;
+    }
   });
 }
 

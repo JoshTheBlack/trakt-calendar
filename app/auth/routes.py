@@ -648,6 +648,32 @@ async def me_page(request: Request):
             {"source": name, "label": providers.registered()[name].label}
             for name in tracker_prefs.tracker_order(linked_trackers)
         ] if len(linked_trackers) > 1 else [],
+        # WHOSE STORED NUMBERS STILL COUNT — every tracker service, linked or not.
+        #
+        # DELIBERATELY NOT NARROWED TO THE LINKED ONES, and narrowing it would
+        # remove the only row that matters: the service somebody wants to retire
+        # is almost always one they have ALREADY unlinked, which is what left its
+        # numbers stranded and every row amber in the first place.
+        #
+        # NOR NARROWED TO SERVICES THAT HAVE ACTUALLY CONTRIBUTED, which would be
+        # the tighter list and cannot be built from here. Which services a viewer
+        # has stored numbers from is the tracker's fact, and auth is a LAYER every
+        # feature may depend on and which depends on none of them
+        # (tests/kernel/test_layering.py) — reaching into distrakt for a nicer
+        # switch list would invert that for cosmetics. A switch over a service
+        # that contributed nothing simply does nothing, and says so.
+        # IN DECLARED ORDER — `tracker_sources()` is a frozenset and iterating it
+        # would put the switches in whatever order the set happened to hash into,
+        # which changes between runs and disagrees with every other per-service
+        # list on this page.
+        "tracker_retirable": [
+            {"source": str(source),
+             "label": provider.label,
+             "linked": str(source) in linked,
+             "counted": tracker_prefs.counts_tracker(source)}
+            for source, provider in providers.registered().items()
+            if str(source) in providers.tracker_sources()
+        ],
         "trakt_login_configured": settings.trakt_login_configured,
         "simkl_login_configured": settings.simkl_login_configured,
         # Whether unlinking is offered at all. Without a password an account's
@@ -768,6 +794,47 @@ async def set_own_tracker_order(request: Request):
     except ValueError as exc:
         return authz.error(str(exc))
     return JSONResponse({"ok": True, "order": list(saved.tracker_priority)})
+
+
+@guard.post("/api/me/tracker-retired", AuthLevel.SESSION)
+async def set_own_retired_trackers(request: Request):
+    """State which services' stored numbers this account no longer counts.
+
+    THE EXIT FROM A STATE THAT HAD NONE. Unlinking stops a service being ASKED,
+    which already worked; it could not stop the numbers it had already
+    contributed from counting, so every row it ever touched stayed amber for ever
+    and an account that had genuinely migrated read as permanently degraded. This
+    is how somebody says "I have moved off that one".
+
+    THE WHOLE LIST IS STORED, like the order beside it and for the same reason:
+    "retire this one" says nothing about the others, and a screen sending the
+    complete answer cannot leave a service in a state nobody chose.
+
+    NOT NARROWED TO WHAT IS LINKED TODAY, also like the order: retiring a service
+    and then re-linking it is a real sequence, and dropping the name on the way in
+    would silently un-retire it. `source_prefs.save` refuses a name this app has
+    never heard of.
+
+    NOTHING IS DELETED, HERE OR ANYWHERE THIS REACHES. The numbers stay where they
+    are and the rows still show them, marked as retired — because un-retiring has
+    to be able to put them straight back, and because a number that vanished
+    without explanation is the invisibility the freshness states exist to remove.
+    A FROZEN MONTH IS NOT TOUCHED AT ALL: what a month recorded is not a live
+    claim, and a preference stated today must not re-answer an earlier month.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    retired = data.get("retired")
+    if not isinstance(retired, list):
+        return authz.error("Retired services must be a list of service names.")
+    source_prefs = _source_prefs()
+    prefs = await source_prefs.load(user.user_id)
+    try:
+        saved = await source_prefs.save(dataclasses.replace(
+            prefs, tracker_retired=[str(name) for name in retired]))
+    except ValueError as exc:
+        return authz.error(str(exc))
+    return JSONResponse({"ok": True, "retired": list(saved.tracker_retired)})
 
 
 @guard.post("/api/me/username", AuthLevel.SESSION)

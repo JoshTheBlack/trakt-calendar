@@ -13,6 +13,7 @@ import logging
 from . import counts, discord_fmt
 from .. import providers
 from ..perftrace import span
+from ..sources import prefs as source_prefs
 from .store import Bucket, record_key
 
 logger = logging.getLogger(__name__)
@@ -157,7 +158,7 @@ def unasked_sources(show: dict, asked=()) -> list[str]:
     return [name for name in counting_sources(show) if name not in names]
 
 
-def fresh_note(show: dict, *, missing=(), asked=()) -> str:
+def fresh_note(show: dict, *, missing=(), asked=(), retired=()) -> str:
     """One row's sentence when its counts ARE this pass's — the tooltip behind
     the mark that says so.
 
@@ -181,9 +182,19 @@ def fresh_note(show: dict, *, missing=(), asked=()) -> str:
     row went on claiming its numbers were "read from" a service that was never
     contacted. Such a number is still worth showing, and it is still that
     service's, but the sentence says which half of the row it applies to.
+
+    `retired` is a service this ACCOUNT has said it no longer counts. It is left
+    out of both halves above rather than given a clause of its own: the sentence
+    exists to say whether the numbers ON the row are current, and a retired
+    service's number is not on the row any more. Saying "Simkl's number is the
+    last one read" about a number that is no longer counted would describe a
+    staleness that has stopped mattering — the tooltip's per-service lines are
+    where the decision is named, once, beside the number it applies to.
     """
     labels = source_labels()
-    counted = counting_sources(show)
+    retired_names = {str(name) for name in retired}
+    counted = [name for name in counting_sources(show)
+               if name not in retired_names]
     if missing:
         # THE SERVICE THAT WENT QUIET IS NOT ONE OF THE SURVIVORS, obvious as
         # that sounds: its name is still on the row's `total_by_source` when the
@@ -195,7 +206,8 @@ def fresh_note(show: dict, *, missing=(), asked=()) -> str:
                          if name not in set(missing))
         return (f"{absent} could not be read just now, so these counts are "
                 + (f"{spoke}'s alone." if spoke else "the last ones read."))
-    stored_only = unasked_sources(show, asked)
+    stored_only = [name for name in unasked_sources(show, asked)
+                   if name not in retired_names]
     read_from = and_list(labels.get(name, name) for name in counted
                          if name not in set(stored_only))
     if stored_only:
@@ -355,11 +367,11 @@ async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
 
 
 def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
-                     asked=(), *, missing=(), dates=None) -> dict:
+                     asked=(), *, missing=(), dates=None, retired=frozenset()) -> dict:
     show = {**rec, "key": str(record_key(rec)), "unavailable": False,
             "unavailable_source": "", "unavailable_reason": ""}
     show.update({field: detail[field] for field in _LIVE_FIELDS})
-    _apply_counts(show, rec, watched, settings, asked, dates)
+    _apply_counts(show, rec, watched, settings, asked, dates, retired)
     # AFTER the counts, not before: the note names the services the numbers came
     # from and those are what `_apply_counts` has just decided.
     #
@@ -377,15 +389,24 @@ def _merge_available(rec: dict, detail: dict, watched: dict[str, int], settings,
     # Both are false under a green mark, which is what "up to date" would claim.
     # THE SERVER NAMES THE STATE rather than shipping a flag for the browser to
     # branch on: the vocabulary and the sentence behind it are one decision.
-    stored_only = unasked_sources(show, asked)
+    # A RETIRED SERVICE IS NOT A GAP, AND THIS IS THE WHOLE POINT OF RETIRING ONE.
+    # "partial" means a number here belongs to a service nobody asked and no
+    # refresh will move it — true of a retired service too, and the reason a
+    # migrated account read as permanently degraded: every row it ever touched
+    # stayed amber for ever with no way out. Once the account has said it no
+    # longer counts that service, its number is not an unanswered question, it is
+    # a decision — so the row goes green and the tooltip carries the explanation.
+    stored_only = [name for name in unasked_sources(show, asked)
+                   if name not in retired]
     show["counts_freshness"] = ("stale" if missing
                                 else "partial" if stored_only else "current")
-    show["counts_note"] = fresh_note(show, missing=missing, asked=asked)
+    show["counts_note"] = fresh_note(show, missing=missing, asked=asked,
+                                     retired=retired)
     return show
 
 
 def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *,
-                       source: str | None, dates=None) -> dict:
+                       source: str | None, dates=None, retired=frozenset()) -> dict:
     """This one title's totals are not this pass's. Render it from its stored
     record's last-known fields and flag it, rather than presenting a fabricated
     0/0 as real.
@@ -419,7 +440,7 @@ def _merge_unavailable(rec: dict, watched: dict[str, int], settings, asked=(), *
         "started_airing": bool(rec.get("started_airing")),
         "finished_airing": bool(rec.get("finished_airing")),
     })
-    _apply_counts(show, rec, watched, settings, asked, dates)
+    _apply_counts(show, rec, watched, settings, asked, dates, retired)
     return show
 
 
@@ -505,7 +526,7 @@ def source_labels() -> dict[str, str]:
 
 
 def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
-                  asked=(), dates=None) -> None:
+                  asked=(), dates=None, retired=frozenset()) -> None:
     """Put the watched counts on a live show, in all three forms it is read in.
 
     `watched` is the primary source's number and is what every existing reader
@@ -543,10 +564,23 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # bucket rule and a frozen month's stored breakdown included, sees plain
     # numbers it can compare and store.
     per_source = counts.resolve(watched, total)
+    # A RETIRED SERVICE'S NUMBER IS KEPT AND NOT COUNTED, and those are two
+    # different things done in two different places on purpose. The account has
+    # said it has moved off that service, so its stored numbers must stop deciding
+    # anything — the primary count, the label, the bucket rule. They are NOT
+    # deleted: the row still shows what that service last said, marked as retired,
+    # because a number that vanished with no explanation is the same invisibility
+    # the freshness states were built to remove, and because un-retiring has to be
+    # able to put it straight back.
+    counting = {name: value for name, value in per_source.items()
+                if name not in retired}
     # `per_source or watched` so a caller holding one bare number instead of a
     # per-source map still gets it back, exactly as before.
-    show["watched"] = counts.primary_count(per_source or watched, order, total)
+    show["watched"] = counts.primary_count(counting or (watched if not retired else {}),
+                                           order, total)
     show["watched_by_source"] = dict(per_source)
+    show["retired_sources"] = [name for name in order if name in retired] or [
+        name for name in per_source if name in retired]
     # The catalogue half, per source too, so a month frozen today can still say
     # which service's episode count it was measured against. One entry: a
     # season's total comes from one source (see detail_source). A record no
@@ -554,7 +588,8 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # last-known number and no service is answering for it this pass.
     detail_from = detail_source(rec, settings)
     show["total_by_source"] = {detail_from: total} if detail_from else {}
-    show["counts"] = counts.counts_label(watched, total, source_labels(), order, asked)
+    show["counts"] = counts.counts_label(counting or (watched if not retired else {}),
+                                         total, source_labels(), order, asked)
     # THE SAME NUMBERS, SAID IN FULL, for the row's tooltip. One line has room
     # for the counts and nothing else, so a service nobody asked and a service
     # that agrees look identical in it — see counts.counts_detail, which is where
@@ -562,7 +597,7 @@ def _apply_counts(show: dict, rec: dict, watched: dict[str, int], settings,
     # name the services differently or disagree about what a number means.
     show["counts_detail"] = counts.counts_detail(
         per_source or watched, total, source_labels(), order, asked, dates,
-        linked=asked)
+        linked=asked, retired=retired)
 
 
 def _log_watched_coverage(records: list[dict], watched_lookup: dict, matched: int) -> None:
@@ -663,6 +698,12 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
     # asked did not go quiet, and naming it would put a stranger's outage on a
     # row that never wanted it.
     unread = tuple(name for name in asked if name in {str(s) for s in sources_unread})
+    # WHICH SERVICES' STORED NUMBERS THIS ACCOUNT HAS RETIRED. Read once for the
+    # whole pass rather than threaded down from every caller: it is one fact about
+    # the account, this function already has the account in hand, and adding an
+    # argument to each of the four callers would be four chances to forget it on
+    # the path that matters. See app/sources/prefs.py's `counts_tracker`.
+    retired = (await source_prefs.load(user_id)).retired_trackers()
 
     shows = []
     matched = 0
@@ -690,11 +731,13 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                         int(rec.get("watched") or 0)}
             show = _merge_unavailable(rec, watched_lookup.get(key) or fallback,
                                       settings, asked, source=source if failed else None,
-                                      dates=(dates_lookup or {}).get(key))
+                                      dates=(dates_lookup or {}).get(key),
+                                      retired=retired)
         else:
             show = _merge_available(rec, detail, watched_lookup.get(key) or {},
                                     settings, asked, missing=unread,
-                                    dates=(dates_lookup or {}).get(key))
+                                    dates=(dates_lookup or {}).get(key),
+                                    retired=retired)
         show["bucket"] = discord_fmt.bucket_of(show, show)
         # WHEN the season was finished, and only for a season that IS finished:
         # on a partly-watched season the same date is just "last time I watched

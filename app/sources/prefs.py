@@ -165,6 +165,10 @@ class SourcePrefs:
     # declared order standing, which is what every account had before this
     # existed — it is NOT a claim that no service decides.
     tracker_priority: list = field(default_factory=list)
+    # Tracker service names whose STORED numbers this account no longer counts.
+    # See `counts_tracker`. Empty means "count everything", which is what every
+    # account had before this existed.
+    tracker_retired: list = field(default_factory=list)
 
     def calendar_selection(self, endpoint=None) -> str:
         """Which services answer for `endpoint`, falling back to the
@@ -291,6 +295,48 @@ class SourcePrefs:
         return preferred + [name for name in names if name not in preferred]
 
 
+    def counts_tracker(self, source: Source | str) -> bool:
+        """Whether this account still counts what `source` reported.
+
+        THE EXIT FROM A STATE THAT HAD NONE. Unlinking a service stops it being
+        ASKED, which already worked; it could not stop the numbers it had already
+        contributed from counting. Those sit in the watch state, per source, and
+        every row that ever had one goes on rendering it — correctly flagged as
+        belonging to a service nobody asked, and with no way to ever stop. An
+        account that has genuinely migrated then reads as permanently degraded
+        instead of as a healthy single-service account. This is how it says so.
+
+        IT REMOVES AN ANSWER EVEN WHEN IT IS THE ONLY ONE, which is the one place
+        this deliberately parts company with `tracker_order` above. That one can
+        only decide which of several answers LEADS, because reordering a single
+        answer is meaningless. This one is a statement that a service's numbers
+        are not to be used at all — and a title only the retired service ever knew
+        is precisely the row carrying the stalest number of the lot, so exempting
+        it would leave the migration half-done and unexplainable. The row says
+        "retired, not counted" rather than going quiet, so a count that drops to
+        nothing is visible and reversible rather than mysterious.
+
+        IT IS ABOUT STORED NUMBERS, NOT ABOUT ASKING. A retired service that is
+        still linked is still read — this says what to do with the answer, not
+        whether to fetch it — so re-counting it later needs nothing refetched.
+        """
+        stated = self.tracker_retired if isinstance(self.tracker_retired, list) else []
+        return str(source) not in {str(name) for name in stated}
+
+    def retired_trackers(self, sources=None) -> frozenset[str]:
+        """The retired names, optionally narrowed to `sources`.
+
+        A frozenset because every caller asks "is this one in it" per row, and
+        because the order of a set of exclusions means nothing — unlike
+        `tracker_priority`, where the order IS the statement.
+        """
+        stated = self.tracker_retired if isinstance(self.tracker_retired, list) else []
+        names = {str(name) for name in stated if isinstance(name, str)}
+        if sources is None:
+            return frozenset(names)
+        return frozenset(names & {str(source) for source in sources})
+
+
 def _stored_tracker_priority(document) -> list[str]:
     """The stated tracker order read back, or an empty list.
 
@@ -335,6 +381,30 @@ def _tracker_priority(value) -> list[str]:
     if len(set(names)) != len(names):
         raise ValueError(f"tracker_order names a service more than once: {names}")
     return names
+
+
+def _tracker_retired(value) -> list[str]:
+    """The retired-tracker list, validated on the way IN.
+
+    Same rules as `_tracker_priority` above and for the same reasons — an unknown
+    service name is a bug in the caller rather than something to swallow — with
+    duplicates TOLERATED rather than refused, because this is a set of exclusions
+    and naming one twice says exactly what naming it once says. Order carries no
+    meaning here either, so it is stored sorted and reads back the same whatever
+    order the screen sent.
+    """
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"tracker_retired must be a list of service names, not {value!r}")
+    names = {str(name) for name in value}
+    unknown = [name for name in names if name not in SOURCE_NAMES]
+    if unknown:
+        raise ValueError(
+            f"tracker_retired names {', '.join(sorted(unknown))}, which is not "
+            f"among {', '.join(sorted(SOURCE_NAMES))}")
+    return sorted(names)
 
 
 def _selection(value, column: str) -> str:
@@ -392,7 +462,7 @@ async def load(user_id: int) -> SourcePrefs:
     """This account's preferences, or the defaults if it has stated none."""
     row = await db.fetch_one(
         "SELECT calendar_source, tracker_source, precedence_json, endpoint_sources_json, "
-        "tracker_order_json FROM source_prefs WHERE user_id = ?",
+        "tracker_order_json, tracker_retired_json FROM source_prefs WHERE user_id = ?",
         (user_id,),
     )
     if row is None:
@@ -404,6 +474,10 @@ async def load(user_id: int) -> SourcePrefs:
         precedence=_stored_precedence(row["precedence_json"]),
         endpoint_sources=_stored_endpoint_sources(row["endpoint_sources_json"]),
         tracker_priority=_stored_tracker_priority(row["tracker_order_json"]),
+        # Same tolerant read as the order beside it: unreadable means "count
+        # everything", which is the state an account that never opened the
+        # screen is in and nothing that cannot be restated by opening it.
+        tracker_retired=_stored_tracker_priority(row["tracker_retired_json"]),
     )
 
 
@@ -427,20 +501,25 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
     endpoint_sources = {str(key): _selection(value, f"endpoint_sources[{key}]")
                         for key, value in endpoint_sources.items()}
     tracker_priority = _tracker_priority(prefs.tracker_priority)
+    tracker_retired = _tracker_retired(prefs.tracker_retired)
     await db.execute(
         "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
-        "precedence_json, endpoint_sources_json, tracker_order_json) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
+        "precedence_json, endpoint_sources_json, tracker_order_json, "
+        "tracker_retired_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET "
         "calendar_source = excluded.calendar_source, "
         "tracker_source = excluded.tracker_source, "
         "precedence_json = excluded.precedence_json, "
         "endpoint_sources_json = excluded.endpoint_sources_json, "
-        "tracker_order_json = excluded.tracker_order_json",
+        "tracker_order_json = excluded.tracker_order_json, "
+        "tracker_retired_json = excluded.tracker_retired_json",
         (prefs.user_id, calendar_source, tracker_source, json.dumps(precedence),
-         json.dumps(endpoint_sources), json.dumps(tracker_priority)),
+         json.dumps(endpoint_sources), json.dumps(tracker_priority),
+         json.dumps(tracker_retired)),
     )
     return replace(prefs, calendar_source=calendar_source,
                    tracker_source=tracker_source, precedence=precedence,
                    endpoint_sources=endpoint_sources,
-                   tracker_priority=tracker_priority)
+                   tracker_priority=tracker_priority,
+                   tracker_retired=tracker_retired)

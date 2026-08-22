@@ -210,7 +210,7 @@ def no_longer_finished(recorded: Mapping[str, int] | int | None,
 def counts_detail(per_source: Mapping[str, int] | int | None, total,
                   labels: Mapping[str, str] | None = None, order=(),
                   asked=(), dates: Mapping[str, str] | None = None,
-                  linked=()) -> str:
+                  linked=(), retired=()) -> str:
     """The whole story behind "x/y", one line per service, for a row's tooltip.
 
     WHAT THE ROW ITSELF CANNOT SAY. `counts_label` has one line to work with, so
@@ -242,6 +242,13 @@ def counts_detail(per_source: Mapping[str, int] | int | None, total,
     means the caller did not say — a frozen month re-rendered, a test — and then
     nothing is marked, because inferring staleness from silence would put the
     mark on every row of a month that is waiting on nobody.
+
+    `retired` IS THE ACCOUNT'S OWN DECISION and reads differently from every other
+    note here, which is why it gets its own word. "not asked" describes something
+    that HAPPENED TO the row — a link lapsed, nobody could ask — and it is a state
+    with no exit. "retired" is something the viewer DID, on purpose, and can undo
+    from the same screen they did it on. The number is still shown because it is
+    still stored: retiring stops it counting, it does not throw it away.
     """
     label_of = labels or {}
     if not isinstance(per_source, Mapping):
@@ -255,6 +262,7 @@ def counts_detail(per_source: Mapping[str, int] | int | None, total,
     counts = resolve(per_source, total)
     when = dates or {}
     asked_names = {str(name) for name in asked}
+    retired_names = {str(name) for name in retired}
     linked_names = {str(name) for name in linked}
     y = int(total or 0)
 
@@ -275,7 +283,14 @@ def counts_detail(per_source: Mapping[str, int] | int | None, total,
             lines.append(f"{shown}: nothing recorded")
             continue
         notes = []
-        if asked_names and name not in asked_names:
+        # RETIRED SUPPRESSES "not asked", because the two would both be true and
+        # only one of them is the reason. A retired service is usually an unlinked
+        # one, so a row saying "not asked, retired, not counted" reports the
+        # mechanism and the decision as though they were separate findings — when
+        # the decision is the whole answer and the only one the reader can act on.
+        if name in retired_names:
+            notes.append("retired, not counted")
+        elif asked_names and name not in asked_names:
             notes.append("not asked")
         if when.get(name):
             notes.append(f"last watched {when[name]}")

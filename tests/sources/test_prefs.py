@@ -310,6 +310,54 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
             await prefs.save(replace(await prefs.load(self.user_id),
                                      tracker_priority=["trakt", "trakt"]))
 
+    async def test_a_retired_service_survives_a_round_trip(self):
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_retired=["trakt"]))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.tracker_retired, ["trakt"])
+        self.assertFalse(stored.counts_tracker("trakt"))
+        self.assertTrue(stored.counts_tracker("simkl"))
+
+    async def test_a_row_predating_the_retired_column_counts_everything(self):
+        """The column has a default, so every existing row got an empty list —
+        and empty is exactly the state every account was in before it could
+        retire anything. Failing OPEN matters more here than for the order: a row
+        that read as "retire everything" would silently stop counting services
+        nobody had retired."""
+        await db.execute(
+            "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
+            "precedence_json) VALUES (?, 'auto', 'auto', '{}')",
+            (self.user_id,))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.tracker_retired, [])
+        self.assertTrue(stored.counts_tracker("trakt"))
+
+    async def test_retiring_an_unknown_service_is_refused(self):
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     tracker_retired=["trakt", "letterboxd"]))
+
+    async def test_naming_a_service_twice_is_tolerated_here(self):
+        """Unlike the ORDER beside it, which refuses a duplicate because naming
+        one service twice has no single meaning. This is a SET of exclusions:
+        naming one twice says exactly what naming it once says, so it is stored
+        the once and reads back the same whatever order the screen sent."""
+        saved = await prefs.save(replace(await prefs.load(self.user_id),
+                                         tracker_retired=["trakt", "trakt"]))
+        self.assertEqual(saved.tracker_retired, ["trakt"])
+
+    async def test_the_two_preferences_do_not_overwrite_each_other(self):
+        """They are stored in one row and written by one verb, so a save that
+        forgot either column would silently discard whichever the screen was not
+        editing at the time."""
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_priority=["simkl", "trakt"]))
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_retired=["trakt"]))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.tracker_priority, ["simkl", "trakt"])
+        self.assertEqual(stored.tracker_retired, ["trakt"])
+
 
 class TrackerOrderTests(unittest.TestCase):
     """Which linked tracker decides. Pure, like the selection rules above — the

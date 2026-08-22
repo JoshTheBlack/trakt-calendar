@@ -2398,6 +2398,39 @@ ALTER TABLE distrakt_user_seasons ADD COLUMN missing_sources_json TEXT NOT NULL 
 """
 
 
+MIGRATION_33 = """
+-- "I HAVE MOVED OFF THAT SERVICE — STOP COUNTING WHAT IT LEFT BEHIND."
+--
+-- Unlinking a service stops it being ASKED, and that much already worked. What it
+-- could not do is stop the numbers it already contributed from counting: those
+-- live in the watch state, they are still per-source, and every row that ever had
+-- one goes on rendering it. The row says so honestly -- `counts_freshness` reads
+-- `partial`, meaning "a number here belongs to a service nobody asked, and no
+-- refresh will move it" -- but that is a state with NO EXIT. An account that has
+-- genuinely migrated reads as permanently degraded rather than as a healthy
+-- single-service account.
+--
+-- A LIST OF SERVICE NAMES WHOSE STORED NUMBERS THIS ACCOUNT NO LONGER COUNTS,
+-- beside tracker_order_json and shaped the same way: names this version does not
+-- recognise fall out on the way past, and an empty list is the honest default
+-- meaning "count everything", which is what every account had before this column.
+--
+-- IGNORED, NEVER DELETED. The numbers stay exactly where they are and the row
+-- still shows them, marked as retired -- because deleting them would throw away
+-- the only record of a service's contribution to settle a display question, and
+-- because un-retiring has to be able to put things back. It is the same stance
+-- the removal marks take one migration earlier: record the decision, do not act
+-- destructively on it.
+--
+-- IT DOES NOT REACH A FROZEN MONTH, and that is the boundary this must not cross.
+-- A settled month's `watched_by_source` is not a cache and not a live claim: it
+-- is what that month RECORDED, and it will never be recomputed. Retiring a source
+-- today must not silently re-answer what an earlier month decided -- exactly the
+-- rule tracker_order_json already follows for the same reason.
+ALTER TABLE source_prefs ADD COLUMN tracker_retired_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2431,6 +2464,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (30, MIGRATION_30),
     (31, MIGRATION_31),
     (32, MIGRATION_32),
+    (33, MIGRATION_33),
 ]
 
 

@@ -19,6 +19,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app import auth, config, db
+from app.sources import prefs as source_prefs
 from app.auth import routes as auth_routes
 from app.config import Settings, load_settings, save_settings
 from app.main import app
@@ -707,3 +708,111 @@ class AdminInviteEndpointTests(RouteTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RetiringATrackersHistoryTests(RouteTestCase):
+    """POST /api/me/tracker-retired — "I have moved off that service".
+
+    THE EXIT FROM A STATE THAT HAD NONE. Unlinking stops a service being ASKED and
+    always did; it could not stop the numbers it had already contributed from
+    counting, so every row it ever touched stayed amber for ever and a migrated
+    account read as permanently degraded. This route is how somebody says so.
+
+    Tested over HTTP because that is the only thing that proves the control is
+    WIRED. Twice in this branch a correct function shipped attached to nothing —
+    the tooltip's watch dates, and a removal check whose port never exposed its
+    own method — each with its own unit tests passing.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()
+
+    def _post(self, retired):
+        return self.client.post("/api/me/tracker-retired", json={"retired": retired})
+
+    def _stored(self):
+        user = asyncio.run(auth.find_user_by_username("josh"))
+        return asyncio.run(source_prefs.load(user["id"]))
+
+    def test_a_service_can_be_retired_and_reads_back(self):
+        resp = self._post(["trakt"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["retired"], ["trakt"])
+        self.assertFalse(self._stored().counts_tracker("trakt"))
+
+    def test_it_can_be_undone(self):
+        """The whole difference between this and deleting the numbers: switching
+        one back on has to put it straight back, which is only possible because
+        nothing was thrown away."""
+        self._post(["trakt"])
+        self.assertEqual(self._post([]).json()["retired"], [])
+        self.assertTrue(self._stored().counts_tracker("trakt"))
+
+    def test_the_whole_set_is_what_is_stored(self):
+        """"Retire this one" says nothing about the others, so the screen sends
+        the complete answer and a service left out of it is counted again."""
+        self._post(["trakt", "simkl"])
+        self._post(["simkl"])
+        stored = self._stored()
+        self.assertTrue(stored.counts_tracker("trakt"))
+        self.assertFalse(stored.counts_tracker("simkl"))
+
+    def test_an_unknown_service_is_refused_rather_than_dropped(self):
+        """A name this app has never heard of is a bug in the screen; swallowing
+        it would leave the viewer looking at a switch that stored nothing."""
+        resp = self._post(["letterboxd"])
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self._stored().tracker_retired, [])
+
+    def test_something_that_is_not_a_list_is_refused(self):
+        self.assertEqual(self.client.post(
+            "/api/me/tracker-retired", json={"retired": "trakt"}).status_code, 400)
+
+    def test_it_needs_a_session(self):
+        """Somebody else's preferences are not a thing an anonymous request may
+        state. The guard is the route's, not this test's — this pins that it is
+        actually on it."""
+        self.client.cookies.clear()
+        self.assertIn(self._post(["trakt"]).status_code, (401, 403))
+
+    def test_the_account_page_offers_a_switch_per_tracker(self):
+        """Rendered even for a service that is NOT linked, which is the row every
+        viewer comes looking for: the service somebody wants to retire is almost
+        always one they have already unlinked."""
+        body = self.client.get("/me").text
+        self.assertIn("trackerRetiredList", body)
+        self.assertIn('data-source="trakt"', body)
+        self.assertIn('data-source="simkl"', body)
+
+
+class StatingWhichTrackerDecidesTests(RouteTestCase):
+    """POST /api/me/tracker-order — the sibling control, which had no route-level
+    coverage at all. Added here because the two are edited from one screen, stored
+    in one row and written by one verb: a save that forgot either column would
+    silently discard whichever the viewer was not editing at the time."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()
+
+    def _stored(self):
+        user = asyncio.run(auth.find_user_by_username("josh"))
+        return asyncio.run(source_prefs.load(user["id"]))
+
+    def test_an_order_is_stored_and_reads_back(self):
+        resp = self.client.post("/api/me/tracker-order",
+                                json={"order": ["simkl", "trakt"]})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._stored().tracker_priority, ["simkl", "trakt"])
+
+    def test_it_does_not_disturb_a_retired_service(self):
+        self.client.post("/api/me/tracker-retired", json={"retired": ["trakt"]})
+        self.client.post("/api/me/tracker-order", json={"order": ["simkl", "trakt"]})
+        stored = self._stored()
+        self.assertEqual(stored.tracker_priority, ["simkl", "trakt"])
+        self.assertFalse(stored.counts_tracker("trakt"))
+
+    def test_an_unknown_service_is_refused(self):
+        self.assertEqual(self.client.post(
+            "/api/me/tracker-order", json={"order": ["letterboxd"]}).status_code, 400)
