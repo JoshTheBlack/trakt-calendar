@@ -344,12 +344,21 @@ async def restore_user_data(user_id: int, doc: dict) -> None:
         for table, cols in _EXPORT_TABLES:
             if table not in payload:
                 continue
-            collist = ", ".join(("user_id", *cols))
-            placeholders = ", ".join(["?"] * (1 + len(cols)))
-            sql = f"INSERT INTO {table} ({collist}) VALUES ({placeholders})"
             for row in payload[table]:
                 if not isinstance(row, dict):
                     raise RestoreError(f"{table} rows must be objects")
-                conn.execute(sql, [user_id, *((row.get(c)) for c in cols)])
+                # A COLUMN THE BACKUP DOES NOT MENTION TAKES THE SCHEMA'S DEFAULT,
+                # which means it is left OUT of the insert rather than written as
+                # NULL. Every backup is a snapshot of the columns that existed when
+                # it was taken, so a restore of an older one is guaranteed to be
+                # short of any column added since — and passing NULL for one
+                # declared NOT NULL turns "this file predates that feature" into a
+                # failed restore of the viewer's whole tracker.
+                stated = [column for column in cols if row.get(column) is not None]
+                collist = ", ".join(("user_id", *stated))
+                placeholders = ", ".join(["?"] * (1 + len(stated)))
+                conn.execute(
+                    f"INSERT INTO {table} ({collist}) VALUES ({placeholders})",
+                    [user_id, *(row[column] for column in stated)])
 
     await db.transaction(_work)
