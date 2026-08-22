@@ -1738,11 +1738,19 @@ async def _learn_source_ids(user_id: int, state: dict, roster: list[dict]) -> No
     proved — that this service knows the title and could be asked about it
     directly. The id costs nothing to obtain here: it has already been obtained.
 
-    ONLY THE IDS THAT NAME A REGISTERED SOURCE. Those are what place a call and
-    what the choice of who to ask is made from. The shared ids are what a record is
-    KEYED on, and improving one of those is a different question with different
+    ONLY WHAT NAMES A REGISTERED SOURCE — its id, and its slug. The id is what
+    places a call; the slug is what a link to that service is built from, and the
+    two services disagree about what a title's slug is, so a record short of one
+    cannot be linked to correctly. The shared ids are what a record is KEYED on,
+    and improving one of those is a different question with different
     consequences — the same fact arriving from a library match has no business
     anywhere near the identity waterfall.
+
+    THE SLUG COSTS NOTHING TO LEARN. It rides the same payloads the ids do: every
+    entry of a Simkl library read carries one, and so does every Trakt history
+    event. Nothing is fetched for it — the plumbing simply used to drop it, which
+    is why records written before the two services' slugs were told apart still
+    had only the ambiguous one.
 
     EVERY PASS, NOT ONLY ONE THAT BASELINED. The state may have held an id for
     sessions while the record went without it, and reading a state this pass merely
@@ -1751,7 +1759,14 @@ async def _learn_source_ids(user_id: int, state: dict, roster: list[dict]) -> No
     is actually short of an id.
     """
     shows = state.get("shows") or {}
+    # EACH SOURCE'S OWN ID, AND ITS OWN SLUG. The id is what places a call; the
+    # slug is what a link to that service is built from, and it arrives in the
+    # same payloads for nothing — every one of a library read's entries carries
+    # it. Both are per-source names a record can be short of, and both are
+    # learned the same add-only way, so filtering the slug out here was the only
+    # reason a record ever went without one.
     sources = [str(source) for source in providers.registered()]
+    learnable = sources + [f"{source}_slug" for source in sources]
     written: set[str] = set()
     for record in roster or []:
         key = record_key(record)
@@ -1759,7 +1774,7 @@ async def _learn_source_ids(user_id: int, state: dict, roster: list[dict]) -> No
             continue
         known = (shows.get(str(key)) or {}).get("ids") or {}
         carried = record.get("ids") or {}
-        learned = {name: known[name] for name in sources
+        learned = {name: known[name] for name in learnable
                    if known.get(name) not in (None, "")
                    and carried.get(name) in (None, "")}
         if learned:

@@ -500,6 +500,11 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         # When each season was finished, for the "Completed means completed THIS
         # month" rule compute_live_shows applies.
         completed_lookup = watch_history.season_completed_map(state)
+        # PER SERVICE, beside the one above and answering a different question:
+        # that one is "when was this season finished", which has one answer; this
+        # is "what does each service say", which is what a tooltip naming
+        # services needs. See watch_history.season_dates_by_source.
+        dates_lookup = watch_history.season_dates_by_source(state)
         mstart, mend = watch_history.month_bounds(month_key)
         movies = watch_history.movies_in_range(state, mstart, mend)
         plays = watch_history.episode_plays(state)
@@ -507,7 +512,8 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         # one service's alone rather than presenting it as what everybody agrees.
         unreadable = watch_history.unreadable_sources(state)
         sp.set(watched_keys=len(watched_lookup), movies=len(movies), plays=len(plays))
-    return state, watched_lookup, completed_lookup, movies, plays, unreadable
+    return (state, watched_lookup, completed_lookup, dates_lookup, movies, plays,
+            unreadable)
 
 
 def _season_lookup(settings) -> lifecycle.SeasonLookup:
@@ -698,11 +704,13 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     state: dict = {}
     watched_lookup: dict = {}
     completed_lookup: dict = {}
+    dates_lookup: dict = {}
     movies: list[dict] = []
     questions = lifecycle.HistoryQuestions([], [])
     unreadable: list[str] = []
     if ports:
-        state, watched_lookup, completed_lookup, movies, plays, unreadable = await _sync_watch_history(
+        (state, watched_lookup, completed_lookup, dates_lookup, movies, plays,
+         unreadable) = await _sync_watch_history(
             settings, user_id, everything, month_key, force_fresh, today)
         if under_way and plays:
             # The history has moved, so what it reported is folded back into the
@@ -727,6 +735,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         computed = await distrakt_store.compute_live_shows(
             user_id, everything, settings, fresh=season_fresh, watched_lookup=watched_lookup,
             allow_degrade=True, completed_lookup=completed_lookup,
+            # WITHOUT THIS EVERY SERVICE REPORTS "no watch dates". The lookup is
+            # only built inside compute_live_shows' own sync branch, and this
+            # caller does its own sync and hands the results in — so a caller
+            # that passes `watched_lookup` has to pass this too.
+            dates_lookup=dates_lookup,
             # The services this pass actually read, which is what tells a season
             # only one of them knows about from one they agree on — and which of
             # them went quiet, which is what stops a row claiming its counts are

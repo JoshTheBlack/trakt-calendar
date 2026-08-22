@@ -1686,3 +1686,63 @@ class TheCountsTooltipTests(unittest.TestCase):
         tooltip cannot list them differently."""
         note = self._detail({"simkl": 12, "trakt": 3})
         self.assertTrue(note.splitlines()[0].startswith("Trakt"))
+
+
+class TheTooltipReachesTheRowTests(AppTestCase):
+    """The composed sentence has to ARRIVE on the row, not merely exist.
+
+    THE BUG THIS PINS, found in a browser: the per-service dates were built only
+    inside compute_live_shows' own sync branch, and the month payload does its own
+    sync and hands the results in — so on the real path nothing ever passed them
+    and every service reported "no watch dates", including ones with years of
+    dated history behind them. The composition was correct and unreachable, which
+    is exactly the shape no test of the composition alone can catch. So this one
+    goes over HTTP, like the notice tests above it and for the same reason.
+    """
+
+    RAW_ACTIVITIES = AnUnreadableServiceKeepsItsHistoryTests.RAW_ACTIVITIES
+
+    def make_settings(self):
+        from app.config import Settings
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "trakt-token")
+        asyncio.run(store.add_user_record(self.user_id, {
+            "ids": {"trakt": 7, "tmdb": 1, "slug": "silo"}, "season": 3,
+            "title": "Silo", "network": "Apple TV", "media": "show",
+            "kind": store.RecordKind.KEEPUP,
+        }))
+        self.sign_in_as(self.user_id)
+
+    def _row(self):
+        async def _season(settings, source_id, season, fresh=False, client=None):
+            return {"total": 8, "cadence": "Tue", "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+
+        today = date.today()
+        with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))),              patch("app.providers.trakt.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)),              patch("app.providers.trakt.sync.fetch_history",
+                   new=AsyncMock(return_value=[])),              patch("app.providers.trakt.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={7: {3: {1: "2026-07-01",
+                                                       2: "2026-07-02"}}})),              patch("app.providers.trakt.detail.fetch_season_detail", _season),              patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))):
+            resp = self.client.get(
+                f"/api/distrakt/month?year={today.year}&month={today.month}")
+        row, = resp.json()["shows"]
+        return row
+
+    def test_the_row_carries_the_service_by_service_breakdown(self):
+        row = self._row()
+        self.assertIn("Trakt: 2 of 8", row["counts_detail"])
+
+    def test_the_date_each_service_reported_reaches_the_row(self):
+        """THE REGRESSION. Trakt reported two episodes, the later on 2026-07-02,
+        and the row has to say so — "no watch dates" against a service that gave
+        two is the exact wrong answer this arrived as."""
+        row = self._row()
+        self.assertIn("last watched 2026-07-02", row["counts_detail"])
+        self.assertNotIn("no watch dates", row["counts_detail"])
