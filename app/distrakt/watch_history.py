@@ -123,7 +123,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import NamedTuple
 
-from . import counts, naming, store
+from . import counts, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
 from ..providers.base import (ItemKey, LibraryPort, Media, PlayCountPort,
@@ -189,6 +189,17 @@ _UNREADABLE = "unreadable"
 # cannot answer "does this service hold this title", which is the only question
 # the baseline asks it.
 _LIBRARY = "library"
+
+# The sources whose removal beacon moved on THIS pass, so the caller can ask each
+# of them what it still holds. IN MEMORY ONLY, like the three around it.
+#
+# IT IS A SIGNAL RATHER THAN THE WORK ITSELF because of where the two facts live:
+# only `_sync_one` sees the beacon move, and only its caller knows whose tracker
+# this is — a removal is recorded against a viewer's ROWS, and `_sync_one` is
+# handed state rather than a user. Passing a user id down would give every branch
+# of the sync the ability to write records, which is a larger permission than one
+# signal needs.
+_REMOVALS_OWED = "removals_owed"
 
 # The source a watch is filed under when nothing said which one reported it — a
 # state restored from a backup taken before the state was per source, or one
@@ -1241,6 +1252,20 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
         else:
             answered += 1
 
+    # WHAT EACH SERVICE STILL HOLDS, asked only of the ones that said something was
+    # removed. It runs AFTER the sync loop rather than inside it because a removal
+    # is recorded against the viewer's rows and this is where the viewer is known.
+    # Never fatal: a service that cannot answer leaves the marks exactly as they
+    # were, which is the same degradation every other per-source failure takes.
+    owed = state.pop(_REMOVALS_OWED, [])
+    for source, port in ports:
+        if str(source) not in owed:
+            continue
+        try:
+            await removals.check(settings, user_id, source, port)
+        except SourceUnavailable as exc:
+            logger.warning("wh.sync: %s could not list its library: %s", source, exc)
+
     state[_PLAYS] = plays
     state[_UNREADABLE] = unreadable
     # WHEN NOTHING ANSWERED, THE FAILURE IS THE TRACKER'S, and it is raised the
@@ -1284,6 +1309,17 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
         return False
 
     rebaseline = force or _removed_changed(stored, beacons)
+
+    # THE SERVICE HAS SAID SOMETHING WAS TAKEN AWAY, so it is worth asking what it
+    # still holds. Only on a genuine removal beacon, never on `force`: a refresh
+    # is the viewer asking for fresher numbers, and nothing about pressing it says
+    # a title left the library. A source with no way to list its ids cheaply is
+    # not asked at all — the full re-baseline below is what covers it.
+    if (not force and _removed_changed(stored, beacons)
+            and getattr(port, "fetch_library_ids", None) is not None):
+        state.setdefault(_REMOVALS_OWED, [])
+        if name not in state[_REMOVALS_OWED]:
+            state[_REMOVALS_OWED].append(name)
 
     # A named month is read from its own first day; everything else carries on
     # from the cursor, or from the start of the month today falls in when there is

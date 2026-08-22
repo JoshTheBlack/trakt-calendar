@@ -186,6 +186,26 @@ function returnMark(s) {
             onclick="acknowledgeReturn('${esc(s.key)}', ${s.season}, this)">back</button>`;
 }
 
+// A service has stopped listing this title. NOT a deletion, and the mark exists
+// so that stays visible: the row keeps its counts and its place, and says which
+// service dropped it. Simkl prescribes deleting the local rows when its library
+// diff no longer names a title; this app records the statement instead, because
+// watch history is not re-derivable from anything here and a wrong deletion is
+// permanent and silent where a wrong mark costs nothing.
+//
+// NOT A BUTTON, WHICH IS THE DIFFERENCE FROM returnMark ABOVE. That marker is
+// cleared only by the viewer pressing it; this one is a claim about what a
+// service currently holds, so the service naming the title again clears it on its
+// own and there is nothing to press. Removing the row for good is the ✕ that was
+// always there — the one thing that deletes a record — and needs no second path.
+function missingMark(s) {
+    const gone = s.missing_sources || [];
+    if (!gone.length) return '';
+    const names = gone.map(name => esc(name)).join(' and ');
+    return ` <span class="distrakt-missing"
+            title="No longer in your ${names} library — your counts here are kept. Use ✕ to remove it.">dropped</span>`;
+}
+
 function showRow(s) {
     const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
     // The x/y comes from the server already written out, because when two
@@ -275,7 +295,7 @@ function showRow(s) {
                   role="img" title="${esc(s.counts_note)}"
                   aria-label="${esc(s.counts_note)}"></span>` : ''}
             <span class="distrakt-badge">${badge}</span>
-            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}</span>
+            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}${missingMark(s)}</span>
             <span class="distrakt-season">S${String(s.season).padStart(2, '0')}</span>
             <!-- Spelled out in every bucket, not just as a tooltip: this is the
                  string the emoji map is keyed on, so seeing it is what makes the

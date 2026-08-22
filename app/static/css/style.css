@@ -1219,6 +1219,18 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     cursor: pointer;
 }
 .distrakt-return:hover { opacity: 1; }
+/* A title a service has stopped listing. The same badge shape as the marker above
+   so the two read as one family, and deliberately NOT a button: that one is
+   cleared by pressing it, this one clears itself the moment the service names the
+   title again. Muted rather than accented, because it reports something that
+   happened elsewhere rather than asking the reader for anything — the row's own
+   counts are still good and the ✕ is still how a row goes away. */
+.distrakt-missing {
+    margin-left: 6px; padding: 0 5px; border-radius: 6px; font-size: 0.62rem;
+    text-transform: uppercase; letter-spacing: 0.06em; vertical-align: middle;
+    color: var(--muted, #8b93a7); border: 1px solid currentColor; opacity: 0.75;
+    line-height: 1.6; cursor: help;
+}
 /* An episode watched that nothing here knows about. Thin, and set apart from the
    bucket rows below it: it is a question rather than part of the month, and it
    sits above every section because a question under six headings is one nobody

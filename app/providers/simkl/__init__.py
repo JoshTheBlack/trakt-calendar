@@ -55,6 +55,21 @@ class _SimklSyncPort:
         return await sync.fetch_library(settings, start_at=start_at,
                                         activities=activities, since=since)
 
+    async def fetch_library_ids(self, settings: Settings):
+        """Every id this library currently holds, for the removal diff.
+
+        SEPARATE FROM fetch_library ABOVE BECAUSE IT ANSWERS A DIFFERENT QUESTION.
+        That one answers "what changed", and past a first sync it is bounded by
+        `date_from` and cannot speak about what is absent. This one answers "what
+        remains", is never bounded, and is the only read entitled to be diffed.
+
+        ITS PRESENCE ON THE PORT IS WHAT MAKES THE CHECK RUN AT ALL. The tracker
+        asks whether a port can list its ids cheaply and skips the check for one
+        that cannot, so a method defined on the module but never exposed here is
+        a removal check that silently never happens.
+        """
+        return await sync.fetch_library_ids(settings)
+
     async def fetch_watched_progress(self, settings: Settings,
                                      since_days: int | None = None) -> list[dict]:
         return await sync.fetch_watched_progress(settings, since_days=since_days)

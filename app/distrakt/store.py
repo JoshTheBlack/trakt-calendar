@@ -224,7 +224,7 @@ MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form",
                         "watched_by_source", "total_by_source")
 
 # Every distrakt_user_seasons column except user_id, in insert order.
-USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back")
+USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back", "missing_sources_json")
 
 # Columns whose value is coerced on the way to the database. Everything else
 # passes through as the caller stated it.
@@ -262,8 +262,17 @@ _UPDATABLE_MONTH_COLUMNS = frozenset(MONTH_RECORD_COLUMNS) - {
 # the marker for a season that turned out not to have been finished, and only the
 # viewer acknowledging it clears it, so a routine counts refresh written back
 # without the flag must not dismiss a marker nobody has read.
+#
+# `missing_sources_json` is excluded for the same shape of reason and a different
+# one: it is written by the removal check alone (see set_missing_sources), which
+# is the only thing that has asked a service what it still holds. Every other
+# write of a user record is a counts refresh built from a roster that carries no
+# opinion on the matter, so leaving it updatable would have each of those quietly
+# clear a mark by omission — the mark would appear after a removal check and
+# vanish on the very next page load, which reads as the check not working.
 _UPDATABLE_USER_COLUMNS = frozenset(USER_RECORD_COLUMNS) - {
-    *IDENTITY_COLUMNS, "season", "added_by", "created_at", "came_back"}
+    *IDENTITY_COLUMNS, "season", "added_by", "created_at", "came_back",
+    "missing_sources_json"}
 
 
 def _insert_sql(table: str, columns: tuple[str, ...]) -> str:
@@ -428,6 +437,11 @@ def normalize_show(show: dict) -> dict:
         "abandoned": kind is RecordKind.ABANDONED,
         "abandoned_form": incoming.get("abandoned_form"),
         "came_back": bool(incoming.get("came_back", False)),
+        # EMPTY UNLESS A REMOVAL CHECK SAYS OTHERWISE. A caller stating a record
+        # is describing what a title IS, never what a service has stopped holding
+        # — only set_missing_sources has asked that question — so this is a
+        # default here rather than a field a caller may supply.
+        "missing_sources_json": "[]",
         "watched": int(incoming.get("watched") or 0),
         "total": int(incoming.get("total") or 0),
         "cadence": incoming.get("cadence"),
@@ -523,6 +537,26 @@ def _stored_json(document) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _stored_list(document) -> list:
+    """A JSON column back as a list, or an empty one.
+
+    SEPARATE FROM `_stored_json` ABOVE BECAUSE THAT ONE ANSWERS `{}` TO EVERYTHING
+    IT DOES NOT RECOGNISE, arrays included. Reading a stored array through it
+    returns empty and raises nothing, so the column reads as "no value" no matter
+    what is in it — which is the same silence as a working empty column, and
+    exactly the failure a caller cannot see. Same tolerance for genuinely
+    unreadable content, and same reason: a row that cannot be parsed should render
+    without its extra rather than take the page down.
+    """
+    if not document:
+        return []
+    try:
+        parsed = json.loads(document)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def row_to_record(row) -> dict:
     """A stored row from either table back into the record shape the renderers
     consume.
@@ -581,6 +615,15 @@ def row_to_record(row) -> dict:
         rec["abandoned_form"] = row["abandoned_form"]
     if "came_back" in columns:
         rec["came_back"] = bool(row["came_back"])
+    # WHICH LINKED SERVICES HAVE STOPPED LISTING THIS TITLE. A list rather than a
+    # flag because a title dropped at one service may still be held at the other,
+    # and a row that only said "missing" could not say whose statement that was.
+    # A row written before the column existed reads as an empty list — every
+    # service still holds it, which is the right answer for a row nothing has
+    # checked yet.
+    if "missing_sources_json" in columns:
+        rec["missing_sources"] = [
+            str(name) for name in _stored_list(row["missing_sources_json"])]
     return rec
 
 
@@ -976,6 +1019,40 @@ async def set_came_back(user_id: int, key: ItemKey, season: int, came_back: bool
     return result.rowcount > 0
 
 
+async def set_missing_sources(user_id: int, key: ItemKey, missing: Iterable[str]) -> int:
+    """Record which services have stopped listing this title. Returns rows changed.
+
+    PER TITLE, NOT PER SEASON, because that is what the statement is about: a
+    service drops a TITLE from a library, and every season of it stops being
+    listed at the same moment. Addressing a season would have the caller repeat
+    one service's answer once per row and leave the rows it did not name
+    disagreeing with the ones it did.
+
+    THE WHOLE LIST IS WRITTEN, NOT ADDED TO, and that is what makes the mark clear
+    itself. The caller has just asked every linked service what it still holds, so
+    what it passes is the complete current answer — a service missing from that
+    list is one that named the title, and its mark going away is the correct
+    outcome rather than something needing its own verb. Contrast `set_came_back`
+    above, which only the viewer may clear: that marker remembers something no
+    later read can restate, where this one is a claim about what a service holds
+    right now and should be overwritten by the next thing the service says.
+
+    NOTHING IS DELETED HERE OR ANYWHERE THIS IS CALLED FROM. Simkl's guide
+    prescribes deleting local rows a removal diff does not name; this app records
+    the removal instead, because watch history is not re-derivable from anything
+    it holds and the two mistakes are not symmetrical — a wrong deletion is
+    permanent and silent, a wrong mark is visible and free to undo. Purging is a
+    separate, explicit act of the viewer's (see remove_user_record).
+    """
+    names = sorted({str(name) for name in (missing or ()) if str(name)})
+    result = await db.execute(
+        "UPDATE distrakt_user_seasons SET missing_sources_json = ? "
+        f"WHERE user_id = ? AND {_IDENTITY_MATCH}",
+        (json.dumps(names), user_id, key.media, key.match_source, key.match_id),
+    )
+    return result.rowcount
+
+
 async def remove_user_record(user_id: int, key: ItemKey, season: int) -> bool:
     """Take one season off the viewer's list. True if it was there."""
     result = await db.execute(
@@ -1076,8 +1153,15 @@ async def migrate_to_user(user_id: int, key: ItemKey, season: int, *, month: str
             month_address).fetchone()
         if row is None:
             return None
+        # A RECORD ARRIVING FROM THE MONTH TABLE HAS NO REMOVAL ANSWER OF ITS OWN.
+        # It is a settled verdict being put back on the list, and no service has
+        # been asked what it currently holds — so the honest starting state is
+        # "nothing missing", which the next removal check will correct if it is
+        # wrong. Stated here because `row_to_record` hands out the PARSED list for
+        # renderers and the insert wants the stored column.
         record = {**row_to_record(row), "kind": str(listed),
-                  "came_back": came_back, "created_at": now}
+                  "came_back": came_back, "missing_sources_json": "[]",
+                  "created_at": now}
         conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
         conn.execute(_INSERT_USER_SQL,
                      _insert_params(user_id, USER_RECORD_COLUMNS, record))

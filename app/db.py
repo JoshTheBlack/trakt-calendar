@@ -2362,6 +2362,42 @@ UPDATE distrakt_month_records
 """
 
 
+MIGRATION_32 = """
+-- A SERVICE STOPPED LISTING A TITLE, WHICH IS NOT THE SAME AS THE VIEWER
+-- FINISHING WITH IT.
+--
+-- Simkl documents that `date_from` deltas never surface removals, and prescribes
+-- detecting them by diffing an ids-only re-read against what is held locally.
+-- What it prescribes DOING about the difference is deleting the local rows. This
+-- app records it instead, and the reason is that the two failure modes are not
+-- symmetrical: watch history is not re-derivable from anything this app holds, so
+-- a wrong deletion is permanent and invisible, while a wrong mark is visible and
+-- costs nothing to undo. A sync hiccup, a re-catalogued title, a bucket that
+-- failed in a way the partial-read logic did not catch — any of those can produce
+-- an absence, and none of them is worth a viewer's history.
+--
+-- PER SOURCE, WHICH IS WHY IT IS A LIST AND NOT A FLAG. A title dropped at Simkl
+-- may still be held at Trakt, and a row that said only "missing" could not say
+-- whose statement that was — the same ambiguity the shared `slug` column was
+-- split apart to remove. An empty list is the default and means every linked
+-- service still lists it.
+--
+-- ON THE USER RECORD RATHER THAN THE MONTH, AND THE LIFECYCLE IS THE ARGUMENT.
+-- distrakt_month_records FREEZES: a month closing while a title was missing would
+-- say so for ever, which reintroduces exactly the irreversibility this exists to
+-- avoid. This table is the viewer's living list — recomputed every load, rolled
+-- forward month to month the way keepup and catchup already are — so the mark
+-- travels with the row until it clears or the viewer purges it.
+--
+-- IT CLEARS ITSELF. A source naming the title again removes that source from the
+-- list, with no acknowledgement needed; `came_back` beside it works the other way
+-- (cleared only by the viewer) because it remembers something no later read can
+-- restate. This one is a claim about what a service currently holds, so the
+-- service's next answer is exactly what should overwrite it.
+ALTER TABLE distrakt_user_seasons ADD COLUMN missing_sources_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2394,6 +2430,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (29, MIGRATION_29),
     (30, MIGRATION_30),
     (31, MIGRATION_31),
+    (32, MIGRATION_32),
 ]
 
 
