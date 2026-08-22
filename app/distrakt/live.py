@@ -456,7 +456,16 @@ def stored_shows(records: list[dict], settings) -> list[dict]:
 def source_order() -> tuple[str, ...]:
     """The registry's declared source order, as bare names. The FIRST entry a
     season actually has a number from is that season's primary — the one number
-    a frozen month and the announcement post carry."""
+    a frozen month and the announcement post carry.
+
+    THE DEFAULT, FOR A CALLER WITH NO ACCOUNT IN HAND. Which order an account
+    actually wants is that account's to state, and
+    `watch_history.tracker_ports` is where the stated one is applied — once,
+    centrally, and then passed down as an explicit order argument. Every caller
+    on a path that knows whose page it is receives that instead, so this answers
+    only where there is genuinely nobody to ask: a shared surface, a pre-warm, a
+    default before a preference exists.
+    """
     return tuple(str(source) for source in providers.registered())
 
 

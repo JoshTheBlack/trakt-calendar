@@ -224,11 +224,22 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
       - the CREDENTIAL is there (`is_configured` against a Settings carrying that
         account's own tokens — see app/distrakt/routes.py's _distrakt_settings).
 
-    The order is registry order, which is Trakt first, and it is load-bearing in
-    one narrow place: the FIRST entry is the account's primary source, whose
-    number is the one a frozen month and the announcement post carry when a
-    single number is all there is room for. Everything else about reading two
-    sources treats them as equals.
+    THE ORDER HERE IS REGISTRY ORDER, WHICH IS NOT THE ORDER THE TRACKER USES.
+    This function knows which sources are ELIGIBLE; it has no account context
+    beyond `prefs`, so it cannot know which of them the viewer wants consulted
+    first. `app/distrakt/watch_history.py`'s `tracker_ports` — same name, deliberately,
+    because it answers the same question one level up — takes this list and
+    reorders it by the account's stated tracker priority, and that result is
+    threaded to every caller as an explicit order rather than re-derived. So this
+    is the NO-CONTEXT FALLBACK, and a caller that ends up using its order
+    directly is a caller nobody has given the account's preference to.
+
+    Order is load-bearing in one narrow place: the FIRST entry is the primary
+    source, whose number is the one a frozen month and the announcement post
+    carry when a single number is all there is room for. That is exactly why the
+    viewer's preference has to win over registry order — a season finished on the
+    service they actually use could otherwise never be the one that counts.
+    Everything else about reading two sources treats them as equals.
 
     An empty list is an ordinary answer — an account that has linked nothing, or
     whose one linked service has no usable token — and every caller already
