@@ -76,6 +76,49 @@ class MarkingWhatAServiceNoLongerListsTests(DistraktTestCase):
         await removals.check(SETTINGS, self.user_id, Source.SIMKL, _Port({222: "s"}))
         self.assertEqual((await self._record())["missing_sources"], [])
 
+    async def test_a_title_put_back_is_cleared_by_an_ordinary_read(self):
+        """THE BUG THIS EXISTS FOR, found by removing a real title at Simkl and
+        restoring it. Clearing used to live inside `check`, which only runs when
+        the removal beacon moves — and putting a title BACK moves the watched
+        stamp, never `removed_from_list`. So the check never ran again and the
+        clearing logic was unreachable: a restored title stayed marked for ever.
+
+        A library read NAMING a title is proof enough, costs nothing because the
+        read happened anyway, and works on a bounded delta read too — a re-add is
+        exactly the kind of change a delta returns.
+        """
+        await self._listed(simkl=222)
+        await store.set_missing_sources(self.user_id, self.key, ["simkl"])
+
+        cleared = await removals.clear_named(self.user_id, Source.SIMKL,
+                                             [str(self.key)])
+        self.assertEqual(cleared, 1)
+        self.assertEqual((await self._record())["missing_sources"], [])
+
+    async def test_clearing_leaves_another_services_mark_alone(self):
+        """Simkl naming a title says nothing about whether Trakt still holds it."""
+        await self._listed(simkl=222, trakt=111)
+        await store.set_missing_sources(self.user_id, self.key, ["simkl", "trakt"])
+
+        await removals.clear_named(self.user_id, Source.SIMKL, [str(self.key)])
+        self.assertEqual((await self._record())["missing_sources"], ["trakt"])
+
+    async def test_clearing_a_title_no_read_named_changes_nothing(self):
+        """Absence from this read is not evidence of anything — a bounded read
+        names only what moved, so most held titles are missing from it."""
+        await self._listed(simkl=222)
+        await store.set_missing_sources(self.user_id, self.key, ["simkl"])
+
+        await removals.clear_named(self.user_id, Source.SIMKL, ["show:tmdb:999"])
+        self.assertEqual((await self._record())["missing_sources"], ["simkl"])
+
+    async def test_clearing_writes_nothing_when_no_row_is_marked(self):
+        """The ordinary pass. A read names hundreds of titles and almost none of
+        them are marked, so this must cost no writes at all."""
+        await self._listed(simkl=222)
+        self.assertEqual(
+            await removals.clear_named(self.user_id, Source.SIMKL, [str(self.key)]), 0)
+
     async def test_a_listing_that_could_not_be_read_changes_nothing(self):
         """None means a bucket failed, and every title in it is absent from the
         answer — absence being the entire signal. There is no partial version of

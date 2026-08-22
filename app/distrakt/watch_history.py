@@ -201,6 +201,19 @@ _LIBRARY = "library"
 # signal needs.
 _REMOVALS_OWED = "removals_owed"
 
+# {source: [identity keys that source's library read named this pass]}. IN MEMORY
+# ONLY, like the keys around it.
+#
+# THE CLEARING HALF OF A REMOVAL MARK, and it is separate from _REMOVALS_OWED
+# above because the two are triggered by opposite things. Marking is expensive
+# and rare: it needs a whole library listing, so it waits for the service to say
+# outright that something was removed. Clearing is free and must be constant: the
+# ordinary read already names every title it saw, and a title being NAMED is
+# proof the service holds it. Gating the clear on the removal beacon — which is
+# how this was first written — made a mark permanent, because putting a title
+# back moves the watched stamp and never the removed one.
+_NAMED_BY_SOURCE = "named_by_source"
+
 # The source a watch is filed under when nothing said which one reported it — a
 # state restored from a backup taken before the state was per source, or one
 # assembled by a caller that has only a play. It is the source every stored row
@@ -1258,7 +1271,13 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
     # Never fatal: a service that cannot answer leaves the marks exactly as they
     # were, which is the same degradation every other per-source failure takes.
     owed = state.pop(_REMOVALS_OWED, [])
+    named = state.pop(_NAMED_BY_SOURCE, {})
     for source, port in ports:
+        # CLEARING FIRST, AND ALWAYS. A title this pass's read named is one the
+        # service still holds, whatever any earlier pass concluded — and unlike
+        # the check below it costs nothing, so it is not gated on anything.
+        if str(source) in named:
+            await removals.clear_named(user_id, source, named[str(source)])
         if str(source) not in owed:
             continue
         try:
@@ -1715,6 +1734,20 @@ async def _sync_from_library(settings, state: dict, name: str, library, span, *,
     # has just refused to believe.
     if _fold_library(state, name, read):
         state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
+    # EVERY TITLE THIS READ NAMED, so a removal mark can clear itself.
+    #
+    # CLEARING MUST NOT DEPEND ON THE REMOVAL BEACON, and it did — which made the
+    # mark permanent in the one case that matters most. Re-adding a title at the
+    # service moves the WATCHED stamp, never `removed_from_list`, so the removal
+    # check never ran again and the clearing logic inside it was unreachable: a
+    # title put back stayed marked as missing for ever. Measured live, by removing
+    # a title and putting it back.
+    #
+    # A READ NAMING A TITLE IS ALREADY PROOF THE SERVICE HOLDS IT, and this read
+    # happens on every pass, so the clearing half costs nothing extra. It works on
+    # a BOUNDED read too: a title being re-added is exactly the kind of change a
+    # delta returns, which is why the cheap signal is also the correct one.
+    state.setdefault(_NAMED_BY_SOURCE, {})[name] = list(read.entries)
     return read.events
 
 

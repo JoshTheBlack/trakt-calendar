@@ -71,6 +71,47 @@ def _may_believe(ours: dict, held: dict) -> bool:
     return bool(held) and bool(set(ours) & set(held))
 
 
+async def clear_named(user_id: int, source, keys) -> int:
+    """Drop `source`'s mark from every identity in `keys`. Returns rows changed.
+
+    THE CHEAP HALF, AND THE ONE THAT MUST RUN CONSTANTLY. A title a library read
+    NAMED is one the service holds — that is the whole proof, it costs nothing
+    because the read happened anyway, and it is true of a bounded delta read as
+    much as a full one.
+
+    IT IS SEPARATE FROM `check` BECAUSE THE TRIGGERS ARE OPPOSITE, and collapsing
+    them is precisely the bug this was written to fix. Marking is expensive and
+    waits for the service to announce a removal. Clearing was originally done
+    inside that same pass — so a title PUT BACK stayed marked for ever, because
+    re-adding moves the watched stamp and never `removed_from_list`, and the
+    check that would have cleared it never ran again. Measured live, by removing
+    a title and restoring it.
+
+    ONLY ROWS THAT ACTUALLY CARRY THE MARK ARE WRITTEN. A library read names
+    hundreds of titles and almost none of them are marked, so the marked set is
+    read first and the write is skipped entirely when it is empty — which on
+    every ordinary pass it is.
+    """
+    name = str(source)
+    wanted = {str(key) for key in keys or ()}
+    if not wanted:
+        return 0
+    marked = [record for record in await store.user_records(user_id)
+              if name in (record.get("missing_sources") or [])]
+    changed = 0
+    for record in marked:
+        key = store.record_key(record)
+        if str(key) not in wanted:
+            continue
+        remaining = [held for held in (record.get("missing_sources") or [])
+                     if held != name]
+        changed += await store.set_missing_sources(user_id, key, remaining)
+    if changed:
+        logger.info("distrakt removals: %s lists %d previously-missing title(s) "
+                    "again; %d row(s) cleared", name, len(marked), changed)
+    return changed
+
+
 async def check(settings, user_id: int, source, port) -> int:
     """Ask one service what it still holds and record what it no longer does.
     Returns how many rows changed.
