@@ -452,6 +452,63 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spy.await_count, 12)
         self.assertTrue(read.complete)
 
+    async def test_a_bucket_that_moved_is_asked_only_for_what_moved(self):
+        """Simkl's sync guide is explicit that pulling a whole list because one
+        thing in it changed is what gets a client id suspended. The bound is that
+        bucket's OWN previous stamp — not a cursor shared across lists — so each
+        one is asked for exactly what it has not already been asked for."""
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z")
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z")
+        _read, spy = await self._read([{}], activities=now, since=before)
+        self.assertEqual(spy.await_args.args[3]["date_from"],
+                         "2026-08-01T00:00:00Z")
+
+    async def test_the_stamp_is_sent_back_exactly_as_simkl_wrote_it(self):
+        """"Don't reformat `date_from` locally" — so it is carried as the opaque
+        string it arrived as and never parsed into a date on the way. A value this
+        app normalised would silently ask for a different window than the one the
+        service last reported."""
+        odd = "2026-08-01T00:00:00.000+00:00"
+        before = self._activities(shows_watching=odd)
+        now = self._activities(shows_watching="later")
+        _read, spy = await self._read([{}], activities=now, since=before)
+        self.assertEqual(spy.await_args.args[3]["date_from"], odd)
+
+    async def test_a_bounded_read_is_never_complete(self):
+        """THE SAFETY PROPERTY OF THE WHOLE DELTA MODEL. `date_from` bounds which
+        ITEMS come back, so a title absent from the answer has not been said to be
+        gone — it has been said not to have changed. Those two arrive looking
+        identical and only one is safe to act on, so a bounded read must never
+        license the caller to retire anything."""
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z")
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z")
+        read, _ = await self._read([{}], activities=now, since=before)
+        self.assertFalse(read.complete)
+
+    async def test_a_first_read_is_unbounded_and_may_be_complete(self):
+        """A baseline needs every title the person holds. An item filtered out of
+        the FIRST read would read as a title Simkl does not have, which is the
+        answer that gets recorded permanently."""
+        read, spy = await self._read([{}] * 12, activities=self._activities())
+        self.assertEqual(spy.await_count, 12)
+        for call in spy.await_args_list:
+            self.assertNotIn("date_from", call.args[3])
+        self.assertTrue(read.complete)
+
+    async def test_a_bucket_with_no_earlier_stamp_of_its_own_is_unbounded(self):
+        """A list this app has never recorded has no point in time to ask for
+        changes since. Borrowing another bucket's stamp would silently skip
+        everything in it older than that — a list read once, wrongly, and then
+        never re-read because its stamp stops moving."""
+        before = {"lists": {"shows": {"watching": "2026-08-01T00:00:00Z"}}}
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z")
+        _read, spy = await self._read([{}] * 12, activities=now, since=before)
+        sent = {call.args[2]: call.args[3].get("date_from")
+                for call in spy.await_args_list}
+        self.assertEqual(sent["sync/all-items/shows/watching"],
+                         "2026-08-01T00:00:00Z")
+        self.assertIsNone(sent["sync/all-items/shows/completed"])
+
     async def test_a_bucket_that_was_asked_for_and_refused_makes_the_read_partial(self):
         """`complete` MEANS "EVERY BUCKET I MEANT TO READ, I READ", never "I
         finished looping". The caller retires a title absent from a complete read,
@@ -770,6 +827,91 @@ class DerivationTests(unittest.TestCase):
         """Simkl's library payload does not carry it, and every reader already
         treats an empty string as "not stated"."""
         self.assertEqual(sync.watched_progress_from(self._events())[0]["network"], "")
+
+
+class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
+    """sync.fetch_library_ids — the cheap "what is still there" read a removal
+    check diffs against.
+
+    Its answer is used to conclude that a title the viewer HOLDS is gone, so the
+    interesting cases are all about when it must refuse to answer at all.
+    """
+
+    async def _ids(self, answers):
+        spy = _cached_get(*answers)
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            return await sync.fetch_library_ids(SETTINGS), spy
+
+    async def test_it_reads_both_the_show_and_the_movie_shapes(self):
+        """Measured live: a show bucket sends `{"show": {"ids": ...}}` and a movie
+        bucket `{"movie": {...}}`, under a key named for the catalogue."""
+        answers = [{"shows": [{"show": {"ids": {"simkl": 2519, "slug": "chuck"}}}]}]
+        answers += [{}] * 7
+        answers += [{"movies": [{"movie": {"ids": {"simkl": 53084, "slug": "ab"}}}]}]
+        answers += [{}] * 3
+        ids, _ = await self._ids(answers)
+        self.assertEqual(ids, {2519: "chuck", 53084: "ab"})
+
+    async def test_a_percent_encoded_slug_is_decoded_once_here(self):
+        """`carniv%C3%A0le` is really in this account's library. A consumer builds
+        a URL by encoding what it is given, so handing over the encoded form makes
+        `carniv%25C3%25A0le` — a dead link built from a value that looks right in
+        the database."""
+        answers = [{"shows": [{"show": {"ids": {"simkl": 514,
+                                                "slug": "carniv%C3%A0le"}}}]}]
+        ids, _ = await self._ids(answers + [{}] * 11)
+        self.assertEqual(ids, {514: "carnivàle"})
+
+    async def test_one_unreadable_bucket_refuses_the_whole_answer(self):
+        """THE ASYMMETRY WITH fetch_library, AND THE REASON FOR IT. There, a bucket
+        that failed costs freshness and the caller folds in what it got. Here it
+        costs every title in that bucket: they are simply ABSENT, and absence is
+        the entire signal. There is no partial version of this answer that is safe
+        to diff, so a failure means no check rather than a check on less."""
+        answers = [{"shows": [{"show": {"ids": {"simkl": 1, "slug": "a"}}}]},
+                   transport.SimklError("500 while reading the list")]
+        ids, _ = await self._ids(answers + [{}] * 10)
+        self.assertIsNone(ids)
+
+    async def test_a_credential_failure_is_raised_rather_than_reported_as_empty(self):
+        """It is not a statement about this list, it is a statement about every
+        request this token will ever make. Swallowing it once per bucket would
+        swallow it twelve times and call the result a library."""
+        boom = transport.SimklError("Simkl rejected the credentials (401).")
+        with patch.object(transport, "is_credential_failure", return_value=True):
+            with self.assertRaises(transport.SimklError):
+                await self._ids([boom] + [{}] * 11)
+
+    async def test_an_empty_library_is_an_answer_rather_than_a_refusal(self):
+        """Every bucket read, every one of them empty. That is a viewer who holds
+        nothing, and it is a real state the caller is entitled to act on — told
+        apart from an unreadable one by being {} rather than None."""
+        ids, spy = await self._ids([{}] * 12)
+        self.assertEqual(ids, {})
+        self.assertEqual(spy.await_count, 12)
+
+    def test_the_registered_port_actually_offers_it(self):
+        """THE CHECK IS GATED ON THIS METHOD BEING ON THE PORT, so a function
+        defined on the module and never exposed there is a removal check that
+        silently never runs — correct code, wired to nothing, with every one of
+        its own tests passing. That is exactly how it was written the first time.
+
+        Asked of the REGISTRY rather than the class, because the registry is what
+        the tracker actually reaches for.
+        """
+        from app import providers
+        from app.providers.base import Source
+        port = providers.get(Source.SIMKL).sync_port
+        self.assertIsNotNone(getattr(port, "fetch_library_ids", None))
+
+    async def test_it_never_sends_date_from(self):
+        """A bounded read answers "what changed"; this one has to answer "what
+        remains". A title filtered out for not having moved is exactly the title
+        the diff would then report as removed."""
+        _ids, spy = await self._ids([{}] * 12)
+        for call in spy.await_args_list:
+            self.assertNotIn("date_from", call.args[3])
+            self.assertEqual(call.args[3]["extended"], "simkl_ids_only")
 
 
 if __name__ == "__main__":  # pragma: no cover

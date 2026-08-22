@@ -48,7 +48,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 
 from ...config import Settings
 from ...perftrace import span
@@ -521,9 +521,10 @@ def _stamp(stamps: dict, media: str, status: str):
 
 
 def _wanted_buckets(activities: dict | None,
-                    since: dict | None) -> tuple[list[tuple[str, str]], bool]:
-    """Which (catalogue, status) buckets a library read has to fetch, and whether
-    fetching only those covers the WHOLE library.
+                    since: dict | None) -> tuple[list[tuple[str, str, str | None]], bool]:
+    """Which (catalogue, status) buckets a library read has to fetch, WHAT
+    `date_from` each one may be bounded by, and whether fetching only those covers
+    the WHOLE library.
 
     THIS IS THE ONLY CONDITIONAL REQUEST SIMKL'S PRIVATE HALF SUPPORTS. The
     /sync/ endpoints carry no ETag, no Last-Modified and no Cache-Control — every
@@ -541,22 +542,51 @@ def _wanted_buckets(activities: dict | None,
         has changed, so what the caller already recorded from it still stands —
         but the bucket was not read, so this read is PARTIAL and a title missing
         from it means nothing.
+
+    A BUCKET THAT DID MOVE IS ASKED ONLY FOR WHAT MOVED, which is the other half
+    and the one Simkl asks for outright: pulling a whole list because one episode
+    in it changed is the pattern its sync guide says will get a client id
+    suspended. The bound is that bucket's OWN previous stamp — per bucket rather
+    than one cursor per source, so each list is asked for exactly what it has not
+    already been asked for — and it is sent back EXACTLY as Simkl wrote it. The
+    guide is explicit that it must not be reformatted locally, so it is carried as
+    the opaque string it arrived as and never parsed into a date on the way.
+
+    A BOUNDED READ IS NOT A COMPLETE ONE, and this is where that is decided rather
+    than left to the caller to remember. `date_from` bounds which ITEMS come back,
+    so a title absent from the answer has not been said to be gone — it has been
+    said not to have changed. Those two are indistinguishable downstream, and the
+    only safe reading is the second, which `complete=False` already means
+    everywhere it is honoured. The cost is that a library read stops being able to
+    retire anything once an account is past its first sync; that is deliberate,
+    and it is why removals are detected by their own mechanism against their own
+    endpoint instead of being inferred from an absence here.
     """
     now = (activities or {}).get("lists") or {}
     before = (since or {}).get("lists") or {}
-    wanted: list[tuple[str, str]] = []
-    skipped = False
+    wanted: list[tuple[str, str, str | None]] = []
+    skipped = bounded = False
     for media in LIBRARY_TYPES:
         for status in WATCHED_STATUSES:
             stamp = _stamp(now, media, status)
             if stamp is None:
                 continue
+            previous = _stamp(before, media, status)
             if (since is not None and stamp is not _UNSTATED
-                    and _stamp(before, media, status) == stamp):
+                    and previous == stamp):
                 skipped = True
                 continue
-            wanted.append((media, status))
-    return wanted, not skipped
+            # ONLY WHEN THERE IS A REAL EARLIER STAMP TO CARRY ON FROM. `since`
+            # being absent is a first sync (or a pull deliberately reaching
+            # further back than the last one), and `_UNSTATED` means this bucket
+            # was never recorded — neither is a point in time this list can be
+            # asked for changes since, and guessing one would silently skip
+            # everything older than the guess.
+            date_from = (previous if since is not None
+                         and isinstance(previous, str) and previous else None)
+            bounded = bounded or date_from is not None
+            wanted.append((media, status, date_from))
+    return wanted, not (skipped or bounded)
 
 
 def _unlisted_claim(item: dict, status: str) -> UnlistedSeasons:
@@ -693,13 +723,19 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
     them twice would double the cost of the most expensive call this module
     makes.
 
-    NO `date_from` IS SENT, deliberately, and it is the one place this is more
-    expensive than fetch_history. `date_from` bounds which ITEMS come back, and a
-    baseline needs every title the person holds rather than the ones that moved
-    recently — an item filtered out here would read as a title Simkl does not
-    have. The events are bounded in this process instead, exactly as they already
-    are for the episodes inside an item. What buys the cost back is
-    `_wanted_buckets`: an unchanged list is not read at all.
+    `date_from` IS SENT ONLY WHERE THERE IS AN EARLIER READ TO CARRY ON FROM, per
+    bucket, and `_wanted_buckets` owns that decision — including what it costs.
+    The FIRST read of a list is unbounded, because a baseline needs every title
+    the person holds and an item filtered out of that would read as a title Simkl
+    does not have. Every read after it asks only for what has moved, which is what
+    Simkl's sync guide requires of a client that wants to keep its id.
+
+    THE TRADE IS THAT A BOUNDED READ CANNOT RETIRE ANYTHING, and the flag carries
+    that: a bounded read comes back `complete=False`, so the caller folds in what
+    it named and leaves everything else alone. Removals are found by their own
+    mechanism rather than inferred from an absence here — see the deletion diff —
+    because "did not change" and "is gone" arrive looking identical and only one
+    of them is safe to act on.
 
     `complete` MEANS "EVERY BUCKET I MEANT TO READ, I READ" — never "I finished
     looping". A bucket deliberately skipped because its list has not moved makes
@@ -716,8 +752,8 @@ async def fetch_library(settings: Settings, *, start_at: str | None = None,
     events: list[dict] = []
     failed = 0
     with span("simkl.library", buckets=len(wanted)) as sp:
-        for media, status in wanted:
-            document = await _all_items(settings, media, status, None)
+        for media, status, date_from in wanted:
+            document = await _all_items(settings, media, status, date_from)
             if document is None:
                 failed += 1
                 complete = False
@@ -774,6 +810,76 @@ def _progress_from_seasons(entry: dict) -> dict[int, dict[int, str]]:
             out.setdefault(where[0], {})[where[1]] = watched_at
     return {season: dict(sorted(episodes.items()))
             for season, episodes in sorted(out.items()) if episodes}
+
+
+async def fetch_library_ids(settings: Settings) -> dict[int, str] | None:
+    """Every Simkl id this person's library currently holds, mapped to that
+    title's slug. None when the answer cannot be trusted to be whole.
+
+    THE CHEAP HALF OF A REMOVAL CHECK. `date_from` deltas never surface removals —
+    Simkl says so outright — and the prescribed answer is to re-read the library
+    with `extended=simkl_ids_only` and diff it against what is stored. That
+    payload carries `ids: {simkl, slug}` per item and nothing else, so it is a
+    fraction of the `extended=full` re-pull the removal path would otherwise cost,
+    and it is the only thing being asked for: what is still there.
+
+    NO `date_from`, EVER, AND THAT IS THE POINT OF THE CALL. A bounded read
+    answers "what changed"; this one has to answer "what remains", and a title
+    filtered out for not having moved is exactly the title a diff would then
+    report as removed. This is the one read in this module that must stay whole.
+
+    NONE RATHER THAN A SHORT LIST WHEN ANY BUCKET FAILS, and the asymmetry with
+    fetch_library is deliberate. There, a bucket that could not be read makes the
+    answer PARTIAL and the caller folds in what it got — the missing bucket costs
+    freshness. Here, a missing bucket costs every title in it: they are absent
+    from the list, and absence is the whole signal. There is no partial version of
+    this answer that is safe to diff, so a failure means no check this pass rather
+    than a check on less than everything.
+
+    THE SLUGS RIDE ALONG BECAUSE THEY ARE FREE. They are in the payload whether or
+    not anything reads them, and a caller filling in the per-service name a record
+    was written without would otherwise have to go and ask for what it already has.
+
+    AND THEY ARE DECODED ON THE WAY OUT. Simkl percent-encodes a slug carrying
+    anything non-ASCII — `carniv%C3%A0le` is in this account's library — and a
+    caller building a URL will encode what it is given. Handing over the encoded
+    form produces `carniv%25C3%25A0le`, a link to a title that does not exist,
+    from a value that looks right in the database. Decoding here means the stored
+    name is the NAME and every consumer can encode it exactly once.
+    """
+    ids: dict[int, str] = {}
+    with span("simkl.library_ids") as sp:
+        for media in LIBRARY_TYPES:
+            for status in WATCHED_STATUSES:
+                params = {"extended": "simkl_ids_only"}
+                try:
+                    document = await transport.cached_get(
+                        transport.sync_client(), settings,
+                        f"sync/all-items/{media}/{status}", params,
+                        pool=transport.SYNC_POOL, private=True, raise_errors=True,
+                        app=transport.APP_NAME_TRACKER)
+                except transport.SimklError as exc:
+                    if transport.is_credential_failure(exc):
+                        raise
+                    logger.warning(
+                        "simkl library ids: %s/%s could not be read (%s) — no "
+                        "removal check this pass", media, status, exc)
+                    return None
+                if not isinstance(document, dict):
+                    continue
+                # A bucket with nothing in it is omitted entirely rather than sent
+                # as an empty list, so every key is read by name and a missing one
+                # is an ordinary empty answer.
+                for key in (media, "shows", "movies", "anime"):
+                    for item in document.get(key) or []:
+                        entry = _entry_ids((item.get("show") or item.get("movie")
+                                            or item) if isinstance(item, dict) else {})
+                        simkl_id = entry.get("simkl")
+                        if simkl_id is None:
+                            continue
+                        ids[int(simkl_id)] = unquote(str(entry.get("simkl_slug") or ""))
+        sp.set(titles=len(ids))
+    return ids
 
 
 async def _speaks_for_one_season(settings: Settings, simkl_ids) -> set[int]:
