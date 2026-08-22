@@ -1746,3 +1746,23 @@ class TheTooltipReachesTheRowTests(AppTestCase):
         row = self._row()
         self.assertIn("last watched 2026-07-02", row["counts_detail"])
         self.assertNotIn("no watch dates", row["counts_detail"])
+
+
+class AnOldFrozenMonthExplainsItselfTests(unittest.TestCase):
+    """A month frozen before records kept a per-service breakdown has one bare
+    number and no attribution — so there is no service to name, and the tooltip
+    would otherwise be empty. An empty tooltip reads as a fault rather than as an
+    answer, and the useful thing to say is WHY: the number is real, and the
+    missing half is a fact about when the month was written rather than something
+    a refresh could recover."""
+
+    def test_a_bare_number_says_why_it_names_nobody(self):
+        note = counts.counts_detail(2, 10, {"trakt": "Trakt"}, ("trakt", "simkl"))
+        self.assertIn("2 of 10", note)
+        self.assertIn("recorded before", note)
+
+    def test_a_record_with_a_breakdown_is_unaffected(self):
+        note = counts.counts_detail({"trakt": 2}, 10, {"trakt": "Trakt"},
+                                    ("trakt",), ("trakt",))
+        self.assertIn("Trakt: 2 of 10", note)
+        self.assertNotIn("recorded before", note)

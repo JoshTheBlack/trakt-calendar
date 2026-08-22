@@ -73,10 +73,18 @@ def _hit(entry: dict, media: Media) -> SearchHit:
     )
 
 
-# How many results one page of a search asks for. Simkl serves 10 by default and
-# caps this at 50 — asking for the cap makes the common query one request
-# instead of several, and `cached_paged_get` walks the rest when there are more.
-PAGE_SIZE = 50
+# How many results one page of a search asks for, and how many pages are worth
+# walking. Simkl serves 10 by default, caps `limit` at 50 and `page` at 20 — so
+# "pull the rest" for a broad word is 500 results, which is not a picker.
+#
+# MEASURED, NOT GUESSED: "attack" answers 123 titles across the two show
+# endpoints. That is not a rate problem (the per-title lookups behind it are
+# bounded by how many hits COLLIDE on one identity, and held for a day) — it is a
+# usability one. Forty per endpoint is roughly four screens, well past the ten
+# that used to be silently all anyone got, and short of the point where a longer
+# list stops being a better answer.
+PAGE_SIZE = 10
+MAX_PAGES = 4
 
 
 async def _search_one(settings: Settings, path: str, query: str, media: Media) -> list[SearchHit]:
@@ -94,7 +102,7 @@ async def _search_one(settings: Settings, path: str, query: str, media: Media) -
     results = await transport.cached_paged_get(
         transport.catalog_client(), settings, path,
         {"q": query, "limit": str(PAGE_SIZE)},
-        pool=transport.CATALOG_POOL, raise_errors=True,
+        pool=transport.CATALOG_POOL, raise_errors=True, max_pages=MAX_PAGES,
     )
     return [_hit(entry, media) for entry in results]
 

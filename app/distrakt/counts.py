@@ -244,7 +244,15 @@ def counts_detail(per_source: Mapping[str, int] | int | None, total,
     mark on every row of a month that is waiting on nobody.
     """
     label_of = labels or {}
-    counts = resolve(per_source, total) if isinstance(per_source, Mapping) else {}
+    if not isinstance(per_source, Mapping):
+        # A MONTH FROZEN BEFORE RECORDS KEPT A PER-SERVICE BREAKDOWN has one bare
+        # number and no attribution, so there is no service to name — and an empty
+        # tooltip reads as a fault rather than as an answer. Saying WHY is the
+        # useful part: the number is real, the missing half is a fact about when
+        # the month was written, and no amount of looking will recover it.
+        return (f"{int(per_source or 0)} of {int(total or 0)} — recorded before "
+                f"this month kept each service's count separately")
+    counts = resolve(per_source, total)
     when = dates or {}
     asked_names = {str(name) for name in asked}
     linked_names = {str(name) for name in linked}
