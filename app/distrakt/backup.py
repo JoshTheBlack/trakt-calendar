@@ -48,6 +48,8 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("distrakt_month_records", MONTH_RECORD_COLUMNS),
     ("distrakt_user_seasons", USER_RECORD_COLUMNS),
     ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at")),
+    # `play_counts_json` is DELIBERATELY not here — see the declaration in
+    # tests/distrakt/test_backup.py and the reasoning in tests/kernel/test_db.py.
     ("distrakt_watch_state", ("cursors_json", "beacons_json")),
     ("distrakt_show_progress", (*IDENTITY_COLUMNS, "season", "source",
                                 "watched_episodes_json", "trakt_id", "simkl_id")),

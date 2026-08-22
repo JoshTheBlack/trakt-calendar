@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from app import auth, clock, db, distrakt
 from app.providers.base import ItemKey
+from app.distrakt import backup
 from app.distrakt import watch_history as wh
 from app.config import Settings, save_settings
 from app.main import app
@@ -910,3 +911,124 @@ def db_migrate_to(conn, version: int) -> int:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BackupCoversTheWholeSchemaTests(unittest.IsolatedAsyncioTestCase):
+    """A COLUMN NOBODY ADDED TO THE EXPORT LIST IS DATA THAT IS NOT BACKED UP, and
+    nothing said so. The list is hand-written per table, the schema grows by
+    migration, and the two drift apart in total silence — the backup succeeds, the
+    file looks right, and the loss is discovered on the restore that needed it.
+
+    THIS ALREADY HAPPENED. `play_counts_json` was added to distrakt_watch_state
+    and the export list, written earlier, was never updated; every backup taken
+    between those two points is missing it. That is the failure this pins.
+
+    A COLUMN MAY BE LEFT OUT, BUT IT HAS TO BE SAID OUT LOUD. The declaration
+    below is checked in both directions, the same way the layering test treats its
+    edges: an undeclared omission fails, and a declaration that no longer applies
+    fails too, so the table cannot rot into a blanket excuse nobody has re-read.
+    """
+
+    # column -> why it is deliberately not in the backup. Keyed (table, column).
+    NOT_BACKED_UP: dict[tuple[str, str], str] = {
+        ("distrakt_months", "user_id"): "the restore writes every row under the "
+                                        "session user; a stored one is ignored",
+        ("distrakt_month_records", "user_id"): "same",
+        ("distrakt_user_seasons", "user_id"): "same",
+        ("distrakt_prompt_dismissals", "user_id"): "same",
+        ("distrakt_watch_state", "user_id"): "same",
+        ("distrakt_show_progress", "user_id"): "same",
+        ("distrakt_movie_watches", "user_id"): "same",
+        ("distrakt_prefs", "user_id"): "same",
+        ("distrakt_watch_state", "play_counts_json"): (
+            "the play-count sweep is a COMPARISON BASELINE, not data. Restoring "
+            "one beside progress rows that may have moved would let it claim "
+            "nothing had changed when everything might have, so a restore "
+            "deliberately starts with no stored sweep and asks about every title "
+            "once. Costs one sweep to rebuild and is correct. Asserted from the "
+            "other side in tests/kernel/test_db.py, which is where the reasoning "
+            "was first written down"),
+    }
+
+    async def asyncSetUp(self):
+        new_db_path("backup-schema")
+        await db.migrate()
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_every_column_is_either_exported_or_declared(self):
+        missed = []
+        for table, cols in backup._EXPORT_TABLES:
+            info = await db.fetch_all(f"PRAGMA table_info({table})")
+            for column in (row["name"] for row in info):
+                if column in cols or (table, column) in self.NOT_BACKED_UP:
+                    continue
+                missed.append(f"{table}.{column}")
+        self.assertEqual(missed, [], "columns in the schema that no backup carries "
+                                     "and nothing has declared as deliberate")
+
+    async def test_every_declared_omission_is_still_a_real_column(self):
+        """So the table cannot keep excusing a column that has been dropped, or
+        one that is now exported after all."""
+        stale = []
+        for (table, column), _reason in self.NOT_BACKED_UP.items():
+            info = await db.fetch_all(f"PRAGMA table_info({table})")
+            names = {row["name"] for row in info}
+            exported = dict(backup._EXPORT_TABLES).get(table, ())
+            if column not in names:
+                stale.append(f"{table}.{column} (no such column)")
+            elif column in exported:
+                stale.append(f"{table}.{column} (exported after all)")
+        self.assertEqual(stale, [])
+
+    async def test_every_exported_table_is_a_real_table(self):
+        """A table renamed by a migration would otherwise export nothing, quietly,
+        for as long as the restore tolerated the absent key."""
+        names = {r["name"] for r in await db.fetch_all(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table, _cols in backup._EXPORT_TABLES:
+            self.assertIn(table, names)
+
+
+class RestoreCarriesEveryExportedColumnTests(ExportTestCase):
+    """THE OTHER HALF. The test above proves the FILE holds every column; this one
+    proves the restore puts every one of them back.
+
+    The two fail differently and neither implies the other: a column can be
+    exported and dropped on the way in — which is precisely what a restore that
+    silently skips an unrecognised key does — and the round-trip above it only
+    compares the document to itself.
+    """
+
+    async def test_a_restore_reproduces_every_exported_column(self):
+        await _seed_dataset(self.user_id, tag="mine")
+        # Values nothing else writes, so a column that is defaulted rather than
+        # restored is not mistaken for one that round-tripped.
+        await db.execute(
+            "UPDATE distrakt_user_seasons SET missing_sources_json = ? "
+            "WHERE user_id = ?", ('["simkl"]', self.user_id))
+        await db.execute(
+            "UPDATE distrakt_watch_state SET play_counts_json = ? WHERE user_id = ?",
+            ('{"trakt": {"1": 3}}', self.user_id))
+
+        doc = await distrakt.export_user_data(self.user_id)
+        before = await _snapshot(self.user_id)
+        await db.execute("DELETE FROM distrakt_user_seasons WHERE user_id = ?",
+                         (self.user_id,))
+        await db.execute("DELETE FROM distrakt_watch_state WHERE user_id = ?",
+                         (self.user_id,))
+        await distrakt.restore_user_data(self.user_id, doc)
+
+        self.assertEqual(await _snapshot(self.user_id), before)
+
+
+async def _snapshot(user_id: int) -> dict:
+    """Every exported column of every exported row, as plain comparable values."""
+    out: dict[str, list[tuple]] = {}
+    for table, cols in backup._EXPORT_TABLES:
+        rows = await db.fetch_all(
+            f"SELECT {', '.join(cols)} FROM {table} WHERE user_id = ? "
+            f"ORDER BY {', '.join(cols)}", (user_id,))
+        out[table] = [tuple(row[c] for c in cols) for row in rows]
+    return out
