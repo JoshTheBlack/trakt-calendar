@@ -1117,6 +1117,66 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
 # an id a record did not have when it was written
 # ---------------------------------------------------------------------------
 
+# Which slug column each service id column owes a value to. A slug is OWED only
+# where that service's own id is present: the id is the service saying it knows
+# this title, and without one there is no reason to think it ever will. Asking
+# for a slug on every row instead would keep a Simkl-only title permanently owing
+# a Trakt name — a debt nothing could ever settle, which turns "is there work to
+# do" into a question that answers yes for ever.
+_SLUG_OWED_BY = {"trakt_id": "trakt_slug", "simkl_id": "simkl_slug"}
+
+
+async def identities_missing_slugs(user_id: int) -> list[tuple[ItemKey, tuple[str, ...]]]:
+    """Every identity this viewer holds a row for that knows a service's id but
+    not what that service CALLS the title, paired with WHICH names it is short of.
+
+    THE NAMES ARE PART OF THE ANSWER, not something the caller may assume. A
+    title only one service lists is the ordinary case, and handing back the
+    identity alone invites a caller to write whatever names it found — which puts
+    a Trakt slug on a title Trakt never named. That row then looks linkable to a
+    service it holds no id for, and the link renders for a service that cannot be
+    asked about it at all.
+
+    PER IDENTITY, NOT PER ROW, because that is the unit a name is true of and the
+    unit `learn_ids` writes: a title's Simkl slug is as true of a frozen record
+    from last March as of the row on today's list. Answering per row would have
+    the caller ask the same question once per season of one show.
+
+    BOTH RECORD TABLES, and the settled half is the point. A verdict's counts are
+    never recomputed, so no live pass visits it — which is exactly why a record
+    that settled before the two services' slugs were told apart has no other way
+    to learn one. An identity short of one name in one table and another name in
+    the other is owed both, so the two tables' answers are merged rather than
+    concatenated.
+    """
+    # THE FLAG COLUMNS ARE ALIASED AWAY FROM THE COLUMNS THEY ARE ABOUT. SQLite
+    # resolves a name in HAVING against the source columns before the select
+    # aliases, so `... AS trakt_slug ... HAVING trakt_slug = 1` compares the raw
+    # (and here always NULL) column and matches nothing at all — a silent empty
+    # answer rather than an error, which reads exactly like "no work to do".
+    owed = {slug_column: f"owes_{slug_column}" for slug_column in _SLUG_OWED_BY.values()}
+    flags = ", ".join(
+        f"MAX(CASE WHEN {id_column} IS NOT NULL AND {id_column} != '' "
+        f"AND ({slug_column} IS NULL OR {slug_column} = '') THEN 1 ELSE 0 END) "
+        f"AS {owed[slug_column]}"
+        for id_column, slug_column in _SLUG_OWED_BY.items())
+    selected = ", ".join(IDENTITY_COLUMNS)
+    having = " OR ".join(f"{alias} = 1" for alias in owed.values())
+    sql = " UNION ALL ".join(
+        f"SELECT {selected}, {flags} FROM {table} WHERE user_id = ? "
+        f"GROUP BY {selected} HAVING {having}"
+        for table in ("distrakt_month_records", "distrakt_user_seasons"))
+    rows = await db.fetch_all(sql, (user_id, user_id))
+
+    merged: dict[tuple, set[str]] = {}
+    for row in rows:
+        address = tuple(str(row[column]) for column in IDENTITY_COLUMNS)
+        names = merged.setdefault(address, set())
+        names.update(slug for slug, alias in owed.items() if row[alias])
+    return [(ItemKey(*address), tuple(sorted(names)))
+            for address, names in merged.items()]
+
+
 async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
     """Fill in ids a stored record was written without, on EVERY row of one title.
     Returns how many rows changed, which is 0 on every pass after the first.

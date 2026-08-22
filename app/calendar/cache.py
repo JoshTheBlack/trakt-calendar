@@ -699,6 +699,28 @@ async def cached_calendar_groups() -> list[dict]:
     return groups
 
 
+async def stored_window_signature() -> str:
+    """A short value that changes whenever the stored calendar might name a title
+    it did not name before. Cheap: no payload leaves the database.
+
+    FOR CALLERS THAT DERIVE WORK FROM THE STORED CALENDAR and would otherwise
+    redo it on every request. `cached_calendar_groups` inflates every window —
+    measured at roughly 30ms for 3,700 groups on the author's instance — which is
+    nothing once, and is worth avoiding on a page load that will find exactly what
+    the previous one found. A caller pairs this with its own notion of what it
+    still owes: unchanged on both sides means the answer cannot have moved.
+
+    COUNT AND LATEST WRITE, not a content hash. A window is replaced wholesale
+    when it refills, so a refill moves `cached_at`; a new window moves both. A
+    hash of every payload would be exact and would cost precisely what the caller
+    is trying not to spend.
+    """
+    row = await db.fetch_one(
+        "SELECT COUNT(*) AS n, COALESCE(MAX(cached_at), 0) AS latest "
+        "FROM api_cache WHERE cache_key LIKE 'calendar:%'")
+    return f"{row['n']}:{row['latest']}" if row else "0:0"
+
+
 async def store_window(endpoint_key: str, start: date, records: list[Record],
                        ttl_seconds: int, now: int, *, sources=(), asked=None) -> list[dict]:
     """Store one window's records, grouped, under the versioned envelope, and

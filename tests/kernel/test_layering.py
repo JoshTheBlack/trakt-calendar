@@ -258,7 +258,10 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "links a Discord post at the viewer's own calendar. It also asks "
         "detail_source.choose which service can describe a title it holds ids "
         "for, rather than deciding that a second time: same ids, same declared "
-        "order, same per-port catalogue predicate"),
+        "order, same per-port catalogue predicate. It also reads the STORED "
+        "calendar windows back for the per-service slugs they already carry, so "
+        "a settled record can learn what a service calls a title without a "
+        "request being spent on asking"),
     (RANKER, DISTRAKT): Edge(
         "one adapter module imports the tracker's public surface so a board can "
         "be seeded from what the viewer finished. THE ONLY ranker module allowed "

@@ -123,7 +123,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import NamedTuple
 
-from . import counts, store
+from . import counts, naming, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
 from ..providers.base import (ItemKey, LibraryPort, Media, PlayCountPort,
@@ -1869,4 +1869,10 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     # THE ID GOES BACK TO THE ROSTER as well as into the state, because the state
     # answers "what has been watched" and the record answers "who can be asked".
     await _learn_source_ids(user_id, state, roster)
+    # AND THE NAMES THE ROSTER CANNOT REACH come off the stored calendar. The pass
+    # above can only teach a title something is currently listing; a settled
+    # verdict is deliberately outside it, and Trakt's slug arrives with a play
+    # rather than with a library read. See naming.py for both gaps. Costs one
+    # indexed count when there is nothing owed, and no network ever.
+    await naming.fill_from_calendar(user_id)
     return state
