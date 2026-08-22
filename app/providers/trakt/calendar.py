@@ -127,6 +127,26 @@ def poster(media: dict) -> str | None:
     return None
 
 
+def _detail_url(media: Media, ids: dict) -> str:
+    """The canonical Trakt page for a title, named the way Trakt prefers.
+
+    THE SLUG WHEN TRAKT GAVE ONE, THE NUMERIC ID WHEN IT DID NOT. Both reach the
+    same page — `trakt.tv/shows/<id>` redirects to the slugged form — so the
+    choice is not about whether the link works but about who does the lookup.
+    Sending the readable name spares Trakt one, which is what it and Simkl both
+    ask callers to do.
+
+    AND EITHER BEATS THE HOMEPAGE. A slug-less entry used to fall back to
+    `https://trakt.tv`, which is the worst of the three outcomes: it is a link
+    that appears to have worked, so nobody reports it, and it drops the viewer on
+    a front page with no path back to the title they clicked. A page for the
+    wrong-looking URL is still the right page; the homepage never is.
+    """
+    kind = "movies" if media == Media.MOVIE else "shows"
+    name = ids.get("slug") or ids.get("trakt")
+    return f"https://trakt.tv/{kind}/{name}" if name else "https://trakt.tv"
+
+
 def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
     """Turn a raw Trakt calendar entry into the uniform Record shape.
 
@@ -169,10 +189,13 @@ def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
         media=endpoint.media,
         id=ids.get("slug") or str(ids.get("trakt") or ""),
         ids=_ids.normalize(ids),
-        detail_url=(
-            f"https://trakt.tv/{'movies' if endpoint.media == Media.MOVIE else 'shows'}/{ids.get('slug')}"
-            if ids.get("slug") else "https://trakt.tv"
-        ),
+        # THE SLUG IF TRAKT NAMED ONE, THE NUMERIC ID IF IT DID NOT. Trakt resolves
+        # either — `/shows/<id>` reaches the same page `/shows/<slug>` does — but
+        # the readable name saves it a title lookup, so it is what we send when we
+        # have it. What this replaced sent every slug-less entry to the Trakt
+        # HOMEPAGE, which is a link that looks like it worked and goes nowhere near
+        # the title the viewer clicked.
+        detail_url=_detail_url(endpoint.media, ids),
         title=media.get("title") or "Untitled",
         year=media.get("year") or "",
         network=media.get("network") or "",

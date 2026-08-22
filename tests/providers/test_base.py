@@ -87,6 +87,31 @@ class TestNormalizeProducesARecord:
         record = trakt_calendar.to_record(entry, MOVIES)
         assert record.detail_url == "https://trakt.tv/movies/a-film"
 
+    def test_a_slugless_entry_links_by_id_rather_than_to_the_homepage(self):
+        """Trakt resolves `/shows/<id>` to the same page `/shows/<slug>` reaches,
+        so an entry Trakt named no slug for still has somewhere correct to go.
+        What this replaced sent it to `https://trakt.tv` — a link that looks like
+        it worked, so nobody reports it, and lands nowhere near the title."""
+        entry = {**ENTRY, "show": {**ENTRY["show"],
+                                   "ids": {"trakt": 123, "tvdb": 456}}}
+        record = trakt_calendar.to_record(entry, SHOWS)
+        assert record.detail_url == "https://trakt.tv/shows/123"
+
+    def test_the_slug_still_wins_when_trakt_named_one(self):
+        """The id is the FALLBACK, not the preference. Both services ask that the
+        readable name be sent when it is known, because resolving the numeric id
+        costs them a title lookup and a redirect they need not have done."""
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.detail_url == "https://trakt.tv/shows/a-show"
+
+    def test_an_entry_naming_no_trakt_id_at_all_still_has_a_url(self):
+        """Neither name available is the one case the homepage is the honest
+        answer: there is no title to point at. It must not render `None` into
+        the path, which would 404 instead."""
+        entry = {**ENTRY, "show": {**ENTRY["show"], "ids": {"tvdb": 456}}}
+        record = trakt_calendar.to_record(entry, SHOWS)
+        assert record.detail_url == "https://trakt.tv"
+
     def test_media_is_the_enum_and_still_equals_its_string(self):
         """Templates, DB columns and the response keys all hold the plain
         string; the enum has to stay interchangeable with it or every one of
