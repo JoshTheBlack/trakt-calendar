@@ -17,8 +17,8 @@ from datetime import date
 from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
-from ..base import Capabilities, Record, Source
-from . import calendar, detail, sync
+from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
+from . import calendar, detail, search, sync
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
 __all__ = ["SimklError", "SimklRateLimitError", "SimklBlockedError"]
@@ -55,6 +55,21 @@ class _SimklSyncPort:
         return await sync.fetch_library(settings, start_at=start_at,
                                         activities=activities, since=since)
 
+    async def fetch_library_ids(self, settings: Settings):
+        """Every id this library currently holds, for the removal diff.
+
+        SEPARATE FROM fetch_library ABOVE BECAUSE IT ANSWERS A DIFFERENT QUESTION.
+        That one answers "what changed", and past a first sync it is bounded by
+        `date_from` and cannot speak about what is absent. This one answers "what
+        remains", is never bounded, and is the only read entitled to be diffed.
+
+        ITS PRESENCE ON THE PORT IS WHAT MAKES THE CHECK RUN AT ALL. The tracker
+        asks whether a port can list its ids cheaply and skips the check for one
+        that cannot, so a method defined on the module but never exposed here is
+        a removal check that silently never happens.
+        """
+        return await sync.fetch_library_ids(settings)
+
     async def fetch_watched_progress(self, settings: Settings,
                                      since_days: int | None = None) -> list[dict]:
         return await sync.fetch_watched_progress(settings, since_days=since_days)
@@ -74,6 +89,23 @@ class _SimklCalendarPort:
     object so a test double installed on app.providers.simkl.calendar is what
     actually answers.
     """
+
+    def calendar_configured(self, settings: Settings) -> bool:
+        """TRUE UNCONDITIONALLY, AND IT IS NOT A STUB. Simkl's calendar is a set
+        of pre-baked JSON files on a separate CDN host (data.simkl.in) that takes
+        no token and no client id — calendar.py's own opening paragraph says so,
+        and nothing in that module reads `settings.simkl_client_id` or
+        `settings.simkl_access_token`; it rides `transport.cdn_client` and never
+        `api_params`. So there is no credential whose absence could make this
+        calendar unreadable, and answering anything else here would withhold a
+        month over a credential the fetch does not send.
+
+        THIS IS WHY THE PREDICATE IS ON THE PORT rather than on the provider:
+        `is_configured` and `catalogue_is_configured` are both true statements
+        about the AUTHENTICATED halves of Simkl (the viewer's library, the
+        per-title catalogue), and neither describes this one.
+        """
+        return True
 
     async def fetch_window(self, endpoint: Endpoint, settings: Settings,
                            start: date, days: int) -> list[Record]:
@@ -99,6 +131,21 @@ class _SimklDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+        return await detail.fetch_seasons(settings, source_id, media)
+
+
+class _SimklSearchPort:
+    """Simkl's answer to "search this catalogue" (app/providers/base.py's
+    SearchPort). A thin delegator over search.py, through the MODULE object,
+    exactly as the ports above are over their own modules — the two-endpoint
+    fan-out that search.py's own docstring explains lives entirely on that
+    side of this call.
+    """
+
+    async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:
+        return await search.search_titles(settings, media, query)
 
 
 class _SimklProvider:
@@ -145,9 +192,23 @@ class _SimklProvider:
     # Simkl-only card was in: it refused with "No Trakt id available for this
     # item" on 690 of the shows in one live month.
     detail_port = _SimklDetailPort()
+    # THE PORT THAT MAKES A SIMKL-ONLY MANUAL ADD POSSIBLE AT ALL — without it
+    # an instance with no Trakt client id has a search box that answers
+    # "Not configured" on every keystroke, which is the sharp consequence a
+    # missing search port has (see this port's own module for the fan-out it
+    # hides).
+    search_port = _SimklSearchPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.simkl_configured
+
+    def catalogue_is_configured(self, settings: Settings) -> bool:
+        # The client id alone, same question `_SimklDetailPort.catalogue_configured`
+        # asks and for the same reason: Simkl's search endpoints take the
+        # client id as a query parameter and no bearer, so a token this
+        # instance has never issued cannot be what decides whether its
+        # catalogue can be searched.
+        return settings.simkl_catalogue_configured
 
 
 register(_SimklProvider())

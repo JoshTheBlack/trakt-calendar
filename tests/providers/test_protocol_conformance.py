@@ -30,7 +30,7 @@ import unittest
 from app import providers
 from app.config import Settings
 from app.providers.base import (CalendarPort, DetailPort, LibraryPort, PlayCountPort,
-                                Provider, SyncPort)
+                                Provider, SearchPort, SyncPort)
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -110,6 +110,33 @@ class CalendarPortIsDeclaredAlongsideTheEndpointsTests(unittest.TestCase):
         self.assertTrue(
             [p for p in providers.registered().values() if p.calendar_port is not None],
             "no source implements the window fetch; the calendar cannot be filled")
+
+    def test_every_calendar_port_answers_whether_it_can_be_read_at_all(self):
+        """`for_calendar_sources` asks the PORT rather than the provider, because
+        what a calendar costs to read differs per source: one wants the instance's
+        client id, another is a public feed wanting nothing. A port without this
+        would fail as an AttributeError on whichever source an operator happens to
+        have — and it has to answer without a call, since it gates the call."""
+        for source, provider in providers.registered().items():
+            port = provider.calendar_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                self.assertIsInstance(port.calendar_configured(Settings()), bool)
+
+    def test_no_calendar_port_asks_the_private_question(self):
+        """The fault this predicate exists to remove: a calendar read never uses
+        a viewer's token, so no source may require one to be readable. Asserted
+        against a Settings carrying each source's client id and nothing else —
+        every calendar that can be read at all must be readable there."""
+        for source, provider in providers.registered().items():
+            port = provider.calendar_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                settings = Settings(**{f"{source}_client_id": "an-id"})
+                self.assertFalse(provider.is_configured(settings))
+                self.assertTrue(port.calendar_configured(settings))
 
 
 class LibraryPortIsOptionalTests(unittest.TestCase):
@@ -210,6 +237,46 @@ class EverySourceCanDescribeATitleTests(unittest.TestCase):
                 self.assertFalse(provider.is_configured(settings))
 
 
+class EverySourceCanBeSearchedTests(unittest.TestCase):
+    """SearchPort, and the reason it is not optional in practice.
+
+    The tracker's manual add flow asks the registry which sources can be
+    searched and never names one. A registered source with no search port is
+    therefore one an instance with no OTHER catalogue configured cannot add
+    anything through at all — the state a Trakt-only build left a Simkl-only
+    instance in before this port existed.
+    """
+
+    def test_every_registered_source_carries_a_search_port(self):
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                self.assertIsNotNone(
+                    provider.search_port,
+                    f"{source} can be described but cannot be searched")
+
+    def test_every_search_port_present_satisfies_searchport(self):
+        for source, provider in providers.registered().items():
+            port = provider.search_port
+            if port is None:
+                continue
+            with self.subTest(source=source):
+                self.assertIsInstance(port, SearchPort)
+
+    def test_the_catalogue_question_is_not_the_private_one(self):
+        """A public search must not be gated on a token it never sends.
+        Asserted against a Settings carrying each source's ID and nothing
+        else, which is the live instance's own shape for Simkl — the same
+        check `EverySourceCanDescribeATitleTests` makes for DetailPort, aimed
+        at `Provider.catalogue_is_configured` rather than the detail port's
+        own predicate.
+        """
+        for source, provider in providers.registered().items():
+            with self.subTest(source=source):
+                settings = Settings(**{f"{source}_client_id": "an-id"})
+                self.assertTrue(provider.catalogue_is_configured(settings))
+                self.assertFalse(provider.is_configured(settings))
+
+
 class TheCheckWouldActuallyFailTests(unittest.TestCase):
     """A conformance test that cannot fail is decoration.
 
@@ -243,10 +310,11 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
     def test_the_protocol_declares_the_members_the_registry_depends_on(self):
         # Named explicitly because the two tests above are self-referential: they
         # derive the member list from the Protocol, so they would still pass if
-        # somebody deleted a member outright. These four are read by
+        # somebody deleted a member outright. These are read by
         # app/providers/__init__.py itself.
         for name in ("source", "label", "capabilities", "sync_port", "calendar_port",
-                     "detail_port", "is_configured"):
+                     "detail_port", "search_port", "is_configured",
+                     "catalogue_is_configured"):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 

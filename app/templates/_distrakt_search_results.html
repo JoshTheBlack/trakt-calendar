@@ -1,0 +1,104 @@
+{% import '_source_logo.html' as src with context %}
+{# One submitted catalogue search, rendered on the server for the add flow's
+   show and film modals alike (app/distrakt/routes.py's `_search_fragment`).
+
+   A VIEW, NOT AN API, and that is the whole reason this file exists. The rows
+   used to be built in JavaScript from a JSON payload, which made two places
+   that had to agree about what a search hit IS — and the shape they agreed on
+   comes from one function (`_search_hit_payload`) that only one of them could
+   see. Rendering here leaves one renderer, and the row's data attributes below
+   are read back from the same dict that drew its text.
+
+   EVERY ROW IS SELF-DESCRIBING. Its ids, its per-source callback ids and its
+   title ride on the row itself rather than on an index into a list the browser
+   happens to be holding, so ONE delegated listener on the container serves
+   every row (app/static/js/tracker/add.js's `onShowResultClick` and
+   `onMovieResultClick`) and a row is as clickable arriving with this fragment as
+   it would be arriving with the page. `data-source-ids` KEEPS ITS ORDER on
+   purpose — see `pickShow` for why its first entry is load-bearing.
+
+   Context: `hits` (each `_search_hit_payload` plus `unkeyable`), `failed` (the
+   sources that could not be asked), `marked` (whether there is more than one
+   catalogue, so a mark disambiguates anything), `media`, `no_catalogue`. #}
+
+{% if no_catalogue %}
+{# NOT "search failed" — nothing was searched. An instance with neither client
+   id is a different situation from one query that went wrong, and saying so is
+   the difference between an operator fixing it and a viewer retyping. #}
+<div class="distrakt-empty">No catalogue is configured, so there is nothing to
+    search. An operator adds a Trakt or Simkl client id in Settings.</div>
+{% else %}
+
+{% if failed %}
+{# QUIET, NOT BLOCKING: whoever did answer returned real results, and burying
+   them behind an error would be treating one source's outage as the search's.
+   The same register the calendar's own partial window uses, naming who was
+   missed because here there is a name to give. #}
+<div class="warning-banner distrakt-search-warn">⚠️ Couldn't reach {{ src.names(failed) }} —
+    showing what the rest found.</div>
+{% endif %}
+
+{% if not hits %}
+<div class="distrakt-empty">No matches.</div>
+{% endif %}
+
+{% for hit in hits %}
+{# A hit the tracker has no id to file under is shown and refused rather than
+   hidden — with the SERVER's own sentence for it, so this and the add route's
+   400 cannot drift into two explanations of one rule. It only ever happens on
+   the film path: a show hit with no shared id is under-described rather than
+   unfileable, and the season click it is about to get resolves it. #}
+<div class="distrakt-search-row{{ ' is-unkeyable' if hit.unkeyable }}"
+     {%- if hit.unkeyable %} aria-disabled="true"{% else %} role="button" tabindex="0"{% endif %}
+     data-title="{{ hit.title }}"
+     data-network="{{ hit.network }}"
+     data-year="{{ hit.year if hit.year else '' }}"
+     {# Both travel as JSON in a SINGLE-quoted attribute: `tojson` escapes the
+        apostrophe (and the angle brackets) but not the double quotes its own
+        strings are wrapped in.
+
+        THE SOURCES GO AS ORDERED PAIRS, NOT AS AN OBJECT, and that is
+        load-bearing: the FIRST one is the service the pick calls back for the
+        season list, because whoever found a title is who can be asked about it
+        and the merge puts the registry's leader first. `tojson` SORTS AN
+        OBJECT'S KEYS (Jinja's own default policy), which would have quietly
+        made Simkl answer for every row Trakt leads. A list cannot be
+        reordered by a serializer, so the order is a fact of the markup rather
+        than a property somebody has to know not to break. #}
+     data-ids='{{ hit.ids | tojson }}'
+     data-source-ids='{{ hit.source_ids.items() | list | tojson }}'>
+    {%- if marked and hit.source_ids %}
+    {# A MARK PER SOURCE THAT RETURNED IT, and only where two catalogues were
+       asked: with one there is nothing to disambiguate and the row should look
+       exactly as it did before this instance had a second service. The row is
+       something to press, which is the test _source_logo.html sets for drawing
+       a mark at all. #}
+    <span class="distrakt-search-marks">
+        {%- for source in hit.source_ids %}{{ src.mark(source, 'search-mark') }}{% endfor -%}
+    </span>
+    {%- endif %}
+    <span class="distrakt-title">{{ hit.title }}</span>
+    {%- if hit.season is not none %}
+    {# WHICH SEASON THIS ROW IS, where the source said so. A catalogue that
+       files each season of a series as its own title answers one search with
+       several rows sharing a name — three "Sousou no Frieren", two "Beastars" —
+       and without this they are told apart only by a year, which says when a
+       season aired rather than which season it is. Drawn only when the source
+       named one: a row that gets a picker on click must not claim a season it
+       is about to ask about. #}
+    <span class="chip distrakt-search-season">Season {{ hit.season }}</span>
+    {%- endif %}
+    <span class="distrakt-year">{{ hit.year if hit.year else '' }}</span>
+    {# Films have no network and shows no runtime worth showing, so each row's
+       third column carries whichever its media actually has. #}
+    <span class="distrakt-network">
+        {%- if media == 'movie' %}{{ (hit.runtime ~ ' min') if hit.runtime else '' }}
+        {%- else %}{{ hit.network }}{% endif -%}
+    </span>
+    {%- if hit.unkeyable %}
+    <span class="distrakt-unkeyable">{{ hit.unkeyable }}</span>
+    {%- endif %}
+</div>
+{% endfor %}
+
+{% endif %}

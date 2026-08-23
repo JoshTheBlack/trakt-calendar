@@ -136,6 +136,43 @@ def finished_by(per_source: Mapping[str, int] | int | None, total) -> set[str]:
     return {name for name, count in resolve(per_source, y).items() if count >= y}
 
 
+def unbacked_by_decider(now: Mapping[str, int] | int | None, total, order=()) -> str:
+    """The service that DECIDES this account's counts and does not say the season
+    is finished, or "" when it does say so — or when nothing decides.
+
+    A SECOND WAY FOR A VERDICT TO STOP BEING BACKED, and it is not the same shape
+    as `no_longer_finished` above. That one is a RETRACTION: a service the record
+    credits with finishing the season now reports otherwise. This one is a CHANGE
+    OF WHO IS ASKED — the record still stands exactly as the service that made it
+    left it, but the account has since made a different service its decider, and
+    that service does not report the season finished. Nobody withdrew anything;
+    the question moved.
+
+    IT NEEDS THE ORDER BECAUSE "THE DECIDER" IS NOT A PROPERTY OF THE NUMBERS.
+    It is the first service this account trusts that has anything to say about
+    this season — the same rule and the same order `primary_count` picks with, so
+    the service named here is always the one whose number the row is showing.
+
+    A SERVICE THAT SAID NOTHING THIS PASS DOES NOT DECIDE, which is why this walks
+    the order looking for one that is PRESENT. Absence is "not read, or read and
+    had no answer", never a zero, so a decider that went quiet hands the decision
+    down rather than failing the verdict — the same reading `no_longer_finished`
+    takes of the same absence, for the same reason.
+
+    STILL NOT A DECISION. Like everything else here this only reports; whether to
+    ask the viewer about it is lifecycle's, and withdrawing a verdict is only ever
+    reopen(), and only ever because somebody said so.
+    """
+    if not isinstance(now, Mapping):
+        return ""
+    y = int(total or 0)
+    still = finished_by(now, y)
+    for name in order:
+        if str(name) in now:
+            return "" if str(name) in still else str(name)
+    return ""
+
+
 def no_longer_finished(recorded: Mapping[str, int] | int | None,
                        now: Mapping[str, int] | int | None, total) -> list[str]:
     """The services a settled verdict credits with FINISHING a season and which do
@@ -168,6 +205,100 @@ def no_longer_finished(recorded: Mapping[str, int] | int | None,
     still = finished_by(now, y)
     return sorted(name for name in finished_by(recorded, y)
                   if name in now and name not in still)
+
+
+def counts_detail(per_source: Mapping[str, int] | int | None, total,
+                  labels: Mapping[str, str] | None = None, order=(),
+                  asked=(), dates: Mapping[str, str] | None = None,
+                  linked=(), retired=()) -> str:
+    """The whole story behind "x/y", one line per service, for a row's tooltip.
+
+    WHAT THE ROW ITSELF CANNOT SAY. `counts_label` has one line to work with, so
+    it shows the numbers and nothing else — and three different situations look
+    identical in it: a service that agrees, a service nobody asked whose number
+    is a leftover from before its link lapsed, and a service that reported "all
+    of it" without itemizing an episode. Telling those apart meant reading the
+    database, which is not something a viewer can do.
+
+    ONE LINE PER LINKED SERVICE, INCLUDING THE ONES HOLDING NOTHING. A service
+    with no record of a title is exactly what somebody is looking for when they
+    open this, and omitting its line would read as a rendering fault rather than
+    as an answer.
+
+    COMPOSED HERE, SERVER-SIDE, AS FINISHED TEXT that the client only displays.
+    That is the same rule the row's other sentences follow, and for the same
+    reason: a flag plus a branch in the browser is how two renderings of one fact
+    come to disagree, and the one in JavaScript is the one no test covers.
+
+    THE DATE IS EACH SERVICE'S OWN LAST WATCH rather than the season's finish
+    date. The two differ precisely when the services disagree, which is when
+    somebody is reading this. And "no watch dates" earns its place: a season can
+    be complete and still never settle onto a month, because a month is named by
+    the day the last episode was watched and not every service records one — so
+    that line is the whole answer to "why is this finished thing still on my
+    list".
+
+    `asked` NARROWS TO THIS PASS and is what "not asked" is drawn from. Empty
+    means the caller did not say — a frozen month re-rendered, a test — and then
+    nothing is marked, because inferring staleness from silence would put the
+    mark on every row of a month that is waiting on nobody.
+
+    `retired` IS THE ACCOUNT'S OWN DECISION and reads differently from every other
+    note here, which is why it gets its own word. "not asked" describes something
+    that HAPPENED TO the row — a link lapsed, nobody could ask — and it is a state
+    with no exit. "retired" is something the viewer DID, on purpose, and can undo
+    from the same screen they did it on. The number is still shown because it is
+    still stored: retiring stops it counting, it does not throw it away.
+    """
+    label_of = labels or {}
+    if not isinstance(per_source, Mapping):
+        # A MONTH FROZEN BEFORE RECORDS KEPT A PER-SERVICE BREAKDOWN has one bare
+        # number and no attribution, so there is no service to name — and an empty
+        # tooltip reads as a fault rather than as an answer. Saying WHY is the
+        # useful part: the number is real, the missing half is a fact about when
+        # the month was written, and no amount of looking will recover it.
+        return (f"{int(per_source or 0)} of {int(total or 0)} — recorded before "
+                f"this month kept each service's count separately")
+    counts = resolve(per_source, total)
+    when = dates or {}
+    asked_names = {str(name) for name in asked}
+    retired_names = {str(name) for name in retired}
+    linked_names = {str(name) for name in linked}
+    y = int(total or 0)
+
+    # DECLARED ORDER FIRST, then anything else that turned up — the same ordering
+    # every other per-service reading on the page uses, so a row and its tooltip
+    # cannot name the services in two different sequences.
+    ordered: list[str] = []
+    for name in [str(n) for n in order] + sorted(counts) + sorted(linked_names):
+        if name in ordered:
+            continue
+        if name in counts or name in linked_names:
+            ordered.append(name)
+
+    lines = []
+    for name in ordered:
+        shown = label_of.get(name, name)
+        if name not in counts:
+            lines.append(f"{shown}: nothing recorded")
+            continue
+        notes = []
+        # RETIRED SUPPRESSES "not asked", because the two would both be true and
+        # only one of them is the reason. A retired service is usually an unlinked
+        # one, so a row saying "not asked, retired, not counted" reports the
+        # mechanism and the decision as though they were separate findings — when
+        # the decision is the whole answer and the only one the reader can act on.
+        if name in retired_names:
+            notes.append("retired, not counted")
+        elif asked_names and name not in asked_names:
+            notes.append("not asked")
+        if when.get(name):
+            notes.append(f"last watched {when[name]}")
+        elif int(counts[name]) > 0:
+            notes.append("no watch dates")
+        line = f"{shown}: {int(counts[name])} of {y}"
+        lines.append(line + (" — " + ", ".join(notes) if notes else ""))
+    return "\n".join(lines)
 
 
 def counts_label(per_source: Mapping[str, int] | int | None, total,

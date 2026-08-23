@@ -17,13 +17,14 @@ an account at all.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 
 from ...config import Settings
 from .. import season as season_rules
-from ..base import Media
-from . import titles, transport
+from ..base import Media, SeasonsAnswer
+from . import _naming, titles, transport
 
 logger = logging.getLogger(__name__)
 
@@ -132,15 +133,66 @@ async def fetch_season_detail(settings: Settings, simkl_id, season: int,
     not what this returns. An episode list is catalogue data on a day-long TTL
     and re-fetching it on a button press would spend the instance's Simkl budget
     to learn nothing.
+
+    THE SEASON ASKED FOR IS THE TRACKER'S, WHICH IS NOT ALWAYS THIS TITLE'S OWN.
+    Simkl files each anime season as a separate title numbering its episodes from
+    season 1, so `show:tmdb:1429` season 3 has to be asked of simkl 694485's own
+    season 1 — see `_translated_season`, which is where that lookup is decided
+    and where the reason it is not paid on every call is written.
     """
-    episodes = await fetch_episodes(settings, simkl_id, media)
+    episodes, local = await _episodes_holding(settings, simkl_id, int(season), media)
     if not episodes:
         return season_rules.empty_season(int(season))
     return {
+        # THE SEASON THE CALLER ASKED ABOUT, always. `local` is Simkl's spelling
+        # of it and belongs to this module; the tracker files its record under
+        # the season both services agree names the same thing.
         "season": int(season),
         **season_rules.derive_season(
-            _season_air_dates(episodes, int(season)), today or date.today()),
+            _season_air_dates(episodes, local), today or date.today()),
     }
+
+
+async def _episodes_holding(settings: Settings, simkl_id, season: int,
+                            media: Media) -> tuple[list[dict], int]:
+    """The episode list that actually holds `season` of the series `simkl_id`
+    belongs to, and the number THAT list calls it.
+
+    Simkl files each anime season as its own title numbering its episodes from
+    1, so the season a record names and the title a record carries are two
+    different things — `_naming.title_for_season` is where that is reconciled,
+    and its docstring carries the reasoning.
+
+    PAID ONLY WHERE THE ANSWER WOULD OTHERWISE BE NOTHING. A title already
+    holding the season it was asked about needs no lookup and gets none, which
+    is every ordinary show and every anime title asked for its own season — so
+    the extra per-title GETs land exactly on the case this exists for, and never
+    on a roster of rows that were already answerable.
+
+    A LOOKUP THAT CANNOT BE MADE LEAVES THE ANSWER ALONE. `fetch_season_detail`
+    has never raised — an unanswerable season reads as an empty one and the next
+    load asks again — so a Simkl outage must not start failing a whole roster
+    render through a refinement of the answer rather than the answer itself.
+    """
+    episodes = await fetch_episodes(settings, simkl_id, media)
+    if not episodes or season in seasons_known(episodes):
+        return episodes, season
+    try:
+        holder = await _naming.title_for_season(settings, simkl_id, season)
+    except transport.SimklError:
+        logger.warning("simkl could not be asked which of its titles holds season %s "
+                       "of simkl id %s; reading that season as this title's own",
+                       season, simkl_id)
+        return episodes, season
+    if holder is None:
+        return episodes, season
+    if str(holder) != str(simkl_id):
+        episodes = await fetch_episodes(settings, holder, media)
+    # The holder IS this season, so whatever single season its own list uses is
+    # the one to read. A list spanning several is one that already numbers its
+    # seasons the way the show does, and needs no translation.
+    known = seasons_known(episodes)
+    return episodes, (known[0] if len(known) == 1 else season)
 
 
 # ---------------------------------------------------------------------------
@@ -221,6 +273,38 @@ def _trailer_url(trailers) -> str:
     return ""
 
 
+async def _filled_from_series(settings: Settings, simkl_id, media: Media,
+                              fields: dict) -> dict:
+    """`fields` with every empty value taken from this title's series root.
+
+    A BLANK IS THE ONLY THING REPLACED. `year` and `status` are the season's own
+    and stay that way where it states them — Frieren's third season is 2027 and
+    `tba`, and reading 2023 and `ended` off season 1 would be worse than the gap
+    this exists to close.
+
+    Costs nothing for a title that already describes itself (the caller only
+    asks when the overview is empty), nothing for a title with no series behind
+    it, and one cached record otherwise. A lookup that fails leaves the gaps —
+    an under-described modal is what this is improving on, not a state worth
+    failing the modal over.
+    """
+    try:
+        naming = await _naming.fetch(settings, simkl_id)
+        root = await _naming.series_root(settings, simkl_id, naming)
+    except transport.SimklError:
+        logger.warning("simkl could not be asked what series simkl id %s belongs to; "
+                       "the modal draws what this title alone says", simkl_id)
+        return fields
+    if not root:
+        return fields
+    parent = await titles.fetch_title(settings, root, media) or {}
+    filled = dict(fields)
+    for key, value in parent.items():
+        if not filled.get(key):
+            filled[key] = value
+    return filled
+
+
 async def fetch_details(settings: Settings, media: Media | str, simkl_id,
                         season: int | None, *, cache_only: bool = False) -> dict:
     """One title as the detail modal draws it — app/providers/base.py's DetailPort.
@@ -248,6 +332,48 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     fields = await titles.fetch_title(settings, simkl_id, media, cache_only=cache_only) or {}
     episodes = (await fetch_episodes(settings, simkl_id, media, cache_only=cache_only)
                 if media is not Media.MOVIE else [])
+    # THE SAME RESOLUTION THE SEASON SUMMARY MAKES, for the same reason: the
+    # season a record NAMES and the Simkl title a record CARRIES are two
+    # different things, so a modal opened on `show:tmdb:90937` season 3 while
+    # the record holds season 1's title would filter its episode list to a
+    # season that list does not contain and say there is none. The tile beside
+    # it would be showing twelve.
+    # SKIPPED ENTIRELY UNDER `cache_only`, which is the public share pages'
+    # promise that a stranger's click spends no Simkl budget — the walk makes
+    # live calls, and a modal with no episode list is the degrade those pages
+    # already accept everywhere else.
+    # WHAT THIS TITLE LEFT BLANK, TAKEN FROM ITS SERIES. Simkl writes a
+    # description and trailers per season-title, and for the newest entries it
+    # has not written them yet — measured, Beastars' 2026 season and Frieren's
+    # 2027 one carry a 0-character overview and no trailers while their earlier
+    # seasons carry both. That left the modal drawing an episode list and a row
+    # of genre chips and nothing else.
+    # FILLING FROM THE SERIES MATCHES THE OTHER SOURCE RATHER THAN INVENTING A
+    # RULE: the Trakt package reads `shows/{id}` for overview, trailer, genres
+    # and rating and lets the season choose only the episode list, so EVERY
+    # Trakt modal already shows the series' description. A gap filled this way
+    # makes one renderer's two sources agree, which is what DetailPort's
+    # contract asks for; a blank does not.
+    # ONLY WHAT IS EMPTY IS FILLED, so a season that does describe itself keeps
+    # its own words — which is better than the series' and is what Simkl offers
+    # that Trakt does not.
+    # `fields` EMPTY MEANS SIMKL DOES NOT KNOW THIS TITLE, which is a different
+    # thing from a title it knows and has not described — there is no series
+    # behind it to ask about, so asking would spend a request to learn nothing.
+    # THE OVERVIEW AND THE NETWORK ARE BOTH TRIGGERS, because they go missing
+    # for different reasons and either one alone leaves the modal disagreeing
+    # with something: an overview Simkl has not written yet empties the card,
+    # and a network it only ever states on the series root would leave the modal
+    # blank beside a roster row that shows one (`fetch_seasons` fills the same
+    # gap for the add).
+    if (media is not Media.MOVIE and not cache_only and fields
+            and not (str(fields.get("overview") or "").strip()
+                     and str(fields.get("network") or "").strip())):
+        fields = await _filled_from_series(settings, simkl_id, media, fields)
+    local = None if season is None else int(season)
+    if (media is not Media.MOVIE and season is not None and not cache_only
+            and episodes and int(season) not in seasons_known(episodes)):
+        episodes, local = await _episodes_holding(settings, simkl_id, int(season), media)
     # WHICH SEASON WAS ANSWERED IS RETURNED, not assumed to be the one asked for.
     # 69 of 690 Simkl-only show entries measured on a live instance carry no
     # season at all — Simkl's calendar files omit it for anime — and a title whose
@@ -257,6 +383,13 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
     # draws no episode section for it.
     known = seasons_known(episodes)
     answered = season if season is not None else (known[0] if len(known) == 1 else None)
+    # `answered` IS THE TRACKER'S SEASON AND `local` IS SIMKL'S SPELLING OF IT.
+    # They differ only for a season-title, whose episodes are numbered from 1
+    # whatever season of the show they are — so the modal must SAY 3 while
+    # FILTERING on 1, and conflating the two is what made it say there was no
+    # episode list at all.
+    if local is None:
+        local = answered
     runtime = fields.get("runtime")
     return {
         # EMPTY, AND NOT AN OVERSIGHT. What this reads is the enrichment
@@ -288,7 +421,7 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # NO SEASON MEANS NO EPISODE SECTION, rather than every season run
         # together. A list nobody can label is worse than none: the reader has no
         # way to tell which season's E01 they are looking at.
-        "episodes": _modal_episodes(episodes, answered) if answered is not None else [],
+        "episodes": _modal_episodes(episodes, local) if local is not None else [],
     }
 
 
@@ -306,3 +439,62 @@ def seasons_known(episodes: list[dict]) -> list[int]:
             continue
         seasons.add(int(entry.get("season") if entry.get("season") is not None else 1))
     return sorted(seasons)
+
+
+# ---------------------------------------------------------------------------
+# The catalogue search's season picker (app/providers/base.py's
+# DetailPort.fetch_seasons) — a different consumer from everything above, and a
+# different per-title lookup from titles.py's `fetch_title`.
+# ---------------------------------------------------------------------------
+
+
+def _season_counts(episodes: list[dict]) -> list[dict]:
+    """[{season, episode_count}] over `episodes`, one entry per season the
+    episode list actually contains, in order — the picker's candidate list.
+
+    GROUPED THE SAME WAY `seasons_known` GROUPS SEASON NUMBERS: an episode with
+    no season number counts as season 1, which is how anime arrives (Simkl
+    omits the field for a title it maps to one canonical season).
+    """
+    counts: dict[int, int] = {}
+    for entry in episodes or []:
+        if str(entry.get("type") or _REGULAR_EPISODE) != _REGULAR_EPISODE:
+            continue
+        if entry.get("episode") is None:
+            continue
+        season = int(entry.get("season") if entry.get("season") is not None else 1)
+        counts[season] = counts.get(season, 0) + 1
+    return [{"season": season, "episode_count": count} for season, count in sorted(counts.items())]
+
+
+async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media.SHOW) -> SeasonsAnswer:
+    """app/providers/base.py's DetailPort.fetch_seasons.
+
+    TWO CALLS, BOTH PAID BY ONE CLICK. `fetch_episodes` answers the picker's
+    candidate list — the episode list already answers it, so no new endpoint is
+    needed for it — and `_naming.fetch` answers the three things only the
+    per-title record carries: this hit's own season, every shared id Simkl knows
+    it by, and the network. Both run together because neither depends on the
+    other's answer.
+
+    THE NETWORK IS HERE BECAUSE THE ADD FLOW HAS NOWHERE ELSE TO GET IT. A Simkl
+    SEARCH hit carries none, so on an instance with no second catalogue to fill
+    the gap from, a show added by hand reached the roster with an empty network
+    and drew no emoji. This record carries it and the click already pays for the
+    record — and where a season-title's own record leaves it null, which is
+    every season but the first, it is read off the series (see
+    `_naming.network_of_series`).
+    """
+    media = Media(media)
+    if media is not Media.SHOW or not simkl_id:
+        return SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
+    episodes, naming = await asyncio.gather(
+        fetch_episodes(settings, simkl_id, media),
+        _naming.fetch(settings, simkl_id),
+    )
+    return SeasonsAnswer(
+        seasons=_season_counts(episodes),
+        named_season=naming.season,
+        ids=naming.ids,
+        network=await _naming.network_of_series(settings, simkl_id, naming),
+    )

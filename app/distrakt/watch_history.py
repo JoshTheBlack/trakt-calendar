@@ -123,7 +123,7 @@ import logging
 from datetime import date, datetime, timezone
 from typing import NamedTuple
 
-from . import counts, store
+from . import counts, naming, removals, store
 from .store import ID_COLUMNS, IDENTITY_COLUMNS, record_key
 from .. import clock, db, providers
 from ..providers.base import (ItemKey, LibraryPort, Media, PlayCountPort,
@@ -189,6 +189,30 @@ _UNREADABLE = "unreadable"
 # cannot answer "does this service hold this title", which is the only question
 # the baseline asks it.
 _LIBRARY = "library"
+
+# The sources whose removal beacon moved on THIS pass, so the caller can ask each
+# of them what it still holds. IN MEMORY ONLY, like the three around it.
+#
+# IT IS A SIGNAL RATHER THAN THE WORK ITSELF because of where the two facts live:
+# only `_sync_one` sees the beacon move, and only its caller knows whose tracker
+# this is — a removal is recorded against a viewer's ROWS, and `_sync_one` is
+# handed state rather than a user. Passing a user id down would give every branch
+# of the sync the ability to write records, which is a larger permission than one
+# signal needs.
+_REMOVALS_OWED = "removals_owed"
+
+# {source: [identity keys that source's library read named this pass]}. IN MEMORY
+# ONLY, like the keys around it.
+#
+# THE CLEARING HALF OF A REMOVAL MARK, and it is separate from _REMOVALS_OWED
+# above because the two are triggered by opposite things. Marking is expensive
+# and rare: it needs a whole library listing, so it waits for the service to say
+# outright that something was removed. Clearing is free and must be constant: the
+# ordinary read already names every title it saw, and a title being NAMED is
+# proof the service holds it. Gating the clear on the removal beacon — which is
+# how this was first written — made a mark permanent, because putting a title
+# back moves the watched stamp and never the removed one.
+_NAMED_BY_SOURCE = "named_by_source"
 
 # The source a watch is filed under when nothing said which one reported it — a
 # state restored from a backup taken before the state was per source, or one
@@ -892,6 +916,35 @@ def season_counts(state: dict, key, season: int, sources=()) -> dict[str, int]:
     return out
 
 
+def season_dates_by_source(state: dict) -> dict[tuple[str, int], dict[str, str]]:
+    """{(item key, season): {source: 'YYYY-MM-DD'}} — the last day EACH service
+    reported an episode of that season.
+
+    A SECOND READER RATHER THAN A WIDER season_completed_map, because the two
+    answer different questions. That one asks "when was this season finished",
+    which has one answer whichever service saw the last episode go by, and it
+    takes the newest across all of them. This one asks "what does each service
+    say", which is what a row has to show when it is naming services — the same
+    reason watched_map is a dict per season rather than a number.
+
+    A SERVICE WITH NO DATED EPISODE IS ABSENT rather than dated "". "I have not
+    said when" and "I said the epoch" must not be confused, and a service that
+    holds a season with no dates at all is exactly the case a reader wants to
+    show: it is why such a season counts in full and still never settles.
+    """
+    out: dict[tuple[str, int], dict[str, str]] = {}
+    for key, entry in (state.get("shows") or {}).items():
+        for season_s, slots in _seasons_by_source(entry).items():
+            per_source = {}
+            for source, eps in slots.items():
+                days = [str(when)[:10] for when in (eps or {}).values() if when]
+                if days:
+                    per_source[str(source)] = max(days)
+            if per_source:
+                out[(key, int(season_s))] = per_source
+    return out
+
+
 def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
     watched, which is the day it was finished.
@@ -1035,7 +1088,25 @@ async def forget_movie_watch(user_id: int, key) -> str | None:
 
 
 async def tracker_ports(settings, user_id: int) -> list:
-    """Every (source, port) pair this account's tracker should read, in order.
+    """Every (source, port) pair this account's tracker should read, MOST TRUSTED
+    FIRST.
+
+    THE ORDER IS THE ACCOUNT'S AND IT IS LOAD-BEARING IN ONE NARROW PLACE, which
+    is the one `providers.for_tracker_ports` already names: the FIRST entry that
+    has a number for a season is the source whose count the bucket rule acts on
+    and a frozen month keeps (counts.primary_count). Registry order answered that
+    for everybody — a fact about what this app supports rather than about whose
+    viewing this viewer trusts — and, worse, it did not follow a LINK: a service
+    unlinked long ago went on deciding from the number it last left behind, so a
+    season finished at the service the viewer actually uses could never complete.
+    Narrowing to the linked ports is what fixes that; `prefs.tracker_order` is
+    where the viewer says which way round they want what remains.
+
+    APPLIED HERE, ONCE, so it reaches every caller rather than each of them
+    remembering to reorder: the live pass takes `sources_read` off this list, the
+    settle-on-drain path asks for the names, and the month payload hands the same
+    list to the verdict check. A second application anywhere else is how one of
+    them comes to disagree with the rest about who decides.
 
     THE PREFERENCE IS READ HERE rather than threaded through every caller: it is
     one small query against the account this sync is already for, so asking for
@@ -1061,13 +1132,15 @@ async def tracker_ports(settings, user_id: int) -> list:
     prefs = await source_prefs.load(user_id)
     linked = frozenset(str(source) for source, provider in providers.registered().items()
                        if provider.is_configured(settings))
-    return providers.for_tracker_ports(prefs, linked, settings)
+    ports = providers.for_tracker_ports(prefs, linked, settings)
+    wanted = prefs.tracker_order([source for source, _port in ports])
+    return sorted(ports, key=lambda pair: wanted.index(str(pair[0])))
 
 
 async def tracker_sources(settings, user_id: int) -> list:
-    """Just the source names of tracker_ports, for callers that need to know WHO
-    answers rather than how to ask them — the season lookups, which are catalogue
-    reads on a different seam entirely."""
+    """The source names of tracker_ports, most trusted first, for callers that
+    need to know WHO answers rather than how to ask them — the season lookups,
+    which are catalogue reads on a different seam entirely."""
     return [source for source, _port in await tracker_ports(settings, user_id)]
 
 
@@ -1097,7 +1170,28 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
     THE UNIT IS THE TITLE BECAUSE THAT IS WHAT A SERVICE ANSWERS ABOUT. A progress
     record covers every season at once and there is no cheaper call for one of
     them, so a caller that cares about a single season pays exactly the same.
+
+    ONE CALL PER SOURCE, WHICH IS WHAT THE PER-TITLE READ IS FOR. Simkl names
+    "checking a small handful of specific titles" as this endpoint's own case, and
+    adding a show is exactly that. The alternative — reading a whole library to
+    learn about one title — is the traffic Simkl names as a reason a client id is
+    suspended, and it was briefly what this function did.
+
+    A SOURCE THAT SAYS NOTHING ABOUT THE TITLE LEAVES IT ALONE, which is the
+    contract above: an id absent from the answer means the service had nothing to
+    tell us, never that the viewer has watched none of it.
+
+    AND A SOURCE WITH A LIBRARY IS ASKED FOR IT WHEN THE PER-TITLE READ DECLINED.
+    One service can hold a tracker title's seasons under SEVERAL of its own
+    titles — Simkl files each anime season separately — and a per-title read that
+    can only speak for one of them must not be handed to the baseline, which
+    replaces everything that source had stored. The provider says so by leaving
+    the id out (simkl.sync._speaks_for_one_season); the library read is what has
+    every title of the series in it. Ordinary television never reaches this: the
+    id names the whole show, the POST answers for it, and the expensive read
+    stays unspent.
     """
+    from ..perftrace import span
     ports = await tracker_ports(settings, user_id)
     state = await _load(user_id)
     touched = False
@@ -1110,11 +1204,14 @@ async def baseline_show(settings, user_id: int, record: dict) -> None:
         except SourceUnavailable as exc:
             logger.warning("baseline_show: %s could not be read: %s", source, exc)
             continue
-        if int(source_id) not in details:
-            continue
-        _set_show_baseline(state, record_key(record), record.get("ids") or {},
-                           details[int(source_id)], str(source))
-        touched = True
+        if int(source_id) in details:
+            _set_show_baseline(state, record_key(record), record.get("ids") or {},
+                               details[int(source_id)], str(source))
+            touched = True
+        elif isinstance(port, LibraryPort):
+            touched = await _baseline_from_library(
+                settings, state, str(source), port,
+                {str(record_key(record)): record}, span) or touched
     if touched:
         await _save(user_id, state)
 
@@ -1168,6 +1265,26 @@ async def sync(settings, user_id: int, force: bool = False, today: date | None =
         else:
             answered += 1
 
+    # WHAT EACH SERVICE STILL HOLDS, asked only of the ones that said something was
+    # removed. It runs AFTER the sync loop rather than inside it because a removal
+    # is recorded against the viewer's rows and this is where the viewer is known.
+    # Never fatal: a service that cannot answer leaves the marks exactly as they
+    # were, which is the same degradation every other per-source failure takes.
+    owed = state.pop(_REMOVALS_OWED, [])
+    named = state.pop(_NAMED_BY_SOURCE, {})
+    for source, port in ports:
+        # CLEARING FIRST, AND ALWAYS. A title this pass's read named is one the
+        # service still holds, whatever any earlier pass concluded — and unlike
+        # the check below it costs nothing, so it is not gated on anything.
+        if str(source) in named:
+            await removals.clear_named(user_id, source, named[str(source)])
+        if str(source) not in owed:
+            continue
+        try:
+            await removals.check(settings, user_id, source, port)
+        except SourceUnavailable as exc:
+            logger.warning("wh.sync: %s could not list its library: %s", source, exc)
+
     state[_PLAYS] = plays
     state[_UNREADABLE] = unreadable
     # WHEN NOTHING ANSWERED, THE FAILURE IS THE TRACKER'S, and it is raised the
@@ -1211,6 +1328,17 @@ async def _sync_one(settings, state: dict, source, port, plays: list, *,
         return False
 
     rebaseline = force or _removed_changed(stored, beacons)
+
+    # THE SERVICE HAS SAID SOMETHING WAS TAKEN AWAY, so it is worth asking what it
+    # still holds. Only on a genuine removal beacon, never on `force`: a refresh
+    # is the viewer asking for fresher numbers, and nothing about pressing it says
+    # a title left the library. A source with no way to list its ids cheaply is
+    # not asked at all — the full re-baseline below is what covers it.
+    if (not force and _removed_changed(stored, beacons)
+            and getattr(port, "fetch_library_ids", None) is not None):
+        state.setdefault(_REMOVALS_OWED, [])
+        if name not in state[_REMOVALS_OWED]:
+            state[_REMOVALS_OWED].append(name)
 
     # A named month is read from its own first day; everything else carries on
     # from the cursor, or from the start of the month today falls in when there is
@@ -1606,6 +1734,20 @@ async def _sync_from_library(settings, state: dict, name: str, library, span, *,
     # has just refused to believe.
     if _fold_library(state, name, read):
         state[_LIBRARY] = {**(state.get(_LIBRARY) or {}), name: read}
+    # EVERY TITLE THIS READ NAMED, so a removal mark can clear itself.
+    #
+    # CLEARING MUST NOT DEPEND ON THE REMOVAL BEACON, and it did — which made the
+    # mark permanent in the one case that matters most. Re-adding a title at the
+    # service moves the WATCHED stamp, never `removed_from_list`, so the removal
+    # check never ran again and the clearing logic inside it was unreachable: a
+    # title put back stayed marked as missing for ever. Measured live, by removing
+    # a title and putting it back.
+    #
+    # A READ NAMING A TITLE IS ALREADY PROOF THE SERVICE HOLDS IT, and this read
+    # happens on every pass, so the clearing half costs nothing extra. It works on
+    # a BOUNDED read too: a title being re-added is exactly the kind of change a
+    # delta returns, which is why the cheap signal is also the correct one.
+    state.setdefault(_NAMED_BY_SOURCE, {})[name] = list(read.entries)
     return read.events
 
 
@@ -1651,6 +1793,66 @@ async def _baseline_from_library(settings, state: dict, name: str, library,
     return True
 
 
+async def _learn_source_ids(user_id: int, state: dict, roster: list[dict]) -> None:
+    """Write onto each roster record the SERVICE IDS this state has since learned.
+
+    A LIBRARY MATCH IS HOW A SECOND SERVICE'S OWN ID ARRIVES for a title that was
+    filed from somewhere else — see _baseline_from_library, where a matched entry's
+    ids are merged into the cached state — and until this ran, that was the only
+    place it landed. The ROSTER RECORD is what decides who can be asked about a
+    title: live.detail_source and live.named_sources both read `ids[source]` off
+    the record. So a row whose watch history one service was answering for could
+    still report that service unconfigured the moment the OTHER service's
+    credential went away, because nothing had written down what the match already
+    proved — that this service knows the title and could be asked about it
+    directly. The id costs nothing to obtain here: it has already been obtained.
+
+    ONLY WHAT NAMES A REGISTERED SOURCE — its id, and its slug. The id is what
+    places a call; the slug is what a link to that service is built from, and the
+    two services disagree about what a title's slug is, so a record short of one
+    cannot be linked to correctly. The shared ids are what a record is KEYED on,
+    and improving one of those is a different question with different
+    consequences — the same fact arriving from a library match has no business
+    anywhere near the identity waterfall.
+
+    THE SLUG COSTS NOTHING TO LEARN. It rides the same payloads the ids do: every
+    entry of a Simkl library read carries one, and so does every Trakt history
+    event. Nothing is fetched for it — the plumbing simply used to drop it, which
+    is why records written before the two services' slugs were told apart still
+    had only the ambiguous one.
+
+    EVERY PASS, NOT ONLY ONE THAT BASELINED. The state may have held an id for
+    sessions while the record went without it, and reading a state this pass merely
+    loaded is what repairs those. Costs nothing when there is nothing to write:
+    the comparison is in memory and the database is reached only for a title that
+    is actually short of an id.
+    """
+    shows = state.get("shows") or {}
+    # EACH SOURCE'S OWN ID, AND ITS OWN SLUG. The id is what places a call; the
+    # slug is what a link to that service is built from, and it arrives in the
+    # same payloads for nothing — every one of a library read's entries carries
+    # it. Both are per-source names a record can be short of, and both are
+    # learned the same add-only way, so filtering the slug out here was the only
+    # reason a record ever went without one.
+    sources = [str(source) for source in providers.registered()]
+    learnable = sources + [f"{source}_slug" for source in sources]
+    written: set[str] = set()
+    for record in roster or []:
+        key = record_key(record)
+        if str(key) in written:
+            continue
+        known = (shows.get(str(key)) or {}).get("ids") or {}
+        carried = record.get("ids") or {}
+        learned = {name: known[name] for name in learnable
+                   if known.get(name) not in (None, "")
+                   and carried.get(name) in (None, "")}
+        if learned:
+            # Every row of this identity is written at once, so the other seasons
+            # of the same title need no pass of their own.
+            written.add(str(key))
+            await store.learn_ids(user_id, key, learned)
+
+
 async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: bool = False,
                             today: date | None = None,
                             since_month: str | None = None) -> dict:
@@ -1661,7 +1863,10 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
 
     Takes the roster RECORDS rather than a list of ids, because filing a baseline
     needs the shared identity and fetching one needs the source's id, and only the
-    record carries both."""
+    record carries both. And it hands one BACK: a service's own id learned from a
+    library match is written onto the record before this returns, which is what
+    lets the per-title paths keep asking that service about the title (see
+    _learn_source_ids)."""
     from ..perftrace import span
     state = await sync(settings, user_id, force=force, today=today,
                        since_month=since_month)
@@ -1730,4 +1935,13 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
         saved = True
     if saved:
         await _save(user_id, state)
+    # THE ID GOES BACK TO THE ROSTER as well as into the state, because the state
+    # answers "what has been watched" and the record answers "who can be asked".
+    await _learn_source_ids(user_id, state, roster)
+    # AND THE NAMES THE ROSTER CANNOT REACH come off the stored calendar. The pass
+    # above can only teach a title something is currently listing; a settled
+    # verdict is deliberately outside it, and Trakt's slug arrives with a play
+    # rather than with a library read. See naming.py for both gaps. Costs one
+    # indexed count when there is nothing owed, and no network ever.
+    await naming.fill_from_calendar(user_id)
     return state

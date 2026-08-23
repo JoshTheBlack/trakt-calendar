@@ -88,7 +88,20 @@ class Source(StrEnum):
 # name an ID SPACE, not a provider: `tmdb` means "this title's id at TMDB",
 # which two different sources can both supply and agree on. That is the property
 # that lets the same title arriving from two services be recognized as one.
-ID_KEYS = ("trakt", "slug", "simkl", "tvdb", "tmdb", "imdb", "mal")
+#
+# A SLUG IS NAMESPACED PER SERVICE, unlike every shared id beside it, and for the
+# same reason `trakt` and `simkl` are: it is a name you CALL one service with,
+# and the two services do not agree on it. Trakt writes `the-traitors-2023` where
+# Simkl writes `the-traitors`. A single `slug` key made the two collide in any
+# merged id map — whichever service wrote last won — and BOTH links built from it
+# were then wrong half the time, Trakt's as readily as Simkl's.
+#
+# `slug` IS STILL READ, never written. Rows predate the split and their value is
+# usually but not provably Trakt's, so it stays a legitimate fallback for a
+# reader that has no namespaced one yet (see store.ID_COLUMNS and the migration
+# that backfills only what it can prove).
+ID_KEYS = ("trakt", "slug", "trakt_slug", "simkl", "simkl_slug",
+           "tvdb", "tmdb", "imdb", "mal")
 
 
 def collect_ids(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -797,6 +810,29 @@ class CalendarPort(Protocol):
     every viewer of every month that overlaps it.
     """
 
+    def calendar_configured(self, settings: Settings) -> bool:
+        """Whether this instance can read THIS SOURCE's calendar at all.
+
+        THE SAME SHAPE `DetailPort.catalogue_configured` DRAWS, and on the PORT
+        for a reason that is sharper here than anywhere else in this file: what a
+        calendar costs to read differs per source more than any other question
+        asked of a provider. Trakt's calendar authenticates with the instance's
+        client id; another source's is a set of public files on a CDN that takes
+        no credential of any kind. A predicate on the PROVIDER — `is_configured`
+        or `catalogue_is_configured` — answers for the source as a whole and
+        would therefore gate a calendar on a credential that calendar never
+        sends, which is how an instance with a working public calendar came to be
+        told it had no calendar source at all.
+
+        NOT `is_configured`, WHICH IS THE PRIVATE QUESTION. A calendar read never
+        uses a viewer's token — `calendar_sources` says so at length and then
+        `for_calendar_sources` used to put that filter straight back — so the
+        answer here is about the INSTANCE and never about who is looking.
+
+        Must answer without a network call: it gates the call.
+        """
+        ...
+
     async def fetch_window(self, endpoint, settings: Settings,
                            start: date, days: int) -> list["Record"]:
         """What this source says airs in [start, start + days), as Records.
@@ -819,6 +855,52 @@ class CalendarPort(Protocol):
         is a request, not a promise.
         """
         ...
+
+
+class SeasonsAnswer(NamedTuple):
+    """The season picker's whole answer for one title, from one per-title lookup.
+
+    THREE FACTS, ONE VERB, BECAUSE ONE LOOKUP ANSWERS ALL THREE ON THE SOURCE
+    THAT NEEDS THEM. A season-title source (Simkl, for anime) states its own
+    season and every shared id it knows on the SAME per-title record its season
+    list already has to be read from — so a search hit that source left bare of
+    a shared id is resolved at the one moment resolving it is free, and a hit
+    that already names its season skips a picker with nothing left to ask. A
+    caller that wanted this as two verbs would pay for the same lookup twice.
+
+    `seasons` is [{season, episode_count}] — a show's seasons this source has
+    populated with episodes, for a picker to offer. Empty for a source or a
+    media kind that has none to offer (a movie, or a lookup that found
+    nothing).
+
+    `named_season` is the season THIS hit's own per-title record already names,
+    or None — either because the source never says a hit is one season of a
+    larger show (Trakt, always), or because a season-title's own mapping is
+    missing or names more than one season of the show it belongs to. AN
+    AMBIGUOUS MAPPING IS NOT GUESSED AT: it comes back as None, exactly like no
+    mapping at all, and a caller falls back to `seasons` and lets somebody
+    choose — see the Simkl implementation for what "missing or ambiguous"
+    means against its actual payload.
+
+    `ids` IS collect_ids()-FILTERED, AND IT IS ONLY WHAT THIS LOOKUP SURFACED —
+    not a caller's own id map merged in, because this function does not have
+    one to merge with. Empty for a source whose search hit already carries
+    every shared id it will ever have (Trakt, measured), which makes unioning
+    it into whatever a caller already knew a no-op rather than a special case.
+
+    `network` IS THE SAME BARGAIN AS `ids`, FOR THE SAME REASON: what this ONE
+    lookup surfaced, "" where the source did not say or where its search hit
+    already carried it (Trakt, measured). It is on this answer rather than
+    fetched separately because a source whose search hit has no network
+    (Simkl, measured) does carry one on the per-title record the season list
+    is read from anyway — and a caller with only that source has no other
+    source to fill the gap from, which is how a show added by hand reached a
+    roster with no network at all.
+    """
+    seasons: list[dict]
+    named_season: int | None
+    ids: dict[str, Any]
+    network: str
 
 
 @runtime_checkable  # see the note on SyncPort above
@@ -878,6 +960,107 @@ class DetailPort(Protocol):
         """
         ...
 
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+        """The season picker's answer for one title, in THIS SOURCE's own id
+        space — see `SeasonsAnswer` for why the season list, a self-named
+        season and newly-surfaced ids all come back from one call.
+
+        `source_id` is this source's own id for the title, the same value
+        `fetch_details` takes it as and for the same reason: a source cannot
+        look a title up by an id it does not issue.
+
+        Raises this source's own `SourceUnavailable` subclass on a genuine
+        failure — the same distinction every other port in this file draws
+        between "asked and found nothing" and "could not be asked at all".
+        """
+        ...
+
+
+class SearchHit(NamedTuple):
+    """One title a catalogue search answered with — not a Record, because a
+    search result is not an airing: it has no date, and the tracker's add
+    flow is the only reader, so this carries what THAT flow needs and nothing
+    a service happened to send.
+
+    A NamedTuple rather than a dict for the same reason every other port's
+    payload is declared (see this module's own docstring): two packages
+    implement SearchPort and `tests/providers/test_protocol_conformance.py`
+    can only hold them to one shape if the shape is stated somewhere.
+
+    `source` AND `source_id` TRAVEL TOGETHER because a pick has to call back
+    to the service that answered — the season list and the per-title
+    resolution both come from a per-title lookup keyed on THAT source's own
+    id, and a hit carries no id space every source shares to be found by
+    instead. Carried rather than re-derived from which of `ids` happens to be
+    present, which would be a guess dressed as a derivation.
+
+    `season` IS None FOR EVERY HIT AT SEARCH TIME ON EVERY SOURCE MEASURED SO
+    FAR — Trakt's search never returns a season, and Simkl's search hit
+    carries no season either, even though Simkl's PER-TITLE record does (a
+    season-title's season number lives one lookup deeper). It is on this
+    shape anyway because a hit that IS a season, once a caller resolves one,
+    needs somewhere honest to put that fact, and `None` still means exactly
+    what it means everywhere else in this file: "this is the whole show."
+
+    `network`, `runtime` AND `overview` ARE EMPTY WHEN A SOURCE DOES NOT SAY,
+    not omitted — Simkl's search hit carries none of the three, measured live,
+    while Trakt's carries all three. A caller merging several sources' answers
+    for the same title can fill a gap from whichever source did say, the same
+    rule `Record.enriched` exists for on the calendar side.
+
+    `ids` IS collect_ids()-FILTERED, AND CARRIES THE WHOLE MAP. An id dropped
+    here is one a later match against another service's search hit could not
+    use — the same reasoning trakt/detail.py's `ids_map` states for its own
+    per-title lookups, and it matters more here: a caller merging two sources'
+    hits for one title dedupes and unions on exactly these ids.
+    """
+    source: Source
+    source_id: str
+    media: Media
+    ids: dict
+    title: str
+    year: int | None
+    season: int | None
+    network: str
+    runtime: int | None
+    overview: str
+
+
+@runtime_checkable  # see the note on SyncPort above
+class SearchPort(Protocol):
+    """A source that can answer a free-text catalogue search — what the
+    tracker's manual add flow asks before anything is picked.
+
+    A SIXTH PROTOCOL, AND A NEW KIND OF QUESTION FROM DetailPort BESIDE IT.
+    DetailPort describes ONE title a caller can already name; this is asked
+    with nothing but a string and answers with however many titles might
+    match it. Folding search into DetailPort would mean a source that can
+    describe a title by id but cannot be searched — or the reverse — could
+    not be registered honestly for the half it actually has.
+
+    LIKE DetailPort AND CalendarPort, THIS ASKS ABOUT THE WORLD RATHER THAN
+    ABOUT ONE PERSON: a catalogue search authenticates with the instance's own
+    credential on every source registered so far, never with a viewer's token,
+    which is why `Provider.catalogue_is_configured` — the predicate that gates
+    this port, not `is_configured` — asks the same public question
+    `DetailPort.catalogue_configured` does for per-title lookups.
+    """
+
+    async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:
+        """Every title this source's catalogue matches `query` on, for
+        `media`. An empty query answers [] without a call — there is nothing
+        to ask a service for.
+
+        RAISES THE SOURCE'S OWN SourceUnavailable SUBCLASS RATHER THAN
+        RETURNING [] on a failure that is not "no matches" — a caller reading
+        several sources needs to tell "this source found nothing" apart from
+        "this source could not be asked", the same distinction every other
+        port in this file draws, and collapsing them here would report a
+        search that could not be made as a search that succeeded with an
+        empty answer.
+        """
+        ...
+
 
 @runtime_checkable  # see the note on SyncPort above
 class Provider(Protocol):
@@ -920,9 +1103,33 @@ class Provider(Protocol):
     # never names a service, so a card from a source nobody added a port for
     # opens on an honest refusal rather than on an AttributeError.
     detail_port: DetailPort | None
+    # How this source answers a catalogue search, or None for a source that
+    # cannot be searched. Declared for the same reason as the three ports
+    # above: `for_catalogue_search` asks the registry which sources can answer
+    # a search and never names one, so a source claiming search while carrying
+    # no port would be lying in the one way the registry cannot catch.
+    search_port: SearchPort | None
 
     def is_configured(self, settings: Settings) -> bool:
         """Whether this source has the credentials it needs to be asked
         anything. The registry uses it to pick a usable calendar source, so it
         must answer without making a network call."""
+        ...
+
+    def catalogue_is_configured(self, settings: Settings) -> bool:
+        """Whether this instance can make this source's PUBLIC catalogue
+        reads — the predicate `for_catalogue_search` gates on, and
+        deliberately not `is_configured` above.
+
+        THE SAME SPLIT `DetailPort.catalogue_configured` DRAWS, ASKED AT THE
+        PROVIDER LEVEL rather than the detail port's, because
+        `for_catalogue_search` picks which sources to ask before any of them
+        has been asked to describe a title — it needs the answer off the
+        Provider itself, the same object `is_configured` already lives on,
+        not off a port that may be None for a source with no detail
+        implementation. Two predicates stating the same instance-wide fact in
+        two places would be one more pair to keep in step for no reason
+        `DetailPort.catalogue_configured` does not already serve its own
+        caller.
+        """
         ...

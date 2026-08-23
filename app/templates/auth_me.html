@@ -299,6 +299,77 @@
     </div>
     <p class="auth-error" id="linkError" role="alert"></p>
 
+    {# WHICH LINKED TRACKER DECIDES. Shown only when more than one is linked,
+       because with one service answering there is no order to state and the
+       control could only confuse. It is a REORDERING and never a switch: a
+       season only one of them knows about still counts, whichever is first —
+       which is why the hint says "when both know about a season" rather than
+       promising the loser is ignored. #}
+    {% if tracker_priority %}
+    <div class="auth-list" id="trackerPriority">
+      <div class="row">
+        <span class="label">Which service decides</span>
+        <div class="row-main">
+          <ol class="tracker-priority-list" id="trackerPriorityList">
+            {% for entry in tracker_priority %}
+            <li class="tracker-priority-item" data-source="{{ entry.source }}">
+              <span class="tracker-priority-name">{{ entry.label }}</span>
+              {# Buttons rather than drag alone: dragging is not reachable from a
+                 keyboard and this is a preference, not a game. The first row
+                 cannot move up and the last cannot move down, so those buttons
+                 are omitted rather than rendered dead. #}
+              {% if not loop.first %}
+              <button class="btn-ghost tiny" type="button" data-move="up"
+                      aria-label="Move {{ entry.label }} up">↑</button>
+              {% endif %}
+              {% if not loop.last %}
+              <button class="btn-ghost tiny" type="button" data-move="down"
+                      aria-label="Move {{ entry.label }} down">↓</button>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ol>
+          <p class="auth-sub">When both know about a season, the one at the top decides
+            whether you have finished it. A season only one of them has still counts.</p>
+          <span class="auth-error" id="trackerPriorityError" role="alert"></span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
+    {# WHOSE NUMBERS STILL COUNT. Unlinking a service stops it being ASKED, but
+       the numbers it already contributed stay in the watch history and go on
+       being shown — correctly flagged as belonging to a service nobody asked,
+       and with no way to ever stop. This is the way to stop. It never deletes
+       anything: the numbers stay, the rows mark them "retired, not counted", and
+       switching one back on puts it straight back. A frozen month is never
+       touched — what a month recorded is not a live claim. #}
+    {% if tracker_retirable %}
+    <div class="auth-list" id="trackerRetired">
+      <div class="row">
+        <span class="label">Count history from</span>
+        <div class="row-main">
+          <ul class="tracker-retired-list" id="trackerRetiredList">
+            {% for entry in tracker_retirable %}
+            <li class="tracker-retired-item">
+              <label>
+                <input type="checkbox" data-source="{{ entry.source }}"
+                       {% if entry.counted %}checked{% endif %}>
+                <span>{{ entry.label }}</span>
+                {% if not entry.linked %}<span class="auth-sub">(not linked)</span>{% endif %}
+              </label>
+            </li>
+            {% endfor %}
+          </ul>
+          <p class="auth-sub">Turn one off if you have moved off that service. Its
+            episodes stay recorded and stop counting towards your rows; months you
+            have already finished keep what they recorded.</p>
+          <span class="auth-error" id="trackerRetiredError" role="alert"></span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
     <div class="auth-list">
       {% if not user.username %}
       {# An account made through Plex or Trakt has no username. Claiming one is
@@ -412,6 +483,104 @@ async function submitCredentialForm(form, url, ok) {
   } catch (e) {
     err.textContent = 'Could not reach the server.';
   }
+}
+
+// WHICH LINKED TRACKER DECIDES. One delegated listener on the list rather than a
+// handler per button, matching the pattern the rest of this app's rows use — the
+// buttons are re-rendered whenever the order changes, and per-button handlers
+// would have to be re-bound each time or silently stop working.
+const trackerPriorityList = document.getElementById('trackerPriorityList');
+if (trackerPriorityList) {
+  const err = document.getElementById('trackerPriorityError');
+
+  // Redrawn from the DOM's own order after every move, so the arrows a row is
+  // allowed to show follow the position it is actually in. Rebuilding the list
+  // from a separate array would be a second copy of the order to keep in step.
+  const redraw = () => {
+    const items = [...trackerPriorityList.children];
+    items.forEach((item, i) => {
+      item.querySelectorAll('[data-move]').forEach((b) => b.remove());
+      const name = item.querySelector('.tracker-priority-name').textContent;
+      if (i > 0) {
+        item.insertAdjacentHTML('beforeend',
+          '<button class="btn-ghost tiny" type="button" data-move="up"' +
+          ' aria-label="Move ' + name + ' up">↑</button>');
+      }
+      if (i < items.length - 1) {
+        item.insertAdjacentHTML('beforeend',
+          '<button class="btn-ghost tiny" type="button" data-move="down"' +
+          ' aria-label="Move ' + name + ' down">↓</button>');
+      }
+    });
+  };
+
+  const save = async () => {
+    err.textContent = '';
+    const order = [...trackerPriorityList.children].map((li) => li.dataset.source);
+    try {
+      const resp = await fetch('/api/me/tracker-order', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({order}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) { err.textContent = data.error || 'Could not save that order.'; }
+    } catch (e) {
+      err.textContent = 'Could not reach the server.';
+    }
+  };
+
+  trackerPriorityList.addEventListener('click', (e) => {
+    const button = e.target.closest('[data-move]');
+    if (!button) { return; }
+    const item = button.closest('.tracker-priority-item');
+    // The move is made in the DOM first and saved after, so the control answers
+    // the press immediately; a failed save says so in its own line and leaves
+    // the list showing what was attempted rather than silently snapping back to
+    // a state the viewer did not ask for.
+    if (button.dataset.move === 'up') {
+      item.parentNode.insertBefore(item, item.previousElementSibling);
+    } else {
+      item.parentNode.insertBefore(item.nextElementSibling, item);
+    }
+    redraw();
+    save();
+  });
+}
+
+// WHOSE STORED NUMBERS STILL COUNT. Each box is one service; unchecked means
+// "I have moved off this one, stop counting what it left behind". The whole set
+// is sent every time rather than a single toggle, because that is what the
+// preference IS — "retire this one" says nothing about the others, and a partial
+// message would leave a service in a state nobody chose.
+const trackerRetiredList = document.getElementById('trackerRetiredList');
+if (trackerRetiredList) {
+  const err = document.getElementById('trackerRetiredError');
+  trackerRetiredList.addEventListener('change', async (e) => {
+    if (!e.target.matches('input[type="checkbox"]')) { return; }
+    err.textContent = '';
+    const retired = [...trackerRetiredList.querySelectorAll('input[type="checkbox"]')]
+      .filter((box) => !box.checked)
+      .map((box) => box.dataset.source);
+    try {
+      const resp = await fetch('/api/me/tracker-retired', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({retired}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        err.textContent = data.error || 'Could not save that.';
+        // Put the box back: unlike the order control above, there is no partial
+        // state worth showing here — a box that stayed flipped after a failed
+        // save would claim a service had been retired when it had not.
+        e.target.checked = !e.target.checked;
+      }
+    } catch (_e) {
+      err.textContent = 'Could not reach the server.';
+      e.target.checked = !e.target.checked;
+    }
+  });
 }
 
 const usernameForm = document.getElementById('usernameForm');

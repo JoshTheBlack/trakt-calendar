@@ -20,7 +20,7 @@ from ...endpoints import ENDPOINTS
 from datetime import date
 
 from .. import register
-from ..base import Capabilities, Record, Source
+from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
 from . import calendar, detail, sync
 from .transport import TraktError, TraktRateLimitError
 
@@ -36,6 +36,15 @@ class _TraktCalendarPort:
     calls, and a name bound at class-definition time would be a second reference
     no test double can get at.
     """
+
+    def calendar_configured(self, settings: Settings) -> bool:
+        # The client id alone, and NOT `_TraktProvider.is_configured`. The window
+        # fetch below asks /calendars/all/, which authenticates with the
+        # `trakt-api-key` header carrying the INSTANCE's client id and sends no
+        # bearer at all (see calendar.fetch_window and transport.api_headers) —
+        # only the per-person reads under /sync/ need a token. Requiring one here
+        # took the calendar away from an instance that had never issued one.
+        return settings.trakt_catalogue_configured
 
     async def fetch_window(self, endpoint, settings: Settings,
                            start: date, days: int) -> list[Record]:
@@ -63,6 +72,67 @@ class _TraktDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, str(media), source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+        """app/providers/base.py's DetailPort.fetch_seasons, over the existing
+        `fetch_show_seasons` — see that function's own comment for the rule its
+        answer already upholds (filtering on `episode_count` rather than
+        `aired_episodes`, so an unaired season is not hidden from the picker).
+
+        `named_season` IS ALWAYS None: Trakt's catalogue has no concept of a
+        search hit that IS a season of a larger show, only shows and their
+        seasons as a picker would offer them. `ids` AND `network` ARE ALWAYS
+        EMPTY for the same reason `SeasonsAnswer`'s own docstring gives — a
+        Trakt search hit already carries every shared id AND the network that
+        `search_titles` found, so there is nothing this per-title call could
+        add. Fetching either again to fill a field that is never the empty one
+        would spend a request to restate what the caller already has.
+        """
+        seasons = await detail.fetch_show_seasons(settings, source_id)
+        return SeasonsAnswer(seasons=seasons, named_season=None, ids={}, network="")
+
+
+class _TraktSearchPort:
+    """Trakt's answer to "search this catalogue" (app/providers/base.py's
+    SearchPort).
+
+    DELEGATES STRAIGHT TO `detail.search_titles`, AND DOES NOT FILTER WHAT IT
+    ANSWERS WITH. The add-show flow used to reach Trakt's search through a
+    helper that dropped any hit carrying no Trakt id; that filter was a
+    byproduct of Trakt's own catalogue never omitting one, not a rule about
+    what a search result IS, and `search_titles`'s docstring says as much for
+    the layer above it — it stopped flattening results to a Trakt id because a
+    result flattened that way could not be stored at all. THIS PORT ANSWERS FOR
+    MORE THAN TRAKT'S CALLERS NOW: its hits are merged with another service's,
+    where a title known by tmdb alone is an ordinary result, so re-adding that
+    filter here would revive the same assumption one layer down and quietly
+    lose rows the merge exists to find.
+    """
+
+    async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:
+        raw = await detail.search_titles(settings, str(media), query)
+        return [
+            SearchHit(
+                source=Source.TRAKT,
+                # A Trakt search hit has always carried a Trakt id in
+                # measurement (search_titles's own docstring), so this is
+                # taken as given rather than guarded — guarding it would be
+                # re-adding, in a quieter place, the exact filter this port
+                # exists to drop.
+                source_id=str(entry["ids"].get("trakt") or ""),
+                media=media,
+                ids=entry["ids"],
+                title=entry["title"],
+                year=entry["year"],
+                # Trakt's search never names a season — see SearchHit's own
+                # docstring for why the field exists anyway.
+                season=None,
+                network=entry["network"],
+                runtime=entry["runtime"],
+                overview=entry["overview"],
+            )
+            for entry in raw
+        ]
 
 
 class _TraktSyncPort:
@@ -142,9 +212,20 @@ class _TraktProvider:
     # describe the title in front of it, so a card carrying a Trakt id gets
     # Trakt's richer answer without the route naming this package.
     detail_port = _TraktDetailPort()
+    # And once more for the tracker's manual add flow: it asks the registry
+    # which sources can be searched and never names Trakt, so a second
+    # catalogue can be searched alongside it with no edit here.
+    search_port = _TraktSearchPort()
 
     def is_configured(self, settings: Settings) -> bool:
         return settings.trakt_configured
+
+    def catalogue_is_configured(self, settings: Settings) -> bool:
+        # The client id alone, same question `_TraktDetailPort.catalogue_configured`
+        # asks and for the same reason: a catalogue search authenticates with
+        # `trakt-api-key` alone, never a bearer, so asking `is_configured`
+        # above would gate a public read on one account's private token.
+        return settings.trakt_catalogue_configured
 
 
 register(_TraktProvider())

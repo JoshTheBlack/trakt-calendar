@@ -255,9 +255,29 @@ class DetailModalSourceTests(AppTestCase):
                                 "tv/episodes/3204421": SIMKL_EPISODES}).json()
         self.assertEqual(body["source"], "simkl")
 
-    def test_nothing_configured_at_all_is_a_refusal_naming_no_service(self):
+    def test_nothing_configured_still_draws_what_this_instance_already_holds(self):
+        """A CREDENTIAL IS NEEDED TO FETCH A DESCRIPTION, NOT TO READ ONE BACK.
+        With no source reachable the modal falls through to a stored-only read,
+        which makes no request and needs nothing configured — so a title this
+        instance has described before still opens. Refusing instead threw away
+        data it was holding, which is the same answer the roster's own rows
+        stopped giving.
+
+        (The stub here replaces the transport's `cached_get` outright, so it
+        answers whether or not the read was cache-only; what this pins is that
+        the route no longer refuses BEFORE looking.)"""
         save_settings(Settings(public_base_url=ORIGIN))
         resp = self._simkl_only()
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertEqual(resp.json()["source"], "simkl")
+
+    def test_nothing_configured_and_nothing_stored_is_a_refusal_naming_no_service(self):
+        """The other half, and the reason the fallback is not simply "always
+        200": a modal opened on empty fields is a blank card the reader cannot
+        act on, so an answer with no title, no overview and no episodes behind it
+        is still the honest refusal it always was."""
+        save_settings(Settings(public_base_url=ORIGIN))
+        resp = self._get("media=show&simkl=3204421&season=1", simkl={})
         self.assertEqual(resp.status_code, 404)
         self.assertNotIn("Trakt", resp.json()["error"])
         self.assertNotIn("Simkl", resp.json()["error"])
@@ -300,9 +320,12 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
 
     def test_a_simkl_only_card_on_a_public_page_serves_what_is_cached(self):
         from app import cache
-        base = simkl_transport.API_BASE
-        asyncio.run(cache.set(f"{base}/tv/3204421?client_id=scid", SIMKL_TITLE))
-        asyncio.run(cache.set(f"{base}/tv/episodes/3204421?client_id=scid", SIMKL_EPISODES))
+        # Seeded through the transport's own key builder rather than a spelled-out
+        # URL: the address a stored answer lives at is that function's to state,
+        # and a copy here would go on passing while the real one moved.
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/3204421"), SIMKL_TITLE))
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/episodes/3204421"),
+                              SIMKL_EPISODES))
         with self._no_network():
             resp = self.client.get(
                 f"/s/{self.token}/details?media=show&simkl=3204421&season=1")

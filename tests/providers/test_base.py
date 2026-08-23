@@ -70,7 +70,12 @@ class TestNormalizeProducesARecord:
     def test_provenance_is_source_ids_and_detail_url(self):
         record = trakt_calendar.to_record(ENTRY, SHOWS)
         assert record.source == Source.TRAKT
-        assert record.ids == {"slug": "a-show", "trakt": 123, "tvdb": 456,
+        # `trakt_slug` beside `slug`: both services call a title's readable
+        # name `slug` and disagree on it, so each one's is namespaced at the
+        # boundary and the shared key stays for rows written before the two
+        # were told apart.
+        assert record.ids == {"slug": "a-show", "trakt_slug": "a-show",
+                              "trakt": 123, "tvdb": 456,
                               "tmdb": 789, "imdb": "tt42"}
         assert record.detail_url == "https://trakt.tv/shows/a-show"
 
@@ -81,6 +86,31 @@ class TestNormalizeProducesARecord:
                  "movie": {"title": "A Film", "ids": {"slug": "a-film", "trakt": 9}}}
         record = trakt_calendar.to_record(entry, MOVIES)
         assert record.detail_url == "https://trakt.tv/movies/a-film"
+
+    def test_a_slugless_entry_links_by_id_rather_than_to_the_homepage(self):
+        """Trakt resolves `/shows/<id>` to the same page `/shows/<slug>` reaches,
+        so an entry Trakt named no slug for still has somewhere correct to go.
+        What this replaced sent it to `https://trakt.tv` — a link that looks like
+        it worked, so nobody reports it, and lands nowhere near the title."""
+        entry = {**ENTRY, "show": {**ENTRY["show"],
+                                   "ids": {"trakt": 123, "tvdb": 456}}}
+        record = trakt_calendar.to_record(entry, SHOWS)
+        assert record.detail_url == "https://trakt.tv/shows/123"
+
+    def test_the_slug_still_wins_when_trakt_named_one(self):
+        """The id is the FALLBACK, not the preference. Both services ask that the
+        readable name be sent when it is known, because resolving the numeric id
+        costs them a title lookup and a redirect they need not have done."""
+        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        assert record.detail_url == "https://trakt.tv/shows/a-show"
+
+    def test_an_entry_naming_no_trakt_id_at_all_still_has_a_url(self):
+        """Neither name available is the one case the homepage is the honest
+        answer: there is no title to point at. It must not render `None` into
+        the path, which would 404 instead."""
+        entry = {**ENTRY, "show": {**ENTRY["show"], "ids": {"tvdb": 456}}}
+        record = trakt_calendar.to_record(entry, SHOWS)
+        assert record.detail_url == "https://trakt.tv"
 
     def test_media_is_the_enum_and_still_equals_its_string(self):
         """Templates, DB columns and the response keys all hold the plain
@@ -137,12 +167,40 @@ class TestRegistry:
         assert provider.capabilities.endpoints == frozenset(ENDPOINTS)
         assert provider.capabilities.private_user_data
 
-    def test_no_usable_calendar_source_until_one_is_configured(self):
-        assert providers.for_calendar_sources(Settings()) == []
+    def test_an_instance_with_no_credentials_at_all_still_has_a_calendar(self):
+        """A source whose calendar needs no credential is usable on an instance
+        that has filled nothing in, which is what a public feed means. This used
+        to answer [] — `for_calendar_sources` narrowed on `is_configured`, the
+        PRIVATE question — and a calendar page therefore explained itself away on
+        an instance that could have drawn a month."""
+        assert [p.source for p in providers.for_calendar_sources(Settings())] == [Source.SIMKL]
+
+    def test_there_is_still_a_way_to_have_nobody_to_ask(self):
+        """The negative half, and it has to exist or the gate above stops
+        meaning anything: with the one credential-free calendar switched off and
+        no client id for the other, the list is empty and the page says so."""
+        nobody = Settings(simkl_public_calendar_enabled=False)
+        assert providers.for_calendar_sources(nobody) == []
 
     def test_the_configured_source_is_the_usable_one(self):
-        configured = Settings(trakt_client_id="id", trakt_access_token="token")
+        configured = Settings(trakt_client_id="id", simkl_public_calendar_enabled=False)
         assert [p.source for p in providers.for_calendar_sources(configured)] == [Source.TRAKT]
+
+    def test_trakts_calendar_asks_for_the_client_id_and_not_the_token(self):
+        """The catalogue question, not the private one: /calendars/all/
+        authenticates with the `trakt-api-key` header and sends no bearer, so an
+        instance that has never issued a token still has Trakt's calendar."""
+        port = providers.get(Source.TRAKT).calendar_port
+        assert port.calendar_configured(Settings(trakt_client_id="id"))
+        assert not port.calendar_configured(Settings(trakt_access_token="token"))
+
+    def test_simkls_calendar_needs_no_credential_of_any_kind(self):
+        """Its months are public CDN files (app/providers/simkl/calendar.py):
+        there is no credential whose absence could make them unreadable, which
+        is why the predicate is on the PORT — `is_configured` and
+        `catalogue_is_configured` are both false here and both irrelevant."""
+        port = providers.get(Source.SIMKL).calendar_port
+        assert port.calendar_configured(Settings())
 
     def test_a_source_that_could_answer_is_listed_whether_or_not_it_is_set_up(self):
         """The two questions are different and both are asked. "Who could put
@@ -162,24 +220,21 @@ class TestRegistry:
         for provider in no_calendar:
             assert provider.source not in [p.source for p in providers.calendar_sources()]
 
-    def test_simkl_is_a_usable_calendar_source_once_its_own_credential_is_set(self):
-        """`for_calendar_sources` narrows to `is_configured`, which for Simkl
-        still asks the TRACKER's credential (client id + access token) even
-        though the calendar CDN itself needs neither. `is_configured` answers
-        for the whole source rather than per capability, so linking Simkl for
-        the tracker is what makes its calendar count as "usable" here too."""
+    def test_both_are_usable_when_both_are_set_up(self):
         both = Settings(trakt_client_id="id", trakt_access_token="token",
                         simkl_client_id="id", simkl_access_token="token")
         assert {p.source for p in providers.for_calendar_sources(both)} == {Source.TRAKT, Source.SIMKL}
 
-    def test_an_unconfigured_simkl_is_still_asked_by_the_fill_but_not_usable_yet(self):
-        """The fill (`calendar_sources`) does not ask `is_configured` at all —
-        so Simkl is admitted to the fill regardless; `for_calendar_sources`
-        is the narrower, credential-checked list a route uses to decide whether
-        there is anybody to explain the calendar with."""
+    def test_the_tracker_credential_has_no_say_over_simkls_calendar(self):
+        """`is_configured` for Simkl asks the TRACKER's credential (client id
+        plus access token), and the calendar CDN needs neither — so an instance
+        that has linked nothing gets Simkl's calendar anyway. Narrowing on the
+        provider-level predicate is what made a working public feed read as no
+        source at all."""
         trakt_only = Settings(trakt_client_id="id", trakt_access_token="token")
+        assert not providers.get(Source.SIMKL).is_configured(trakt_only)
         assert Source.SIMKL in [p.source for p in providers.calendar_sources()]
-        assert Source.SIMKL not in [p.source for p in providers.for_calendar_sources(trakt_only)]
+        assert Source.SIMKL in [p.source for p in providers.for_calendar_sources(trakt_only)]
 
     def test_an_accounts_auto_asks_every_source_the_instance_can_fill_from(self):
         """The fill is instance-credentialed, so an account's links have no say
@@ -384,3 +439,58 @@ class TestTrackerPort:
             answer = asyncio.run(port.fetch_last_activities(Settings()))
         assert answer == {"episodes": {"watched_at": "T"}}
         spy.assert_awaited_once()
+
+
+class TestCatalogueSearch:
+    """The registry answering "who can answer a catalogue search", which is
+    the whole mechanism a Trakt-only or a Simkl-only instance being able to
+    search at all rests on — see `for_catalogue_search`'s own docstring for
+    why it asks the catalogue question and not the private one.
+    """
+
+    def test_no_source_is_offered_until_one_has_a_catalogue_credential(self):
+        assert providers.for_catalogue_search(Settings()) == []
+
+    def test_a_trakt_only_instance_gets_exactly_trakt(self):
+        trakt_only = Settings(trakt_client_id="id")
+        assert [s for s, _p in providers.for_catalogue_search(trakt_only)] == [Source.TRAKT]
+
+    def test_a_simkl_only_instance_gets_exactly_simkl(self):
+        """THE CASE THIS PORT EXISTS FOR: an instance with no Trakt client id
+        must still be able to search — see this port's own module docstring
+        for what "not configured" used to mean for every one of these."""
+        simkl_only = Settings(simkl_client_id="id")
+        assert [s for s, _p in providers.for_catalogue_search(simkl_only)] == [Source.SIMKL]
+
+    def test_both_configured_gets_both_in_registry_order(self):
+        both = Settings(trakt_client_id="id", simkl_client_id="id")
+        assert [s for s, _p in providers.for_catalogue_search(both)] == [Source.TRAKT, Source.SIMKL]
+
+    def test_it_asks_the_catalogue_question_not_the_private_one(self):
+        """A client id with no access token is a real, searchable state for
+        both sources — the private per-account token a search never sends
+        must not be what gates it."""
+        client_id_only = Settings(
+            trakt_client_id="id", trakt_access_token="",
+            simkl_client_id="id", simkl_access_token="")
+        assert not Settings.trakt_configured.fget(client_id_only)
+        assert not Settings.simkl_configured.fget(client_id_only)
+        assert {s for s, _p in providers.for_catalogue_search(client_id_only)} == {
+            Source.TRAKT, Source.SIMKL}
+
+    def test_the_ports_returned_are_the_registered_search_ports(self):
+        both = Settings(trakt_client_id="id", simkl_client_id="id")
+        pairs = dict(providers.for_catalogue_search(both))
+        assert pairs[Source.TRAKT] is providers.get(Source.TRAKT).search_port
+        assert pairs[Source.SIMKL] is providers.get(Source.SIMKL).search_port
+
+    def test_a_source_with_no_search_port_would_be_excluded(self):
+        """The negative half, pinned through the registry rather than by name
+        so this keeps meaning something once every registered source has a
+        search port — see the equivalent calendar-port test above."""
+        no_search = [p for p in providers.registered().values() if p.search_port is None]
+        both = Settings(trakt_client_id="id", simkl_client_id="id")
+        offered = {s for s, _p in providers.for_catalogue_search(both)}
+        for provider in no_search:
+            assert provider.source not in offered
+

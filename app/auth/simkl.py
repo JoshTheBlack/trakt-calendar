@@ -105,8 +105,6 @@ def _oauth_headers() -> dict:
     return {
         "Content-Type": "application/json",
         "User-Agent": transport.USER_AGENT,
-        "app-name": transport.APP_NAME,
-        "app-version": transport.APP_VERSION,
     }
 
 
@@ -171,7 +169,12 @@ async def fetch_account(client_id: str, access_token: str) -> dict:
     Raises AccountLookupError for every failure, including a network one, so the
     caller decides whether that is fatal.
     """
-    url = f"{ACCOUNT_URL}?{urlencode({'client_id': client_id})}"
+    # The three things Simkl asks every request to carry. Built here rather than
+    # through transport.api_params because that one reads the client id off a
+    # Settings object, and this flow is handed the id directly — the account being
+    # looked up is the one that just signed in, not the instance's own.
+    url = (f"{ACCOUNT_URL}?"
+           f"{urlencode({'client_id': client_id, 'app-name': transport.APP_NAME_TRACKER, 'app-version': transport.app_version()})}")
     try:
         t0 = _time.perf_counter()
         resp = await transport.send(

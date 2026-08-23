@@ -22,6 +22,9 @@ from .base import (
     Media,
     Provider,
     Record,
+    SearchHit,
+    SearchPort,
+    SeasonsAnswer,
     Source,
     SyncPort,
     collect_ids,
@@ -31,9 +34,10 @@ from .base import (
 
 __all__ = [
     "CalendarPort", "Capabilities", "ID_KEYS", "Item", "Media", "Provider",
-    "Record", "Source", "SyncPort", "collect_ids", "parse_media", "render",
-    "register", "get", "registered", "calendar_sources", "for_calendar_sources",
-    "for_tracker_ports", "tracker_sources",
+    "Record", "SearchHit", "SearchPort", "SeasonsAnswer", "Source", "SyncPort",
+    "collect_ids", "parse_media", "render", "register", "get", "registered",
+    "calendar_sources", "for_calendar_sources", "for_tracker_ports",
+    "tracker_sources", "for_catalogue_search",
 ]
 
 _REGISTRY: dict[Source, Provider] = {}
@@ -178,9 +182,22 @@ def for_calendar_sources(settings, *, prefs=None) -> list[Provider]:
     have not been filled in yet is one the calendar page has always had to render
     an explanation for, not an error — and it is the state the page explains
     rather than rendering an empty month.
+
+    IT ASKS THE PORT, NOT THE PROVIDER, AND THAT IS THE WHOLE DIFFERENCE FROM
+    WHAT IT USED TO DO. This narrowed `calendar_sources` above by
+    `Provider.is_configured` — the PRIVATE question, "has this account's own
+    token been filled in" — which is precisely the filter the function above
+    refuses to apply and says why. Blanking a Trakt client id then emptied the
+    calendar on an instance whose other source was reading months perfectly well.
+    `CalendarPort.calendar_configured` is the same question asked at the grain
+    that can answer it: Trakt's calendar wants the instance's client id, Simkl's
+    is an unauthenticated CDN feed and wants nothing, and a provider-level
+    predicate — private or catalogue — could only have given one answer for both.
+    An instance holding NO credentials at all therefore still has a calendar,
+    which is what a public feed means.
     """
     return [p for p in calendar_sources(prefs=prefs, settings=settings)
-            if p.is_configured(settings)]
+            if p.calendar_port.calendar_configured(settings)]
 
 
 def tracker_sources() -> frozenset[str]:
@@ -207,11 +224,22 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
       - the CREDENTIAL is there (`is_configured` against a Settings carrying that
         account's own tokens — see app/distrakt/routes.py's _distrakt_settings).
 
-    The order is registry order, which is Trakt first, and it is load-bearing in
-    one narrow place: the FIRST entry is the account's primary source, whose
-    number is the one a frozen month and the announcement post carry when a
-    single number is all there is room for. Everything else about reading two
-    sources treats them as equals.
+    THE ORDER HERE IS REGISTRY ORDER, WHICH IS NOT THE ORDER THE TRACKER USES.
+    This function knows which sources are ELIGIBLE; it has no account context
+    beyond `prefs`, so it cannot know which of them the viewer wants consulted
+    first. `app/distrakt/watch_history.py`'s `tracker_ports` — same name, deliberately,
+    because it answers the same question one level up — takes this list and
+    reorders it by the account's stated tracker priority, and that result is
+    threaded to every caller as an explicit order rather than re-derived. So this
+    is the NO-CONTEXT FALLBACK, and a caller that ends up using its order
+    directly is a caller nobody has given the account's preference to.
+
+    Order is load-bearing in one narrow place: the FIRST entry is the primary
+    source, whose number is the one a frozen month and the announcement post
+    carry when a single number is all there is room for. That is exactly why the
+    viewer's preference has to win over registry order — a season finished on the
+    service they actually use could otherwise never be the one that counts.
+    Everything else about reading two sources treats them as equals.
 
     An empty list is an ordinary answer — an account that has linked nothing, or
     whose one linked service has no usable token — and every caller already
@@ -227,3 +255,39 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
             continue
         ports.append((source, provider.sync_port))
     return ports
+
+
+def for_catalogue_search(settings) -> list[tuple[Source, SearchPort]]:
+    """Every source that can answer a catalogue search right now, in declared
+    order — the registry's answer to "who can I ask", following
+    `for_tracker_ports`'s shape above.
+
+    TWO CONDITIONS, DELIBERATELY NOT THREE. The source carries a
+    `search_port` — one usable for something else and with no search port is
+    simply not askable — and its CATALOGUE credential is present, asked
+    through `catalogue_is_configured` and NOT `is_configured`. A catalogue
+    search authenticates with the INSTANCE's own client id on both sources
+    registered today, never with a viewer's token, so asking the private
+    question here would repeat the exact fault `for_calendar_sources` above
+    already refuses to: an instance-wide, publicly-answerable question hinging
+    on whether one particular account happens to have linked something.
+
+    NO ACCOUNT PREFERENCE, UNLIKE `for_tracker_ports`. `prefs.admits_tracker`
+    governs whose DATA a read touches, and a catalogue search touches nobody's
+    data — there is nothing here for a preference to admit or refuse.
+
+    THE LENGTH IS THE WHOLE ANSWER TO "A TRAKT-ONLY OR A SIMKL-ONLY INSTANCE
+    MUST BOTH WORK ORDINARILY". 0 means no catalogue is reachable, 1 means one
+    source answers with nothing to disambiguate, 2 means a caller has two
+    answers to merge — and every behaviour downstream keys off that length
+    rather than off a source's name. Registry order, so Trakt leads where an
+    order is drawn from one, the same rule `for_tracker_ports` states in full.
+    """
+    out: list[tuple[Source, SearchPort]] = []
+    for source, provider in registered().items():
+        if provider.search_port is None:
+            continue
+        if not provider.catalogue_is_configured(settings):
+            continue
+        out.append((source, provider.search_port))
+    return out

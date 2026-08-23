@@ -38,8 +38,8 @@ from datetime import date, datetime, timedelta
 
 from ...config import Settings
 from ...endpoints import Endpoint
-from ..base import Media, Record, Source, collect_ids
-from . import transport
+from ..base import Media, Record, Source
+from . import _ids, transport
 from .transport import SimklError
 
 logger = logging.getLogger(__name__)
@@ -247,7 +247,14 @@ def _simkl_ids(raw: dict) -> dict:
     `"tmdb": null` in the payload, not an omitted key) as well as any key
     genuinely missing, so an anime entry with no tmdb reads the same either
     way."""
-    return collect_ids({
+    # THROUGH THE PACKAGE'S OWN NORMALIZER, which is what namespaces the slug as
+    # `simkl_slug`. Both services call a title's readable name `slug` and disagree
+    # on it, so an unnamespaced one is ambiguous the moment a record knows a title
+    # by both — and these files are the CHEAPEST place this app ever sees Simkl's:
+    # the calendar CDN costs no API quota at all, so a premiere built from one
+    # arrives able to link to Simkl correctly without a single request being spent
+    # on finding out how.
+    return _ids.normalize({
         "simkl": raw.get("simkl_id"),
         "slug": raw.get("slug"),
         "tmdb": raw.get("tmdb"),

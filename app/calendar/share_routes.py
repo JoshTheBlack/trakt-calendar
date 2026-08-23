@@ -1153,11 +1153,16 @@ async def _details(request: Request, share_row) -> Response:
     if chosen is None:
         return JSONResponse({"ok": False, "error": "No source can describe this title"},
                             status_code=404)
-    source, source_id = chosen
     season = _season_param(request.query_params.get("season"))
-    details = await detail_source.fetch(settings, source, media, source_id, season,
-                                        cache_only=True)
-    return JSONResponse({"ok": True, "source": str(source), **details})
+    # cache_only unconditionally, whatever `chosen` says about reachability: a
+    # public request may never spend the owner's budget, which is a stricter rule
+    # than "nobody could be asked anyway" and does not depend on it.
+    details = await detail_source.describe(settings, chosen, media, season,
+                                           cache_only=True)
+    if details is None:
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    return JSONResponse({"ok": True, "source": str(chosen.source), **details})
 
 
 @guard.get("/s/{token}/details", AuthLevel.PUBLIC)

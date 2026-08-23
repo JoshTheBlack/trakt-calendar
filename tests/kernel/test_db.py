@@ -511,6 +511,208 @@ class MigrationTests(DbTestCase):
         self.assertNotIn("play_counts_json", columns)
 
 
+    async def test_migration_28_readdresses_a_cached_answer_off_its_credential(self):
+        """A stored Simkl answer keyed by the client id that fetched it is
+        unreachable the moment that credential changes — and it never leaves on
+        its own, because these rows carry no per-row TTL and the size sweep does
+        not fire until a gigabyte. So they are re-addressed rather than left, and
+        rather than deleted: the payloads are good answers about titles whose
+        content never depended on the credential.
+
+        THE KEY IT LANDS ON IS THE ONE THE TRANSPORT WILL ASK FOR, asserted
+        against that function rather than against a spelled-out string — a
+        migration that produced a plausible-looking key nothing reads would pass
+        every test written the other way.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        from app.providers.simkl import transport
+
+        path = TMP / "migration-28-test.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 27]):
+                db.migrate_sync(conn)
+            now = db.now()
+            rows = [
+                ("https://api.simkl.com/tv/10009?client_id=abc", b"a"),
+                ("https://api.simkl.com/tv/55?extended=full&client_id=abc", b"b"),
+                # Two parameters in an order urlencode would not have chosen, so
+                # the sort is exercised rather than merely described.
+                ("https://api.simkl.com/search/tv?q=silo&extended=full&client_id=abc", b"c"),
+                # Not this migration's business, and proof it is not a blanket
+                # rewrite: Trakt sends its key as a header, so its URLs carry no
+                # credential at all.
+                ("https://api.trakt.tv/shows/7?extended=full", b"d"),
+            ]
+            for key, payload in rows:
+                conn.execute(
+                    "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, "
+                    "byte_size) VALUES (?, ?, ?, NULL, ?)", (key, payload, now, len(payload)))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            keys = {r["cache_key"] for r in conn.execute("SELECT cache_key FROM api_cache")}
+            self.assertEqual(keys, {
+                transport.cache_key("tv/10009"),
+                transport.cache_key("tv/55", {"extended": "full"}),
+                transport.cache_key("search/tv", {"q": "silo", "extended": "full"}),
+                "https://api.trakt.tv/shows/7?extended=full",
+            })
+            # The ANSWER travelled with the address — a rekey that lost the
+            # payload would be a delete wearing a better name.
+            self.assertEqual(
+                conn.execute("SELECT payload FROM api_cache WHERE cache_key = ?",
+                             (transport.cache_key("tv/10009"),)).fetchone()[0], b"a")
+        finally:
+            conn.close()
+
+    async def test_migration_28_collapses_two_credentials_answers_onto_one_row(self):
+        """`cache_key` is the primary key, so an instance that rotated its client
+        id holds two rows for one question and they cannot both survive. Both are
+        answers to the same public question and neither is more this instance's
+        than the other, so the collision resolves rather than raising."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        from app.providers.simkl import transport
+
+        path = TMP / "migration-28-collision-test.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 27]):
+                db.migrate_sync(conn)
+            now = db.now()
+            for key in ("https://api.simkl.com/tv/10009?client_id=old",
+                        "https://api.simkl.com/tv/10009?client_id=new"):
+                conn.execute(
+                    "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, "
+                    "byte_size) VALUES (?, ?, ?, NULL, 1)", (key, b"x", now))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            self.assertEqual(
+                [r["cache_key"] for r in conn.execute("SELECT cache_key FROM api_cache")],
+                [transport.cache_key("tv/10009")])
+        finally:
+            conn.close()
+
+    async def test_migration_29_gives_a_stored_record_the_id_its_state_knows(self):
+        """The live pass writes a service's own id onto the records it renders,
+        but it never sees a settled verdict or anything in a frozen month — so
+        those keep the gap for ever, and a row nobody can ask about is the whole
+        thing the id exists to prevent.
+
+        ADD-ONLY AND THE IDENTITY UNTOUCHED, both asserted: a record already
+        naming a service keeps its own value, and gaining an id does not move the
+        row (MATCH_SOURCES excludes `simkl` for exactly that reason).
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-29-test.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 28]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute("INSERT INTO users (id, username, created_at, updated_at) "
+                         "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute("INSERT INTO distrakt_watch_state (user_id) VALUES (1)")
+            # What the baseline learned and left on the watch state.
+            for season in (1, 2):
+                conn.execute(
+                    "INSERT INTO distrakt_show_progress (user_id, media, match_source, "
+                    "match_id, season, source, watched_episodes_json, trakt_id, simkl_id) "
+                    "VALUES (1, 'show', 'tmdb', '900', ?, 'simkl', '{}', 111, 222)", (season,))
+            conn.execute("INSERT INTO distrakt_months (user_id, month, closed, created_at) "
+                         "VALUES (1, '2026-01', 1, ?)", (now,))
+            # A settled verdict on a frozen month: the record the live pass never
+            # touches, and the reason this migration exists.
+            conn.execute(
+                "INSERT INTO distrakt_month_records (user_id, month, kind, media, "
+                "match_source, match_id, season, trakt_id, simkl_id, tmdb, title, "
+                "network, watched, total, started_airing, finished_airing, added_by, "
+                "created_at) VALUES (1, '2026-01', 'completed', 'show', 'tmdb', '900', 1, "
+                "111, NULL, 900, 'Settled', '', 8, 8, 1, 1, 'manual', ?)", (now,))
+            # And one that already names Simkl, with a DIFFERENT id.
+            conn.execute(
+                "INSERT INTO distrakt_user_seasons (user_id, media, match_source, match_id, "
+                "season, kind, trakt_id, simkl_id, tmdb, title, network, watched, total, "
+                "started_airing, finished_airing, came_back, added_by, created_at) "
+                "VALUES (1, 'show', 'tmdb', '900', 2, 'keepup', 111, 999, 900, 'Listed', "
+                "'', 3, 8, 1, 0, 0, 'manual', ?)", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            settled = conn.execute(
+                "SELECT * FROM distrakt_month_records WHERE month = '2026-01'").fetchone()
+            self.assertEqual(settled["simkl_id"], 222)
+            # The identity is the WHERE clause, never the SET.
+            self.assertEqual(
+                (settled["media"], settled["match_source"], settled["match_id"]),
+                ("show", "tmdb", "900"))
+            self.assertEqual(settled["watched"], 8, "a verdict's counts are not this "
+                                                    "migration's to touch")
+
+            listed = conn.execute("SELECT * FROM distrakt_user_seasons").fetchone()
+            self.assertEqual(listed["simkl_id"], 999,
+                             "an id the record already carried must not be overwritten")
+        finally:
+            conn.close()
+
+    async def test_migration_29_leaves_a_record_no_state_can_name_alone(self):
+        """Silence is not an id. A title no service's library holds has nothing to
+        learn, and must come away exactly as it arrived rather than gaining
+        something derived from a neighbouring row."""
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-29-silent-test.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 28]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute("INSERT INTO users (id, username, created_at, updated_at) "
+                         "VALUES (1, 'viewer', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO distrakt_user_seasons (user_id, media, match_source, match_id, "
+                "season, kind, trakt_id, simkl_id, tmdb, title, network, watched, total, "
+                "started_airing, finished_airing, came_back, added_by, created_at) "
+                "VALUES (1, 'show', 'tmdb', '901', 1, 'keepup', 111, NULL, 901, 'Alone', "
+                "'', 0, 8, 1, 0, 0, 'manual', ?)", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            row = conn.execute("SELECT * FROM distrakt_user_seasons").fetchone()
+            self.assertIsNone(row["simkl_id"])
+            self.assertEqual(row["trakt_id"], 111)
+        finally:
+            conn.close()
+
+
 class PragmaTests(DbTestCase):
     async def test_foreign_keys_are_actually_on(self):
         """Asserted, not assumed: the setting is per-connection and defaults off,

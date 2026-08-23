@@ -44,9 +44,17 @@ from tests.support import AppTestCase, ORIGIN, new_db_path
 # for the tracker exactly when this object carries a usable credential for it —
 # see app/distrakt/routes.py's _distrakt_settings, which is what puts one
 # person's own tokens on it.
-TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False)
-SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True)
-BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True)
+#
+# THE CATALOGUE CREDENTIALS ARE THE OPERATOR'S AND ARE ON ALL THREE. What one
+# viewer linked decides whose HISTORY can be read; whether a title's episode
+# count can be looked up is the instance's client id and nobody's token (see
+# live.detail_source, which skips a record whose only source is unconfigured).
+# Keeping both true here is what leaves these tests measuring the account
+# question they are about.
+_CATALOGUE = {"trakt_catalogue_configured": True, "simkl_catalogue_configured": True}
+TRAKT_ONLY = SimpleNamespace(trakt_configured=True, simkl_configured=False, **_CATALOGUE)
+SIMKL_ONLY = SimpleNamespace(trakt_configured=False, simkl_configured=True, **_CATALOGUE)
+BOTH = SimpleNamespace(trakt_configured=True, simkl_configured=True, **_CATALOGUE)
 
 LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
 ORDER = ("trakt", "simkl")
@@ -410,6 +418,84 @@ class FrozenMonthTests(TwoSourceTestCase):
         self.assertEqual(record["watched_by_source"], {})
         self.assertEqual(counts.counts_label(record["watched_by_source"] or record["watched"],
                                              5, LABELS, ORDER, ORDER), "5/5")
+
+
+def _trakt_only_record(tid, season=1, **fields) -> dict:
+    """A roster record as a title that entered from Trakt alone carries it: the
+    shared id it is filed under, Trakt's own id, and NOTHING naming Simkl.
+
+    Which is every title on a roster built before the account linked a second
+    service — and the shape that made the failure this class is about: Simkl can
+    answer for it, the library match proves so, and the record has never said so."""
+    return {"media": "show", "match_source": "tmdb", "match_id": str(tid),
+            "season": season, "title": f"Show {tid}",
+            "ids": {"trakt": tid, "tmdb": tid}, **fields}
+
+
+# An instance whose Trakt credential has gone: the account still admits both
+# services, but only Simkl's catalogue can be asked about a title. This is the
+# question live.detail_source puts, and the state the reported row was in.
+SIMKL_CATALOGUE_ONLY = SimpleNamespace(
+    trakt_configured=True, simkl_configured=True,
+    trakt_catalogue_configured=False, simkl_catalogue_configured=True)
+
+
+class TheIdALibraryMatchTeachesTests(TwoSourceTestCase):
+    """A library match names a title with the matching service's OWN id, and that
+    id has to reach the ROSTER RECORD — not only the watch state.
+
+    The record is what source selection reads. A row could therefore report counts
+    from both services (proof Simkl holds history for it) and still degrade to
+    "Trakt isn't configured" the moment Trakt's credential went away, because
+    nothing had written down what the match already knew.
+    """
+
+    async def _sync(self, record, tid=101):
+        return await self._baseline(BOTH, [record],
+                                    trakt={tid: {1: _episodes(1, 2, 3)}},
+                                    simkl={tid: {1: _episodes(1, 2)}})
+
+    async def test_the_record_learns_the_matching_services_own_id(self):
+        record = _trakt_only_record(101, kind=store.RecordKind.KEEPUP)
+        await store.add_user_record(self.user_id, record)
+        before, = await store.user_records(self.user_id)
+        self.assertNotIn("simkl", before["ids"])
+        await self._sync(record)
+        after, = await store.user_records(self.user_id)
+        self.assertEqual(after["ids"]["simkl"], 101)
+        # and the id it already had is untouched — this only ever adds.
+        self.assertEqual(after["ids"]["trakt"], 101)
+
+    async def test_the_row_then_degrades_to_the_other_service(self):
+        """THE REPAIR, END TO END. Before the write the record names one service
+        and losing that credential leaves nobody to ask; after it, the service that
+        was answering all along can be."""
+        record = _trakt_only_record(101, kind=store.RecordKind.KEEPUP)
+        await store.add_user_record(self.user_id, record)
+        before, = await store.user_records(self.user_id)
+        self.assertIsNone(live.detail_source(before, SIMKL_CATALOGUE_ONLY))
+        await self._sync(record)
+        after, = await store.user_records(self.user_id)
+        self.assertEqual(live.detail_source(after, SIMKL_CATALOGUE_ONLY), "simkl")
+
+    async def test_a_month_premiere_record_learns_it_too(self):
+        """The case the upsert path could not reach. A premiere record is corrected
+        from the catalogue fields alone on every load and its ids are never
+        restated, so an id it was filed without could arrive no other way."""
+        record = _trakt_only_record(101, kind=store.RecordKind.SERIES_PREMIERE)
+        await store.add_month_record(self.user_id, "2026-07", record)
+        await self._sync(record)
+        stored, = await store.month_records(self.user_id, "2026-07")
+        self.assertEqual(stored["ids"]["simkl"], 101)
+
+    async def test_a_title_no_library_holds_learns_nothing(self):
+        """Silence is not an id. A title the matching service does not hold comes
+        away exactly as it arrived, rather than gaining anything derived."""
+        record = _trakt_only_record(102, kind=store.RecordKind.KEEPUP)
+        await store.add_user_record(self.user_id, record)
+        await self._sync(record, tid=101)
+        after, = await store.user_records(self.user_id)
+        self.assertEqual(after["ids"], {"trakt": 102, "tmdb": 102})
 
 
 class OneServiceIsUnchangedTests(TwoSourceTestCase):
@@ -1264,7 +1350,10 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["sources_unreadable"], ["Simkl"])
+        # The page states it as a finished sentence rather than as a list of
+        # names for the browser to build one out of — there is more than one
+        # reason a count can be missing and they do not share a wording.
+        self.assertIn("Simkl could not be read just now", body["source_notices"][0])
 
     def test_the_other_services_counts_still_render(self):
         """Degrading is not failing. The row shows what Trakt reported, and the
@@ -1388,7 +1477,7 @@ class TheOtherServiceSaysSoTooTests(AppTestCase):
         self.assertEqual(resp.status_code, 200)
         body = resp.json()
         self.assertTrue(body["ok"])
-        self.assertEqual(body["sources_unreadable"], ["Trakt"])
+        self.assertIn("Trakt could not be read just now", body["source_notices"][0])
 
     def test_the_other_services_counts_still_render(self):
         """Degrading is not failing. The row shows what the service that answered
@@ -1531,3 +1620,149 @@ class SourceNamesTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheCountsTooltipTests(unittest.TestCase):
+    """The long form behind "x/y", composed server-side for a row's tooltip.
+
+    WHAT THE CELL CANNOT SAY. One line has room for the numbers and nothing else,
+    so three different situations are indistinguishable in it: a service that
+    agrees, a service nobody asked whose number is a leftover from before its link
+    lapsed, and a service that reported a title finished without itemizing an
+    episode of it. Telling them apart meant reading the database.
+    """
+
+    LABELS = {"trakt": "Trakt", "simkl": "Simkl"}
+    ORDER = ("trakt", "simkl")
+
+    def _detail(self, per_source, total=12, asked=ORDER, dates=None, linked=()):
+        return counts.counts_detail(per_source, total, self.LABELS, self.ORDER,
+                                    asked, dates, linked=linked)
+
+    def test_each_service_gets_its_own_line_with_its_own_number(self):
+        note = self._detail({"trakt": 0, "simkl": 12},
+                            dates={"simkl": "2026-08-21"})
+        self.assertEqual(note.splitlines()[0], "Trakt: 0 of 12")
+        self.assertIn("Simkl: 12 of 12", note)
+        self.assertIn("last watched 2026-08-21", note)
+
+    def test_a_service_nobody_asked_says_so(self):
+        """The amber mark says a number belongs to a service nobody asked; this
+        says WHICH number. Without it a stale zero is indistinguishable from a
+        service that genuinely has none of the season."""
+        note = self._detail({"trakt": 0, "simkl": 12}, asked=("simkl",))
+        self.assertIn("Trakt: 0 of 12 — not asked", note)
+        self.assertNotIn("Simkl: 12 of 12 — not asked", note)
+
+    def test_a_linked_service_holding_nothing_still_gets_a_line(self):
+        """Its absence is exactly what somebody has opened this to find out, and
+        an omitted line reads as a rendering fault rather than as an answer."""
+        note = self._detail({"trakt": 3}, dates={"trakt": "2022-04-27"},
+                            linked=("trakt", "simkl"))
+        self.assertIn("Simkl: nothing recorded", note)
+
+    def test_a_complete_season_with_no_dates_says_so(self):
+        """THE ANSWER TO "why is this finished thing still on my list". A month is
+        named by the day the last episode was watched, and a service that records
+        no date leaves a season that counts in full and can never settle."""
+        self.assertIn("Simkl: 12 of 12 — no watch dates",
+                      self._detail({"simkl": 12}, asked=("simkl",)))
+
+    def test_a_whole_title_claim_is_shown_as_the_number_it_comes_to(self):
+        """A service can report a title finished without itemizing it. That claim
+        travels as a sentinel and must never reach a viewer wearing one."""
+        note = self._detail({"simkl": counts.ALL_EPISODES}, total=8, asked=("simkl",))
+        self.assertIn("Simkl: 8 of 8", note)
+        self.assertNotIn(str(counts.ALL_EPISODES), note)
+
+    def test_nothing_is_marked_when_the_caller_did_not_say_what_it_asked(self):
+        """A frozen month re-rendered, or a test. Inferring staleness from silence
+        would put the mark on every row of a month waiting on nobody."""
+        note = self._detail({"trakt": 0, "simkl": 12}, asked=())
+        self.assertNotIn("not asked", note)
+
+    def test_the_services_are_named_in_the_declared_order(self):
+        """The same order every other per-service reading uses, so a row and its
+        tooltip cannot list them differently."""
+        note = self._detail({"simkl": 12, "trakt": 3})
+        self.assertTrue(note.splitlines()[0].startswith("Trakt"))
+
+
+class TheTooltipReachesTheRowTests(AppTestCase):
+    """The composed sentence has to ARRIVE on the row, not merely exist.
+
+    THE BUG THIS PINS, found in a browser: the per-service dates were built only
+    inside compute_live_shows' own sync branch, and the month payload does its own
+    sync and hands the results in — so on the real path nothing ever passed them
+    and every service reported "no watch dates", including ones with years of
+    dated history behind them. The composition was correct and unreachable, which
+    is exactly the shape no test of the composition alone can catch. So this one
+    goes over HTTP, like the notice tests above it and for the same reason.
+    """
+
+    RAW_ACTIVITIES = AnUnreadableServiceKeepsItsHistoryTests.RAW_ACTIVITIES
+
+    def make_settings(self):
+        from app.config import Settings
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid")
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self.make_user("viewer", distrakt_approved=True,
+                                      calendar_approved=True)
+        self.link_identity(self.user_id, "trakt", 900, "trakt-token")
+        asyncio.run(store.add_user_record(self.user_id, {
+            "ids": {"trakt": 7, "tmdb": 1, "slug": "silo"}, "season": 3,
+            "title": "Silo", "network": "Apple TV", "media": "show",
+            "kind": store.RecordKind.KEEPUP,
+        }))
+        self.sign_in_as(self.user_id)
+
+    def _row(self):
+        async def _season(settings, source_id, season, fresh=False, client=None):
+            return {"total": 8, "cadence": "Tue", "premiere": "7/1", "finale": None,
+                    "started_airing": True, "finished_airing": False}
+
+        today = date.today()
+        with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))),              patch("app.providers.trakt.sync.fetch_last_activities",
+                   new=AsyncMock(return_value=BEACON)),              patch("app.providers.trakt.sync.fetch_history",
+                   new=AsyncMock(return_value=[])),              patch("app.providers.trakt.sync.fetch_progress_details",
+                   new=AsyncMock(return_value={7: {3: {1: "2026-07-01",
+                                                       2: "2026-07-02"}}})),              patch("app.providers.trakt.detail.fetch_season_detail", _season),              patch("app.providers.trakt.sync.fetch_play_counts",
+                   new=AsyncMock(return_value=PlayCounts({}, False))):
+            resp = self.client.get(
+                f"/api/distrakt/month?year={today.year}&month={today.month}")
+        row, = resp.json()["shows"]
+        return row
+
+    def test_the_row_carries_the_service_by_service_breakdown(self):
+        row = self._row()
+        self.assertIn("Trakt: 2 of 8", row["counts_detail"])
+
+    def test_the_date_each_service_reported_reaches_the_row(self):
+        """THE REGRESSION. Trakt reported two episodes, the later on 2026-07-02,
+        and the row has to say so — "no watch dates" against a service that gave
+        two is the exact wrong answer this arrived as."""
+        row = self._row()
+        self.assertIn("last watched 2026-07-02", row["counts_detail"])
+        self.assertNotIn("no watch dates", row["counts_detail"])
+
+
+class AnOldFrozenMonthExplainsItselfTests(unittest.TestCase):
+    """A month frozen before records kept a per-service breakdown has one bare
+    number and no attribution — so there is no service to name, and the tooltip
+    would otherwise be empty. An empty tooltip reads as a fault rather than as an
+    answer, and the useful thing to say is WHY: the number is real, and the
+    missing half is a fact about when the month was written rather than something
+    a refresh could recover."""
+
+    def test_a_bare_number_says_why_it_names_nobody(self):
+        note = counts.counts_detail(2, 10, {"trakt": "Trakt"}, ("trakt", "simkl"))
+        self.assertIn("2 of 10", note)
+        self.assertIn("recorded before", note)
+
+    def test_a_record_with_a_breakdown_is_unaffected(self):
+        note = counts.counts_detail({"trakt": 2}, 10, {"trakt": "Trakt"},
+                                    ("trakt",), ("trakt",))
+        self.assertIn("Trakt: 2 of 10", note)
+        self.assertNotIn("recorded before", note)

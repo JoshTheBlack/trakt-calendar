@@ -1,4 +1,5 @@
-"""The hidden Discord tracker: its page shell and the whole /api/distrakt/* API.
+"""The hidden Discord tracker: its page shell, its rendered fragments, and the
+whole /api/distrakt/* API.
 
 Every route here is DISTRAKT_APPROVED, and every one of them reads ONE person's
 private Trakt history — their progress, their plays, their films. That is why
@@ -27,12 +28,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from . import backfill, counts, discord_fmt, lifecycle, live, unsettled, watch_history
+# The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
+# rather than bare `search` so a call site reads which module it is, the same
+# reason the six modules above are imported by name rather than star-imported.
+from . import search as catalogue_search
 # The data layer is reached through this package's own public surface, the same
 # names an outside caller uses, rather than through the six modules those names
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, clock, db, route_params
+from .. import auth, authz, chrome, clock, db, providers, route_params
 from ..auth import simkl_routes, trakt_routes
 from ..auth import AuthLevel
 from ..calendar import detail_source
@@ -44,8 +49,8 @@ from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
-from ..providers.base import (ID_KEYS, ItemKey, Media, SourceUnavailable, collect_ids,
-                              parse_item_key)
+from ..providers.base import (ID_KEYS, ItemKey, Media, Source, SourceUnavailable,
+                              collect_ids, parse_item_key, parse_media)
 from ..providers.trakt import TraktError, TraktRateLimitError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
@@ -258,6 +263,13 @@ async def distrakt(request: Request):
         # back to these emoji whenever a network has no logo.
         "network_emojis": network_emojis,
         "default_network_emoji": default_network_emoji,
+        # WHICH CATALOGUES THE ADD FLOW'S SEARCH FIELDS NAME, from the same
+        # registry call that will answer the search itself, so the label cannot
+        # promise a service the search does not ask. The INSTANCE's settings,
+        # not this viewer's: a catalogue read authenticates with the instance's
+        # own client id and no account's token has any bearing on it.
+        "catalogue_sources": [str(source) for source, _
+                              in providers.for_catalogue_search(load_settings())],
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
 
@@ -354,26 +366,52 @@ def _rows_for(shape: lifecycle.MonthShape,
         rows.append({**show, "returned": bool(show.get("came_back")),
                      "counts": show.get("counts") or counts.counts_label(
                          show.get("watched_by_source") or show.get("watched"),
+                         show.get("total"), live.source_labels(), live.source_order()),
+                     # THE SAME BREAKDOWN IN FULL, for the row's tooltip — a peek
+                     # at what this month actually recorded, which is the most
+                     # useful thing a frozen row can offer.
+                     #
+                     # WITH NO FRESHNESS AND NO DATES, deliberately. Nothing was
+                     # asked this pass, so "not asked" would be true of every
+                     # service and would say nothing; and the dates live on the
+                     # watch state, which a frozen month deliberately does not
+                     # consult — it renders what it froze.
+                     "counts_detail": show.get("counts_detail") or counts.counts_detail(
+                         show.get("watched_by_source") or show.get("watched"),
                          show.get("total"), live.source_labels(), live.source_order())})
     return rows
 
 
 async def _stale_month_payload(user_id: int, month_key: str, emojis: dict, default_emoji: str,
                                link_url: str | None, rate_limited: bool,
-                               standing: distrakt_store.MonthStanding) -> dict:
-    """Render a month WITHOUT any Trakt call, from whatever is last persisted — the
-    top-level fallback when a shared refresh prerequisite hit Trakt's rate limit or
+                               standing: distrakt_store.MonthStanding,
+                               settings) -> dict:
+    """Render a month WITHOUT any provider call, from whatever is last persisted —
+    the top-level fallback when a shared refresh prerequisite hit a rate limit or
     was unreachable. Stored records already carry each show's last-known
-    watched/total/cadence/dates, so this projects them offline (frozen_shows),
-    attaching a visible notice so stale-but-real beats a false 0/0 or a 500.
-    `rate_limited` only chooses the notice wording; both cases degrade identically
-    and return HTTP 200.
+    watched/total/cadence/dates, so this projects them offline, attaching a
+    visible notice so stale-but-real beats a false 0/0 or a 500. `rate_limited`
+    only chooses the notice wording; both cases degrade identically and return
+    HTTP 200.
 
-    The viewer's own list is left out on purpose: reading it is cheap, but every
-    row on it would need the season lookup that has just failed, so it could only
-    be rendered from counts nothing has refreshed."""
+    THE VIEWER'S OWN LIST IS RENDERED TOO, and it used to be left out. The stated
+    reason was that every row on it would need the season lookup that had just
+    failed — true, and it does not follow that the rows cannot be drawn: each one
+    carries its own last-known counts and dates (live.stored_shows), which is
+    what the degraded LIVE path has always drawn for a single failed title. What
+    the old shape produced instead was a page whose whole list vanished on a
+    refresh and came back on a reload, which reads as data loss rather than as a
+    service being briefly unreachable.
+
+    ONLY FOR THE MONTH UNDER WAY, the same rule the live path follows: what
+    somebody is keeping up with belongs to no month, so a month that is over or
+    has not begun has no list to show.
+    """
     doc = await distrakt_store.load_month(user_id, month_key)
-    shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [])
+    listed = (await distrakt_store.user_records(user_id)
+              if standing is distrakt_store.MonthStanding.CURRENT else [])
+    shape = lifecycle.shape_of(distrakt_store.frozen_shows(doc) if doc else [],
+                               live.stored_shows(listed, settings))
     shows = _rows_for(shape, standing)
     notice = (
         "Trakt is rate-limiting us right now — showing last-known totals. Refresh again in a moment."
@@ -462,6 +500,11 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         # When each season was finished, for the "Completed means completed THIS
         # month" rule compute_live_shows applies.
         completed_lookup = watch_history.season_completed_map(state)
+        # PER SERVICE, beside the one above and answering a different question:
+        # that one is "when was this season finished", which has one answer; this
+        # is "what does each service say", which is what a tooltip naming
+        # services needs. See watch_history.season_dates_by_source.
+        dates_lookup = watch_history.season_dates_by_source(state)
         mstart, mend = watch_history.month_bounds(month_key)
         movies = watch_history.movies_in_range(state, mstart, mend)
         plays = watch_history.episode_plays(state)
@@ -469,7 +512,8 @@ async def _sync_watch_history(settings, user_id: int, records: list[dict],
         # one service's alone rather than presenting it as what everybody agrees.
         unreadable = watch_history.unreadable_sources(state)
         sp.set(watched_keys=len(watched_lookup), movies=len(movies), plays=len(plays))
-    return state, watched_lookup, completed_lookup, movies, plays, unreadable
+    return (state, watched_lookup, completed_lookup, dates_lookup, movies, plays,
+            unreadable)
 
 
 def _season_lookup(settings) -> lifecycle.SeasonLookup:
@@ -481,18 +525,28 @@ def _season_lookup(settings) -> lifecycle.SeasonLookup:
     lifecycle.SeasonLookup. It is paid once per season that reopened, never once
     per episode seen.
 
-    A record with no source id, or a lookup that fails, answers {}: the season
-    still comes back onto the viewer's list, on the counts the withdrawn verdict
-    had, and the next load re-derives them anyway. Failing the whole month over a
-    season that grew would be the worse trade.
+    A record no source can be asked about, or a lookup that fails, answers {}:
+    the season still comes back onto the viewer's list, on the counts the
+    withdrawn verdict had, and the next load re-derives them anyway. Failing the
+    whole month over a season that grew would be the worse trade.
+
+    ASKED OF WHOEVER THE RECORD'S OWN IDS NAME, through `live.season_detail`,
+    rather than of Trakt off a bare `ids["trakt"]`. "How long is this season" is
+    one question with one answer and one place that decides who answers it — a
+    premiere correction that only ever asked Trakt simply never happened on an
+    instance reading its catalogue from somewhere else.
     """
     async def look_up(record: dict, season: int) -> dict:
-        source_id = (record.get("ids") or {}).get("trakt")
-        if source_id is None:
+        rec = {**record, "season": season}
+        # THE EMPTY ANSWER IS CHECKED FOR RATHER THAN FETCHED. `season_detail`
+        # answers a zeroed season when nobody can be asked, which is right for a
+        # caller that has nothing else to draw; here it would overwrite a real
+        # withdrawn verdict's counts with zeros, and {} is what says "keep them".
+        if live.detail_source(rec, settings) is None:
             return {}
         try:
-            return await trakt_detail.fetch_season_detail(settings, source_id, season)
-        except TraktError:
+            return await live.season_detail(settings, rec)
+        except SourceUnavailable:
             return {}
     return look_up
 
@@ -515,7 +569,7 @@ def _unknown_episode_rows(plays) -> list[dict]:
 
 
 def _unbacked_note(question: lifecycle.UnbackedVerdict) -> str:
-    """The sentence a settled row whose services have withdrawn is offered with.
+    """The sentence a settled row nothing stands behind any more is offered with.
 
     IT SAYS BOTH NUMBERS, not just that something changed. "This no longer adds
     up" leaves the viewer to open the row, remember what it used to say and work
@@ -524,11 +578,28 @@ def _unbacked_note(question: lifecycle.UnbackedVerdict) -> str:
     function the row itself is drawn with — so the two can never disagree about
     how a per-service reading is spelled.
 
+    TWO SENTENCES, BECAUSE THERE ARE TWO REASONS AND THEY ARE NOT THE SAME NEWS.
+    A RETRACTION is a service changing its mind: it said you had finished this and
+    now says you have not, and the viewer may well want to know which one. A
+    DECIDER CHANGE is nobody changing their mind at all — the verdict stands
+    exactly as the service that made it left it, and what moved is which service
+    this account counts first. Telling somebody "Trakt no longer reports finishing
+    this" when Trakt never reported it in the first place would be a plain
+    falsehood, which is why the shape is chosen here rather than the two being
+    forced into one wording.
+
     Written here for the reason MONTH_AWAITS_IMPORT is: it is a sentence this page
     says about its own state, and the page's states are this module's.
     """
     labels, order = live.source_labels(), live.source_order()
     total = question.record.get("total")
+    if question.decider and not question.sources:
+        was = counts.counts_label(question.record.get("watched_by_source") or {},
+                                  total, labels, order)
+        now = counts.counts_label(question.now, total, labels, order)
+        return (f"{labels.get(question.decider, question.decider)} is the service "
+                f"you count first now, and it does not report this finished. "
+                f"{question.month} recorded it as {was}, and it now reads {now}.")
     # Named in the registry's declared order, which is the order every other
     # per-service reading on the page is written in (counts.counts_label takes the
     # same one). The rule that produced them answers alphabetically because a set
@@ -578,20 +649,23 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     the stale-but-real fallback — this function does not degrade, so that decision
     lives in exactly one place.
     """
-    committed = distrakt_store.month_committed(month_key, today)
     standing = distrakt_store.month_standing(month_key, today)
-    # A PREVIEW month (before the 1st) keeps auto-populating from premieres so it
-    # tracks the calendar (and un-turning-away re-adds a previously excluded
-    # premiere). A COMMITTED month is stable — premieres only re-import on demand.
-    # THE INSTANCE'S SETTINGS FOR THE CALENDAR HALF, not the per-viewer ones this
-    # function is working with: a calendar window is fetched under the instance's
-    # own credentials and served to everybody, so a viewer who has not linked
-    # Trakt must not be the reason a preview month stops tracking the calendar.
-    # calendar_import.premiere_records states that contract.
-    instance_settings = load_settings()
-    if not committed and instance_settings.calendar_source_configured:
-        await distrakt_store.import_premieres(user_id, month_key, instance_settings)
-        doc = await distrakt_store.load_month(user_id, month_key) or doc
+    # NOTHING IS IMPORTED BY LOOKING. A month that has not begun is populated when
+    # somebody ASKS — the Import control, which is also the only thing that builds
+    # such a month in the first place (see rollover.can_initialize, which says the
+    # ask is the safeguard). This load used to re-import a preview month's
+    # premieres on every visit, on the reasoning that a preview should track the
+    # calendar; what that meant in practice is that the calendar's list for a month
+    # goes on growing right up to the 1st, so opening next month filed everything
+    # the calendar had learned since the last look — 85 titles in one visit on the
+    # instance this was found on, none of them chosen. Reading a month must not
+    # decide what is in it.
+    #
+    # THE MIRROR IS NOW ONE-WAY BEFORE THE 1st, and that is the cost of this being
+    # right. reconcile_turn_aways below still takes a title turned away on the
+    # calendar OFF a preview month; taking a mark BACK no longer puts the title
+    # back there by itself, because that would be an import and imports are asked
+    # for. Import from calendar re-adds it.
 
     # BEFORE the records are read, because it changes them: a title turned away on
     # the main calendar becomes a verdict here, and one whose mark has been taken
@@ -630,11 +704,13 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     state: dict = {}
     watched_lookup: dict = {}
     completed_lookup: dict = {}
+    dates_lookup: dict = {}
     movies: list[dict] = []
     questions = lifecycle.HistoryQuestions([], [])
     unreadable: list[str] = []
     if ports:
-        state, watched_lookup, completed_lookup, movies, plays, unreadable = await _sync_watch_history(
+        (state, watched_lookup, completed_lookup, dates_lookup, movies, plays,
+         unreadable) = await _sync_watch_history(
             settings, user_id, everything, month_key, force_fresh, today)
         if under_way and plays:
             # The history has moved, so what it reported is folded back into the
@@ -659,9 +735,17 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         computed = await distrakt_store.compute_live_shows(
             user_id, everything, settings, fresh=season_fresh, watched_lookup=watched_lookup,
             allow_degrade=True, completed_lookup=completed_lookup,
+            # WITHOUT THIS EVERY SERVICE REPORTS "no watch dates". The lookup is
+            # only built inside compute_live_shows' own sync branch, and this
+            # caller does its own sync and hands the results in — so a caller
+            # that passes `watched_lookup` has to pass this too.
+            dates_lookup=dates_lookup,
             # The services this pass actually read, which is what tells a season
-            # only one of them knows about from one they agree on.
-            sources_read=[source for source, _port in ports]) if everything else []
+            # only one of them knows about from one they agree on — and which of
+            # them went quiet, which is what stops a row claiming its counts are
+            # current when one service's history could not be read at all.
+            sources_read=[source for source, _port in ports],
+            sources_unread=unreadable) if everything else []
     # compute_live_shows answers in the order it was asked, so the split is where
     # the two inputs were joined.
     live_premieres, live_listed = computed[:len(premieres)], computed[len(premieres):]
@@ -728,7 +812,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
             # The record's own flat identity, which is the key the watch state
             # files everything under — not re-resolved from its ids, which would
             # be a second answer to a question the record already carries.
-            live_counts)
+            live_counts,
+            # Which services this account trusts, most first — the same list the
+            # rows' own numbers were picked with, so a verdict is only ever
+            # questioned against the service the page is already showing.
+            order=[source for source, _port in ports])
 
     shows = _rows_for(shape, standing)
     if premieres and season_fresh:
@@ -771,10 +859,16 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         # reached that the services have stopped backing. Present only on the
         # month under way, and only until it is answered either way.
         "unbacked_verdicts": _unbacked_rows(unbacked),
-        # The services that could not be read on this pass, under the names they
-        # are shown by. Present so a season showing one number says WHY that is
-        # all there is, instead of reading as two services agreeing.
-        "sources_unreadable": [live.source_labels().get(name, name) for name in unreadable],
+        # WHAT THE PAGE SAYS ABOUT WHAT IT COULD NOT REFRESH, as finished
+        # sentences rather than as names for the browser to build one from. A
+        # season showing one number has to say WHY that is all there is, instead
+        # of reading as two services agreeing — and there is more than one why:
+        # a service that could not be read, one this instance has no credential
+        # for, and a title no registered service can look up. Composed here
+        # because the rule for choosing between them is the same rule the row's
+        # own tooltip is written from (app/distrakt/live.py), and a second copy
+        # in JavaScript could not be tested against it.
+        "source_notices": live.unavailable_notices(computed, unreadable=unreadable),
         "post1": post1,
         "post2": post2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -867,11 +961,13 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
     except TraktRateLimitError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt rate-limited): %s", month_key, exc)
         return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
-                                          rate_limited=True, standing=standing), 200
+                                          rate_limited=True, standing=standing,
+                                          settings=settings), 200
     except TraktError as exc:
         logger.warning("distrakt month %s degraded to stale (Trakt unreachable): %s", month_key, exc)
         return await _stale_month_payload(user_id, month_key, emojis, default_emoji, link_url,
-                                          rate_limited=False, standing=standing), 200
+                                          rate_limited=False, standing=standing,
+                                          settings=settings), 200
 
 
 @guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)
@@ -1095,9 +1191,15 @@ async def api_distrakt_details(request: Request):
     if chosen is None:
         return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
                             status_code=404)
-    source, source_id = chosen
+    source = chosen.source
     try:
-        details = await detail_source.fetch(settings, source, Media.SHOW, source_id, season)
+        # See the calendar's own modal: with nobody reachable, what this
+        # instance already holds beats a blank card, and None is the case where
+        # it holds nothing either.
+        details = await detail_source.describe(settings, chosen, Media.SHOW, season)
+        if details is None:
+            return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
+                                status_code=404)
     except TraktError as exc:
         # Trakt's own error type carries a status worth passing on; every other
         # source raises something this route has no special reading of, and a
@@ -1158,7 +1260,14 @@ async def api_distrakt_details(request: Request):
         # WHO ANSWERED, told to the client the same way the calendar's modal
         # tells it, because the panel renders a service's name and its links.
         "source": str(source),
+        # EACH SERVICE'S OWN SLUG, because they do not agree on one. A single
+        # `slug` held whichever service wrote last, which made the Trakt link
+        # land nowhere whenever the value had come from Simkl. `slug` still
+        # travels as the fallback for rows written before the two were told
+        # apart — see store.ID_COLUMNS.
         "slug": str(ids.get("slug") or ""),
+        "trakt_slug": str(ids.get("trakt_slug") or ""),
+        "simkl_slug": str(ids.get("simkl_slug") or ""),
         "season": season,
         "watched_episodes": watched,
         "watched_by_source": by_source,
@@ -1290,47 +1399,146 @@ async def api_distrakt_remove(request: Request):
     return JSONResponse(payload, status_code=status)
 
 
-@guard.get("/api/distrakt/search", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_search(request: Request):
-    """Show search for the add flow.
+def _search_hit_payload(hit: catalogue_search.MergedSearchHit) -> dict:
+    """One merged search hit as the add flow's results row is built from.
 
-    Trakt's /search is a public catalogue read — it authenticates with the
-    instance's client id and returns the same results to everybody — so this
-    gate asks the catalogue question rather than whether this viewer linked
-    Trakt. Adding what it finds is a separate act with its own gate.
+    THE ONE PLACE A `MergedSearchHit` BECOMES THE ROW: the fragment template
+    (templates/_distrakt_search_results.html) draws both the row's text and the
+    data attributes the pick reads back off it from this same dict, so there is
+    no second statement of what a search hit is for the two to drift apart on.
+
+    `key` TRAVELS AS THE SAME FLAT STRING every other route hands the client
+    (see app/distrakt/store.py's `normalize_show`) — None when no source could
+    name this title in a shared id space, which is the caller's cue that
+    clicking it has to resolve one before an add is offered (see
+    app/providers/base.py's SeasonsAnswer and this file's api_distrakt_seasons).
+    `source_ids` names both which sources found it (the marks) and, per source,
+    the id a season lookup calls back with — see MergedSearchHit's own
+    docstring for why one field carries both.
+    """
+    return {
+        "key": str(hit.key) if hit.key is not None else None,
+        "season": hit.season,
+        "source_ids": {str(source): source_id for source, source_id in hit.source_ids.items()},
+        "ids": hit.ids,
+        "title": hit.title,
+        "year": hit.year,
+        "network": hit.network,
+        "runtime": hit.runtime,
+        "overview": hit.overview,
+    }
+
+
+def _unkeyable_reason(media: Media, ids: dict, title: str) -> str | None:
+    """`UnkeyableRecord`'s own sentence for a title the tracker cannot file, or
+    None when it can.
+
+    ONE SOURCE OF TRUTH FOR THE REFUSAL, asked BEFORE an add is offered as well
+    as at the add itself. `record_key` is what decides whether a title has an id
+    the tracker can key on (app/providers/base.py's MATCH_SOURCES is why some do
+    not), and its message is what every surface says about it — this file's
+    season lookup, the film search's disabled row, and api_distrakt_add's 400.
+    Editing that sentence changes all three, which is the point of asking the
+    question here rather than writing a second version of the answer.
+    """
+    try:
+        distrakt_store.record_key({"media": media, "ids": ids, "title": title})
+    except distrakt_store.UnkeyableRecord as exc:
+        return str(exc)
+    return None
+
+
+def _search_rows(hits, media: Media) -> list[dict]:
+    """The merged hits as the results fragment's row contexts.
+
+    A FILM HIT WITH NO SHARED ID IS REFUSED HERE AND A SHOW HIT IS NOT, and the
+    asymmetry is the flows' own rather than an inconsistency. Clicking a show
+    hit already pays for a per-title lookup — the season list — and that lookup
+    resolves the ids a search left out, so the show path can afford to find out
+    on the click (see api_distrakt_seasons). A film has no season to pick and so
+    no click that already spends a round trip, which would leave the refusal to
+    the add attempt itself; saying it on the row instead costs one key
+    resolution per hit and no request at all.
+    """
+    rows = []
+    for hit in hits:
+        row = _search_hit_payload(hit)
+        row["unkeyable"] = (_unkeyable_reason(media, hit.ids, hit.title)
+                            if media is Media.MOVIE and hit.key is None else None)
+        rows.append(row)
+    return rows
+
+
+async def _search_fragment(request: Request, media: Media):
+    """One submitted catalogue search as the results list the add modal swaps in.
+
+    A VIEW, NOT AN API, following the ranker's own fragments: it answers with
+    the rows and nothing else, so the browser has no second copy of what a
+    search hit looks like to keep in step with `_search_hit_payload`.
+
+    Gated on WHETHER ANY SOURCE CAN BE SEARCHED — `providers.for_catalogue_search`
+    returning something — rather than on Trakt's configuration alone, so an
+    instance with only a Simkl client id can still search: each source
+    authenticates a catalogue read with the INSTANCE's own credential, never
+    this viewer's token, which is the same distinction api_distrakt_add's own
+    comment draws for the identical lookup. Adding what it finds is a separate
+    act with its own gate. NO CATALOGUE AT ALL IS ITS OWN RENDERED STATE rather
+    than an error: nothing was searched, so telling somebody their search failed
+    would send them to retype a query that was never the problem.
+
+    ONE SOURCE FAILING IS NOT THE SEARCH FAILING — `search_catalogue` returns
+    who could not be asked alongside what the rest found, and the fragment says
+    so quietly above results that are still real.
     """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    q = request.query_params.get("q", "")
-    try:
-        results = await trakt_detail.search_shows(settings, q)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "results": results})
+    asked = providers.for_catalogue_search(settings)
+    context = {"request": request, "media": str(media), "hits": [], "failed": [],
+               # A MARK DISAMBIGUATES, so with one catalogue there is nothing for
+               # it to do — the rule _source_logo.html states and the reason a
+               # single-source instance looks like this app always did.
+               "marked": len(asked) > 1, "no_catalogue": not asked}
+    if asked:
+        result = await catalogue_search.search_catalogue(
+            asked, settings, media, request.query_params.get("q", ""))
+        context["hits"] = _search_rows(result.hits, media)
+        context["failed"] = sorted(str(source) for source in result.failed)
+    return templates.TemplateResponse(request, "_distrakt_search_results.html", context)
 
 
-@guard.get("/api/distrakt/search-movie", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_search_movie(request: Request):
-    """Film search for the add-a-film flow. Its own route rather than a media
-    flag on the show search, because what comes back is a different shape with
-    no seasons in it and the caller does something else entirely with it.
+@guard.get("/distrakt/fragments/search", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_search_fragment(request: Request):
+    """Show search for the add flow, merged across every catalogue this instance
+    can ask (app/distrakt/search.py's `search_catalogue`). See `_search_fragment`
+    for what it renders and why it is a fragment rather than JSON."""
+    return await _search_fragment(request, Media.SHOW)
 
-    Public catalogue read, gated as api_distrakt_search is."""
-    settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    q = request.query_params.get("q", "")
-    try:
-        found = await trakt_detail.search_titles(settings, Media.MOVIE, q)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    results = [
-        {"ids": entry["ids"], "title": entry["title"],
-         "year": entry["year"], "runtime": entry.get("runtime")}
-        for entry in found if (entry.get("ids") or {}).get("trakt")
-    ]
-    return JSONResponse({"ok": True, "results": results})
+
+@guard.get("/distrakt/fragments/search-movie", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_movie_search_fragment(request: Request):
+    """Film search for the add-a-film flow, merged across every catalogue this
+    instance can ask (app/distrakt/search.py's `search_catalogue`) — the same
+    machinery the show search uses, media-parameterized to MOVIE.
+
+    ITS OWN ROUTE RATHER THAN A MEDIA FLAG ON THE SHOW SEARCH, and the reason
+    is not that the payloads differ — it is that a show and a film MEAN
+    different things and change for different reasons, which is the test for
+    what may not be collapsed into one unit. A SHOW IS ADDED TO BE TRACKED AS
+    ITS EPISODES AIR: it goes onto the viewer's own list or becomes a month's
+    premiere record, and the point of adding it is everything that happens
+    afterwards — which is why it needs a season picker, a show search hit
+    being incomplete without one. A FILM IS RECORDED AS ALREADY WATCHED: it
+    goes straight into the month as completed, there is nothing to track and
+    nothing will happen afterwards, so there is no season to pick and never
+    will be. What is shared between the two routes is the port and the merge,
+    both media-parameterized; what is not shared is what each route does with
+    the answer.
+
+    Gated on WHETHER ANY SOURCE CAN BE SEARCHED, exactly as the show search is
+    — see `_search_fragment` for why `providers.for_catalogue_search` is asked
+    rather than `trakt_catalogue_configured` alone, and for why a film hit with
+    no shared id comes back refused on the row while a show hit does not.
+    """
+    return await _search_fragment(request, Media.MOVIE)
 
 
 @guard.post("/api/distrakt/add-movie", AuthLevel.DISTRAKT_APPROVED)
@@ -1438,22 +1646,81 @@ async def api_distrakt_remove_movie(request: Request):
 
 @guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_seasons(request: Request):
-    """Aired seasons for a show (add-flow season picker) — required so the
-    browser can call fetch_show_seasons().
+    """The add flow's season picker for one search hit, answered by WHICHEVER
+    SOURCE FOUND IT — `source` names the service, `id` is that service's own
+    id for the title (a merged hit's `source_ids[source]`, never a shared id).
 
-    A show's season list is public catalogue data, so this asks the catalogue
-    question and not whether this viewer linked Trakt."""
+    THREE THINGS COME BACK FROM ONE LOOKUP (app/providers/base.py's
+    `DetailPort.fetch_seasons` — see its own docstring for why): the season
+    list a picker offers, the season this hit's own per-title record already
+    names (so a Simkl season-title skips the picker outright), and every
+    shared id that same lookup surfaced. THE LAST ONE IS WHAT RESOLVES A BARE
+    HIT: a search result with no shared id is under-described, not unkeyable
+    (measured — a per-title lookup fills in every one, 5 for 5), and this is
+    the same lookup the season question already pays for, so resolving it here
+    costs nothing beyond what the click already spends.
+
+    `ids...` QUERY PARAMS ARE THE HIT'S OWN, as the search response's `ids`
+    handed them back — unioned with what THIS lookup surfaces before the key
+    is re-resolved, with the LOOKUP winning any disagreement. Without them a
+    source whose per-title lookup adds nothing new (Trakt, always — see
+    SeasonsAnswer's own docstring) would look unresolvable even though the
+    search hit that named it was never bare; without the precedence, a row
+    whose id and whose season came from two different titles would be filed
+    as one that can never be counted.
+
+    `unkeyable` CARRIES `UnkeyableRecord`'s OWN MESSAGE when the union still
+    names no shared id, the same sentence api_distrakt_add's 400 uses for the
+    identical refusal — one source of truth for why a title cannot be filed,
+    stated here BEFORE an add is offered rather than only after it is tried.
+
+    `network` IS THE FOURTH THING THE ONE LOOKUP ANSWERS, and it is here for the
+    reason the ids are: a source whose SEARCH hit carries no network (Simkl,
+    measured) carries one on the per-title record this call already makes, and
+    on a single-catalogue instance there is no second source for the merge to
+    fill the gap from — so a show added by hand reached the roster with no
+    network, drew no emoji in the announcement post, and registered "" in the
+    viewer's emoji map. Empty from a source whose hit already had it (Trakt),
+    which is what makes the caller's "keep what I have unless this fills it"
+    a no-op rather than a special case.
+    """
     settings = await _distrakt_settings(await _distrakt_user_id(request))
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    trakt_id = request.query_params.get("id")
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
     try:
-        seasons = await trakt_detail.fetch_show_seasons(settings, trakt_id)
-    except TraktError as exc:
+        source = Source(request.query_params.get("source", ""))
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Missing or invalid source"}, status_code=400)
+    provider = providers.get(source)
+    if not provider.detail_port.catalogue_configured(settings):
+        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    source_id = request.query_params.get("id", "")
+    if not source_id:
+        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    media = parse_media(request.query_params.get("media"), Media.SHOW)
+    title = request.query_params.get("title", "")
+    given_ids = _client_ids({key: request.query_params.get(key)
+                             for key in ID_KEYS if key in request.query_params})
+    try:
+        answer = await provider.detail_port.fetch_seasons(settings, source_id, media)
+    except SourceUnavailable as exc:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "seasons": seasons})
+    # THE LOOKUP WINS A CONFLICT, and the client's ids fill in the rest. This
+    # answer's `season` was read off the per-title record `answer.ids` came
+    # from, so those two describe the same title by construction; a client id
+    # that disagrees describes a different one, and keeping it would file the
+    # record with one title's season beside another title's id — which is
+    # exactly what a source listing one series as several titles produces, and
+    # a record nothing can then count. The client's own ids still travel
+    # because a lookup that surfaces nothing (Trakt, always — see
+    # SeasonsAnswer) must not read as "this hit had no ids after all".
+    resolved_ids = {**given_ids, **answer.ids}
+    return JSONResponse({
+        "ok": True,
+        "seasons": answer.seasons,
+        "season": answer.named_season,
+        "ids": resolved_ids,
+        "network": answer.network,
+        "unkeyable": _unkeyable_reason(media, resolved_ids, title),
+    })
 
 
 async def _register_networks(user_id: int, networks) -> dict:
@@ -1487,13 +1754,13 @@ async def api_distrakt_add(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
-    # instance's client id, exactly as /search and /seasons ask for the same
-    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
-    # `trakt_configured` here asked whether this account had linked Trakt — and
-    # refused the whole action to somebody signed in with Simkl alone.
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    # NO CATALOGUE GATE. This used to refuse the whole add unless the instance
+    # held a TRAKT client id, which was the same shape of mistake `trakt_configured`
+    # was here for before it: a season lookup that only Trakt could answer, stated
+    # as a precondition on adding anything at all. The lookup below now asks
+    # whichever source the title's own ids name (live.season_detail), so a
+    # Simkl-only instance adds a Simkl-only title; and a lookup that cannot be
+    # made at all is already survivable — see this function's own last paragraph.
     data = await authz.json_body(request)
     today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
@@ -1516,6 +1783,14 @@ async def api_distrakt_add(request: Request):
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid ids/season"}, status_code=400)
+    # ADDING A SEASON WITHDRAWS ANY REFUSAL ABOUT IT. A dismissal says "do not put
+    # this season back on my list, stop asking", and adding it by hand is the
+    # viewer doing exactly the thing that refusal refused — so the refusal has
+    # lapsed. Left standing it silences the page's questions about a season the
+    # viewer has visibly changed their mind about, which is what happened to a
+    # re-added verdict: it could not be questioned again because a refusal made
+    # about the row that used to be there still applied to the one replacing it.
+    await distrakt_store.clear_prompt_dismissal(user_id, key, int(show["season"]))
     month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
         # No backfill: refuse to create a never-tracked PAST month even via a
@@ -1526,9 +1801,12 @@ async def api_distrakt_add(request: Request):
             status_code=400,
         )
     try:
-        detail = await trakt_detail.fetch_season_detail(settings, (show["ids"]).get("trakt"),
-                                                        show["season"])
-    except TraktError:
+        # WHICHEVER SOURCE THIS TITLE'S OWN IDS NAME, through the same one rule
+        # the live pass uses. Asking Trakt directly handed a Simkl-only title a
+        # None id, so the record was stored with no episode total, no air dates
+        # and no way to ever acquire them.
+        detail = await live.season_detail(settings, show)
+    except SourceUnavailable:
         detail = {}
     if detail and not detail.get("started_airing"):
         await distrakt_store.add_month_record(user_id, month_key, {
@@ -1567,19 +1845,17 @@ async def api_distrakt_add_completed(request: Request):
     person saying "January had this in it", which is the case it was never meant
     to cover. Past months only: the current month is the tracker's own to bucket.
 
-    The episode total comes from Trakt's season detail, not from the caller — a
-    frozen month's counts are never recomputed, so a wrong one is wrong forever
-    and would reach the ranker import as a wrong episode count.
+    The episode total comes from a season lookup, not from the caller — a frozen
+    month's counts are never recomputed, so a wrong one is wrong forever and
+    would reach the ranker import as a wrong episode count.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)
-    # A CATALOGUE LOOKUP, NOT A READ OF ANYBODY'S OWN DATA. What this needs is the
-    # instance's client id, exactly as /search and /seasons ask for the same
-    # lookup. `_distrakt_settings` swaps in the VIEWER's token, so asking
-    # `trakt_configured` here asked whether this account had linked Trakt — and
-    # refused the whole action to somebody signed in with Simkl alone.
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+    # NO CATALOGUE GATE, for the reason api_distrakt_add gives: which source can
+    # answer for a title follows from the title's own ids, so an instance-wide
+    # precondition naming ONE service is the wrong question to ask here. This
+    # route still refuses when the lookup comes back with no episodes, which is
+    # the condition it actually cares about.
     data = await authz.json_body(request)
     today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
@@ -1594,17 +1870,25 @@ async def api_distrakt_add_completed(request: Request):
         season = int(data["season"])
     except (KeyError, TypeError, ValueError):
         return JSONResponse({"ok": False, "error": "Missing or invalid season"}, status_code=400)
-    if not ids.get("trakt"):
+    if not ids:
         return JSONResponse({"ok": False, "error": "Missing or invalid ids"}, status_code=400)
 
     try:
-        detail = await trakt_detail.fetch_season_detail(settings, ids["trakt"], season)
-    except TraktError as exc:
-        return JSONResponse({"ok": False, "error": f"Trakt could not be read: {exc}"}, status_code=502)
+        # The episode total has to be REAL here — a frozen month's counts are
+        # never recomputed — so unlike the ordinary add this one refuses rather
+        # than degrading. Asked of whichever source the ids name, so a
+        # Simkl-only title can be filled in by hand too; it used to require a
+        # Trakt id outright, which is why it could not be.
+        detail = await live.season_detail(settings, {"media": Media.SHOW, "ids": ids,
+                                                     "season": season})
+    except SourceUnavailable as exc:
+        return JSONResponse({"ok": False, "error": f"That season could not be read: {exc}"},
+                            status_code=exc.status or 502)
     total = int((detail or {}).get("total") or 0)
     if not total:
         return JSONResponse(
-            {"ok": False, "error": "Trakt lists no episodes for that season, so it cannot be recorded as finished."},
+            {"ok": False,
+             "error": "No source lists any episodes for that season, so it cannot be recorded as finished."},
             status_code=400)
 
     try:
@@ -2019,21 +2303,35 @@ async def _live_form_source(settings, record: dict, season: int) -> dict:
     Degrades to the stored record rather than failing. Giving up is a user ACTION
     and must still succeed — it is not a read to fail on — so an unreachable
     provider costs the line its live counts and nothing else.
+
+    TWO HALVES, TWO DIFFERENT QUESTIONS, AND ONLY ONE OF THEM IS PUBLIC. How long
+    the season is, is catalogue data and is asked of whoever the record's own ids
+    name (`live.season_detail`) — a form frozen on an instance that reads its
+    catalogue from somewhere other than Trakt used to carry the stored record and
+    nothing fresh at all. How much of it THIS VIEWER has watched is their own
+    data, and it is still read from Trakt alone, behind the private
+    `trakt_configured` gate that is genuinely entitled to guard it: a per-source
+    answer to that needs the watch-history state this path does not hold, which
+    is a different piece of work from swapping a season lookup. Where it cannot
+    be read the record keeps its OWN `watched`, which is the number the row the
+    viewer just pressed was drawing.
     """
+    rec = {**record, "season": season}
+    try:
+        detail = await live.season_detail(settings, rec)
+    except SourceUnavailable:
+        return dict(record)
+    form = {**record, **detail, "season": season}
     source_id = (record.get("ids") or {}).get("trakt")
     if not (settings and getattr(settings, "trakt_configured", False)) or source_id is None:
-        return dict(record)
+        return form
     try:
-        watched, detail = await asyncio.gather(
-            trakt_sync.fetch_watched_map(settings, [source_id]),
-            trakt_detail.fetch_season_detail(settings, source_id, season),
-        )
+        watched = await trakt_sync.fetch_watched_map(settings, [source_id])
     except TraktError:
-        return dict(record)
+        return form
     # fetch_watched_map answers in Trakt's own (id, season) terms, so this one
     # count is re-filed under the shared identity the record is keyed by.
-    return {**record, "watched": watched.get((int(source_id), season), 0), **detail,
-            "season": season}
+    return {**form, "watched": watched.get((int(source_id), season), 0)}
 
 
 @guard.get("/api/distrakt/export", AuthLevel.DISTRAKT_APPROVED)

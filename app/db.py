@@ -2140,6 +2140,297 @@ CREATE INDEX ix_trakt_releases_fetched ON trakt_releases(fetched_at);
 """
 
 
+def MIGRATION_28(conn: sqlite3.Connection) -> None:
+    """Re-address every cached Simkl answer that was filed under a client id.
+
+    Simkl takes its client id as a QUERY PARAMETER, so it was part of the URL the
+    response cache keys on and every stored catalogue answer belonged to the
+    credential that fetched it. It does not: the same public title comes back
+    with no client id, a bogus one and the real one, so the credential selects
+    nothing and only ever narrowed who could read the row back. The key is built
+    without it now (app/providers/simkl/transport.py's `cache_key` is the one
+    statement of the shape), which leaves every row written before that change
+    addressed by a key nothing will ever ask for again.
+
+    WITHOUT THIS THEY WOULD NEVER LEAVE. `cache.set` writes these rows with no
+    per-row TTL, so the age sweep skips them by design, and the size sweep does
+    not fire until `api_cache_max_bytes` — a gigabyte. On a real instance holding
+    a few dozen megabytes that is never, so 13,470 unreachable rows would sit
+    there for the life of the database while the same titles were fetched again
+    beside them.
+
+    REKEYED RATHER THAN DELETED. The payloads are perfectly good answers about
+    titles whose content never depended on the credential, and they are exactly
+    what the modal falls back to when a source cannot be reached. Deleting them
+    would throw away the thing the change was made to make reachable.
+
+    THE SHAPE IS RESTATED HERE, NOT IMPORTED, and that is deliberate rather than
+    duplication: a migration transforms the keys as they were WRITTEN at a
+    particular time into the shape they had to become at that time. If `cache_key`
+    changes again, this must go on doing what it does now — following it would
+    make an already-applied migration mean something different. (The kernel also
+    may not import a provider package; that rule points the same way.)
+
+    UPDATE OR REPLACE, because `cache_key` is the primary key: an instance that
+    had rotated its client id can hold two rows for one question, and they
+    collapse onto the one address. Keeping the later-written one is right — both
+    are answers to the same question and neither is more this instance's than the
+    other.
+    """
+    from urllib.parse import parse_qsl, urlencode
+
+    rows = conn.execute(
+        "SELECT cache_key FROM api_cache WHERE cache_key LIKE ?",
+        ("https://api.simkl.com/%client_id=%",),
+    ).fetchall()
+    for row in rows:
+        old = row[0]
+        base, _, query = old.partition("?")
+        # Sorted, which is what `cache_key` does: with the credential no longer
+        # appended last there is nothing else making the order canonical, and two
+        # spellings of one question must not become two rows.
+        kept = sorted((name, value) for name, value in parse_qsl(query, keep_blank_values=True)
+                      if name != "client_id")
+        new = f"{base}?{urlencode(kept)}"
+        if new != old:
+            conn.execute("UPDATE OR REPLACE api_cache SET cache_key = ? WHERE cache_key = ?",
+                         (new, old))
+
+
+MIGRATION_29 = """
+-- GIVE EVERY STORED RECORD THE SERVICE IDS ITS WATCH STATE ALREADY KNOWS.
+--
+-- A baseline that matches a roster title against another service's library gets
+-- that service's own id back on the matched entry and keeps it on the watch
+-- state. Source selection reads the RECORD, so a row could report counts from
+-- both services -- proof the second one holds history for it -- and still say
+-- the first was not configured the moment that credential went away. The live
+-- pass writes the id onto the record now, but it only reaches what it renders:
+-- the open month's premieres and the viewer's own list. It never sees a SETTLED
+-- verdict (deliberately kept out, so a verdict keeps the counts it was reached
+-- on) or anything in a FROZEN month (which renders from its snapshot and runs no
+-- live pass at all). Those records would keep their gap for ever.
+--
+-- ADD-ONLY, WHICH IS THE SAME RULE store.learn_ids APPLIES. Only a column that
+-- is NULL is filled: a stored id is what every per-title path has been calling
+-- with and normally came off that service's own payload, while the one arriving
+-- here was matched across services on the shared identity -- a join, not a
+-- statement, and one service can list a series as several titles that resolve to
+-- one tracker key.
+--
+-- THE IDENTITY IS UNTOUCHED. media/match_source/match_id are the WHERE clause
+-- and never the SET, so a record learning an id stays filed exactly where it
+-- was. MATCH_SOURCES excludes `simkl` for precisely this reason, so gaining one
+-- cannot move a row.
+--
+-- MIN() RATHER THAN A BARE SUBQUERY because there is one progress row per
+-- (season, source) and any of them can carry the id. They agree in every case
+-- measured -- the ids describe the TITLE, not the season -- but an unordered
+-- pick from several rows is a result that could differ between two runs of the
+-- same migration, which is not a property a migration may have.
+UPDATE distrakt_month_records AS r
+   SET simkl_id = (SELECT MIN(p.simkl_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.simkl_id IS NOT NULL)
+ WHERE r.simkl_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.simkl_id IS NOT NULL);
+
+UPDATE distrakt_month_records AS r
+   SET trakt_id = (SELECT MIN(p.trakt_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.trakt_id IS NOT NULL)
+ WHERE r.trakt_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.trakt_id IS NOT NULL);
+
+UPDATE distrakt_user_seasons AS r
+   SET simkl_id = (SELECT MIN(p.simkl_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.simkl_id IS NOT NULL)
+ WHERE r.simkl_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.simkl_id IS NOT NULL);
+
+UPDATE distrakt_user_seasons AS r
+   SET trakt_id = (SELECT MIN(p.trakt_id) FROM distrakt_show_progress p
+                    WHERE p.user_id = r.user_id AND p.media = r.media
+                      AND p.match_source = r.match_source AND p.match_id = r.match_id
+                      AND p.trakt_id IS NOT NULL)
+ WHERE r.trakt_id IS NULL
+   AND EXISTS (SELECT 1 FROM distrakt_show_progress p
+                WHERE p.user_id = r.user_id AND p.media = r.media
+                  AND p.match_source = r.match_source AND p.match_id = r.match_id
+                  AND p.trakt_id IS NOT NULL);
+"""
+
+
+MIGRATION_30 = """
+-- WHICH LINKED TRACKER DECIDES, WHEN MORE THAN ONE ANSWERS FOR A SEASON.
+--
+-- Two services can report different counts for one season and both be right,
+-- and one number has to be picked: it is what the bucket rule reads to decide a
+-- season is finished, and it is what a frozen month and an announcement post
+-- carry for ever. That pick has always been the REGISTRY's declared order --
+-- app-wide, identical for everybody, and not a thing an account could state.
+--
+-- WHY THAT NEEDED TO BECOME A PREFERENCE. The registry order is a fact about
+-- what this app supports, not about whose viewing an account trusts. Somebody
+-- migrating between services has the order backwards and cannot say so; worse,
+-- the registry order does not follow a LINK, so a service unlinked long ago
+-- goes on deciding from whatever number it last left behind, and a season
+-- finished at the service the viewer actually uses can never complete.
+--
+-- A LIST OF SOURCE NAMES, MOST TRUSTED FIRST, AND IT IS A REORDERING RATHER
+-- THAN A SELECTION -- the same shape and the same rule as precedence_json's
+-- field order beside it. A source this account does not name still answers when
+-- it is the only one that can; a name this version does not recognise falls out
+-- on the way past. So an empty list is the honest default for an account that
+-- has said nothing, and it reads as "use the declared order", which is exactly
+-- what every account got before this column existed.
+--
+-- WHAT IT DELIBERATELY DOES NOT REACH: a month already frozen. Those numbers
+-- are the answer to "what did that month decide", not a live claim, and a
+-- preference changed today must not re-answer an earlier year's record.
+ALTER TABLE source_prefs ADD COLUMN tracker_order_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
+MIGRATION_31 = """
+-- A SLUG BELONGS TO ONE SERVICE, AND THE COLUMN THAT HELD IT DID NOT SAY WHICH.
+--
+-- Trakt and Simkl both call a title's readable name `slug` and do not agree on
+-- it: Trakt writes `the-traitors-2023` where Simkl writes `the-traitors`. A
+-- roster row knows a title by BOTH services, so both wrote into the one `slug`
+-- column and whichever synced last won. Every link built from it was then wrong
+-- for the other service — the tracker's episode ticks open `app.trakt.tv/shows/
+-- {slug}`, which lands nowhere when the value came from Simkl, and the same
+-- would have been true in reverse the moment Simkl's link used it.
+--
+-- ADD-ONLY, AND THE BACKFILL REFUSES TO GUESS. A row only ONE service knows must
+-- have taken its slug from that service, which is provable and is what these two
+-- statements copy. A row BOTH services know is genuinely ambiguous — the value
+-- is whichever wrote last and nothing recorded which — so it is left NULL and
+-- re-learned from the next sync, which writes the namespaced key. Guessing there
+-- would bake in the exact ambiguity this migration exists to remove, and a
+-- confidently wrong slug is what the bug already was.
+--
+-- `slug` IS NOT DROPPED. It is the only value the ambiguous rows have until a
+-- sync fills the new ones in, and readers fall back to it — so dropping it would
+-- break links this migration is meant to fix, to reclaim one column.
+ALTER TABLE distrakt_user_seasons  ADD COLUMN trakt_slug TEXT;
+ALTER TABLE distrakt_user_seasons  ADD COLUMN simkl_slug TEXT;
+ALTER TABLE distrakt_month_records ADD COLUMN trakt_slug TEXT;
+ALTER TABLE distrakt_month_records ADD COLUMN simkl_slug TEXT;
+
+-- THE HELD-ROWS TABLE CARRIES THE SAME IDS AND MUST GROW WITH THEM. Its reader
+-- (unsettled._record) builds a record by walking store.ID_COLUMNS and taking each
+-- named column off the row, so a column named there and missing here is not a
+-- missing slug — it is an IndexError on every held row.
+ALTER TABLE distrakt_unsettled_rows ADD COLUMN trakt_slug TEXT;
+ALTER TABLE distrakt_unsettled_rows ADD COLUMN simkl_slug TEXT;
+
+UPDATE distrakt_unsettled_rows
+   SET trakt_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND simkl_id IS NULL;
+UPDATE distrakt_unsettled_rows
+   SET simkl_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND trakt_id IS NULL AND simkl_id IS NOT NULL;
+
+UPDATE distrakt_user_seasons
+   SET trakt_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND simkl_id IS NULL;
+UPDATE distrakt_user_seasons
+   SET simkl_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND trakt_id IS NULL AND simkl_id IS NOT NULL;
+
+UPDATE distrakt_month_records
+   SET trakt_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND simkl_id IS NULL;
+UPDATE distrakt_month_records
+   SET simkl_slug = slug
+ WHERE slug IS NOT NULL AND slug <> '' AND trakt_id IS NULL AND simkl_id IS NOT NULL;
+"""
+
+
+MIGRATION_32 = """
+-- A SERVICE STOPPED LISTING A TITLE, WHICH IS NOT THE SAME AS THE VIEWER
+-- FINISHING WITH IT.
+--
+-- Simkl documents that `date_from` deltas never surface removals, and prescribes
+-- detecting them by diffing an ids-only re-read against what is held locally.
+-- What it prescribes DOING about the difference is deleting the local rows. This
+-- app records it instead, and the reason is that the two failure modes are not
+-- symmetrical: watch history is not re-derivable from anything this app holds, so
+-- a wrong deletion is permanent and invisible, while a wrong mark is visible and
+-- costs nothing to undo. A sync hiccup, a re-catalogued title, a bucket that
+-- failed in a way the partial-read logic did not catch — any of those can produce
+-- an absence, and none of them is worth a viewer's history.
+--
+-- PER SOURCE, WHICH IS WHY IT IS A LIST AND NOT A FLAG. A title dropped at Simkl
+-- may still be held at Trakt, and a row that said only "missing" could not say
+-- whose statement that was — the same ambiguity the shared `slug` column was
+-- split apart to remove. An empty list is the default and means every linked
+-- service still lists it.
+--
+-- ON THE USER RECORD RATHER THAN THE MONTH, AND THE LIFECYCLE IS THE ARGUMENT.
+-- distrakt_month_records FREEZES: a month closing while a title was missing would
+-- say so for ever, which reintroduces exactly the irreversibility this exists to
+-- avoid. This table is the viewer's living list — recomputed every load, rolled
+-- forward month to month the way keepup and catchup already are — so the mark
+-- travels with the row until it clears or the viewer purges it.
+--
+-- IT CLEARS ITSELF. A source naming the title again removes that source from the
+-- list, with no acknowledgement needed; `came_back` beside it works the other way
+-- (cleared only by the viewer) because it remembers something no later read can
+-- restate. This one is a claim about what a service currently holds, so the
+-- service's next answer is exactly what should overwrite it.
+ALTER TABLE distrakt_user_seasons ADD COLUMN missing_sources_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
+MIGRATION_33 = """
+-- "I HAVE MOVED OFF THAT SERVICE — STOP COUNTING WHAT IT LEFT BEHIND."
+--
+-- Unlinking a service stops it being ASKED, and that much already worked. What it
+-- could not do is stop the numbers it already contributed from counting: those
+-- live in the watch state, they are still per-source, and every row that ever had
+-- one goes on rendering it. The row says so honestly -- `counts_freshness` reads
+-- `partial`, meaning "a number here belongs to a service nobody asked, and no
+-- refresh will move it" -- but that is a state with NO EXIT. An account that has
+-- genuinely migrated reads as permanently degraded rather than as a healthy
+-- single-service account.
+--
+-- A LIST OF SERVICE NAMES WHOSE STORED NUMBERS THIS ACCOUNT NO LONGER COUNTS,
+-- beside tracker_order_json and shaped the same way: names this version does not
+-- recognise fall out on the way past, and an empty list is the honest default
+-- meaning "count everything", which is what every account had before this column.
+--
+-- IGNORED, NEVER DELETED. The numbers stay exactly where they are and the row
+-- still shows them, marked as retired -- because deleting them would throw away
+-- the only record of a service's contribution to settle a display question, and
+-- because un-retiring has to be able to put things back. It is the same stance
+-- the removal marks take one migration earlier: record the decision, do not act
+-- destructively on it.
+--
+-- IT DOES NOT REACH A FROZEN MONTH, and that is the boundary this must not cross.
+-- A settled month's `watched_by_source` is not a cache and not a live claim: it
+-- is what that month RECORDED, and it will never be recomputed. Retiring a source
+-- today must not silently re-answer what an earlier month decided -- exactly the
+-- rule tracker_order_json already follows for the same reason.
+ALTER TABLE source_prefs ADD COLUMN tracker_retired_json TEXT NOT NULL DEFAULT '[]';
+"""
+
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2168,6 +2459,12 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (25, MIGRATION_25),
     (26, MIGRATION_26),
     (27, MIGRATION_27),
+    (28, MIGRATION_28),
+    (29, MIGRATION_29),
+    (30, MIGRATION_30),
+    (31, MIGRATION_31),
+    (32, MIGRATION_32),
+    (33, MIGRATION_33),
 ]
 
 

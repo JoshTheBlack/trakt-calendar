@@ -132,17 +132,16 @@ function applyReadonlyState(readonly, kind) {
 function renderNotice(d) {
     const el = document.getElementById('distraktNotice');
     if (!el) return;
-    const down = (d && d.sources_unreadable) || [];
+    // THE SENTENCES ARE THE SERVER'S, FINISHED. There is more than one reason a
+    // count can be missing — a service that could not be read, one this instance
+    // holds no credential for, a title nothing can look up — and they call for
+    // different things from the reader. Building them here meant the wording sat
+    // where it could not be checked against the rule that chooses between them
+    // (app/distrakt/live.py's unavailable_notices), which is how "could not be
+    // reached" came to be shown for a service that was simply absent.
     const lines = [];
     if (d && d.notice) lines.push(d.notice);
-    if (down.length) {
-        // Worded so it is true whether or not anything else answered. When a
-        // second account did, the counts below are its alone; when nothing did,
-        // they are the last ones that were written down. Either way the honest
-        // statement is that this service is not in them.
-        lines.push(down.join(' and ')
-            + ' could not be read just now — the counts below are only what could be read without it.');
-    }
+    for (const notice of (d && d.source_notices) || []) lines.push(notice);
     if (lines.length) {
         el.textContent = '⚠ ' + lines.join(' ');
         el.hidden = false;

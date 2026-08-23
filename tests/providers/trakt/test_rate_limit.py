@@ -28,6 +28,12 @@ from tests.support import new_db_path
 FAKE_SETTINGS = SimpleNamespace(
     trakt_access_token="tok", trakt_client_id="cid",
     pagination_limit=100, cache_ttl_minutes=10,
+    # The live pass now asks WHICH source can answer for each record before it
+    # asks anything (live.detail_source), and that question is a per-port
+    # predicate reading these two — a record whose source is unconfigured is
+    # never fetched at all, so a stand-in Settings has to answer them or the
+    # degrade path below is measuring the wrong thing.
+    trakt_catalogue_configured=True, simkl_catalogue_configured=False,
 )
 
 

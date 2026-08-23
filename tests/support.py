@@ -184,7 +184,14 @@ class AppTestCase(unittest.TestCase):
     def make_settings(self):
         from app.config import Settings
 
-        return Settings()
+        # AN INSTANCE WITH NOTHING SET UP, AND THAT NOW HAS TO BE SAID OUT LOUD
+        # FOR THE ONE SOURCE THAT NEEDS NOTHING. Simkl's calendar is public CDN
+        # files, so it is a usable calendar source on a Settings with every
+        # credential blank — which is correct for the app and wrong for a shared
+        # fixture: it would have every page render in this suite reach for a real
+        # CDN, and conftest's network guard is what would tell you, one file at a
+        # time. A test that wants that source switches it back on.
+        return Settings(simkl_public_calendar_enabled=False)
 
     def setUp(self):
         from app.config import save_settings

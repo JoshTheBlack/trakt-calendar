@@ -34,8 +34,14 @@ from tests.support import new_db_path
 # and belongs to the instance rather than to the account: whether there is a
 # CALENDAR to build a month's premieres from, which is what rollover asks before
 # it will create one.
+# The fourth pair is the CATALOGUE question, asked per source before a season
+# lookup is made at all (live.detail_source): can this instance ask that service
+# about a title, which is its client id and not anybody's token. Both true, so
+# which service answers for a record goes on being decided by the ids it carries.
 SETTINGS = SimpleNamespace(trakt_configured=True, simkl_configured=False,
                            calendar_source_configured=True,
+                           trakt_catalogue_configured=True,
+                           simkl_catalogue_configured=True,
                            network_emojis={}, default_network_emoji=":tv:",
                            timezone="UTC")
 
@@ -1134,6 +1140,71 @@ class AMonthOnlyShowsWhatItCanShowTests(RolloverTestCase):
         # Kept off that month's view, not taken away: the season is still the
         # viewer's and is still on their own list.
         self.assertEqual(await self._held(self.user_id), {(101, 1)})
+
+    async def test_looking_at_a_month_that_has_not_begun_imports_nothing(self):
+        """READING A MONTH MUST NOT DECIDE WHAT IS IN IT.
+
+        This load used to re-import a preview month's premieres on every visit, so
+        that the month tracked the calendar. What that meant in practice is that
+        the calendar's list for a month goes on growing right up to the 1st: on the
+        instance this was found on, opening next month filed 85 titles the viewer
+        had never chosen, in one visit. Import from calendar is the ask, and it is
+        the only thing that adds — which is the same rule rollover.can_initialize
+        already applies to BUILDING such a month.
+        """
+        from app.distrakt import routes as distrakt_routes
+
+        today = date.today()
+        year, month = _months_ahead(today, 1)
+        preview = distrakt.month_key(year, month)
+        # What a previous, deliberate import put there.
+        await self._premiere(self.user_id, preview, 201, title="Asked For",
+                             premiere="8/15")
+
+        # And a premiere the calendar has learned about SINCE. It is a real,
+        # importable entry — the assertion is about who decides, not about an
+        # empty calendar.
+        async def one_new_premiere(endpoint, settings, **kw):
+            return [_cal_item(301, 1, "Learned Since")], None
+
+        settings = SimpleNamespace(**vars(SETTINGS), public_base_url="")
+        with patch("app.providers.trakt.sync.fetch_progress_details", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_last_activities", return_value={}), \
+             patch("app.providers.trakt.sync.fetch_history", return_value=[]), \
+             patch("app.providers.trakt.sync.fetch_play_counts",
+                   return_value=PlayCounts({}, False)), \
+             patch("app.providers.trakt.detail.fetch_season_detail", side_effect=_fake_season_detail), \
+             patch("app.calendar.cache.read_month", side_effect=one_new_premiere), \
+             patch("app.media.logos.ensure_logos", new=AsyncMock(return_value=None)):
+            payload, status = await distrakt_routes._distrakt_month_payload(
+                self.user_id, year, month, settings)
+
+        self.assertEqual(status, 200)
+        stored = {int((r.get("ids") or {}).get("tmdb"))
+                  for r in await distrakt.month_records(self.user_id, preview)}
+        self.assertEqual(stored, {201}, "looking at a preview month imported into it")
+        self.assertNotIn(301, {int((s.get("ids") or {}).get("tmdb"))
+                               for s in payload["shows"]})
+
+    async def test_the_import_control_still_adds_to_a_month_that_has_not_begun(self):
+        """The other half, so the rule above reads as "only when asked" rather
+        than as "never": the same premiere the load refused arrives the moment
+        somebody presses Import."""
+        today = date.today()
+        year, month = _months_ahead(today, 1)
+        preview = distrakt.month_key(year, month)
+        await self._premiere(self.user_id, preview, 201, title="Asked For",
+                             premiere="8/15")
+
+        async def one_new_premiere(endpoint, settings, **kw):
+            return [_cal_item(301, 1, "Learned Since")], None
+
+        with patch("app.calendar.cache.read_month", side_effect=one_new_premiere):
+            await distrakt.import_premieres(self.user_id, preview, SETTINGS)
+
+        stored = {int((r.get("ids") or {}).get("tmdb"))
+                  for r in await distrakt.month_records(self.user_id, preview)}
+        self.assertEqual(stored, {201, 301})
 
 
 class ATurnAwayKeepsATitleOutOfAMonthTests(RolloverTestCase):

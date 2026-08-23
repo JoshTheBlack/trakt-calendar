@@ -66,6 +66,19 @@ COMPRESS_LEVEL = 6
 # exactly the path this is for.
 TTL_GRACE_SECONDS = 90 * 24 * 60 * 60
 
+# HOW LONG A CATALOGUE ANSWER IS WORTH KEEPING AT ALL, as opposed to how fresh it
+# has to be to serve a request — see `set`, where that distinction is the whole
+# point. Six months, which is far past every read-time ttl in the app and past
+# the stale reads a public share card makes (it draws whatever is cached and
+# never fetches), so nothing live is ever reclaimed. What it reclaims is a key
+# nothing asks for any more, which previously stayed for ever.
+#
+# THE SWEEP ADDS ITS GRACE ON TOP, so a row is actually reclaimed at this plus
+# TTL_GRACE_SECONDS — nine months in total. That is not a second policy: the
+# grace is one number the sweep applies to every TTL it honours, and stating this
+# one net of it would mean the constant and the behaviour disagreed.
+RETAIN_SECONDS = 180 * 24 * 60 * 60
+
 
 def _encode(value) -> bytes:
     return zlib.compress(json.dumps(value, separators=(",", ":")).encode("utf-8"), COMPRESS_LEVEL)
@@ -124,20 +137,37 @@ async def get_stale(key: str):
         return None
 
 
-async def set(key: str, value) -> None:
-    """Store `value` for `key`. Written with no per-row TTL: freshness for these
-    detail lookups is decided by the ttl passed to get(), so the row is aged out
-    by the size cap rather than the TTL sweep. Best-effort — a write failure is
-    swallowed."""
+async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> None:
+    """Store `value` for `key`, to be reclaimed once nothing has re-fetched it for
+    `retain_seconds`. Best-effort — a write failure is swallowed.
+
+    THE ROW'S TTL IS NOT ITS FRESHNESS. How stale an answer may be before a
+    caller re-fetches is decided by the ttl passed to `get`, per read, and is
+    measured in minutes or hours; this one decides when a row is worth keeping AT
+    ALL, and is measured in months. The two never met before because rows were
+    written with no TTL at all, which put them entirely beyond the age sweep.
+
+    WHAT THAT COST: a key nothing asks for any more was kept for ever. Change the
+    parameters a call sends — a search that starts asking for more results, a
+    lookup that gains a field — and the old address is orphaned, unreachable and
+    unreclaimed, because the only eviction was a size cap this instance never
+    reaches. There are such rows in the field already, from a search-by-id path
+    that no longer exists.
+
+    A ROW STILL IN USE NEVER AGES OUT, which is what makes this safe: every
+    refresh re-inserts and bumps `cached_at`, so the clock only ever runs on rows
+    nothing has asked for. What expires is precisely the orphans, plus titles
+    genuinely untouched for half a year — and those simply get fetched again.
+    """
     def _work(conn: db.Connection) -> None:
         blob = _encode(value)
         conn.execute(
             "INSERT INTO api_cache (cache_key, payload, cached_at, ttl_seconds, byte_size) "
-            "VALUES (?, ?, ?, NULL, ?) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(cache_key) DO UPDATE SET "
             "payload = excluded.payload, cached_at = excluded.cached_at, "
             "ttl_seconds = excluded.ttl_seconds, byte_size = excluded.byte_size",
-            (key, blob, db.now(), len(blob)),
+            (key, blob, db.now(), retain_seconds, len(blob)),
         )
 
     try:

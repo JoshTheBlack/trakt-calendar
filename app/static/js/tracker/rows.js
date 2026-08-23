@@ -186,6 +186,26 @@ function returnMark(s) {
             onclick="acknowledgeReturn('${esc(s.key)}', ${s.season}, this)">back</button>`;
 }
 
+// A service has stopped listing this title. NOT a deletion, and the mark exists
+// so that stays visible: the row keeps its counts and its place, and says which
+// service dropped it. Simkl prescribes deleting the local rows when its library
+// diff no longer names a title; this app records the statement instead, because
+// watch history is not re-derivable from anything here and a wrong deletion is
+// permanent and silent where a wrong mark costs nothing.
+//
+// NOT A BUTTON, WHICH IS THE DIFFERENCE FROM returnMark ABOVE. That marker is
+// cleared only by the viewer pressing it; this one is a claim about what a
+// service currently holds, so the service naming the title again clears it on its
+// own and there is nothing to press. Removing the row for good is the ✕ that was
+// always there — the one thing that deletes a record — and needs no second path.
+function missingMark(s) {
+    const gone = s.missing_sources || [];
+    if (!gone.length) return '';
+    const names = gone.map(name => esc(name)).join(' and ');
+    return ` <span class="distrakt-missing"
+            title="No longer in your ${names} library — your counts here are kept. Use ✕ to remove it.">dropped</span>`;
+}
+
 function showRow(s) {
     const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
     // The x/y comes from the server already written out, because when two
@@ -203,14 +223,27 @@ function showRow(s) {
     // already carrying both numbers, each named, and drawing it is all that is
     // left to do. The announcement post deliberately does NOT follow: it is prose
     // rather than a ledger and carries one number or none (app/distrakt/live.py).
+    // AND THE WHOLE STORY BEHIND IT HANGS OFF IT AS A TOOLTIP. One line has room
+    // for the numbers and nothing else, so a service nobody asked, a service that
+    // agrees, and a service that said "all of it" without itemizing all look
+    // identical in the cell — see app/distrakt/counts.py's counts_detail, which
+    // composes the long form server-side. This draws it and decides nothing: the
+    // sentence arrives finished, the same way `counts_note` beside it does.
     let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}` : xy;
     // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
     let dates = '';
     if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;
     else if (s.bucket === 'keepup') dates = s.finale || '?/?';
-    // Server couldn't refresh THIS show's totals (rate-limited/unreachable): don't
-    // present its last-known numbers as a fresh read — blank them and flag it.
-    if (s.unavailable) { counts = ''; dates = 'unavailable — refresh to retry'; }
+    // A ROW WHOSE TOTALS THE SERVER COULD NOT REFRESH KEEPS ITS NUMBERS. They are
+    // the last ones actually read, which is a real fact about the season, and
+    // blanking them was worse than showing them: a roster whose one catalogue
+    // credential went missing rendered as rows with no counts at all, which reads
+    // as "nothing here" rather than as "nothing new here". What the row owes the
+    // reader is not silence but a mark saying the numbers are not current —
+    // `distrakt-freshness` below, red or green, carrying the server's own
+    // sentence as its tooltip (app/distrakt/live.py composes both, because the
+    // reason differs — unreachable, unconfigured, or a title nothing can look up
+    // — and only the server knows which).
     // A closed month keeps its ✕ but loses the abandon toggle: what a past month
     // RECORDS can still be corrected (a season you finished years ago and
     // re-watched one episode of does not belong on its list), but its verdicts
@@ -242,14 +275,34 @@ function showRow(s) {
         <div class="distrakt-show-row${s.abandoned ? ' abandoned' : ''}${s.unavailable ? ' unavailable' : ''}" title="${esc(net)}"
              data-key="${esc(s.key)}" data-season="${s.season}" data-title="${esc(s.title)}"
              onclick="openDistraktDetails(this, event)">
+            <!-- Whether these numbers are this load's, first in the row so the
+                 column reads down as one thing rather than being hunted for
+                 beside each row's counts. On every row, so the mark means
+                 something on sight rather than only when it appears; the
+                 sentence behind it names the services the numbers came from and
+                 is composed server-side, where the reason is known.
+                 THREE STATES, NAMED BY THE SERVER: current, partial (a number
+                 here belongs to a service nobody asked, so no refresh will move
+                 it) and stale (a service was asked and could not be read). The
+                 class IS the server's word — branching here on a flag would put
+                 the vocabulary in two places, which is what the sentence itself
+                 already avoids.
+                 A CLOSED MONTH GETS NONE. What a frozen month recorded is not
+                 waiting on anybody, so freshness is not a question it has —
+                 asked of the month rather than inferred from a missing field,
+                 which is how a row that had one arrived here wearing it. -->
+            ${!monthClosed && s.counts_note ? `<span class="distrakt-freshness ${esc(s.counts_freshness || 'current')}"
+                  role="img" title="${esc(s.counts_note)}"
+                  aria-label="${esc(s.counts_note)}"></span>` : ''}
             <span class="distrakt-badge">${badge}</span>
-            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}</span>
+            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}${missingMark(s)}</span>
             <span class="distrakt-season">S${String(s.season).padStart(2, '0')}</span>
             <!-- Spelled out in every bucket, not just as a tooltip: this is the
                  string the emoji map is keyed on, so seeing it is what makes the
                  map editable without guessing. -->
             <span class="distrakt-network">${esc(net || '—')}</span>
-            <span class="distrakt-counts">${counts ? '(' + esc(counts) + ')' : ''}</span>
+            <span class="distrakt-counts"${counts && s.counts_detail
+                ? ` title="${esc(s.counts_detail)}"` : ''}>${counts ? '(' + esc(counts) + ')' : ''}</span>
             <span class="distrakt-dates">${esc(dates)}</span>
             <span class="distrakt-row-actions">${actions}</span>
         </div>`;

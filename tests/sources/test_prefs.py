@@ -281,6 +281,126 @@ class StoreTests(unittest.IsolatedAsyncioTestCase):
         await db.execute("DELETE FROM users WHERE id = ?", (self.user_id,))
         self.assertEqual(await db.fetch_value("SELECT COUNT(*) FROM source_prefs"), 0)
 
+    async def test_a_stated_tracker_order_survives_a_round_trip(self):
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_priority=["simkl", "trakt"]))
+        self.assertEqual((await prefs.load(self.user_id)).tracker_priority,
+                         ["simkl", "trakt"])
+
+    async def test_a_row_predating_the_column_reads_as_no_opinion(self):
+        """The column has a default, so the migration gave every existing row an
+        empty list rather than a NULL nothing can read — and an empty list is
+        exactly what every account had before it could state one."""
+        await db.execute(
+            "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
+            "precedence_json) VALUES (?, 'auto', 'auto', '{}')",
+            (self.user_id,))
+        self.assertEqual((await prefs.load(self.user_id)).tracker_priority, [])
+
+    async def test_an_order_naming_an_unknown_service_is_refused(self):
+        """Refused rather than coerced, the same way a bad selection is: an order
+        naming a service this app has never heard of is a bug in the screen, and
+        dropping it quietly would hide the screen sending the wrong name."""
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     tracker_priority=["trakt", "letterboxd"]))
+
+    async def test_an_order_naming_a_service_twice_is_refused(self):
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     tracker_priority=["trakt", "trakt"]))
+
+    async def test_a_retired_service_survives_a_round_trip(self):
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_retired=["trakt"]))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.tracker_retired, ["trakt"])
+        self.assertFalse(stored.counts_tracker("trakt"))
+        self.assertTrue(stored.counts_tracker("simkl"))
+
+    async def test_a_row_predating_the_retired_column_counts_everything(self):
+        """The column has a default, so every existing row got an empty list —
+        and empty is exactly the state every account was in before it could
+        retire anything. Failing OPEN matters more here than for the order: a row
+        that read as "retire everything" would silently stop counting services
+        nobody had retired."""
+        await db.execute(
+            "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
+            "precedence_json) VALUES (?, 'auto', 'auto', '{}')",
+            (self.user_id,))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.tracker_retired, [])
+        self.assertTrue(stored.counts_tracker("trakt"))
+
+    async def test_retiring_an_unknown_service_is_refused(self):
+        with self.assertRaises(ValueError):
+            await prefs.save(replace(await prefs.load(self.user_id),
+                                     tracker_retired=["trakt", "letterboxd"]))
+
+    async def test_naming_a_service_twice_is_tolerated_here(self):
+        """Unlike the ORDER beside it, which refuses a duplicate because naming
+        one service twice has no single meaning. This is a SET of exclusions:
+        naming one twice says exactly what naming it once says, so it is stored
+        the once and reads back the same whatever order the screen sent."""
+        saved = await prefs.save(replace(await prefs.load(self.user_id),
+                                         tracker_retired=["trakt", "trakt"]))
+        self.assertEqual(saved.tracker_retired, ["trakt"])
+
+    async def test_the_two_preferences_do_not_overwrite_each_other(self):
+        """They are stored in one row and written by one verb, so a save that
+        forgot either column would silently discard whichever the screen was not
+        editing at the time."""
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_priority=["simkl", "trakt"]))
+        await prefs.save(replace(await prefs.load(self.user_id),
+                                 tracker_retired=["trakt"]))
+        stored = await prefs.load(self.user_id)
+        self.assertEqual(stored.tracker_priority, ["simkl", "trakt"])
+        self.assertEqual(stored.tracker_retired, ["trakt"])
+
+
+class TrackerOrderTests(unittest.TestCase):
+    """Which linked tracker decides. Pure, like the selection rules above — the
+    reordering takes the services that answer rather than looking them up."""
+
+    def _prefs(self, priority):
+        return prefs.SourcePrefs(user_id=1, tracker_priority=priority)
+
+    def test_an_account_with_no_opinion_gets_the_declared_order_back(self):
+        """Which is what every account had before this could be stated, and what
+        keeps a single-service account behaving exactly as it did."""
+        self.assertEqual(self._prefs([]).tracker_order(["trakt", "simkl"]),
+                         ["trakt", "simkl"])
+
+    def test_the_named_service_leads(self):
+        self.assertEqual(self._prefs(["simkl"]).tracker_order(["trakt", "simkl"]),
+                         ["simkl", "trakt"])
+
+    def test_it_reorders_and_never_filters(self):
+        """THE RULE THAT MAKES ONE PREFERENCE WORK ACROSS MIXED ROWS. A season
+        only the un-preferred service knows about still has that service's
+        number, because it is still in the list — just not first."""
+        self.assertEqual(sorted(self._prefs(["simkl"]).tracker_order(["trakt", "simkl"])),
+                         ["simkl", "trakt"])
+
+    def test_a_preferred_service_that_does_not_answer_decides_nothing(self):
+        """`sources` is already the set that answers for this account, so a
+        service named here but not linked is simply absent — which is the whole
+        fix for a service deciding from the number it left behind when its link
+        lapsed."""
+        self.assertEqual(self._prefs(["trakt", "simkl"]).tracker_order(["simkl"]),
+                         ["simkl"])
+
+    def test_a_name_this_version_does_not_know_falls_out(self):
+        """A row written by a newer version must not stop an older one rendering
+        a page — the same degrade rule the selections take."""
+        self.assertEqual(self._prefs(["letterboxd", "simkl"]).tracker_order(
+            ["trakt", "simkl"]), ["simkl", "trakt"])
+
+    def test_a_document_that_is_not_a_list_reads_as_no_opinion(self):
+        self.assertEqual(self._prefs("simkl").tracker_order(["trakt", "simkl"]),
+                         ["trakt", "simkl"])
+
 
 if __name__ == "__main__":
     unittest.main()

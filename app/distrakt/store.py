@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Iterable, Mapping
 from datetime import date
 from enum import StrEnum
 
@@ -193,6 +193,12 @@ IDENTITY_COLUMNS = ("media", "match_source", "match_id")
 ID_COLUMNS = {
     "trakt_id": "trakt", "simkl_id": "simkl", "tmdb": "tmdb",
     "tvdb": "tvdb", "imdb": "imdb", "mal": "mal", "slug": "slug",
+    # A SLUG IS PER SERVICE, and these two are why. Both services call a title's
+    # readable name `slug` and disagree on it, so the single column above held
+    # whichever one wrote last — and a link built from it was wrong for the other
+    # service, in both directions. `slug` is kept because rows predate the split
+    # and it is still the only value they have; nothing writes it any more.
+    "trakt_slug": "trakt_slug", "simkl_slug": "simkl_slug",
 }
 
 # The fields both tables share, in insert order. Split out because the two record
@@ -218,7 +224,7 @@ MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form",
                         "watched_by_source", "total_by_source")
 
 # Every distrakt_user_seasons column except user_id, in insert order.
-USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back")
+USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back", "missing_sources_json")
 
 # Columns whose value is coerced on the way to the database. Everything else
 # passes through as the caller stated it.
@@ -256,8 +262,17 @@ _UPDATABLE_MONTH_COLUMNS = frozenset(MONTH_RECORD_COLUMNS) - {
 # the marker for a season that turned out not to have been finished, and only the
 # viewer acknowledging it clears it, so a routine counts refresh written back
 # without the flag must not dismiss a marker nobody has read.
+#
+# `missing_sources_json` is excluded for the same shape of reason and a different
+# one: it is written by the removal check alone (see set_missing_sources), which
+# is the only thing that has asked a service what it still holds. Every other
+# write of a user record is a counts refresh built from a roster that carries no
+# opinion on the matter, so leaving it updatable would have each of those quietly
+# clear a mark by omission — the mark would appear after a removal check and
+# vanish on the very next page load, which reads as the check not working.
 _UPDATABLE_USER_COLUMNS = frozenset(USER_RECORD_COLUMNS) - {
-    *IDENTITY_COLUMNS, "season", "added_by", "created_at", "came_back"}
+    *IDENTITY_COLUMNS, "season", "added_by", "created_at", "came_back",
+    "missing_sources_json"}
 
 
 def _insert_sql(table: str, columns: tuple[str, ...]) -> str:
@@ -422,6 +437,11 @@ def normalize_show(show: dict) -> dict:
         "abandoned": kind is RecordKind.ABANDONED,
         "abandoned_form": incoming.get("abandoned_form"),
         "came_back": bool(incoming.get("came_back", False)),
+        # EMPTY UNLESS A REMOVAL CHECK SAYS OTHERWISE. A caller stating a record
+        # is describing what a title IS, never what a service has stopped holding
+        # — only set_missing_sources has asked that question — so this is a
+        # default here rather than a field a caller may supply.
+        "missing_sources_json": "[]",
         "watched": int(incoming.get("watched") or 0),
         "total": int(incoming.get("total") or 0),
         "cadence": incoming.get("cadence"),
@@ -517,6 +537,26 @@ def _stored_json(document) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _stored_list(document) -> list:
+    """A JSON column back as a list, or an empty one.
+
+    SEPARATE FROM `_stored_json` ABOVE BECAUSE THAT ONE ANSWERS `{}` TO EVERYTHING
+    IT DOES NOT RECOGNISE, arrays included. Reading a stored array through it
+    returns empty and raises nothing, so the column reads as "no value" no matter
+    what is in it — which is the same silence as a working empty column, and
+    exactly the failure a caller cannot see. Same tolerance for genuinely
+    unreadable content, and same reason: a row that cannot be parsed should render
+    without its extra rather than take the page down.
+    """
+    if not document:
+        return []
+    try:
+        parsed = json.loads(document)
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
 def row_to_record(row) -> dict:
     """A stored row from either table back into the record shape the renderers
     consume.
@@ -575,6 +615,15 @@ def row_to_record(row) -> dict:
         rec["abandoned_form"] = row["abandoned_form"]
     if "came_back" in columns:
         rec["came_back"] = bool(row["came_back"])
+    # WHICH LINKED SERVICES HAVE STOPPED LISTING THIS TITLE. A list rather than a
+    # flag because a title dropped at one service may still be held at the other,
+    # and a row that only said "missing" could not say whose statement that was.
+    # A row written before the column existed reads as an empty list — every
+    # service still holds it, which is the right answer for a row nothing has
+    # checked yet.
+    if "missing_sources_json" in columns:
+        rec["missing_sources"] = [
+            str(name) for name in _stored_list(row["missing_sources_json"])]
     return rec
 
 
@@ -970,6 +1019,40 @@ async def set_came_back(user_id: int, key: ItemKey, season: int, came_back: bool
     return result.rowcount > 0
 
 
+async def set_missing_sources(user_id: int, key: ItemKey, missing: Iterable[str]) -> int:
+    """Record which services have stopped listing this title. Returns rows changed.
+
+    PER TITLE, NOT PER SEASON, because that is what the statement is about: a
+    service drops a TITLE from a library, and every season of it stops being
+    listed at the same moment. Addressing a season would have the caller repeat
+    one service's answer once per row and leave the rows it did not name
+    disagreeing with the ones it did.
+
+    THE WHOLE LIST IS WRITTEN, NOT ADDED TO, and that is what makes the mark clear
+    itself. The caller has just asked every linked service what it still holds, so
+    what it passes is the complete current answer — a service missing from that
+    list is one that named the title, and its mark going away is the correct
+    outcome rather than something needing its own verb. Contrast `set_came_back`
+    above, which only the viewer may clear: that marker remembers something no
+    later read can restate, where this one is a claim about what a service holds
+    right now and should be overwritten by the next thing the service says.
+
+    NOTHING IS DELETED HERE OR ANYWHERE THIS IS CALLED FROM. Simkl's guide
+    prescribes deleting local rows a removal diff does not name; this app records
+    the removal instead, because watch history is not re-derivable from anything
+    it holds and the two mistakes are not symmetrical — a wrong deletion is
+    permanent and silent, a wrong mark is visible and free to undo. Purging is a
+    separate, explicit act of the viewer's (see remove_user_record).
+    """
+    names = sorted({str(name) for name in (missing or ()) if str(name)})
+    result = await db.execute(
+        "UPDATE distrakt_user_seasons SET missing_sources_json = ? "
+        f"WHERE user_id = ? AND {_IDENTITY_MATCH}",
+        (json.dumps(names), user_id, key.media, key.match_source, key.match_id),
+    )
+    return result.rowcount
+
+
 async def remove_user_record(user_id: int, key: ItemKey, season: int) -> bool:
     """Take one season off the viewer's list. True if it was there."""
     result = await db.execute(
@@ -1070,8 +1153,15 @@ async def migrate_to_user(user_id: int, key: ItemKey, season: int, *, month: str
             month_address).fetchone()
         if row is None:
             return None
+        # A RECORD ARRIVING FROM THE MONTH TABLE HAS NO REMOVAL ANSWER OF ITS OWN.
+        # It is a settled verdict being put back on the list, and no service has
+        # been asked what it currently holds — so the honest starting state is
+        # "nothing missing", which the next removal check will correct if it is
+        # wrong. Stated here because `row_to_record` hands out the PARSED list for
+        # renderers and the insert wants the stored column.
         record = {**row_to_record(row), "kind": str(listed),
-                  "came_back": came_back, "created_at": now}
+                  "came_back": came_back, "missing_sources_json": "[]",
+                  "created_at": now}
         conn.execute(f"DELETE FROM distrakt_user_seasons {_SEASON_WHERE}", address)
         conn.execute(_INSERT_USER_SQL,
                      _insert_params(user_id, USER_RECORD_COLUMNS, record))
@@ -1108,6 +1198,124 @@ async def remove_season_everywhere(user_id: int, key: ItemKey, season: int) -> l
 
 
 # ---------------------------------------------------------------------------
+# an id a record did not have when it was written
+# ---------------------------------------------------------------------------
+
+# Which slug column each service id column owes a value to. A slug is OWED only
+# where that service's own id is present: the id is the service saying it knows
+# this title, and without one there is no reason to think it ever will. Asking
+# for a slug on every row instead would keep a Simkl-only title permanently owing
+# a Trakt name — a debt nothing could ever settle, which turns "is there work to
+# do" into a question that answers yes for ever.
+_SLUG_OWED_BY = {"trakt_id": "trakt_slug", "simkl_id": "simkl_slug"}
+
+
+async def identities_missing_slugs(user_id: int) -> list[tuple[ItemKey, tuple[str, ...]]]:
+    """Every identity this viewer holds a row for that knows a service's id but
+    not what that service CALLS the title, paired with WHICH names it is short of.
+
+    THE NAMES ARE PART OF THE ANSWER, not something the caller may assume. A
+    title only one service lists is the ordinary case, and handing back the
+    identity alone invites a caller to write whatever names it found — which puts
+    a Trakt slug on a title Trakt never named. That row then looks linkable to a
+    service it holds no id for, and the link renders for a service that cannot be
+    asked about it at all.
+
+    PER IDENTITY, NOT PER ROW, because that is the unit a name is true of and the
+    unit `learn_ids` writes: a title's Simkl slug is as true of a frozen record
+    from last March as of the row on today's list. Answering per row would have
+    the caller ask the same question once per season of one show.
+
+    BOTH RECORD TABLES, and the settled half is the point. A verdict's counts are
+    never recomputed, so no live pass visits it — which is exactly why a record
+    that settled before the two services' slugs were told apart has no other way
+    to learn one. An identity short of one name in one table and another name in
+    the other is owed both, so the two tables' answers are merged rather than
+    concatenated.
+    """
+    # THE FLAG COLUMNS ARE ALIASED AWAY FROM THE COLUMNS THEY ARE ABOUT. SQLite
+    # resolves a name in HAVING against the source columns before the select
+    # aliases, so `... AS trakt_slug ... HAVING trakt_slug = 1` compares the raw
+    # (and here always NULL) column and matches nothing at all — a silent empty
+    # answer rather than an error, which reads exactly like "no work to do".
+    owed = {slug_column: f"owes_{slug_column}" for slug_column in _SLUG_OWED_BY.values()}
+    flags = ", ".join(
+        f"MAX(CASE WHEN {id_column} IS NOT NULL AND {id_column} != '' "
+        f"AND ({slug_column} IS NULL OR {slug_column} = '') THEN 1 ELSE 0 END) "
+        f"AS {owed[slug_column]}"
+        for id_column, slug_column in _SLUG_OWED_BY.items())
+    selected = ", ".join(IDENTITY_COLUMNS)
+    having = " OR ".join(f"{alias} = 1" for alias in owed.values())
+    sql = " UNION ALL ".join(
+        f"SELECT {selected}, {flags} FROM {table} WHERE user_id = ? "
+        f"GROUP BY {selected} HAVING {having}"
+        for table in ("distrakt_month_records", "distrakt_user_seasons"))
+    rows = await db.fetch_all(sql, (user_id, user_id))
+
+    merged: dict[tuple, set[str]] = {}
+    for row in rows:
+        address = tuple(str(row[column]) for column in IDENTITY_COLUMNS)
+        names = merged.setdefault(address, set())
+        names.update(slug for slug, alias in owed.items() if row[alias])
+    return [(ItemKey(*address), tuple(sorted(names)))
+            for address, names in merged.items()]
+
+
+async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
+    """Fill in ids a stored record was written without, on EVERY row of one title.
+    Returns how many rows changed, which is 0 on every pass after the first.
+
+    The verb for a caller that has LEARNED an id with no record in hand to write.
+    `_coerce_update` is the same rule on the upsert path — a record learning an id
+    it did not have when it was written is the one way an identity can be improved
+    later — and it can only improve a record something is already writing. A title
+    whose record nothing on this pass is rewriting (a month's premiere record is
+    corrected from the catalogue fields alone, and a settled verdict is not
+    rewritten at all) would never learn one through it.
+
+    AN ID IS A FACT ABOUT THE TITLE, so this addresses the IDENTITY and not a
+    season: a title's `simkl` id is as true of the premiere record on last March
+    as it is of the row on the viewer's list today. Teaching one row and not the
+    others leaves the same title answering "who can be asked about this" differently
+    depending on which section of the page it was drawn in.
+
+    NOTHING IS EVER OVERWRITTEN — only a column that is NULL or empty is filled,
+    and that is the WHERE clause rather than a check the caller could forget. A
+    value already stored is what every per-title path has been calling with, and it
+    is usually the service's own statement about the title, taken straight off the
+    payload the record was built from. A value arriving here has been matched
+    across services on the shared identity, which is a JOIN rather than a
+    statement: one service can list a series as several titles that all resolve to
+    one tracker key, so a match can legitimately name a different title from the
+    one the record came from. Adding what is missing cannot make a working record
+    worse; replacing what is there can.
+
+    THE IDENTITY COLUMNS ARE NOT REACHABLE FROM HERE. `media`, `match_source` and
+    `match_id` are what a row is ADDRESSED by, so they are in the WHERE clause and
+    never in the SET, and a record learning an id stays filed exactly where it was.
+    That is what makes this a repair rather than a re-identification.
+    """
+    fillable = {column: value for column, id_key in ID_COLUMNS.items()
+                if (value := (ids or {}).get(id_key)) not in (None, "")}
+    if not fillable:
+        return 0
+    address = (user_id, key.media, key.match_source, key.match_id)
+
+    def _work(conn: db.Connection) -> int:
+        changed = 0
+        for table in ("distrakt_month_records", "distrakt_user_seasons"):
+            for column, value in fillable.items():
+                changed += conn.execute(
+                    f"UPDATE {table} SET {column} = ? "
+                    f"WHERE user_id = ? AND {_IDENTITY_MATCH} "
+                    f"AND ({column} IS NULL OR {column} = '')",
+                    (value, *address)).rowcount
+        return changed
+
+    return await db.transaction(_work)
+
+
+# ---------------------------------------------------------------------------
 # the prompt for an episode nothing knows about
 # ---------------------------------------------------------------------------
 
@@ -1126,6 +1334,31 @@ async def dismiss_prompt(user_id: int, key: ItemKey, season: int) -> None:
         "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
         (user_id, key.media, key.match_source, key.match_id, int(season), db.now()),
+    )
+
+
+async def clear_prompt_dismissal(user_id: int, key: ItemKey, season: int) -> None:
+    """Forget that the viewer declined this season, because they have just put it
+    ON their list.
+
+    A DISMISSAL SAYS "DO NOT PUT THIS SEASON BACK ON MY LIST, STOP ASKING" — one
+    sentence, shared by all three prompts that can be refused (see
+    lifecycle.unbacked_verdicts). Adding the season is the viewer doing the very
+    thing that refusal refused, so the refusal has been withdrawn by the clearest
+    means available and keeping it would silence questions about a season they
+    have visibly changed their mind about. That is not hypothetical: a verdict
+    re-added by hand went on being unquestionable afterwards, because a refusal
+    made about the row that used to be there still applied to the one that
+    replaced it.
+
+    CLEARED ON THE WAY IN RATHER THAN ON THE WAY OUT, deliberately. Removing a
+    season is the viewer saying they do not want it, and clearing the refusal
+    there would set the history prompt asking about it again on the next load —
+    the opposite of what removing it meant.
+    """
+    await db.execute(
+        f"DELETE FROM distrakt_prompt_dismissals {_SEASON_WHERE}",
+        (user_id, key.media, key.match_source, key.match_id, int(season)),
     )
 
 

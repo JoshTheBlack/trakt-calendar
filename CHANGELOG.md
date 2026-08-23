@@ -2,6 +2,29 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.1] - Unreleased
+
+### Fixed
+- 🖼️ **A calendar card whose describing service can no longer be reached now shows what was last known about it, instead of going blank.** Pulling a credential used to erase a row's details the moment the cached answer expired, even though the app had perfectly good information from before. It now draws what it has and says which service it can no longer ask.
+- 🔗 **A card's link to Trakt no longer opens Trakt's front page instead of the title.** When there was no slug on hand to build a proper link, it now falls back to the numeric id, which Trakt resolves just as well.
+- 💾 **Restoring a backup made on an older version of the app no longer fails over a column that version didn't have.** Anything a backup file doesn't mention is left at its ordinary default instead of blocking the whole restore.
+
+### Under the hood
+- 🔍 **Simkl search now reads every page of results instead of stopping at the first**, and correcting a bad client id takes effect immediately rather than needing a restart.
+- 🚦 **Requests to Simkl follow the service's own documented caching and rate-limit rules more closely** — fewer needless calls to sources that were already answerable from the edge, and a blocked or rejected credential is now reported plainly instead of quietly reading as a real zero.
+- 🗂️ **Cached answers from Simkl are filed by the question asked, not by the credential that asked it**, so correcting or rotating a client id no longer strands perfectly good cached answers under an address nothing looks at again.
+
+### 🥚
+- It can go looking somewhere it hadn't thought to before, when the first place comes up empty-handed.
+- Where the two of them number differently, it's learned to tell which one means what — and to fill in what one left blank from what the other already knew.
+- Looking ahead at a month that hadn't started yet used to quietly add everything to it. Looking is just looking, now.
+- It doesn't need to read everything again just to notice what changed since it last asked.
+- Something finished appeared barely begun, going by only one telling of it. It counts properly either way now.
+- Asked whose count decides when the two of them disagree, it can be told — and remembers.
+- Told it's moved on from one of them, it stops adding that one in, without pretending its old numbers changed.
+- Noticing one of them has quietly stopped naming something it used to, it says so rather than acting on it — and takes the note back the moment that changes.
+- It used to lose track of who told it what, once the two of them started describing the same thing. It doesn't any more.
+
 ## 🏷️ [1.2.0] - 2026-08-12
 
 ### What's new

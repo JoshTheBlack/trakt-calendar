@@ -57,8 +57,18 @@ guard = authz.Guard(router)
 # cards further down it that nobody has scrolled to yet.
 INITIAL_DAY_BLOCKS = 5
 
+# WHAT THE PAGE SAYS WHEN NOBODY CAN SUPPLY A CALENDAR, and it deliberately
+# names no service. The gate in front of it (`calendar_source_configured` ->
+# providers.for_calendar_sources) asks the registry whether ANY source can be
+# read, and each source answers for its own transport: one wants the instance's
+# client id, another is a public feed that wants nothing. A sentence naming Trakt
+# and its Access Token was wrong twice over on an instance reading months from
+# somewhere else — it named a service that was not the reason, and a credential
+# the calendar never sends. Reaching this state now means every source is either
+# missing its own credential or switched off, and both are settings.
 NOT_CONFIGURED = (
-    "Trakt API credentials aren't set yet. Open ⚙️ Settings to add your Client ID and Access Token."
+    "No calendar source is available right now. Open ⚙️ Settings to add a "
+    "service's credentials, or to switch a source back on."
 )
 
 
@@ -891,17 +901,23 @@ async def api_details(request: Request):
         # nobody who can answer it. The modal says so in its own words.
         return JSONResponse({"ok": False, "error": "No source can describe this title"},
                             status_code=404)
-    source, source_id = chosen
     try:
-        details = await detail_source.fetch(
-            settings, source, media, source_id,
+        # NO SOURCE REACHABLE MEANS DRAW WHAT IS ALREADY HELD, which `describe`
+        # decides: reading the store back needs no credential and makes no
+        # request, and refusing instead threw away a description this instance
+        # had already fetched once. None is the genuinely empty case.
+        details = await detail_source.describe(
+            settings, chosen, media,
             route_params.season(request.query_params.get("season")))
     except SourceUnavailable as exc:
         # The shared degradation contract rather than one service's error type:
         # this route can now be answered by either of two sources and catching
         # only Trakt's would let Simkl's escape as a 500.
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "source": str(source), **details})
+    if details is None:
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    return JSONResponse({"ok": True, "source": str(chosen.source), **details})
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

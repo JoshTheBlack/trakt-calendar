@@ -1462,5 +1462,55 @@ class SharePanelSourceControlTests(CalendarRouteTestCase):
                          ["trakt", "simkl", "mercury"])
 
 
+class TheCalendarDoesNotGoDarkOverOneServicesCredentialTests(CalendarRouteTestCase):
+    """OBSERVED, 2026-08-19: blanking `trakt_client_id` emptied the calendar and
+    said "Trakt API credentials aren't set yet" on an instance whose other source
+    was reading months perfectly well.
+
+    `calendar_sources` states outright that it does not ask `is_configured`,
+    because a calendar read does not use a viewer's token — and
+    `for_calendar_sources` put that filter straight back. The question belongs to
+    the port, which is the only thing that knows what its own calendar costs.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # NO TRAKT CREDENTIAL OF ANY KIND. Everything below is what an instance
+        # reading its calendar from the credential-free source alone must still
+        # get, and the fill is stubbed at the cache's own boundary so the read
+        # path runs for real without a service being reached.
+        save_settings(Settings())
+        self.user_id = self._make_user("simkl_only_viewer")
+        self.sign_in_as(self.user_id)
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([_entry("show-a", "Show A", "2026-07-15T20:00:00Z")]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_month_still_renders_its_titles(self):
+        resp = self.client.get("/?year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Show A", resp.text)
+        self.assertNotIn(calendar_routes.NOT_CONFIGURED, resp.text)
+
+    def test_a_day_fragment_is_served_too(self):
+        """The second of the three gates reading this answer, and it refuses with
+        a 400 rather than a message — so a page that renders and days that do not
+        would be a worse state than the outage it used to report."""
+        resp = self.client.get("/calendar/day?year=2026&month=7&date=2026-07-15")
+        self.assertEqual(resp.status_code, 200, resp.text)
+
+    def test_the_refusal_that_remains_names_no_service(self):
+        """It is reachable only with every source unavailable, and by then Trakt
+        is not the reason — naming it sent an operator to the wrong settings
+        field, which is the same fault as the gate it sat on."""
+        self.assertNotIn("Trakt", calendar_routes.NOT_CONFIGURED)
+        save_settings(Settings(simkl_public_calendar_enabled=False))
+        # Compared on a fragment rather than the whole sentence: the template
+        # escapes it on the way out, so the punctuation is not the same bytes.
+        self.assertIn("No calendar source is available",
+                      self.client.get("/?year=2026&month=7").text)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

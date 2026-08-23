@@ -4,23 +4,49 @@
 // One file because both are the same bargain — the server is told which title by
 // its id map and answers with the recomputed month — and both change together
 // when that payload changes.
+//
+// NEITHER FLOW RENDERS ITS OWN RESULTS LIST. Both search fields carry `hx-get`
+// at a fragment route and swap the server's rows straight in
+// (templates/_distrakt_search_results.html), so "what a search hit looks like"
+// has one home. What is left here is the part a fragment cannot be: deciding
+// when a search is worth firing, and what a click on one of those rows means.
+
+// ---- Submitting a search ----
+// Enter and the button are the same act, on both modals. An empty box is not a
+// query and fires nothing — the check lives here, once, rather than in an
+// attribute on each of the two inputs.
+function submitAddSearch(inputId) {
+    const input = document.getElementById(inputId);
+    if (!input.value.trim()) return;
+    // A new search invalidates whatever the last pick opened.
+    resetShowPick();
+    htmx.trigger(input, 'search-submit');
+    // The button takes focus when it is what was pressed; handing it back means a
+    // query that came back wrong can be corrected without reaching for the mouse.
+    input.focus();
+}
+
+function onAddSearchKey(event, inputId) {
+    if (event.key !== 'Enter') return;
+    // These inputs are not in a form, so nothing else would happen anyway — but
+    // saying so keeps a later `<form>` from turning Enter into a page load.
+    event.preventDefault();
+    submitAddSearch(inputId);
+}
 
 // ---- Add-show modal: search -> pick show -> pick season -> POST add ----
-let showSearchTimer = null;
-let searchResults = [];
 let pickedShow = null;
 
 function openAddShow() {
     document.getElementById('addSearchInput').value = '';
     document.getElementById('addSearchResults').innerHTML = '';
-    document.getElementById('addSeasonPick').hidden = true;
+    resetShowPick();
     // A closed month has nothing live to bucket against, so adding to one means
     // recording something as finished during it. Say which mode this is before
     // anything is picked.
     document.getElementById('addShowTitle').textContent =
         monthClosed ? '➕ Add a finished show' : '➕ Add show';
     document.getElementById('addShowCompletedNote').hidden = !monthClosed;
-    pickedShow = null;
     document.getElementById('addShowModal').classList.add('open');
     document.getElementById('addSearchInput').focus();
 }
@@ -29,87 +55,138 @@ function closeAddShow() {
     document.getElementById('addShowModal').classList.remove('open');
 }
 
-function onAddSearchInput() {
-    clearTimeout(showSearchTimer);
-    const q = document.getElementById('addSearchInput').value.trim();
+// Everything one pick put on screen, taken back down: the season panel and the
+// refusal note are both answers about a title that is no longer the subject.
+function resetShowPick() {
+    pickedShow = null;
     document.getElementById('addSeasonPick').hidden = true;
-    if (!q) { document.getElementById('addSearchResults').innerHTML = ''; return; }
-    showSearchTimer = setTimeout(() => runAddSearch(q), 300);
+    document.getElementById('addShowUnkeyable').hidden = true;
 }
 
-async function runAddSearch(q) {
-    const host = document.getElementById('addSearchResults');
-    host.innerHTML = '<div class="distrakt-empty">Searching…</div>';
-    const url = `/api/distrakt/search?q=${encodeURIComponent(q)}`;
-    console.log('[distrakt] search ->', url);
-    try {
-        const res = await fetch(url);
-        console.log('[distrakt] search response status', res.status);
-        const d = await res.json();
-        console.log('[distrakt] search response body', d);
-        if (!d.ok) {
-            console.error('[distrakt] search failed:', d.error);
-            host.innerHTML = `<div class="distrakt-empty">${esc(d.error || 'Search failed.')}</div>`;
-            toast(d.error || 'Search failed', false);
-            return;
-        }
-        searchResults = d.results || [];
-        console.log('[distrakt] search results count', searchResults.length);
-        renderSearchResults(searchResults);
-    } catch (e) {
-        console.error('[distrakt] search request threw', e);
-        host.innerHTML = '<div class="distrakt-empty">Search failed.</div>';
-    }
+// ONE LISTENER FOR THE WHOLE RESULTS LIST, bound to the container in
+// templates/distrakt.html. The rows come from the server and carry what a pick
+// needs on themselves, so this works the same whether a row arrived with the
+// page or with a fragment — and nothing here has to hold the result list in a
+// variable to index back into.
+function onShowResultClick(event) {
+    const row = event.target.closest('.distrakt-search-row');
+    if (row) pickShow(row);
 }
 
-function renderSearchResults(results) {
-    const host = document.getElementById('addSearchResults');
-    if (!results.length) { host.innerHTML = '<div class="distrakt-empty">No matches.</div>'; return; }
-    host.innerHTML = results.map((r, i) => `
-        <div class="distrakt-search-row" onclick="pickShow(${i})">
-            <span class="distrakt-title">${esc(r.title)}</span>
-            <span class="distrakt-year">${esc(r.year || '')}</span>
-            <span class="distrakt-network">${esc(r.network || '')}</span>
-        </div>
-    `).join('');
+// A row says it is a button (role/tabindex), so it has to answer to a keyboard
+// like one. Both lists share this: the synthetic click lands on whichever
+// container the row is in and takes that list's own path from there.
+function onResultKey(event) {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const row = event.target.closest('.distrakt-search-row[role="button"]');
+    if (!row) return;
+    event.preventDefault();
+    row.click();
 }
 
-async function pickShow(i) {
-    pickedShow = searchResults[i];
-    if (!pickedShow) return;
+function onMovieResultClick(event) {
+    const row = event.target.closest('.distrakt-search-row');
+    // A film with no id the tracker can file it under is rendered refused, with
+    // the server's reason already on it; there is nothing for a click to do.
+    if (row && !row.hasAttribute('aria-disabled')) addPickedMovie(row);
+}
+
+async function pickShow(row) {
+    // WHICH SERVICE ANSWERS FOR A ROW BOTH OF THEM RETURNED: the FIRST of the
+    // row's [source, id] pairs, which the server writes in registry order. Do
+    // not sort these, and do not reach for 'trakt' first — the whole point of
+    // the merge is that whoever found a title is who can be asked about it, and
+    // a Simkl-only instance has no Trakt entry here at all. They are PAIRS
+    // rather than an object precisely so that order is not something a
+    // serializer on either side can quietly rearrange.
+    const sources = JSON.parse(row.dataset.sourceIds || '[]');
+    if (!sources.length) return;
+    const [source, sourceId] = sources[0];
+    pickedShow = {
+        title: row.dataset.title || '',
+        network: row.dataset.network || '',
+        ids: JSON.parse(row.dataset.ids || '{}'),
+    };
+    document.getElementById('addShowUnkeyable').hidden = true;
     const panel = document.getElementById('addSeasonPick');
     const list = document.getElementById('addSeasonList');
     document.getElementById('addSeasonShowTitle').textContent = pickedShow.title;
     panel.hidden = false;
     list.innerHTML = '<div class="distrakt-empty">Loading seasons…</div>';
-    const url = `/api/distrakt/seasons?id=${encodeURIComponent(pickedShow.ids.trakt)}`;
-    console.log('[distrakt] seasons ->', url);
     try {
-        const res = await fetch(url);
-        console.log('[distrakt] seasons response status', res.status);
+        const res = await fetch('/api/distrakt/seasons?' + seasonsQuery(source, sourceId));
         const d = await res.json();
-        console.log('[distrakt] seasons response body', d);
         if (!d.ok) {
-            console.error('[distrakt] seasons failed:', d.error);
             list.innerHTML = `<div class="distrakt-empty">${esc(d.error || 'Could not load seasons.')}</div>`;
             toast(d.error || 'Could not load seasons', false);
             return;
         }
+        // FOUR ANSWERS FROM THE ONE LOOKUP the season list already pays for: the
+        // ids it surfaced (which is what resolves a hit search left bare), the
+        // network the row may not have had, the season this title already names
+        // for itself, and the list to pick from.
+        pickedShow.ids = d.ids || pickedShow.ids;
+        // ONLY WHERE THE ROW HAD NONE. The row's network came from whichever
+        // source led the merge; this one is the per-title record's, and it fills
+        // a gap rather than overriding a source that already answered — a Simkl
+        // search hit carries no network, so on a Simkl-only instance this is the
+        // only place the roster ever gets one.
+        pickedShow.network = pickedShow.network || d.network || '';
+        if (d.unkeyable) {
+            // Only now — after the lookup that had its chance to fill the gap —
+            // is "this cannot be filed" a true thing to say. The server's own
+            // sentence, so this and the add route's refusal cannot drift.
+            panel.hidden = true;
+            const note = document.getElementById('addShowUnkeyable');
+            note.textContent = d.unkeyable;
+            note.hidden = false;
+            return;
+        }
+        if (d.season !== null && d.season !== undefined) {
+            // The hit IS a season — a Simkl anime season-title, which knows which
+            // season of the underlying show it is. Asking which season would be
+            // asking a question the row already answered, and offering the whole
+            // show's list invites picking one nobody searched for.
+            panel.hidden = true;
+            addPickedShow(d.season);
+            return;
+        }
         renderSeasons(d.seasons || []);
     } catch (e) {
-        console.error('[distrakt] seasons request threw', e);
         list.innerHTML = '<div class="distrakt-empty">Could not load seasons.</div>';
     }
 }
 
+// `source` names the service to ask and `id` is THAT service's own id for the
+// title — never a shared one. The hit's own ids ride along because the lookup
+// answers with only what IT surfaced: Trakt's per-title call adds nothing (its
+// search hits are never bare), so without them a perfectly keyable Trakt title
+// would come back reading as unfileable.
+function seasonsQuery(source, sourceId) {
+    const params = new URLSearchParams({
+        source, id: sourceId, media: 'show', title: pickedShow.title,
+    });
+    Object.entries(pickedShow.ids).forEach(([space, value]) => params.set(space, value));
+    return params.toString();
+}
+
+// The season buttons describe themselves the same way the result rows do, and
+// one listener on the list serves all of them — a handler interpolated into each
+// button would be one more per-item script for the page's policy to have to
+// permit, for no gain over an attribute the button was already going to carry.
 function renderSeasons(seasons) {
     const list = document.getElementById('addSeasonList');
     if (!seasons.length) { list.innerHTML = '<div class="distrakt-empty">No aired seasons found.</div>'; return; }
     list.innerHTML = seasons.map(s => `
-        <button type="button" class="btn-ghost small" onclick="addPickedShow(${s.season})">
-            S${String(s.season).padStart(2, '0')} (${s.episode_count} eps)
+        <button type="button" class="btn-ghost small" data-season="${esc(s.season)}">
+            S${String(s.season).padStart(2, '0')} (${esc(s.episode_count)} eps)
         </button>
     `).join('');
+}
+
+function onSeasonClick(event) {
+    const button = event.target.closest('button[data-season]');
+    if (button) addPickedShow(Number(button.dataset.season));
 }
 
 async function addPickedShow(season) {
@@ -139,9 +216,11 @@ async function addPickedShow(season) {
 // ---- Add a film ----
 // Films have no roster, no buckets and no progress: one is a play on a day. So
 // this flow is a date and a search, and the month it lands in follows from the
-// date rather than from whichever month happens to be on screen.
-let movieSearchTimer = null;
-let movieResults = [];
+// date rather than from whichever month happens to be on screen. There is no
+// season step here and there never will be, which is also why a film row that
+// names no shared id is refused where it is drawn rather than on the click: the
+// show flow's click already buys a lookup that could resolve one, and this one
+// has nothing to hide a round trip inside.
 
 function openAddMovie() {
     const input = document.getElementById('addMovieDate');
@@ -155,7 +234,6 @@ function openAddMovie() {
     input.max = new Date().toISOString().slice(0, 10);
     document.getElementById('addMovieSearch').value = '';
     document.getElementById('addMovieResults').innerHTML = '';
-    movieResults = [];
     document.getElementById('addMovieModal').classList.add('open');
     document.getElementById('addMovieSearch').focus();
 }
@@ -164,43 +242,15 @@ function closeAddMovie() {
     document.getElementById('addMovieModal').classList.remove('open');
 }
 
-function onAddMovieSearchInput() {
-    clearTimeout(movieSearchTimer);
-    const q = document.getElementById('addMovieSearch').value.trim();
-    if (!q) { document.getElementById('addMovieResults').innerHTML = ''; return; }
-    movieSearchTimer = setTimeout(() => runMovieSearch(q), 300);
-}
-
-async function runMovieSearch(q) {
-    const host = document.getElementById('addMovieResults');
-    host.innerHTML = '<div class="distrakt-empty">Searching…</div>';
-    try {
-        const res = await fetch('/api/distrakt/search-movie?q=' + encodeURIComponent(q));
-        const d = await res.json();
-        if (!d.ok) throw new Error(d.error || 'Search failed.');
-        movieResults = d.results || [];
-        host.innerHTML = movieResults.length
-            ? movieResults.map((r, i) => `
-                <div class="distrakt-search-row" onclick="addPickedMovie(${i})">
-                    <span class="distrakt-title">${esc(r.title)}</span>
-                    <span class="distrakt-year">${esc(r.year || '')}</span>
-                    <span class="distrakt-network">${r.runtime ? esc(r.runtime) + ' min' : ''}</span>
-                </div>`).join('')
-            : '<div class="distrakt-empty">No matches.</div>';
-    } catch (e) {
-        host.innerHTML = `<div class="distrakt-empty">${esc(e.message || 'Search failed.')}</div>`;
-    }
-}
-
-async function addPickedMovie(i) {
-    const picked = movieResults[i];
-    if (!picked) return;
+async function addPickedMovie(row) {
+    const title = row.dataset.title || '';
+    const year = row.dataset.year ? Number(row.dataset.year) : null;
     try {
         const res = await fetch('/api/distrakt/add-movie', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                ids: picked.ids, title: picked.title, year: picked.year,
+                ids: JSON.parse(row.dataset.ids || '{}'), title, year,
                 watched_on: document.getElementById('addMovieDate').value,
                 // Which month to re-render afterwards: the one on screen, which
                 // is not necessarily the one the film was filed under.
@@ -210,7 +260,7 @@ async function addPickedMovie(i) {
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
         const day = document.getElementById('addMovieDate').value;
-        toast(`Recorded ${picked.title} — watched ${day}`, true);
+        toast(`Recorded ${title} — watched ${day}`, true);
         closeAddMovie();
         applyMonthResponse(d);
     } catch (e) {

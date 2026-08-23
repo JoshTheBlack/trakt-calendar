@@ -83,17 +83,26 @@ class PrivacyTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_batched_progress_read_is_a_post_and_is_never_cached(self):
         """A POST whose meaning is entirely in its body cannot be expressed by a
-        URL key, and this one is also one person's viewing. It goes through
-        `send`, which does not cache at all — so a test that it never reaches
-        cached_get is the whole assertion."""
+        URL key, and this one is also one person's viewing.
+
+        THE PERSONAL READ IS THE POST, AND IT IS THE ONE THAT MAY NOT BE CACHED.
+        This function also asks the PUBLIC per-title record whether an id names
+        one season of a series (`_speaks_for_one_season`), and that answer is
+        cached and travels on the catalogue pool exactly as every other catalogue
+        lookup does. So the assertion is not "nothing is cached" — it is that the
+        watch history goes out on `send`, to the sync pool, and never through the
+        cache, while everything that DOES reach the cache is public."""
         send = AsyncMock(return_value=_Response([]))
-        cached = _cached_get()
+        cached = _cached_get({"ids": {"simkl": 1}}, {"ids": {"simkl": 2}})
         with patch("app.providers.simkl.transport.send", new=send), \
              patch("app.providers.simkl.transport.cached_get", new=cached):
             await sync.fetch_progress_details(SETTINGS, [1, 2])
-        cached.assert_not_awaited()
         self.assertEqual(send.await_args.args[1], "POST")
         self.assertIs(send.await_args.kwargs["pool"], transport.SYNC_POOL)
+        for call in cached.await_args_list:
+            with self.subTest(path=call.args[2]):
+                self.assertTrue(call.args[2].startswith("tv/"))
+                self.assertIsNot(call.kwargs.get("pool"), transport.SYNC_POOL)
 
     async def test_nothing_here_writes_to_simkl(self):
         """This build reads a person's viewing and never edits it. The write path
@@ -443,6 +452,63 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spy.await_count, 12)
         self.assertTrue(read.complete)
 
+    async def test_a_bucket_that_moved_is_asked_only_for_what_moved(self):
+        """Simkl's sync guide is explicit that pulling a whole list because one
+        thing in it changed is what gets a client id suspended. The bound is that
+        bucket's OWN previous stamp — not a cursor shared across lists — so each
+        one is asked for exactly what it has not already been asked for."""
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z")
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z")
+        _read, spy = await self._read([{}], activities=now, since=before)
+        self.assertEqual(spy.await_args.args[3]["date_from"],
+                         "2026-08-01T00:00:00Z")
+
+    async def test_the_stamp_is_sent_back_exactly_as_simkl_wrote_it(self):
+        """"Don't reformat `date_from` locally" — so it is carried as the opaque
+        string it arrived as and never parsed into a date on the way. A value this
+        app normalised would silently ask for a different window than the one the
+        service last reported."""
+        odd = "2026-08-01T00:00:00.000+00:00"
+        before = self._activities(shows_watching=odd)
+        now = self._activities(shows_watching="later")
+        _read, spy = await self._read([{}], activities=now, since=before)
+        self.assertEqual(spy.await_args.args[3]["date_from"], odd)
+
+    async def test_a_bounded_read_is_never_complete(self):
+        """THE SAFETY PROPERTY OF THE WHOLE DELTA MODEL. `date_from` bounds which
+        ITEMS come back, so a title absent from the answer has not been said to be
+        gone — it has been said not to have changed. Those two arrive looking
+        identical and only one is safe to act on, so a bounded read must never
+        license the caller to retire anything."""
+        before = self._activities(shows_watching="2026-08-01T00:00:00Z")
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z")
+        read, _ = await self._read([{}], activities=now, since=before)
+        self.assertFalse(read.complete)
+
+    async def test_a_first_read_is_unbounded_and_may_be_complete(self):
+        """A baseline needs every title the person holds. An item filtered out of
+        the FIRST read would read as a title Simkl does not have, which is the
+        answer that gets recorded permanently."""
+        read, spy = await self._read([{}] * 12, activities=self._activities())
+        self.assertEqual(spy.await_count, 12)
+        for call in spy.await_args_list:
+            self.assertNotIn("date_from", call.args[3])
+        self.assertTrue(read.complete)
+
+    async def test_a_bucket_with_no_earlier_stamp_of_its_own_is_unbounded(self):
+        """A list this app has never recorded has no point in time to ask for
+        changes since. Borrowing another bucket's stamp would silently skip
+        everything in it older than that — a list read once, wrongly, and then
+        never re-read because its stamp stops moving."""
+        before = {"lists": {"shows": {"watching": "2026-08-01T00:00:00Z"}}}
+        now = self._activities(shows_watching="2026-08-20T00:00:00Z")
+        _read, spy = await self._read([{}] * 12, activities=now, since=before)
+        sent = {call.args[2]: call.args[3].get("date_from")
+                for call in spy.await_args_list}
+        self.assertEqual(sent["sync/all-items/shows/watching"],
+                         "2026-08-01T00:00:00Z")
+        self.assertIsNone(sent["sync/all-items/shows/completed"])
+
     async def test_a_bucket_that_was_asked_for_and_refused_makes_the_read_partial(self):
         """`complete` MEANS "EVERY BUCKET I MEANT TO READ, I READ", never "I
         finished looping". The caller retires a title absent from a complete read,
@@ -493,6 +559,158 @@ class LibraryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(call.kwargs["raise_errors"], True)
 
 
+class AnimeSeasonTitleTests(unittest.IsolatedAsyncioTestCase):
+    """Simkl's anime season-titles, and the parameter that resolves them.
+
+    THE PROBLEM, MEASURED 2026-08-18. Simkl models each anime season as its own
+    catalogue title: "Beastars" season 2 is simkl 1231401, a different title from
+    season 1's 1034467, and it numbers its own episodes from 1. Under
+    `extended=full` its library payload arrives as `{simkl, slug, mal}` with no
+    tmdb at all — so untranslated it becomes its own `show:mal:` row, numbering
+    season 2's episodes as season 1, disconnected from the series the viewer
+    tracks under `show:tmdb:90937`.
+
+    THE ANSWER IS `extended=full_anime_seasons`, MEASURED 2026-08-21. Asked that
+    way the same entry carries the PARENT SERIES' ids (tmdb and tvdb included)
+    and every episode carries a `tvdb: {season, episode}` block giving its real
+    coordinates. This package used to derive both with a per-title lookup; the
+    payload states them outright. These tests pin the reading of that payload,
+    and the parameters that ask for it.
+    """
+
+    # Beastars season 2 as `full_anime_seasons` really returns it: the series'
+    # ids on a season-title, its own numbering as season 1, and the true
+    # coordinates on each episode.
+    SEASON_TWO = {"show": {"title": "Beastars",
+                           "ids": {"simkl_id": 1231401, "mal": "40935",
+                                   "tmdb": "90937", "tvdb": "361013"}},
+                  "mapped_tvdb_seasons": [2],
+                  "seasons": [{"number": 1, "episodes": [
+                      {"number": 1, "watched_at": "2026-08-18T12:00:00Z",
+                       "tvdb": {"season": 2, "episode": 1}}]}]}
+    SEASON_ONE = {"show": {"title": "Beastars",
+                           "ids": {"simkl_id": 1034467, "mal": "39195",
+                                   "tmdb": "90937", "tvdb": "361013"}},
+                  "mapped_tvdb_seasons": [1],
+                  "seasons": [{"number": 1, "episodes": [
+                      {"number": 1, "watched_at": "2022-04-25T03:58:43Z",
+                       "tvdb": {"season": 1, "episode": 1}}]}]}
+
+    async def _read(self, anime_items=(), finished=(), shows_items=()):
+        """A library read whose only non-empty buckets are `shows/watching`,
+        `anime/watching` and `anime/completed`. Returns the read, the paths asked
+        for and the parameters each was asked with."""
+        buckets = iter([{"shows": list(shows_items)}] + [{}] * 3
+                       + [{"anime": list(anime_items)},
+                          {"anime": list(finished)}] + [{}] * 6)
+        paths, params = [], []
+
+        async def _get(client, settings, path, param=None, **kwargs):
+            paths.append(path)
+            params.append(dict(param or {}))
+            return next(buckets)
+
+        with patch("app.providers.simkl.transport.cached_get",
+                   new=AsyncMock(side_effect=_get)):
+            return await sync.fetch_library(SETTINGS), paths, params
+
+    async def test_a_season_title_files_under_the_series_and_the_real_season(self):
+        """Both halves at once: the entry keys by the series' tmdb because the
+        payload carries it, and the episode lands on season 2 because its own
+        `tvdb` block says so."""
+        read, _paths, _params = await self._read([self.SEASON_ONE, self.SEASON_TWO])
+        self.assertEqual(list(read.entries), ["show:tmdb:90937"])
+        self.assertEqual(read.entries["show:tmdb:90937"].seasons,
+                         {1: {1: "2022-04-25T03:58:43Z"}, 2: {1: "2026-08-18T12:00:00Z"}})
+
+    async def test_the_plays_are_translated_too_not_only_the_baseline(self):
+        """Both readers take the coordinates from the same place, so a viewer's
+        plays can never sit on a different season from their progress."""
+        read, _paths, _params = await self._read([self.SEASON_TWO])
+        self.assertEqual([(e["episode"]["season"], e["episode"]["number"])
+                          for e in read.events], [(2, 1)])
+
+    async def test_an_episode_renumbered_by_simkl_takes_both_coordinates(self):
+        """A series numbered absolutely — One Piece is one title with a thousand
+        episodes — maps each episode to a season AND a number of its own. Taking
+        the season from the mapping and the number from the item would produce a
+        coordinate that exists in neither numbering."""
+        item = {"show": {"title": "One Piece",
+                         "ids": {"simkl_id": 38636, "tmdb": "37854"}},
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": 878, "watched_at": "2026-01-02T00:00:00Z",
+                     "tvdb": {"season": 20, "episode": 1}}]}]}
+        read, _paths, _params = await self._read([item])
+        self.assertEqual(read.entries["show:tmdb:37854"].seasons,
+                         {20: {1: "2026-01-02T00:00:00Z"}})
+
+    async def test_an_item_with_no_mapping_keeps_its_own_numbering(self):
+        """Television carries no `tvdb` block and needs none — its seasons are
+        already the show's. The fallback is the item's own numbers, which is what
+        every non-anime item has always used."""
+        plain = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                 "seasons": [{"number": 3, "episodes": [
+                     {"number": 4, "watched_at": "2026-07-01"}]}]}
+        read, _paths, _params = await self._read(shows_items=[plain])
+        self.assertEqual(read.entries["show:tmdb:900"].seasons, {3: {4: "2026-07-01"}})
+
+    async def test_only_the_anime_buckets_ask_for_the_mapping(self):
+        """`full_anime_seasons` is a superset of `full` and costs a larger
+        payload; television gains nothing from it, so it is asked for where it
+        answers something."""
+        _read, paths, params = await self._read()
+        asked = dict(zip(paths, params))
+        self.assertEqual(asked["sync/all-items/anime/watching"]["extended"],
+                         sync.ANIME_EXTENDED)
+        self.assertEqual(asked["sync/all-items/shows/watching"]["extended"], "full")
+
+    async def test_every_bucket_asks_for_the_episodes_of_a_finished_title(self):
+        """`include_all_episodes=yes` is what makes the `completed` and `dropped`
+        buckets carry episodes at all — without it they state counts, and this
+        app spent a phase reconstructing the episodes from them by hand."""
+        _read, _paths, params = await self._read()
+        for param in params:
+            self.assertEqual(param.get("include_all_episodes"), "yes")
+            self.assertEqual(param.get("episode_watched_at"), "yes")
+
+    async def test_a_finished_season_title_needs_no_special_handling_now(self):
+        """THE PHASE THIS REPLACES. A completed season-title used to arrive with
+        no seasons block at all, and had to be rebuilt from
+        `watched_episodes_count` against a per-title season lookup. Asked
+        correctly it arrives itemized and translated like any other item."""
+        finished = {"show": {"title": "Beastars",
+                             "ids": {"simkl_id": 1231401, "mal": "40935",
+                                     "tmdb": "90937"}},
+                    "status": "completed", "mapped_tvdb_seasons": [2],
+                    "watched_episodes_count": 12, "total_episodes_count": 12,
+                    "not_aired_episodes_count": 0,
+                    "seasons": [{"number": 1, "episodes": [
+                        {"number": n, "watched_at": "2026-08-21T15:49:06Z",
+                         "tvdb": {"season": 2, "episode": n}}
+                        for n in range(1, 13)]}]}
+        read, paths, _params = await self._read(finished=[finished])
+        entry = read.entries["show:tmdb:90937"]
+        self.assertEqual(sorted(entry.seasons), [2])
+        self.assertEqual(sorted(entry.seasons[2]), list(range(1, 13)))
+        # And it costs no per-title lookup at all: the payload said everything.
+        self.assertEqual([p for p in paths if p.startswith("tv/")], [])
+
+    async def test_the_do_not_remember_placeholder_is_not_a_date(self):
+        """Simkl writes 1970-01-01T00:00:01Z for "watched it, no idea when".
+        Read literally it files a season as finished in January 1970 — a real
+        month, on a real page, sorted before everything. The episode still
+        counts; the date does not."""
+        item = {"show": {"title": "Show", "ids": {"simkl_id": 55, "tmdb": "900"}},
+                "seasons": [{"number": 1, "episodes": [
+                    {"number": 1, "watched_at": "1970-01-01T00:00:01Z"},
+                    {"number": 2, "watched_at": "2026-07-02"}]}]}
+        read, _paths, _params = await self._read(shows_items=[item])
+        self.assertEqual(read.entries["show:tmdb:900"].seasons[1],
+                         {1: "", 2: "2026-07-02"})
+        # And it never becomes a play, which is what would carry it into a month.
+        self.assertEqual([e["episode"]["number"] for e in read.events], [2])
+
+
 class ProgressTests(unittest.IsolatedAsyncioTestCase):
     """One request for a whole roster, and what comes back matched to what was
     asked."""
@@ -505,7 +723,9 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             {"number": 1, "episodes": [{"number": 1, "watched_at": "2026-07-01"}]}]}
             for n in range(1, 71)]
         send = AsyncMock(return_value=_Response(answers))
-        with patch("app.providers.simkl.transport.send", new=send):
+        # Every title stands alone, so none of them declines the per-title read.
+        with patch("app.providers.simkl.transport.send", new=send),              patch("app.providers.simkl.transport.cached_get",
+                   new=_cached_get(*[{"ids": {"simkl": n}} for n in range(1, 71)])):
             got = await sync.fetch_progress_details(SETTINGS, list(range(1, 71)))
         self.assertEqual(send.await_count, 1)
         self.assertEqual(len(got), 70)
@@ -521,20 +741,45 @@ class ProgressTests(unittest.IsolatedAsyncioTestCase):
             got = await sync.fetch_progress_details(SETTINGS, [91])
         self.assertEqual(got, {91: {2: {4: ""}}})
 
-    async def test_a_season_with_no_breakdown_contributes_no_episodes(self):
+    async def test_a_season_with_no_breakdown_says_nothing_rather_than_zero(self):
         """Turning a watched COUNT into "episodes 1..n" would invent both the
-        numbers and the dates.
-
-        THE TITLE IS STILL PRESENT IN THE ANSWER, holding nothing. Simkl answered
-        about it, and an id that was answered about is present however empty the
-        answer — absence is reserved for an id that could not be read at all, which
-        is what stops a failed request being read as a viewer who has watched
-        nothing (see SyncPort.fetch_progress_details).
+        numbers and the dates — so there is nothing to report. What that means is
+        "I cannot say", NOT "none of it was watched", and the title is therefore
+        ABSENT: Simkl has just said four episodes of season 1 were seen, and
+        answering the caller with a zero would have it retire every season it had
+        stored for the title on the strength of a payload that says the opposite.
         """
         send = AsyncMock(return_value=_Response(
             [{"ids": {"simkl": 5}, "seasons": [{"number": 1, "total_episodes_watched": 4}]}]))
         with patch("app.providers.simkl.transport.send", new=send):
-            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {5: {}})
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [5]), {})
+
+    async def test_an_answer_with_no_seasons_at_all_says_nothing(self):
+        """THE SHAPE EVERY REAL ANSWER TAKES, measured 2026-08-21: this endpoint
+        reports WHETHER a title has been watched and never HOW MUCH, whatever
+        `episode_watched_at` asks for. Twin Peaks comes back like this while the
+        library read itemizes eight episodes of it."""
+        send = AsyncMock(return_value=_Response(
+            [{"simkl": 203, "result": True, "list": "watching",
+              "last_watched_at": "2020-02-02T19:07:39Z"}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [203]), {})
+
+    async def test_a_title_the_viewer_does_not_hold_is_a_real_zero(self):
+        """The ONE answer from here that means "seen none of it", and it has to
+        stay distinguishable from the rest: a title that has left the library is
+        how stored counts are correctly retired."""
+        send = AsyncMock(return_value=_Response([{"simkl": 9, "result": False}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [9]), {9: {}})
+
+    async def test_ids_simkl_could_not_resolve_say_nothing_rather_than_zero(self):
+        """`not_found` is Simkl saying it does not know what was asked about,
+        which is the opposite of "this viewer has watched none of it" — and this
+        app had the two the wrong way round."""
+        send = AsyncMock(return_value=_Response([{"simkl": 9, "result": "not_found"}]))
+        with patch("app.providers.simkl.transport.send", new=send):
+            self.assertEqual(await sync.fetch_progress_details(SETTINGS, [9]), {})
 
     async def test_a_batch_that_failed_names_none_of_its_ids(self):
         """The other half of the same rule, and the one that protects stored
@@ -582,6 +827,91 @@ class DerivationTests(unittest.TestCase):
         """Simkl's library payload does not carry it, and every reader already
         treats an empty string as "not stated"."""
         self.assertEqual(sync.watched_progress_from(self._events())[0]["network"], "")
+
+
+class LibraryIdsTests(unittest.IsolatedAsyncioTestCase):
+    """sync.fetch_library_ids — the cheap "what is still there" read a removal
+    check diffs against.
+
+    Its answer is used to conclude that a title the viewer HOLDS is gone, so the
+    interesting cases are all about when it must refuse to answer at all.
+    """
+
+    async def _ids(self, answers):
+        spy = _cached_get(*answers)
+        with patch("app.providers.simkl.transport.cached_get", new=spy):
+            return await sync.fetch_library_ids(SETTINGS), spy
+
+    async def test_it_reads_both_the_show_and_the_movie_shapes(self):
+        """Measured live: a show bucket sends `{"show": {"ids": ...}}` and a movie
+        bucket `{"movie": {...}}`, under a key named for the catalogue."""
+        answers = [{"shows": [{"show": {"ids": {"simkl": 2519, "slug": "chuck"}}}]}]
+        answers += [{}] * 7
+        answers += [{"movies": [{"movie": {"ids": {"simkl": 53084, "slug": "ab"}}}]}]
+        answers += [{}] * 3
+        ids, _ = await self._ids(answers)
+        self.assertEqual(ids, {2519: "chuck", 53084: "ab"})
+
+    async def test_a_percent_encoded_slug_is_decoded_once_here(self):
+        """`carniv%C3%A0le` is really in this account's library. A consumer builds
+        a URL by encoding what it is given, so handing over the encoded form makes
+        `carniv%25C3%25A0le` — a dead link built from a value that looks right in
+        the database."""
+        answers = [{"shows": [{"show": {"ids": {"simkl": 514,
+                                                "slug": "carniv%C3%A0le"}}}]}]
+        ids, _ = await self._ids(answers + [{}] * 11)
+        self.assertEqual(ids, {514: "carnivàle"})
+
+    async def test_one_unreadable_bucket_refuses_the_whole_answer(self):
+        """THE ASYMMETRY WITH fetch_library, AND THE REASON FOR IT. There, a bucket
+        that failed costs freshness and the caller folds in what it got. Here it
+        costs every title in that bucket: they are simply ABSENT, and absence is
+        the entire signal. There is no partial version of this answer that is safe
+        to diff, so a failure means no check rather than a check on less."""
+        answers = [{"shows": [{"show": {"ids": {"simkl": 1, "slug": "a"}}}]},
+                   transport.SimklError("500 while reading the list")]
+        ids, _ = await self._ids(answers + [{}] * 10)
+        self.assertIsNone(ids)
+
+    async def test_a_credential_failure_is_raised_rather_than_reported_as_empty(self):
+        """It is not a statement about this list, it is a statement about every
+        request this token will ever make. Swallowing it once per bucket would
+        swallow it twelve times and call the result a library."""
+        boom = transport.SimklError("Simkl rejected the credentials (401).")
+        with patch.object(transport, "is_credential_failure", return_value=True):
+            with self.assertRaises(transport.SimklError):
+                await self._ids([boom] + [{}] * 11)
+
+    async def test_an_empty_library_is_an_answer_rather_than_a_refusal(self):
+        """Every bucket read, every one of them empty. That is a viewer who holds
+        nothing, and it is a real state the caller is entitled to act on — told
+        apart from an unreadable one by being {} rather than None."""
+        ids, spy = await self._ids([{}] * 12)
+        self.assertEqual(ids, {})
+        self.assertEqual(spy.await_count, 12)
+
+    def test_the_registered_port_actually_offers_it(self):
+        """THE CHECK IS GATED ON THIS METHOD BEING ON THE PORT, so a function
+        defined on the module and never exposed there is a removal check that
+        silently never runs — correct code, wired to nothing, with every one of
+        its own tests passing. That is exactly how it was written the first time.
+
+        Asked of the REGISTRY rather than the class, because the registry is what
+        the tracker actually reaches for.
+        """
+        from app import providers
+        from app.providers.base import Source
+        port = providers.get(Source.SIMKL).sync_port
+        self.assertIsNotNone(getattr(port, "fetch_library_ids", None))
+
+    async def test_it_never_sends_date_from(self):
+        """A bounded read answers "what changed"; this one has to answer "what
+        remains". A title filtered out for not having moved is exactly the title
+        the diff would then report as removed."""
+        _ids, spy = await self._ids([{}] * 12)
+        for call in spy.await_args_list:
+            self.assertNotIn("date_from", call.args[3])
+            self.assertEqual(call.args[3]["extended"], "simkl_ids_only")
 
 
 if __name__ == "__main__":  # pragma: no cover

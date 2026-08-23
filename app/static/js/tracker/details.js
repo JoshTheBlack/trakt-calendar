@@ -33,14 +33,32 @@ async function openDistraktDetails(row, event) {
     } catch (e) {
         console.error(e);
         document.getElementById('distraktDetailsBody').innerHTML =
-            '<div class="d-empty">⚠️ Could not load details from Trakt.</div>';
+            // NAMES NO SERVICE, because it does not know which one would have
+            // answered and there is more than one: the server picks a source
+            // from the row's own ids (app/calendar/detail_source.py), so this
+            // said "Trakt" over a title Trakt never listed. The calendar's own
+            // modal has always worded it this way.
+            '<div class="d-empty">⚠️ Could not load details for this item.</div>';
     }
 }
 
-// https://app.trakt.tv/shows/<slug>?season=N&view=episode&episode=M
-function traktEpisodeUrl(slug, season, number) {
-    if (!slug) return null;
-    return `https://app.trakt.tv/shows/${encodeURIComponent(slug)}`
+// https://app.trakt.tv/shows/<slug|id>?season=N&view=episode&episode=M
+//
+// THE SLUG IS PREFERRED AND THE ID IS THE FALLBACK, the same order the Simkl
+// link below uses and for the same reason: a service resolves its own numeric id
+// perfectly well, but doing so costs it a title lookup and a redirect it would
+// not have needed. Sending the readable name when we know it is what both
+// services ask for.
+//
+// A ROW WITH NEITHER USED TO GET NO LINK AT ALL. Trakt's slug arrives on history
+// events, so a title with no recent play could carry an id for years and still
+// render its tick as plain text — a tick you cannot press to go and correct the
+// count it disagrees with, which is the entire purpose of the tick. The id alone
+// reaches the right page.
+function traktEpisodeUrl(slug, traktId, season, number) {
+    const name = slug || (traktId != null && traktId !== '' ? String(traktId) : '');
+    if (!name) return null;
+    return `https://app.trakt.tv/shows/${encodeURIComponent(name)}`
         + `?season=${encodeURIComponent(season)}&view=episode&episode=${encodeURIComponent(number)}`;
 }
 
@@ -53,10 +71,41 @@ function traktEpisodeUrl(slug, season, number) {
 // which is as deep as an id from a roster row reaches. A service the row carries
 // no id for gets no link at all and its tick is drawn as plain text rather than
 // as a link somewhere unhelpful.
+// EACH SERVICE'S OWN SLUG, AND NOTHING ELSE. Trakt and Simkl both call a title's
+// readable name `slug` and disagree on what it is — `the-traitors-2023` against
+// `the-traitors` — so the single field a row used to carry held whichever service
+// wrote last, with nothing recording which.
+//
+// THE SHARED FIELD IS NOT A SAFE FALLBACK FOR EITHER SERVICE, and reading it as
+// one produced live 404s. A Simkl-only title carried `shingeki-no-kyojin-oad` —
+// Simkl's name for it — and this handed that to the Trakt link builder, which
+// dutifully built a Trakt URL for a title Trakt has never heard of. Requiring the
+// service's id first would not have saved it either: a row holding BOTH ids can
+// have its shared slug written by either service, so the value is unattributable
+// exactly when both links are being drawn.
+//
+// An empty answer is not a dead end. The id is the fallback the link builders
+// use, both services resolve their own, and naming.py fills the namespaced slug
+// in from the stored calendar so the prettier form arrives on its own.
+function serviceSlug(service, d) {
+    if (service === 'trakt') return d.trakt_slug || '';
+    if (service === 'simkl') return d.simkl_slug || '';
+    return '';
+}
+
 function serviceEpisodeUrl(service, d, number) {
     const ids = d.source_ids || {};
-    if (service === 'trakt') return traktEpisodeUrl(d.slug, d.season, number);
-    if (service === 'simkl' && ids.simkl) return `https://simkl.com/tv/${encodeURIComponent(ids.simkl)}`;
+    if (service === 'trakt') {
+        return traktEpisodeUrl(serviceSlug('trakt', d), ids.trakt, d.season, number);
+    }
+    if (service === 'simkl' && ids.simkl) {
+        // THE ID IS THE STABLE IDENTIFIER AND THE SLUG IS DECORATION — Simkl says
+        // so outright, and asks that the slug be included when it is known. So a
+        // title we have no Simkl slug for still links, by id alone.
+        const slug = serviceSlug('simkl', d);
+        const base = `https://simkl.com/tv/${encodeURIComponent(ids.simkl)}`;
+        return slug ? `${base}/${encodeURIComponent(slug)}` : base;
+    }
     return '';
 }
 

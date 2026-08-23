@@ -544,9 +544,26 @@ def _window_sources(endpoint: Endpoint, settings, start: date) -> list[Provider]
     show. It is applied at READ as well (app/calendar/resolve.py), because a
     window filled before the operator changed their mind still holds the records
     they just switched off.
+
+    A SOURCE THIS INSTANCE CANNOT READ AT ALL IS NOT IN PLAY, and leaving it in
+    was what made every window on a single-source instance report itself
+    incomplete. `calendar_sources` deliberately does not ask about credentials —
+    its subject is which sources COULD publish this endpoint — so the fill asked
+    a source with no client id, got a refusal, and stored a window that named it
+    as asked-but-silent. The read path then marked every one of those windows
+    partial, on every day of every month, for ever: the "some calendar data
+    couldn't be loaded" banner on an instance where nothing had gone wrong and
+    nothing ever would.
+    `CalendarPort.calendar_configured` is the question that separates them —
+    can this instance read THIS source's calendar — and asking it here is what
+    keeps "partial" meaning a source that FAILED. It also keeps the recovery
+    working, without a special case: filling a credential in puts that source
+    back in play, `load_window` sees it in `in_play` and absent from the stored
+    window's `asked`, and refills for exactly the reason that rule exists.
     """
     return [p for p in providers.calendar_sources(settings=settings)
-            if p.capabilities.answers(endpoint.key) and _covers(p, start)]
+            if p.capabilities.answers(endpoint.key) and _covers(p, start)
+            and p.calendar_port.calendar_configured(settings)]
 
 
 async def fetch_window_records(endpoint: Endpoint, settings, start: date
@@ -680,6 +697,28 @@ async def cached_calendar_groups() -> list[dict]:
         if window is not None:
             groups.extend(window.groups)
     return groups
+
+
+async def stored_window_signature() -> str:
+    """A short value that changes whenever the stored calendar might name a title
+    it did not name before. Cheap: no payload leaves the database.
+
+    FOR CALLERS THAT DERIVE WORK FROM THE STORED CALENDAR and would otherwise
+    redo it on every request. `cached_calendar_groups` inflates every window —
+    measured at roughly 30ms for 3,700 groups on the author's instance — which is
+    nothing once, and is worth avoiding on a page load that will find exactly what
+    the previous one found. A caller pairs this with its own notion of what it
+    still owes: unchanged on both sides means the answer cannot have moved.
+
+    COUNT AND LATEST WRITE, not a content hash. A window is replaced wholesale
+    when it refills, so a refill moves `cached_at`; a new window moves both. A
+    hash of every payload would be exact and would cost precisely what the caller
+    is trying not to spend.
+    """
+    row = await db.fetch_one(
+        "SELECT COUNT(*) AS n, COALESCE(MAX(cached_at), 0) AS latest "
+        "FROM api_cache WHERE cache_key LIKE 'calendar:%'")
+    return f"{row['n']}:{row['latest']}" if row else "0:0"
 
 
 async def store_window(endpoint_key: str, start: date, records: list[Record],

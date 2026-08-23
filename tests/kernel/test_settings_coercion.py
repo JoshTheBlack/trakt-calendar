@@ -106,7 +106,12 @@ class TestConfiguredProperties:
     def test_calendar_source_configured_tracks_the_registry(self):
         """Not a second spelling of trakt_configured: it asks the registry
         whether ANY source can supply a calendar, which is the question the
-        calendar route needs and the one that survives a second provider."""
-        assert not Settings().calendar_source_configured
-        assert Settings(trakt_client_id="id",
-                        trakt_access_token="token").calendar_source_configured
+        calendar route needs and the one that survives a second provider.
+
+        A bare Settings HAS a calendar, because one registered source's months
+        are public files needing no credential — it takes switching that source
+        off to leave the page with nobody to ask."""
+        assert Settings().calendar_source_configured
+        assert not Settings(simkl_public_calendar_enabled=False).calendar_source_configured
+        assert Settings(trakt_client_id="id", simkl_public_calendar_enabled=False
+                        ).calendar_source_configured

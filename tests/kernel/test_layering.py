@@ -221,6 +221,15 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "deleting an account deletes its profile and header pictures, and "
         "connecting a service seeds its picture into that account's slots — "
         "both are auth events whose effect is on stored images"),
+    (AUTH, SOURCES): Edge(
+        "the account page is where somebody says which of their linked trackers "
+        "decides a season is finished, because it is the page that shows what "
+        "they have linked — the preference is stored beside the other per-account "
+        "source preferences rather than in a second place that answers 'which "
+        "service leads'. Function-local because this package's routes read auth "
+        "for their access levels, and naming it at load time would close that "
+        "loop",
+        deferred=True),
     (CALENDAR, MEDIA): Edge("a day block, and the picture a share link unfurls into, show posters"),
     (DISTRAKT, MEDIA): Edge("a tracked show is shown with its poster"),
     (RANKER, MEDIA): Edge("an exported board is drawn from posters with the shared image primitives"),
@@ -246,7 +255,13 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
-        "links a Discord post at the viewer's own calendar"),
+        "links a Discord post at the viewer's own calendar. It also asks "
+        "detail_source.choose which service can describe a title it holds ids "
+        "for, rather than deciding that a second time: same ids, same declared "
+        "order, same per-port catalogue predicate. It also reads the STORED "
+        "calendar windows back for the per-service slugs they already carry, so "
+        "a settled record can learn what a service calls a title without a "
+        "request being spent on asking"),
     (RANKER, DISTRAKT): Edge(
         "one adapter module imports the tracker's public surface so a board can "
         "be seeded from what the viewer finished. THE ONLY ranker module allowed "

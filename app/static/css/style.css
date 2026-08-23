@@ -987,6 +987,27 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 
 .auth-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* Which linked tracker decides. An ordered list because the ORDER is the whole
+   content — the numbers say "first, then this" without a caption having to. */
+.tracker-priority-list {
+    list-style: decimal; margin: 0; padding: 0 0 0 20px;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.tracker-priority-item { display: flex; align-items: center; gap: 8px; }
+.tracker-priority-name { color: var(--text); }
+
+/* Whose stored numbers still count. UNORDERED, unlike the control above it, and
+   the difference is the point: that one is a ranking where position is the whole
+   meaning, this one is a set of independent switches where order says nothing. */
+.tracker-retired-list {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 6px;
+}
+.tracker-retired-item label {
+    display: flex; align-items: center; gap: 8px; cursor: pointer;
+}
+.tracker-retired-item .auth-sub { margin: 0; }
+
 .avatar-row .row-main { display: flex; align-items: center; gap: 10px; }
 .avatar-thumb {
     width: 40px; height: 40px; border-radius: 999px; object-fit: cover;
@@ -1179,10 +1200,25 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     border: 1px solid var(--card-border); border-radius: 8px; background: rgba(255,255,255,0.02);
 }
 .distrakt-show-row.abandoned { opacity: 0.5; }
-/* A show whose totals couldn't be refreshed this pass: dim it and tint the
-   "unavailable — refresh to retry" note so its last-known counts aren't trusted. */
-.distrakt-show-row.unavailable { opacity: 0.6; }
-.distrakt-show-row.unavailable .distrakt-dates { color: var(--danger, #e0736b); font-style: italic; }
+/* WHETHER THIS ROW'S NUMBERS ARE THIS LOAD'S. Drawn on every row, green or red,
+   because a mark that only appears when something is wrong is one the reader has
+   to learn the meaning of first — and because the numbers themselves stay put
+   either way, so the mark is the only thing carrying the difference. The sentence
+   behind it is the row's own title attribute, composed server-side: the reason
+   differs (unreachable, not configured, or a title nothing can look up) and only
+   the server knows which. The row is NOT dimmed for this: it used to be, back
+   when its counts were blanked too, and dimming real numbers only makes them
+   harder to read. */
+.distrakt-freshness {
+    flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok, #5cb85c); opacity: 0.75;
+}
+/* Amber sits between the two on purpose: nothing is broken and nothing is
+   waiting, so red would send somebody looking for an outage that is not there —
+   but one of the numbers is older than the row otherwise reads, and green says
+   it is not. */
+.distrakt-freshness.partial { background: var(--warn, #d8a33a); opacity: 1; }
+.distrakt-freshness.stale { background: var(--danger, #e0736b); opacity: 1; }
 /* A season that was finished and now has more of it. Quiet enough not to compete
    with the title, loud enough that the row does not read as a mistake. It is a
    button — pressing it is the only thing that clears the mark — so the browser's
@@ -1195,6 +1231,18 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     cursor: pointer;
 }
 .distrakt-return:hover { opacity: 1; }
+/* A title a service has stopped listing. The same badge shape as the marker above
+   so the two read as one family, and deliberately NOT a button: that one is
+   cleared by pressing it, this one clears itself the moment the service names the
+   title again. Muted rather than accented, because it reports something that
+   happened elsewhere rather than asking the reader for anything — the row's own
+   counts are still good and the ✕ is still how a row goes away. */
+.distrakt-missing {
+    margin-left: 6px; padding: 0 5px; border-radius: 6px; font-size: 0.62rem;
+    text-transform: uppercase; letter-spacing: 0.06em; vertical-align: middle;
+    color: var(--muted, #8b93a7); border: 1px solid currentColor; opacity: 0.75;
+    line-height: 1.6; cursor: help;
+}
 /* An episode watched that nothing here knows about. Thin, and set apart from the
    bucket rows below it: it is a question rather than part of the month, and it
    sits above every section because a question under six headings is one nobody
@@ -1329,6 +1377,33 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .distrakt-search-row:hover { border-color: var(--gold); }
 .distrakt-search-row .distrakt-title { flex: 1; font-weight: 600; }
 .distrakt-search-row .distrakt-year, .distrakt-search-row .distrakt-network { color: var(--text-faint); font-size: 0.82rem; }
+/* Which season a row IS, where its source said so — a `.chip` like the ones the
+   details modal draws a title's facts with, since that is what this is, so only
+   what DIFFERS is stated here: smaller, and never wrapped or shrunk. It is not
+   given a column of its own because most rows have no season to put in one, and
+   an empty column draws a gap the width of a word nobody is saying. */
+.distrakt-search-row .distrakt-search-season {
+    flex: 0 0 auto; padding: 1px 8px; font-size: 0.74rem; white-space: nowrap;
+}
+/* A row nothing can be filed under: still readable, visibly not a button, and
+   carrying its own reason rather than a tooltip nobody hovers for. */
+.distrakt-search-row.is-unkeyable { cursor: default; opacity: 0.62; flex-wrap: wrap; }
+.distrakt-search-row.is-unkeyable:hover { border-color: var(--card-border); }
+.distrakt-search-row .distrakt-unkeyable { flex: 1 0 100%; color: var(--gold-soft); font-size: 0.78rem; }
+/* Which service(s) returned a row, drawn only where two catalogues were asked. */
+.distrakt-search-marks { display: inline-flex; align-items: center; gap: 3px; }
+.distrakt-search-marks .search-mark { width: 14px; height: 14px; }
+/* The search field and its submit sit on one line; the busy note follows them
+   and reserves nothing when idle, htmx's own indicator class doing the hiding. */
+.distrakt-search-submit { display: flex; align-items: center; gap: 8px; }
+.distrakt-search-submit input { flex: 1; }
+.distrakt-search-submit .distrakt-empty { padding: 0; font-size: 0.82rem; }
+/* Out of the flow entirely when idle rather than merely transparent, so the
+   field does not carry a gap the width of a word it is not saying. */
+.distrakt-search-submit .htmx-indicator { display: none; }
+.distrakt-search-submit .htmx-indicator.htmx-request { display: inline; }
+/* Narrower than the calendar's page-wide banner: this one sits inside a modal. */
+.distrakt-search-warn { margin: 0 0 8px 0; padding: 8px 12px; font-size: 0.82rem; }
 
 .distrakt-season-pick { margin-top: 14px; }
 .distrakt-season-list { display: flex; flex-wrap: wrap; gap: 8px; }

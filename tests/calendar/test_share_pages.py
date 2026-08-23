@@ -301,6 +301,60 @@ class ShareCodeArrivalTests(SharePageTestCase):
         self.assertIn("card-poster", resp.text)
 
 
+class ASharePageOnAnInstanceWithNoCredentialsTests(SharePageTestCase):
+    """The third surface reading "is there anybody to ask", and the one where
+    widening the answer had to be thought about hardest.
+
+    A share page is the one public path allowed an outbound call, so admitting a
+    source that needs NO credential is exactly the case to check: more instances
+    now have a calendar to serve a stranger, and none of them may let that
+    stranger spend anything. The bound is `allow_fetch=False` in `_read_month`,
+    which both the page and its preview picture come through.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # No credential of any kind — the state that used to make every share
+        # page an empty month whatever was cached.
+        save_settings(Settings(public_base_url=ORIGIN))
+        self.user_id = self._make_user("shareowner", calendar_approved=True)
+        self.sign_in_as(self.user_id)
+        self.token = self.client.get("/api/me/share").json()["token"]
+        self.client.cookies.clear()
+        entry = {
+            "first_aired": "2026-07-15T20:00:00Z",
+            "episode": {"season": 1, "number": 1, "title": "Pilot"},
+            "show": {"title": "Cached Show", "year": 2026, "country": "us",
+                     "genres": ["drama"],
+                     "ids": {"slug": "cached-show", "trakt": 321, "tmdb": 654}},
+        }
+        start = calendar_cache.window_start(date(2026, 7, 15))
+        asyncio.run(calendar_cache.store_window(
+            "shows/new", start, calendar_records([entry], get_endpoint("shows/new")),
+            600, db.now(), sources=["trakt"]))
+
+    def _no_fetch(self):
+        """A window fill that fails the test. The share surfaces read the cache
+        and only the cache; reaching this is the regression."""
+        async def _boom(*args, **kwargs):
+            raise AssertionError("a share request must never fetch a calendar")
+        return patch("app.calendar.cache.fetch_window_records", _boom)
+
+    def test_the_page_serves_what_is_cached_instead_of_an_empty_month(self):
+        with self._no_fetch():
+            resp = self.client.get(f"/s/{self.token}?year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Cached Show", resp.text)
+
+    def test_the_preview_picture_still_refuses_to_fetch_one(self):
+        """The card draws the same view the page does and warms only artwork for
+        titles the cache already holds. Widening who counts as a source must not
+        widen what an anonymous request can make this instance spend."""
+        with self._no_fetch():
+            resp = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=7")
+        self.assertEqual(resp.status_code, 200)
+
+
 class SharePageViewControlsTests(SharePageTestCase):
     """The visitor's own controls on a public page: GET-only, no session."""
 

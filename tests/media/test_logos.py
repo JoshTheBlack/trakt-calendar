@@ -115,7 +115,11 @@ class FetchWatchedProgressTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((rec["season"], rec["watched"]), (1, 2))
         # The whole id map travels, because the caller decides which of them the
         # row it writes is keyed on.
-        self.assertEqual(rec["ids"], {"trakt": 10, "tmdb": 111, "slug": "a"})
+        # `trakt_slug` beside `slug`: Trakt's normalizer namespaces the slug it
+        # was handed, because Simkl calls that field `slug` too and disagrees on
+        # what it holds.
+        self.assertEqual(rec["ids"], {"trakt": 10, "tmdb": 111, "slug": "a",
+                                      "trakt_slug": "a"})
 
 
 if __name__ == "__main__":
