@@ -183,6 +183,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         """
         held = premieres or {}
         self.season_calls = []
+        self.network_calls = []
 
         async def read_month(endpoint, settings, year=None, month=None, **kw):
             key = distrakt_store.month_key(int(year), int(month))
@@ -196,12 +197,21 @@ class RolloverOverHttpTestCase(AppTestCase):
                                     since_month=None):
             return _watch_state(roster, plays)
 
+        async def network_for(settings, rec):
+            """The show-level lookup an add from a history prompt makes, because
+            the prompt row carries no network of its own. Recorded rather than
+            merely stubbed: it is a per-click outbound call, so a test that starts
+            making one per ROW should have to say so."""
+            self.network_calls.append(str((rec.get("ids") or {}).get("tmdb") or ""))
+            return "Fake Network"
+
         with contextlib.ExitStack() as stack:
             for target, fake in (
                 ("app.calendar.cache.read_month", read_month),
                 ("app.providers.trakt.sync.fetch_watched_progress", _no_progress),
                 ("app.providers.trakt.detail.fetch_season_detail", season_detail),
                 ("app.distrakt.watch_history.sync_and_baseline", sync_and_baseline),
+                ("app.distrakt.live.network_for", network_for),
             ):
                 stack.enter_context(mock.patch(target, side_effect=fake))
             yield
@@ -1285,3 +1295,55 @@ class ARefusalIsAWatermarkNotAVetoTests(RolloverOverHttpTestCase):
         self.watched(4, self.EARLIER)
         self.decline()
         self.assertEqual(self.watched(6, "")["unknown_episodes"], [])
+
+
+class AddingFromAPromptBringsTheNetworkTests(RolloverOverHttpTestCase):
+    """A season added from a history prompt has to arrive with a network.
+
+    REPORTED FROM A REAL TRACKER: Beastars S2, added from the prompt, drew no
+    emoji; the same season added through search drew one. Nothing about the
+    account's services caused it — the prompt row simply had no network to send.
+    A play is deliberately thin (watch_history.EpisodePlay: a lookup per unmatched
+    episode is the whole cost the ask-the-viewer path avoids), so it carries none,
+    and the season lookup the add already makes answers about the SEASON and does
+    not carry one either. Measured against both services: neither
+    fetch_season_detail returns a network, and neither should.
+    """
+
+    ROW = {"key": "show:tmdb:999", "season": 1, "ids": {"trakt": 999, "tmdb": 999},
+           "title": "No Network Yet"}
+
+    def ask(self) -> dict:
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING, plays=[_play(999, 1, 3, "No Network Yet")])
+
+    def listed_networks(self) -> list[str]:
+        records = asyncio.run(distrakt_store.user_records(self.user_id))
+        return [r.get("network") or "" for r in records if int(r["match_id"]) == 999]
+
+    def test_the_added_row_carries_a_network(self):
+        self.ask()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add", {**self.ROW, **_viewing(OPENING)})
+        self.assertEqual(self.listed_networks(), ["Fake Network"])
+
+    def test_the_lookup_is_paid_once_on_the_click_not_per_row(self):
+        """The row is drawn from what the history event said and costs nothing;
+        the lookup happens because somebody pressed the button. A test that starts
+        seeing one per rendered row has found a real regression."""
+        self.ask()
+        self.assertEqual(self.network_calls, [],
+                         "rendering the prompt looked a network up")
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add", {**self.ROW, **_viewing(OPENING)})
+        self.assertEqual(len(self.network_calls), 1)
+
+    def test_a_network_the_client_did_send_is_not_overwritten(self):
+        """The lookup fills a gap; it does not overrule something already known.
+        Nothing sends one today, but the row is client-supplied and a future
+        surface that has one should not have it silently replaced."""
+        self.ask()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add",
+                      {**self.ROW, "network": "Stated By The Caller", **_viewing(OPENING)})
+        self.assertEqual(self.listed_networks(), ["Stated By The Caller"])

@@ -327,6 +327,73 @@ async def season_detail(settings, rec: dict, *, fresh: bool = False, client=None
                                      fresh=fresh, client=client)
 
 
+async def network_for(settings, rec: dict) -> str:
+    """Who broadcast this title, from whichever source can answer for it — "" when
+    none can.
+
+    BESIDE `season_detail` AND PICKING ITS SOURCE THE SAME WAY, because it is the
+    same kind of question: a public catalogue fact about a title, decided by which
+    ids the record carries and which of those services this instance can actually
+    ask (`detail_source`). That is what makes it work on a Simkl-only instance,
+    where reaching for Trakt first would answer nothing.
+
+    WHY IT IS A SECOND CALL AND NOT A PARAMETER ON THE ONE ALREADY BEING MADE.
+    Asked of both services' docs and then measured against both live, because a
+    free ride would have been worth having:
+
+      SIMKL — GET /tv/episodes/{id} takes no `extended` at all. Its own
+      conventions page says the parameter "is still accepted for backward
+      compatibility, but it's a no-op", and that is exactly what it does:
+      identical bytes and identical keys with and without it.
+
+      TRAKT — GET /shows/{id}/seasons/{n} was tried with every `extended` value
+      the API has (none, full, metadata, full,metadata, episodes, full,episodes,
+      full,images). It answers a list of EPISODES; no value adds the parent show,
+      and `network` appears nowhere in any of them.
+
+      THE NEAR MISS WORTH WRITING DOWN: the ALL-seasons call,
+      GET /shows/{id}/seasons?extended=full, does carry a `network` key on each
+      season object — but it is empty on every show sampled (Severance, Beastars,
+      Better Call Saul all null; The Walking Dead ""), while each of those shows
+      states a real network at the SHOW level. So it is a field Trakt publishes
+      and does not fill, and reading it would have looked right in review and
+      returned nothing in production.
+
+    So the network is a fact about the SHOW and has to be asked for as one. The
+    season lookup answers how long a season is and when it aired, which is a
+    different question, and should not be widened into this one.
+
+    WHO NEEDS IT: a row added from a history prompt. Every other way onto the
+    roster arrives with a network already — a search hit carries one, a calendar
+    record carries one — so this is the one path with nowhere else to get it, and
+    it is paid once, on a click, exactly as the season lookup beside it is.
+
+    THE TWO SERVICES CAN LEGITIMATELY DISAGREE and that is not a defect to
+    reconcile here: Simkl answers Beastars with "Fuji TV" (who aired it) and Trakt
+    with "Netflix" (who carried it), both true. Whichever source the record's own
+    ids and this instance's credentials select is the one that answers, which is
+    the same answer the rest of the row is built from.
+    """
+    from ..providers.simkl import _naming as simkl_naming
+    from ..providers.trakt.detail import fetch_show_summary
+    ids = rec.get("ids") or {}
+    source = detail_source(rec, settings)
+    if source == "simkl":
+        simkl_id = ids.get("simkl")
+        if not simkl_id:
+            return ""
+        naming = await simkl_naming.fetch(settings, simkl_id)
+        # Simkl fills the network in on the SERIES root and leaves it null on
+        # every later season-title, so a season added from a prompt has to read
+        # it off the series — see network_of_series, which is where that
+        # measurement lives.
+        return await simkl_naming.network_of_series(settings, simkl_id, naming)
+    if source is None:
+        return ""
+    info = await fetch_show_summary(settings, ids.get("trakt"))
+    return str((info or {}).get("network") or "")
+
+
 async def fetch_season_details(settings, records: list[dict], *, fresh: bool,
                                allow_degrade: bool, sources: list | None = None) -> list:
     """One season lookup per record, in parallel, in the records' own order.

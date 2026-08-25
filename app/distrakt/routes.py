@@ -2151,8 +2151,24 @@ async def api_distrakt_unknown_add(request: Request):
         # viewing is what put it here, which is what this records.
         "added_by": distrakt_store.ADDED_BY_HISTORY,
     }
-    detail = await _season_lookup(settings)(record, season)
+    # THE NETWORK IS LOOKED UP HERE BECAUSE THE PROMPT ROW HAS NONE TO SEND.
+    # Every other way onto the roster brings one — a search hit carries it, a
+    # calendar record carries it — but a history prompt is built from a play,
+    # which is deliberately thin (see watch_history.EpisodePlay: a lookup per
+    # unmatched episode is the cost the ask-the-viewer path exists to avoid). So
+    # the row arrived with an empty network and the show drew no emoji. Paid on
+    # the click, beside the season lookup, and by the same source-picking rule —
+    # which is what makes it answer on a Simkl-only instance too.
+    detail, network = await asyncio.gather(
+        _season_lookup(settings)(record, season),
+        live.network_for(settings, record),
+    )
+    record["network"] = record["network"] or network
     await lifecycle.follow(user_id, {**record, **detail, "season": season})
+    # The viewer's own emoji map is keyed by network name, so a network nothing
+    # registered draws nothing — the same call the manual add makes for the same
+    # reason.
+    await _register_networks(user_id, [record["network"]])
     # ANSWERED, so it stops being asked. Closing it here rather than leaving
     # standing_questions to notice the season is now listed keeps the answer and
     # its effect in one place; that check is the safety net, not the mechanism.

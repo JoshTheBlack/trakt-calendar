@@ -309,6 +309,29 @@ async def search_titles(settings: Settings, media: str, query: str) -> list[dict
     return out
 
 
+async def fetch_show_summary(settings: Settings, trakt_id) -> dict | None:
+    """/shows/{id}?extended=full -> the raw show object, or None.
+
+    THE SHOW-LEVEL FACTS A SEASON LOOKUP DOES NOT CARRY, and the network is the
+    one with a caller: `fetch_season_detail` answers how long a season is and
+    when it aired, which is a question about the SEASON, so nothing in its reply
+    says who broadcast the thing. A row added from a history prompt has no search
+    hit behind it to have brought one, and so reached the roster with no network
+    and drew no emoji.
+
+    `extended=full` RATHER THAN `full,images`, unlike the movie helper beside
+    this: the caller wants one string, the poster is answered elsewhere for a
+    show, and the image block is the larger half of the response.
+
+    Caches like every other public per-title lookup — a show's network is the
+    same for everybody and changes about never.
+    """
+    data = await transport.cached_get(
+        transport.shared_client(), settings, f"shows/{trakt_id}", {"extended": "full"},
+    )
+    return data if isinstance(data, dict) else None
+
+
 async def fetch_movie_summary(settings: Settings, trakt_id) -> dict | None:
     """/movies/{id}?extended=full,images -> the raw movie object, or None.
 
