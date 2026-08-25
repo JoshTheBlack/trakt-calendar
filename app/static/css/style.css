@@ -653,6 +653,12 @@ body.hide-not-watching .card.not-watching { display: none; }
 .site-footer { text-align: center; padding: 22px 6vw 36px 6vw; }
 .site-footer p { font-size: 0.72rem; color: var(--text-faint); opacity: 0.55; line-height: 1.7; }
 .site-footer .version-tag { color: var(--gold-soft); font-weight: 700; }
+/* The TMDB attribution line. Their terms ask for the logo and the disclaimer
+   together, with the logo LESS PROMINENT than the app's own branding — hence
+   footer type size and a mark that sits on the text baseline rather than
+   leading the line. */
+.footer-attribution { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
+.site-footer .tmdb-mark { height: 9px; width: auto; opacity: 0.75; vertical-align: baseline; }
 
 /* ---- Modal (settings + details shell) ---- */
 .modal-overlay { display: none; position: fixed; inset: 0; z-index: 10000; background: rgba(5,6,9,0.72); backdrop-filter: blur(4px); align-items: flex-start; justify-content: center; padding: 40px 16px; overflow-y: auto; }

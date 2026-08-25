@@ -304,10 +304,7 @@
     {% endfor %}
 </main>
 
-<hr class="footer-divider">
-<footer class="site-footer">
-    <p>Idea &amp; design by great_vc — Python rebuild &nbsp;&nbsp;<span class="version-tag">🏷️ v{{ version }} · {{ build }}</span></p>
-</footer>
+{% with note = 'Idea & design by great_vc — Python rebuild' %}{% include "_footer.html" %}{% endwith %}
 
 {% if is_admin %}
 <!-- Settings modal -->

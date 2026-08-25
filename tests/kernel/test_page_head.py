@@ -558,3 +558,81 @@ class BundledStylesheetTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Every page that draws a poster, a network logo or card art is drawing TMDB
+# content, and TMDB's API terms require their logo and disclaimer wherever that
+# happens. The set is written out rather than derived because "does this page
+# show TMDB content" is not a property of the template text — distrakt.html draws
+# network logos through an API route, and share_calendar.html draws poster art
+# the owner's views warmed. A page added to this list without the include, or
+# given the include and left off the list, fails below.
+TMDB_CONTENT_PAGES = {
+    "index.html",           # calendar cards: posters + network logos
+    "share_calendar.html",  # the public month, same cards
+    "distrakt.html",        # tracker rows: network logos
+    "ranker.html",          # the board: poster tiles
+    "pick.html",            # the month picker, same chrome as the calendar
+    "sources.html",
+    "admin.html",
+    "auth_me.html",
+}
+
+# The exact sentence TMDB's terms require, verbatim. Asserted as a whole string
+# so a well-meant reword is a failing test rather than a quiet breach.
+TMDB_DISCLAIMER = ("This product uses TMDB and the TMDB APIs but is not "
+                   "endorsed, certified, or otherwise approved by TMDB.")
+
+
+class FooterAttributionTests(unittest.TestCase):
+    """The shared footer, and the attribution it exists to carry.
+
+    NOT A TIDINESS TEST. Two pages had grown their own footers with different
+    content, and the obligation these assert — TMDB's logo and disclaimer
+    wherever TMDB content appears — is one this app already incurred through
+    poster art and network logos long before anything was written down about it.
+    A page that draws TMDB content and forgets the footer is the failure mode,
+    and it is invisible by inspection because nothing about it looks wrong.
+    """
+
+    def test_every_page_drawing_tmdb_content_includes_the_shared_footer(self):
+        for name in sorted(TMDB_CONTENT_PAGES):
+            with self.subTest(page=name):
+                source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+                self.assertIn('include "_footer.html"', source)
+
+    def test_no_page_builds_its_own_footer_beside_the_shared_one(self):
+        """The two hand-rolled footers are what the partial replaced; a third
+        would put the attribution back into drift."""
+        for name in PAGES:
+            with self.subTest(page=name):
+                source = (TEMPLATES_DIR / name).read_text(encoding="utf-8")
+                self.assertNotIn("<footer", source)
+
+    def test_the_footer_carries_the_logo_and_the_exact_disclaimer(self):
+        rendered = templates.get_template("_footer.html").render(
+            version="1.2.3", build="dev")
+        self.assertIn(TMDB_DISCLAIMER, rendered)
+        self.assertIn("/static/images/tmdb-short.svg", rendered)
+        self.assertIn("themoviedb.org", rendered)
+
+    def test_the_logo_asset_exists(self):
+        self.assertTrue((TEMPLATES_DIR.parent / "static" / "images"
+                         / "tmdb-short.svg").is_file())
+
+    def test_the_page_note_is_optional_and_the_attribution_is_not(self):
+        """A page with nothing of its own to say still carries the attribution —
+        which is the whole reason the note is the parameter and the attribution
+        is not."""
+        without = templates.get_template("_footer.html").render()
+        self.assertIn(TMDB_DISCLAIMER, without)
+        with_note = templates.get_template("_footer.html").render(note="Hello")
+        self.assertIn("Hello", with_note)
+        self.assertIn(TMDB_DISCLAIMER, with_note)
+
+    def test_the_version_tag_is_omitted_rather_than_left_empty(self):
+        """A page rendered without chrome context (no session to build one from)
+        should print no tag at all, not an empty one."""
+        self.assertNotIn("version-tag", templates.get_template("_footer.html").render())
+        self.assertIn("v1.2.3", templates.get_template("_footer.html").render(
+            version="1.2.3", build="dev"))

@@ -1,0 +1,36 @@
+{# THE ONE FOOTER EVERY PAGE DRAWS.
+
+   It exists because two pages had grown their own — the calendar's carried the
+   byline and the version, the share page's carried a one-line description and
+   neither — so "what does the foot of a page say" had two answers and no page
+   that gained a footer later would have matched either.
+
+   `note` IS THE PAGE'S OWN LINE and is the only thing that varies: the calendar
+   states its byline, the share page says it is read-only, and every other page
+   passes nothing. Everything below the note is the same everywhere, because it
+   is the same claim everywhere.
+
+   THE TMDB ATTRIBUTION IS NOT DECORATION AND MUST NOT BE DROPPED FROM A PAGE
+   THAT DRAWS TMDB CONTENT. TMDB's API terms require the logo and this exact
+   disclaimer wherever their content appears, and they ask that the logo be less
+   prominent than the app's own branding — which is what a footer is. Poster art
+   and network logos come from TMDB on the calendar, the tracker and the ranker
+   alike, so the obligation is app-wide rather than one page's, and putting it in
+   the shared partial is what stops the next page from being the one that forgets.
+   Per-item Simkl and Trakt attribution is a different requirement and is met
+   elsewhere, on the cards themselves (see _card.html's source links).
+
+   `version` and `build` come from chrome.page_context. A page that renders
+   without them — anything with no session to build that context from — simply
+   omits the tag rather than printing an empty one. #}
+<hr class="footer-divider">
+<footer class="site-footer">
+    {% if note %}<p>{{ note }}</p>{% endif %}
+    <p class="footer-attribution">
+        <a href="https://www.themoviedb.org/" target="_blank" rel="noopener noreferrer">
+            <img src="/static/images/tmdb-short.svg" alt="TMDB" class="tmdb-mark" width="68" height="9" loading="lazy">
+        </a>
+        This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise approved by TMDB.
+        {% if version %}&nbsp;&nbsp;<span class="version-tag">🏷️ v{{ version }} · {{ build }}</span>{% endif %}
+    </p>
+</footer>

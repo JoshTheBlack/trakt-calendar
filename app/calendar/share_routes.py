@@ -34,7 +34,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
                state as calendar_state)
-from .. import auth, authz, clock, perftrace, route_params
+from .. import auth, authz, chrome, clock, perftrace, route_params
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
@@ -517,6 +517,14 @@ async def _render(request: Request, share_row) -> Response:
         "day_packings": _DAY_PACKINGS,
         "hide_not_watching": view.hide_not_watching,
         "timezone_groups": build_timezone_options(view.tz.key),
+        # The shared footer states the version and the TMDB attribution, and a
+        # public page owes that attribution exactly as a signed-in one does — its
+        # cards draw the same TMDB poster art. `None` is "nobody is signed in",
+        # which is what this page always is: the nav flags come back all-false and
+        # go unread, while version and build are what the footer wants. Asked of
+        # chrome rather than restated here, so a page cannot drift from what every
+        # other page says about itself.
+        **chrome.page_context(None),
     }
     # Jinja renders SYNCHRONOUSLY on the event loop, and this template is one
     # block per airing — a busy month is a lot of string building with every other

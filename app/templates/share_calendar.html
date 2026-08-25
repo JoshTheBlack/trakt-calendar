@@ -198,10 +198,7 @@
     {% endif %}
 </main>
 
-<hr class="footer-divider">
-<footer class="site-footer">
-    <p>A read-only shared calendar &mdash; no sign-in required.</p>
-</footer>
+{% with note = 'A read-only shared calendar — no sign-in required.' %}{% include "_footer.html" %}{% endwith %}
 
 <!-- Details modal — same content as the calendar page (cast, trailer, episodes),
      served cache-only from what the owner's own views already fetched. -->
