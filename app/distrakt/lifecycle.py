@@ -532,6 +532,47 @@ async def find_shown_season(user_id: int, key: ItemKey, season: int, *,
     return None
 
 
+
+# How far a play's own timestamp may trail a refusal and still count as older
+# than it. The two clocks are not the same clock: `watched_at` is the SERVICE's
+# and the refusal's is OURS, so an episode marked watched moments before the ✗
+# was pressed can come back reading a second or two after it. Without the margin
+# that play would look like new evidence and re-ask immediately, which is the one
+# outcome a refusal must never produce. A minute is far below the gap between a
+# refusal and a genuine next viewing, and far above any plausible skew.
+_DISMISSAL_GRACE_SECONDS = 60
+
+
+def _still_declined(play: watch_history.EpisodePlay,
+                    declined: dict[tuple[str, int], tuple[str, int]],
+                    address: tuple[str, int]) -> bool:
+    """Whether a refusal still covers this play.
+
+    A VERDICT REFUSAL COVERS EVERYTHING, for ever — that question is a standing
+    condition and saying no to it means stop asking (see store.dismiss_prompt).
+    A HISTORY refusal is a watermark: it covers the viewing it was made about and
+    every play reported at or before it, and nothing after. So watching another
+    episode — or the same one again — asks again, while a forced refresh
+    re-reading the month from its first day hands back evidence already answered
+    and is correctly ignored.
+
+    A PLAY THAT CANNOT DATE ITSELF STAYS COVERED. With no usable timestamp there
+    is no way to show the play is new, and the viewer's refusal is the only thing
+    actually known — honouring it beats guessing, because guessing wrong here
+    means putting a question somebody has already answered back in front of them.
+    """
+    found = declined.get(address)
+    if found is None:
+        return False
+    kind, dismissed_at = found
+    if kind != store.DISMISSAL_HISTORY:
+        return True
+    when = watch_history.watched_at_epoch(play.watched_at)
+    if when is None:
+        return True
+    return when <= dismissed_at + _DISMISSAL_GRACE_SECONDS
+
+
 async def reconcile_history(user_id: int,
                             plays: Sequence[watch_history.EpisodePlay], *,
                             month: str,
@@ -591,30 +632,113 @@ async def reconcile_history(user_id: int,
     for play in plays:
         seasons.setdefault((str(play.key), int(play.season)), play)
 
-    settled_here = {(record["key"], int(record["season"])) for record
-                    in await store.month_records(user_id, month, store.SETTLED_KINDS)}
+    # COMPLETED ONLY, NOT EVERY SETTLED KIND, and the difference is the whole of
+    # the same-month case. The reason written above for leaving a settled season
+    # alone is a reason about FINISHING one: re-watching an episode of something
+    # completed is not news, and treating it as news is how it came back as a
+    # season nothing had heard of. An ABANDONMENT is the opposite claim — this
+    # module says so a few lines up, that watching something again after giving
+    # up on it is a real signal only the viewer can settle — and skipping it here
+    # because it happened to be settled THIS month meant a season given up on and
+    # gone back to in the same month was never offered back at all, on this load
+    # or any later one.
+    finished_here = {(record["key"], int(record["season"])) for record
+                     in await store.month_records(user_id, month,
+                                                  {store.RecordKind.COMPLETED})}
     # Read at most once, and only if something is actually going to be asked
     # about: the usual pull matches everything it reports to a season already in
     # hand, and a query for a set nothing will be tested against is a query for
     # nothing.
-    declined: set[tuple[str, int]] | None = None
-    unknown: list[watch_history.EpisodePlay] = []
-    given_up: list[watch_history.EpisodePlay] = []
+    declined: dict[tuple[str, int], tuple[str, int]] | None = None
     for address, play in seasons.items():
-        if address in settled_here:
+        if address in finished_here:
             continue
-        placed = await find_season(user_id, play.key, play.season, month=month)
+        # find_shown_season, NOT find_season, and only because the guard above
+        # narrowed. find_season deliberately stops one month short of the month
+        # being read, so a season abandoned THIS month is invisible to it — which
+        # was harmless while every such season was skipped outright, and becomes
+        # a wrong answer the moment one is not: the play would match nothing,
+        # come back as a season the tracker had never heard of, and adding it
+        # would file a second record beside the verdict. The wider search is the
+        # one written for "where is a season this month's page is drawing", which
+        # is exactly what this is now asking.
+        placed = await find_shown_season(user_id, play.key, play.season, month=month)
         if placed is not None and placed.month is None:
             continue  # already in hand; the counts refresh covers it
         asking = placed is None or placed.record["kind"] == RecordKind.ABANDONED
         if asking:
             if declined is None:
                 declined = await store.dismissed_prompts(user_id)
-            if address in declined:
+            if _still_declined(play, declined, address):
                 continue
-            (unknown if placed is None else given_up).append(play)
+            # WRITTEN DOWN RATHER THAN RETURNED, and that is the whole of the fix
+            # this call used to need. The plays behind these questions do not
+            # outlive the request that reported them, and the next sync reports
+            # nothing new — so a question nobody had answered yet vanished from
+            # the very next payload, and all three answer routes end by building
+            # one. Answering one question threw every other question away.
+            await store.open_prompt(user_id, play.key, play.season, play.number,
+                                    play.title, play.ids, play.watched_at)
         elif placed.record["kind"] == RecordKind.COMPLETED:
             await reopen(user_id, placed, look_up=look_up)
+    return await standing_questions(user_id, month=month)
+
+
+async def standing_questions(user_id: int, *, month: str) -> HistoryQuestions:
+    """Every question this viewer still has outstanding, split the way the page
+    asks them.
+
+    THE ONE PLACE THAT DECIDES WHAT IS ASKED, and it answers from stored plays
+    rather than from whatever a sync happened to report this time round. That is
+    what makes the questions survive a reload and survive answering one of
+    several — see store.open_prompt.
+
+    IT RE-DECIDES RATHER THAN REPLAYING. A stored play is a fact ("this was
+    watched and nothing knew about it"); whether it is still worth asking is a
+    judgement, and the judgement is made here, now, against the records as they
+    stand. A season that has since been placed on the list, settled by this
+    month, or declined is no longer a question — and its row is CLOSED as it is
+    dropped, so the table holds only what is genuinely outstanding rather than
+    growing a tail of questions nobody will ever be asked.
+
+    THE SPLIT IS THE SAME ONE reconcile_history makes for a fresh play, because
+    it is the same question: nothing anywhere knows this season (`unknown`), or
+    the viewer gave up on it and has watched it again (`given_up`).
+    """
+    stored = await store.open_prompts(user_id)
+    if not stored:
+        return HistoryQuestions([], [])
+    # THE SAME NARROWING reconcile_history makes, for the same reason: an
+    # abandonment reached this month is still a live question, and only a
+    # COMPLETION settles one. Reading every settled kind here would close a
+    # given-up prompt in the same breath that raised it.
+    finished_here = {(record["key"], int(record["season"])) for record
+                     in await store.month_records(user_id, month,
+                                                  {store.RecordKind.COMPLETED})}
+    # NO REFUSAL CHECK HERE, DELIBERATELY. Declining CLOSES the stored row
+    # (routes' unknown-dismiss), and a row only ever reopens through
+    # reconcile_history, which applies the watermark before it writes one. So a
+    # row that exists is by construction one no refusal covers, and re-testing it
+    # here would be a second copy of that rule with nothing to add — while a
+    # VERDICT refusal, which does still sit in that table, is about a different
+    # question entirely and must not silence this one.
+    unknown: list[watch_history.EpisodePlay] = []
+    given_up: list[watch_history.EpisodePlay] = []
+    for row in stored:
+        key, season = row["key"], row["season"]
+        address = (str(key), int(season))
+        placed = await find_shown_season(user_id, key, season, month=month)
+        # Answered, adopted or settled since it was asked: the question is spent.
+        if (address in finished_here
+                or (placed is not None and placed.month is None)
+                or (placed is not None
+                    and placed.record["kind"] != RecordKind.ABANDONED)):
+            await store.close_prompt(user_id, key, season)
+            continue
+        play = watch_history.EpisodePlay(key, season, row["number"],
+                                         row["title"], row["ids"],
+                                         row.get("watched_at", ""))
+        (unknown if placed is None else given_up).append(play)
     return HistoryQuestions(unknown, given_up)
 
 
@@ -726,7 +850,7 @@ async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
     would be tested against.
     """
     questions: list[UnbackedVerdict] = []
-    declined: set[tuple[str, int]] | None = None
+    declined: dict[tuple[str, int], tuple[str, int]] | None = None
     for record in settled:
         if record["kind"] != RecordKind.COMPLETED:
             continue
@@ -744,7 +868,14 @@ async def unbacked_verdicts(user_id: int, month: str, settled: Sequence[dict],
             continue
         if declined is None:
             declined = await store.dismissed_prompts(user_id)
-        if (record["key"], season) in declined:
+        # A VERDICT REFUSAL AND NOT ANY REFUSAL. These once shared one row and one
+        # meaning; they no longer do (see store.dismiss_prompt). A history refusal
+        # settles a VIEWING, and letting it silence this question would suppress
+        # something nobody had refused — the record asserting a completion no
+        # service backs is a different claim from an episode the tracker could not
+        # place, and declining one says nothing about the other.
+        found = declined.get((record["key"], season))
+        if found is not None and found[0] == store.DISMISSAL_VERDICT:
             continue
         questions.append(UnbackedVerdict(record, month, withdrawn, now, decider))
     return questions

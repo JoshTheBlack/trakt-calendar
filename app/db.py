@@ -2431,6 +2431,83 @@ ALTER TABLE source_prefs ADD COLUMN tracker_retired_json TEXT NOT NULL DEFAULT '
 """
 
 
+MIGRATION_34 = """
+-- A QUESTION THE VIEWER HAS NOT ANSWERED YET OUTLIVES THE REQUEST THAT ASKED IT.
+--
+-- The untracked-season prompts are derived from what the INCREMENTAL history sync
+-- just folded in (lifecycle.reconcile_history returns nothing at all for an empty
+-- play list), and that pull happens once: the activity beacon moves, and the very
+-- next request reports no new plays. Every prompt on the page therefore vanished
+-- from the next payload built -- and each of the three answer routes ends by
+-- rebuilding the month and returning it. So answering ONE question silently threw
+-- away every other question beside it, with only the answered one recorded. A
+-- plain reload did the same thing, for the same reason, with nothing answered.
+--
+-- HOLDING THE PLAY IS WHAT FIXES IT, NOT HOLDING THE QUESTION. What is stored here
+-- is the raw play -- the identity, the episode, and the ids the history event
+-- spelled out -- and whether it is still worth asking about is re-decided on every
+-- read by the rules that already decide it. A season that has since been placed,
+-- settled or declined drops out by those rules rather than by a second copy of
+-- them going stale in a queue. It is the same division distrakt_prompt_dismissals
+-- already draws: persist the FACT, re-derive the JUDGEMENT.
+--
+-- KEYED BY SEASON, like the dismissals table beside it and for the same reason:
+-- reconcile_history reduces a sitting of nine episodes to one question, so a
+-- second episode of a season already asked about must not add a second row.
+--
+-- `ids` TRAVELS AS JSON because saying yes means LOOKING THE SEASON UP, and a
+-- lookup needs the id of the service being asked. The play is the only place
+-- those ids ever existed -- re-deriving them would mean fetching a whole history
+-- again to find them a second time.
+CREATE TABLE distrakt_open_prompts (
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    media        TEXT    NOT NULL,
+    match_source TEXT    NOT NULL,
+    match_id     TEXT    NOT NULL,
+    season       INTEGER NOT NULL,
+    number       INTEGER NOT NULL,
+    title        TEXT    NOT NULL DEFAULT '',
+    ids_json     TEXT    NOT NULL DEFAULT '{}',
+    -- WHEN THE EPISODE WAS WATCHED, as the service reported it (UTC, like every
+    -- other watched_at in this app). It is what tells a play the viewer has
+    -- already declined from one they have not: a refusal is a watermark, so the
+    -- question is only re-raised by a play LATER than it.
+    watched_at   TEXT    NOT NULL DEFAULT '',
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY (user_id, media, match_source, match_id, season)
+);
+
+-- AND WHAT A REFUSAL MEANS, WHICH IS NO LONGER ONE THING.
+--
+-- distrakt_prompt_dismissals was written when all three of the page's questions
+-- agreed exactly about NO: do not put this season back on my list, stop asking.
+-- They no longer do, because they are driven by different things.
+--
+--   A HISTORY QUESTION IS AN EVENT. An episode was watched. Saying no settles
+--   THAT viewing -- but watching another episode afterwards is fresh evidence
+--   that the viewer is following the show after all, and it should ask again.
+--   So a history refusal is a WATERMARK: a play later than the refusal reopens
+--   the question, while the same play re-reported does not. That distinction is
+--   only decidable because a forced refresh re-reads from the first of the month
+--   and would otherwise hand back evidence somebody has already answered.
+--
+--   AN UNBACKED VERDICT IS A STANDING CONDITION. The record asserts a completion
+--   no service backs any more, and that stays true on every load until something
+--   changes it. A refusal there has to be permanent or the question returns for
+--   ever, which is what it was always for.
+--
+-- Sharing one row made the first silence the second: declining a history prompt
+-- permanently suppressed a DIFFERENT question about the same season's verdict --
+-- one nobody had refused.
+--
+-- 'verdict' IS THE DEFAULT SO EXISTING ROWS KEEP THE MEANING THEY WERE WRITTEN
+-- WITH. Every row predating this column was recorded as "stop asking, full
+-- stop", and defaulting the other way would quietly turn each of them into a
+-- watermark and start re-asking about seasons somebody has already declined.
+ALTER TABLE distrakt_prompt_dismissals
+    ADD COLUMN kind TEXT NOT NULL DEFAULT 'verdict';
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2465,6 +2542,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (31, MIGRATION_31),
     (32, MIGRATION_32),
     (33, MIGRATION_33),
+    (34, MIGRATION_34),
 ]
 
 

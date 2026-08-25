@@ -663,9 +663,9 @@ class TheUntrackedEpisodePromptTests(DistraktTestCase):
         """The prompt is derived from the watch history on every load, so without
         somewhere to record the refusal it would come straight back."""
         key = ItemKey("show", "tmdb", "7")
-        self.assertEqual(await distrakt.dismissed_prompts(self.user_id), set())
+        self.assertEqual(await distrakt.dismissed_prompts(self.user_id), {})
         await distrakt.dismiss_prompt(self.user_id, key, 2)
-        self.assertEqual(await distrakt.dismissed_prompts(self.user_id),
+        self.assertEqual(set(await distrakt.dismissed_prompts(self.user_id)),
                          {("show:tmdb:7", 2)})
 
     async def test_it_is_per_season_not_per_episode(self):

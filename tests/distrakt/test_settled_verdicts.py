@@ -1064,7 +1064,7 @@ class AddingASeasonWithdrawsARefusalTests(AppTestCase):
         self.assertIn((str(ITEM), SEASON),
                       asyncio.run(store.dismissed_prompts(self.user_id)))
         asyncio.run(store.clear_prompt_dismissal(self.user_id, ITEM, SEASON))
-        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)), set())
+        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)), {})
 
     def test_it_clears_only_the_season_that_was_added(self):
         """Per season, like the refusal itself — an answer about one season of a
@@ -1072,11 +1072,13 @@ class AddingASeasonWithdrawsARefusalTests(AppTestCase):
         asyncio.run(store.dismiss_prompt(self.user_id, ITEM, SEASON))
         asyncio.run(store.dismiss_prompt(self.user_id, ITEM, SEASON + 1))
         asyncio.run(store.clear_prompt_dismissal(self.user_id, ITEM, SEASON))
-        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)),
+        # Compared on the ADDRESSES alone: which seasons stand refused is this
+        # test's subject, and how long each refusal lasts is dismiss_prompt's.
+        self.assertEqual(set(asyncio.run(store.dismissed_prompts(self.user_id))),
                          {(str(ITEM), SEASON + 1)})
 
     def test_clearing_one_that_was_never_refused_is_harmless(self):
         """The add path calls this unconditionally rather than checking first — a
         delete of nothing is cheaper than a read plus a delete."""
         asyncio.run(store.clear_prompt_dismissal(self.user_id, ITEM, SEASON))
-        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)), set())
+        self.assertEqual(asyncio.run(store.dismissed_prompts(self.user_id)), {})

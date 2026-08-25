@@ -783,6 +783,14 @@ class EpisodePlay(NamedTuple):
     number: int
     title: str
     ids: dict
+    # WHEN, as the service reported it — UTC, like every other watched_at here.
+    # Carried for one reason: a refusal to add a season is a watermark rather
+    # than a permanent veto (see store.dismiss_prompt), so telling a play the
+    # viewer has already declined from a later one is the whole of what decides
+    # whether the question comes back. Defaulted so a caller that builds a play
+    # without one — a test, or a stored row written before this existed — is a
+    # play that simply cannot argue it is new.
+    watched_at: str = ""
 
 
 def _episode_play(event: dict) -> EpisodePlay | None:
@@ -802,7 +810,8 @@ def _episode_play(event: dict) -> EpisodePlay | None:
         return None
     return EpisodePlay(key, int(episode["season"]), int(episode["number"]),
                        str(show.get("title") or ""),
-                       collect_ids(show.get("ids") or {}))
+                       collect_ids(show.get("ids") or {}),
+                       str(event.get("watched_at") or ""))
 
 
 def episode_plays(state: dict) -> list[EpisodePlay]:
@@ -815,6 +824,35 @@ def episode_plays(state: dict) -> list[EpisodePlay]:
     rather than out of a sync — see _PLAYS for why the plays are never stored.
     """
     return list(state.get(_PLAYS) or [])
+
+
+def watched_at_epoch(watched_at: str) -> int | None:
+    """One `watched_at` as epoch seconds, or None when it cannot be read.
+
+    LIVES HERE BECAUSE THIS IS WHERE `watched_at` MEANS SOMETHING. Every service
+    reports it in UTC (see _sweep_cursor, which relies on the same thing), so the
+    conversion is a parse rather than a timezone question — but the exact spelling
+    is theirs: some send a trailing "Z", some an explicit "+00:00", some carry
+    milliseconds. fromisoformat handles the offset forms directly and the "Z" is
+    swapped for one it accepts.
+
+    None RATHER THAN A GUESS. A caller comparing this against a clock of its own
+    needs to know it could not be read, because "treat an unreadable timestamp as
+    now" and "treat it as the beginning of time" are opposite mistakes and only
+    the caller knows which one is safe for it.
+    """
+    text = (watched_at or "").strip()
+    if not text:
+        return None
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return int(moment.timestamp())
 
 
 def unreadable_sources(state: dict) -> list[str]:

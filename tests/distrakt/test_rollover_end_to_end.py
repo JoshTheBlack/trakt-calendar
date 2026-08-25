@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from app import clock, distrakt as distrakt_store
@@ -1008,3 +1008,280 @@ class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):
             resp = self.client.get("/api/distrakt/month")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["month"], distrakt_store.month_key(far.year, far.month))
+
+
+class QuestionsSurviveTheRequestThatRaisedThemTests(RolloverOverHttpTestCase):
+    """A question nobody has answered yet has to outlive the pull that found it.
+
+    THE BUG THIS IS WRITTEN AGAINST: the prompts were derived from what one
+    incremental sync folded in, and that sync happens once — the activity beacon
+    moves and the next pull reports nothing. So any payload built afterwards
+    found no plays and therefore no questions, and every one of the three answer
+    routes ends by building one. Ticking a single prompt silently threw away
+    every other prompt beside it, with only the ticked one recorded. A plain
+    reload did the same thing with nothing ticked at all.
+    """
+
+    ONE = {"key": "show:tmdb:801", "season": 1, "ids": {"trakt": 801, "tmdb": 801},
+           "title": "First Unknown"}
+    TWO = {"key": "show:tmdb:802", "season": 2, "ids": {"trakt": 802, "tmdb": 802},
+           "title": "Second Unknown"}
+
+    def ask_about_both(self) -> dict:
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING, plays=[
+                _play(801, 1, 1, "First Unknown"),
+                _play(802, 2, 5, "Second Unknown"),
+            ])
+
+    def reload(self) -> dict:
+        """The same month again, with the history reporting NOTHING new — which
+        is what every load after the first one actually looks like."""
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING)
+
+    def test_both_questions_are_raised_by_one_pull(self):
+        seasons = sorted(u["season"] for u in self.ask_about_both()["unknown_episodes"])
+        self.assertEqual(seasons, [1, 2])
+
+    def test_a_reload_that_reports_no_plays_still_asks_both(self):
+        self.ask_about_both()
+        seasons = sorted(u["season"] for u in self.reload()["unknown_episodes"])
+        self.assertEqual(seasons, [1, 2], "an ordinary reload lost the questions")
+
+    def test_answering_one_leaves_the_other_asking(self):
+        self.ask_about_both()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add", {**self.ONE, **_viewing(OPENING)})
+        seasons = [u["season"] for u in self.reload()["unknown_episodes"]]
+        self.assertEqual(seasons, [2], "answering one question dismissed the other")
+
+    def test_answering_one_records_only_that_one(self):
+        """The half that always worked, asserted beside the half that did not, so
+        a fix that keeps both questions by failing to act on either would fail."""
+        self.ask_about_both()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add", {**self.ONE, **_viewing(OPENING)})
+        listed = self.listed_ids()
+        self.assertIn(801, listed)
+        self.assertNotIn(802, listed)
+
+    def test_declining_one_leaves_the_other_asking(self):
+        self.ask_about_both()
+        self.client.post("/api/distrakt/unknown-dismiss",
+                         json={"key": self.ONE["key"], "season": 1})
+        seasons = [u["season"] for u in self.reload()["unknown_episodes"]]
+        self.assertEqual(seasons, [2])
+
+    def test_answering_both_leaves_nothing_outstanding(self):
+        self.ask_about_both()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add", {**self.ONE, **_viewing(OPENING)})
+        self.client.post("/api/distrakt/unknown-dismiss",
+                         json={"key": self.TWO["key"], "season": 2})
+        self.assertEqual(self.reload()["unknown_episodes"], [])
+
+
+class GivingUpAndGoingBackInTheSAMEMonthTests(RolloverOverHttpTestCase):
+    """Giving up on a season and watching it again WITHIN THE SAME MONTH.
+
+    The offer-it-back path was only ever exercised with the verdict sitting on an
+    EARLIER month (see GoingBackToSomethingYouGaveUpOnTests, which seeds the
+    closing month). Reported from a real tracker: abandon a season now, watch an
+    episode of it now, and nothing is offered — a reload does not help either.
+
+    reconcile_history skips anything this month has already settled, before it
+    ever asks whether the verdict was a completion or an abandonment. That guard
+    is written for the COMPLETED case and its own docstring says so — "an episode
+    re-watched after finishing a season would come back as something the tracker
+    had never heard of" — but it is applied to both, and for an abandonment the
+    reasoning is the opposite one: the module states plainly that watching
+    something again after giving up on it is a real signal the viewer alone can
+    settle.
+    """
+
+    ABANDONED = {"key": "show:tmdb:770", "season": 1}
+
+    def setUp(self):
+        super().setUp()
+        asyncio.run(distrakt_store.add_month_record(self.user_id, OPENING, {
+            "ids": {"trakt": 770, "tmdb": 770, "slug": "slug-770"},
+            "season": 1, "title": "Audacity", "network": "Net",
+            "kind": distrakt_store.RecordKind.ABANDONED,
+            "watched": 3, "total": 8,
+            "abandoned_form": "`Audacity S01 (3/8)`",
+        }))
+        # Giving up also turns the title away on the main calendar — the two are
+        # one act, and a verdict recorded without the mark describes a state the
+        # app cannot reach. The month's next load reads a missing mark as the
+        # viewer having taken the verdict back, so leaving it out would delete
+        # the very record this fixture exists to set up. Same reasoning, and the
+        # same call, as seed_the_closing_month.
+        asyncio.run(calendar_state.set_not_watching(self.user_id, "slug-770", True))
+
+    def ask(self) -> dict:
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING, plays=[_play(770, 1, 4, "Audacity")])
+
+    def test_it_is_offered_back(self):
+        payload = self.ask()
+        self.assertEqual([u["key"] for u in payload["given_up_episodes"]],
+                         ["show:tmdb:770"],
+                         "a season given up on THIS month is never offered back")
+
+    def test_it_is_not_mistaken_for_something_unknown(self):
+        """The tracker holds a verdict on it, so it is not a season nothing has
+        heard of — that would offer the wrong control and file a second record."""
+        self.assertEqual(self.ask()["unknown_episodes"], [])
+
+    def test_the_verdict_stands_until_the_viewer_withdraws_it(self):
+        self.ask()
+        self.assertIn(770, self.stored_ids(OPENING))
+        self.assertNotIn(770, self.listed_ids())
+
+    def test_the_offer_survives_a_reload(self):
+        self.ask()
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING)
+        self.assertEqual([u["key"] for u in payload["given_up_episodes"]],
+                         ["show:tmdb:770"])
+
+    def test_saying_yes_relists_it_rather_than_refusing(self):
+        """Reported from the browser the moment the offer started appearing: the
+        row was drawn and pressing the tick answered "That season isn't recorded
+        as given up on" — the route was asking find_season, which cannot see a
+        verdict this month reached, so the offer and its answer disagreed about a
+        record plainly on screen."""
+        self.ask()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-resume",
+                      {**self.ABANDONED, **_viewing(OPENING)})
+        self.assertIn(770, self.listed_ids(), "the tick did not put the season back")
+        self.assertNotIn(770, self.stored_ids(OPENING),
+                         "the month went on recording a verdict that was withdrawn")
+
+    def test_saying_yes_un_turns_it_away_on_the_calendar(self):
+        """Giving up wrote the mark; left standing, the next load's turn-away
+        reconciliation gives the season up all over again."""
+        self.ask()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-resume",
+                      {**self.ABANDONED, **_viewing(OPENING)})
+        marks = asyncio.run(calendar_state.not_watching_ids(self.user_id))
+        self.assertNotIn("slug-770", marks)
+
+    def test_saying_yes_stops_it_being_offered_again(self):
+        self.ask()
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-resume",
+                      {**self.ABANDONED, **_viewing(OPENING)})
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING)
+        self.assertEqual(payload["given_up_episodes"], [])
+
+    def test_a_season_COMPLETED_this_month_is_still_left_alone(self):
+        """The other half of the same guard, and it must not move: re-watching an
+        episode of something finished this month is not a question."""
+        asyncio.run(distrakt_store.add_month_record(self.user_id, OPENING, {
+            "ids": {"trakt": 771, "tmdb": 771, "slug": "slug-771"},
+            "season": 1, "title": "All Done Now", "network": "Net",
+            "kind": distrakt_store.RecordKind.COMPLETED, "watched": 8, "total": 8,
+        }))
+        with fake_today(ON_THE_FIRST):
+            payload = self.get_month(OPENING, plays=[_play(771, 1, 8, "All Done Now")])
+        self.assertEqual(payload["unknown_episodes"], [])
+        self.assertEqual([u["key"] for u in payload["given_up_episodes"]], [])
+
+
+class ARefusalIsAWatermarkNotAVetoTests(RolloverOverHttpTestCase):
+    """Saying no to a history question settles THAT viewing, not the season.
+
+    The old refusal was permanent, and its own note said why: the prompt was
+    re-derived from the whole watch history on every load, so anything short of
+    permanent did nothing. Plays arrive incrementally now and the outstanding
+    question is stored, so the refusal only has to outlast the evidence that
+    raised it — and a viewer who keeps watching a show after declining is saying
+    something the tracker should hear.
+    """
+
+    ROW = {"key": "show:tmdb:880", "season": 1, "ids": {"trakt": 880, "tmdb": 880},
+           "title": "Kept Watching"}
+
+    # ANCHORED TO THE REAL CLOCK, NOT TO THE FAKE ONE THE MONTH IS READ UNDER.
+    # A refusal is stamped with db.now(), which fake_today does not touch — it
+    # moves the calendar date the tracker reasons about, not the wall clock a row
+    # is written with. Fixed August dates therefore sat WHOLLY BEFORE every
+    # refusal, so even the "watched afterwards" play read as older and the two
+    # cases that must ask again could not.
+    EARLIER = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    LATER = (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()
+
+    def watched(self, number: int, when: str) -> dict:
+        with fake_today(ON_THE_FIRST):
+            return self.get_month(OPENING, plays=[
+                _play(880, 1, number, "Kept Watching")._replace(watched_at=when)])
+
+    def decline(self) -> None:
+        self.client.post("/api/distrakt/unknown-dismiss",
+                         json={"key": self.ROW["key"], "season": 1})
+
+    def test_the_same_viewing_reported_again_stays_quiet(self):
+        """A forced refresh re-reads the month from its first day, so the play
+        that was just declined comes back. It is the same evidence, already
+        answered, and must not ask again."""
+        self.watched(4, self.EARLIER)
+        self.decline()
+        self.assertEqual(self.watched(4, self.EARLIER)["unknown_episodes"], [])
+
+    def test_another_episode_watched_afterwards_asks_again(self):
+        """The case the whole change is for: still watching it, despite the no."""
+        self.watched(4, self.EARLIER)
+        self.decline()
+        payload = self.watched(5, self.LATER)
+        self.assertEqual([u["key"] for u in payload["unknown_episodes"]],
+                         [self.ROW["key"]])
+
+    def test_the_same_episode_watched_again_later_asks_again(self):
+        """Indistinguishable from the first case by episode number alone, which
+        is why the refusal is dated rather than remembering which episode it
+        was about."""
+        self.watched(4, self.EARLIER)
+        self.decline()
+        payload = self.watched(4, self.LATER)
+        self.assertEqual([u["key"] for u in payload["unknown_episodes"]],
+                         [self.ROW["key"]])
+
+    def test_declining_twice_moves_the_mark_rather_than_keeping_the_first(self):
+        """Otherwise the play behind the SECOND refusal still reads as newer than
+        the FIRST mark, and the question comes back a third time.
+
+        THE WRITE CLOCK IS CONTROLLED HERE and nowhere else in this class, because
+        this is the only case that needs two refusals with a viewing BETWEEN them.
+        Left to the real clock both refusals land in the same millisecond, no play
+        can fall between them, and the case cannot be posed at all — the sequence
+        would be untestable rather than passing. The gaps are an hour so nothing
+        turns on the skew margin the comparison allows.
+        """
+        base = int(datetime.now(timezone.utc).timestamp())
+        hour = 3600
+        first_watch = datetime.fromtimestamp(base, timezone.utc).isoformat()
+        second_watch = datetime.fromtimestamp(base + 2 * hour, timezone.utc).isoformat()
+
+        self.watched(4, first_watch)
+        with mock.patch("app.db.now", return_value=base + hour):
+            self.decline()
+        # An hour after that refusal: genuinely new, so it asks.
+        payload = self.watched(5, second_watch)
+        self.assertEqual([u["key"] for u in payload["unknown_episodes"]],
+                         [self.ROW["key"]])
+        with mock.patch("app.db.now", return_value=base + 3 * hour):
+            self.decline()
+        # The same play again. It predates the second refusal, so it is answered.
+        self.assertEqual(self.watched(5, second_watch)["unknown_episodes"], [])
+
+    def test_a_play_that_cannot_date_itself_stays_declined(self):
+        """With no timestamp there is no way to show the play is new, and the
+        refusal is the only thing actually known."""
+        self.watched(4, self.EARLIER)
+        self.decline()
+        self.assertEqual(self.watched(6, "")["unknown_episodes"], [])

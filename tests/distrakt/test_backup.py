@@ -120,7 +120,7 @@ class RoundTripTests(ExportTestCase):
         # back on their own
         listed, = await distrakt.user_records(self.user_id)
         self.assertEqual((listed["kind"], listed["watched"]), ("keepup", 2))
-        self.assertEqual(await distrakt.dismissed_prompts(self.user_id),
+        self.assertEqual(set(await distrakt.dismissed_prompts(self.user_id)),
                          {("show:tmdb:808", 3)})
         # and the watch-history side came back too
         state = await wh._load(self.user_id)
@@ -936,6 +936,7 @@ class BackupCoversTheWholeSchemaTests(unittest.IsolatedAsyncioTestCase):
         ("distrakt_month_records", "user_id"): "same",
         ("distrakt_user_seasons", "user_id"): "same",
         ("distrakt_prompt_dismissals", "user_id"): "same",
+        ("distrakt_open_prompts", "user_id"): "same",
         ("distrakt_watch_state", "user_id"): "same",
         ("distrakt_show_progress", "user_id"): "same",
         ("distrakt_movie_watches", "user_id"): "same",

@@ -590,18 +590,34 @@ class ASeasonThatTurnedOutNotToBeFinishedTests(LifecycleTestCase):
         self.assertEqual(lookup.calls, [])
         self.assertIn((str(_key(4)), 1), await self.month_kinds(self.this_month))
 
-    async def test_a_season_this_month_was_given_up_on_raises_no_question(self):
-        """The other half of the same rule, and the half that fails loudest if the
-        month under way's verdicts ever start reaching the search: an abandoned
-        record found there is offered back to the viewer, so a season they gave up
-        on this morning would ask to be re-added this afternoon, every load."""
+    async def test_a_season_this_month_was_given_up_on_IS_offered_back(self):
+        """REVERSED DELIBERATELY, and the reason the old expectation was written
+        is worth keeping in view: it feared that a season given up on this morning
+        would ask to be re-added this afternoon, on every load. What it actually
+        produced was worse and was reported from a real tracker — give up on a
+        season and watch an episode of it the same month, and nothing was ever
+        offered, on that load or any later one, because the guard fired before
+        anything asked whether the verdict was a completion or an abandonment.
+
+        THE FEAR DOES NOT SURVIVE HOW PLAYS ARRIVE. `plays` is what one
+        incremental sync folded in, not the whole history, so the episodes watched
+        BEFORE the verdict do not come back round — only an episode watched after
+        it raises this. And a question raised once is now stored and answerable
+        (see store.open_prompt), so saying no to it ends it rather than leaving it
+        to be re-derived every load, which is what "every load" was really about.
+
+        The completion half of the same guard is unchanged and is asserted just
+        below: re-watching something finished this month is still not a question.
+        """
         await store.add_month_record(self.user_id, self.this_month,
                                      _show(5, kind=store.RecordKind.ABANDONED))
         lookup = CountingLookup({"total": 10})
         questions = await self._questions([_play(5)], lookup)
-        self.assertEqual(questions.given_up, [])
-        self.assertEqual(questions.unknown, [])
-        self.assertEqual(lookup.calls, [])
+        self.assertEqual([str(p.key) for p in questions.given_up], [str(_key(5))])
+        self.assertEqual(questions.unknown, [],
+                         "a season the tracker holds a verdict on is not unknown")
+        self.assertEqual(lookup.calls, [],
+                         "offering it back must still cost no season lookup")
 
     async def test_the_second_pass_over_the_same_plays_writes_nothing(self):
         """Once a season has come back, a page load that sees the same plays must

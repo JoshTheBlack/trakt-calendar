@@ -712,15 +712,28 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
         (state, watched_lookup, completed_lookup, dates_lookup, movies, plays,
          unreadable) = await _sync_watch_history(
             settings, user_id, everything, month_key, force_fresh, today)
-        if under_way and plays:
+        if under_way:
             # The history has moved, so what it reported is folded back into the
             # records: a season the viewer had finished and has now watched more
             # of comes back onto their list, and anything it could not place
             # anywhere is handed on to be asked about. Only on the month under
             # way — a season coming back is a statement about what the viewer has
             # in hand, and only that month has a list to put it on.
-            questions = await lifecycle.reconcile_history(
-                user_id, plays, month=month_key, look_up=_season_lookup(settings))
+            #
+            # ASKED EVEN WHEN THE SYNC REPORTED NOTHING, which is the difference
+            # between a question that survives and one that does not. The plays
+            # arrive once — the beacon moves and the next pull is empty — so a
+            # payload built after that (a reload, or the rebuild every answer
+            # route ends with) used to find no plays and therefore no questions,
+            # and dropped every prompt the viewer had not got to yet.
+            # `standing_questions` reads what is still outstanding from the
+            # store; `reconcile_history` is what puts it there, and is skipped
+            # when there is nothing new to fold in.
+            if plays:
+                questions = await lifecycle.reconcile_history(
+                    user_id, plays, month=month_key, look_up=_season_lookup(settings))
+            else:
+                questions = await lifecycle.standing_questions(user_id, month=month_key)
             # The viewer's list was read BEFORE the history was pulled, so a
             # season that has just come back onto it is not in it. Read again
             # rather than render this load against the state before its own
@@ -2140,6 +2153,10 @@ async def api_distrakt_unknown_add(request: Request):
     }
     detail = await _season_lookup(settings)(record, season)
     await lifecycle.follow(user_id, {**record, **detail, "season": season})
+    # ANSWERED, so it stops being asked. Closing it here rather than leaving
+    # standing_questions to notice the season is now listed keeps the answer and
+    # its effect in one place; that check is the safety net, not the mechanism.
+    await distrakt_store.close_prompt(user_id, key, season)
     today = clock.today()
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
@@ -2178,11 +2195,20 @@ async def api_distrakt_unknown_resume(request: Request):
     year = route_params.valid_year(data.get("year"), today.year)
     month = route_params.valid_month(data.get("month"), today.month)
     month_key = distrakt_store.month_key(year, month)
-    placed = await lifecycle.find_season(user_id, key, season, month=month_key)
+    # find_shown_season, for the same reason the page's own question now uses it:
+    # find_season deliberately stops one month short of the month being read, so a
+    # season given up on THIS month is invisible to it. That made the offer and its
+    # answer disagree — the row was drawn, and pressing ✓ refused it with "that
+    # season isn't recorded as given up on" about a verdict plainly on screen.
+    # The kind check below is what keeps the wider search safe: this route acts
+    # only on an ABANDONED record, so the completed verdicts the extra step also
+    # reaches are refused exactly as they were before.
+    placed = await lifecycle.find_shown_season(user_id, key, season, month=month_key)
     if placed is None or placed.month is None or \
             placed.record["kind"] != distrakt_store.RecordKind.ABANDONED:
         return authz.error("That season isn't recorded as given up on.", 404)
     await lifecycle.take_back(user_id, key, season, month=placed.month)
+    await distrakt_store.close_prompt(user_id, key, season)
     await _tell_the_calendar(user_id, placed.record, turned_away=False)
     settings = await _distrakt_settings(user_id)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
@@ -2292,7 +2318,26 @@ async def api_distrakt_unknown_dismiss(request: Request):
         key, season = _row_target(data)
     except RequestError as exc:
         return authz.error(str(exc))
-    await distrakt_store.dismiss_prompt(user_id, key, season)
+    # WHICH QUESTION WAS REFUSED IS READ FROM THE STORE, NOT FROM THE REQUEST, and
+    # the discriminator is exact rather than a heuristic: a history question is
+    # raised by a play and always has an outstanding row (lifecycle.
+    # reconcile_history writes one before the question is ever rendered), while an
+    # unbacked verdict is derived from the records on every load and never has
+    # one. Asking the store therefore answers it outright — and it keeps a client
+    # from being able to choose how long its own refusal lasts, which is the part
+    # that should not be up for negotiation.
+    outstanding = {(str(row["key"]), int(row["season"]))
+                   for row in await distrakt_store.open_prompts(user_id)}
+    kind = (distrakt_store.DISMISSAL_HISTORY
+            if (str(key), int(season)) in outstanding
+            else distrakt_store.DISMISSAL_VERDICT)
+    await distrakt_store.dismiss_prompt(user_id, key, season, kind)
+    # TWO WRITES BECAUSE THEY SAY DIFFERENT THINGS. The dismissal is the refusal
+    # itself — permanent for a verdict, a watermark for a history question.
+    # Closing the open prompt retires THIS outstanding question. A decline needs
+    # both: without the first the same play asks again, and without the second the
+    # row lingers until something else notices it was answered.
+    await distrakt_store.close_prompt(user_id, key, season)
     return JSONResponse({"ok": True})
 
 

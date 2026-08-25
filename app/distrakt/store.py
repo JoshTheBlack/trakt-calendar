@@ -1319,21 +1319,45 @@ async def learn_ids(user_id: int, key: ItemKey, ids: Mapping) -> int:
 # the prompt for an episode nothing knows about
 # ---------------------------------------------------------------------------
 
-async def dismiss_prompt(user_id: int, key: ItemKey, season: int) -> None:
-    """Record that the viewer declined to add a season the tracker has never
-    heard of.
+# WHAT A REFUSAL MEANS, AND IT IS TWO DIFFERENT THINGS. See migration 34 for the
+# full reasoning; in short, the page asks questions of two kinds and NO means
+# something different in each.
+#
+#   HISTORY — an episode was watched and the tracker could not place it (or the
+#   viewer had given the season up). The question is an EVENT, so declining
+#   settles that viewing and nothing more: an episode watched afterwards is fresh
+#   evidence and asks again. The refusal is a WATERMARK.
+#
+#   VERDICT — a completed record no service backs any more. The question is a
+#   STANDING CONDITION, true on every load until something changes it, so
+#   declining has to be permanent or it returns for ever.
+DISMISSAL_HISTORY = "history"
+DISMISSAL_VERDICT = "verdict"
 
-    Stored, because the prompt is DERIVED from the watch history on every load:
-    without somewhere to record the refusal the same episode would raise it again
-    on the very next one and the ✗ would do nothing. Per SEASON rather than per
-    episode, or every further episode of the same season would ask again.
+
+async def dismiss_prompt(user_id: int, key: ItemKey, season: int,
+                         kind: str = DISMISSAL_VERDICT) -> None:
+    """Record that the viewer declined one of the page's questions about a season.
+
+    `kind` SAYS WHICH QUESTION, and therefore how long the refusal lasts — see the
+    pair above. It defaults to the permanent one because that is what every row
+    written before this argument existed meant, and because a refusal that lasts
+    too long is a question that goes unasked, while one that lapses too early is a
+    question somebody already answered being put to them again.
+
+    THE TIMESTAMP IS THE WATERMARK for a history refusal, which is why the write
+    REFRESHES it rather than leaving the first one standing. Declining the same
+    season a second time has to move the mark, or the play that prompted the
+    second refusal would still read as newer than the first and ask a third time.
     """
     await db.execute(
         "INSERT INTO distrakt_prompt_dismissals "
-        "(user_id, media, match_source, match_id, season, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?) "
-        "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
-        (user_id, key.media, key.match_source, key.match_id, int(season), db.now()),
+        "(user_id, media, match_source, match_id, season, created_at, kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, media, match_source, match_id, season) DO UPDATE SET "
+        "created_at = excluded.created_at, kind = excluded.kind",
+        (user_id, key.media, key.match_source, key.match_id, int(season),
+         db.now(), str(kind)),
     )
 
 
@@ -1362,13 +1386,120 @@ async def clear_prompt_dismissal(user_id: int, key: ItemKey, season: int) -> Non
     )
 
 
-async def dismissed_prompts(user_id: int) -> set[tuple[str, int]]:
-    """The (item key, season) pairs this viewer has already said no to, in the
-    same shape the watch-history lookups are keyed by."""
+async def dismissed_prompts(user_id: int) -> dict[tuple[str, int], tuple[str, int]]:
+    """What this viewer has said no to: {(item key, season): (kind, when)}.
+
+    A MAPPING RATHER THAN A SET, and every existing caller is unaffected by that:
+    `address in declined` reads a dict exactly as it read a set, which is what
+    the verdict question still wants — it asks only whether a refusal exists. The
+    history question needs more, because its refusal is a watermark rather than a
+    veto, and it is the only caller that looks at the value.
+
+    ONE FUNCTION FOR BOTH so there is one query and one place that knows how this
+    table is shaped. Two readers wanting different amounts of the same row is not
+    two questions.
+    """
     rows = await db.fetch_all(
-        "SELECT media, match_source, match_id, season FROM distrakt_prompt_dismissals "
-        "WHERE user_id = ?",
+        "SELECT media, match_source, match_id, season, kind, created_at "
+        "FROM distrakt_prompt_dismissals WHERE user_id = ?",
         (user_id,),
     )
-    return {(item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"]))
-            for r in rows}
+    return {
+        (item_key(r["media"], r["match_source"], r["match_id"]), int(r["season"])):
+            (str(r["kind"] or DISMISSAL_VERDICT), int(r["created_at"]))
+        for r in rows
+    }
+
+
+# ---------------------------------------------------------------------------
+# the questions the viewer has not answered yet
+# ---------------------------------------------------------------------------
+#
+# WHY THESE ARE STORED AT ALL, when the dismissals beside them are stored for the
+# opposite reason. A dismissal is remembered so a question is NOT asked again; an
+# open prompt is remembered so it still CAN be. The prompts are derived from what
+# one incremental history sync folded in, and that sync happens once — so a
+# question nobody has answered yet disappeared from the very next payload, and
+# every answer route ends by building one. Answering one question threw the rest
+# away.
+#
+# WHAT IS KEPT IS THE PLAY, NOT THE QUESTION. Whether a season is still worth
+# asking about is re-decided on every read, by app/distrakt/lifecycle.py's
+# reconcile_history, from these rows — so a season since placed, settled or
+# declined stops being asked by the rules that already say so rather than by a
+# second copy of them here. Persist the fact, re-derive the judgement.
+
+
+async def open_prompt(user_id: int, key: ItemKey, season: int, number: int,
+                      title: str, ids: dict, watched_at: str = "") -> None:
+    """Remember one unanswered play, so the question survives the request that
+    raised it.
+
+    FIRST WRITER WINS, per season, matching how the question itself is reduced:
+    reconcile_history keeps the FIRST play it saw for a season, so a later
+    episode of a season already being asked about must not overwrite the episode
+    number the viewer is looking at on screen.
+    """
+    await db.execute(
+        "INSERT INTO distrakt_open_prompts "
+        "(user_id, media, match_source, match_id, season, number, title, ids_json, "
+        " watched_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(user_id, media, match_source, match_id, season) DO NOTHING",
+        (user_id, key.media, key.match_source, key.match_id, int(season), int(number),
+         str(title or ""), json.dumps(dict(ids or {})), str(watched_at or ""), db.now()),
+    )
+
+
+async def close_prompt(user_id: int, key: ItemKey, season: int) -> None:
+    """Forget an unanswered play, because the viewer has just answered it.
+
+    CALLED BY ALL THREE ANSWERS — added, resumed, declined — because what it
+    records is "this is still outstanding", and every one of those three settles
+    it. A decline ALSO writes a dismissal, which is the separate, longer-lived
+    statement that it must not be raised again.
+    """
+    await db.execute(
+        f"DELETE FROM distrakt_open_prompts {_SEASON_WHERE}",
+        (user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+
+
+async def open_prompts(user_id: int) -> list[dict]:
+    """Every unanswered play this viewer still has, oldest first.
+
+    Oldest first so the page keeps a stable order as questions are answered out
+    of it — a list that reshuffles under the pointer is how the wrong one gets
+    ticked.
+
+    Returned as plain dicts rather than as EpisodePlay: this module does not
+    import app/distrakt/watch_history.py (that one imports this), and the caller
+    rebuilds the play it needs. A row whose stored ids will not parse is handed
+    back with none rather than dropped — the ids are what a LOOKUP needs, and a
+    question worth asking is still worth asking with less to answer it by.
+    """
+    rows = await db.fetch_all(
+        "SELECT media, match_source, match_id, season, number, title, ids_json, "
+        "       watched_at "
+        "FROM distrakt_open_prompts WHERE user_id = ? ORDER BY created_at, rowid",
+        (user_id,),
+    )
+    out: list[dict] = []
+    for row in rows:
+        try:
+            ids = json.loads(row["ids_json"])
+        except (TypeError, ValueError):
+            ids = {}
+        out.append({
+            # An ItemKey, not the flat string `item_key` builds: the caller hands
+            # this straight to find_season and onto an EpisodePlay, and both want
+            # the triple. The flat form is what a dict key or a client reference
+            # needs, which is a different job.
+            "key": ItemKey(row["media"], row["match_source"], row["match_id"]),
+            "season": int(row["season"]),
+            "number": int(row["number"]),
+            "title": str(row["title"] or ""),
+            "ids": ids if isinstance(ids, dict) else {},
+            "watched_at": str(row["watched_at"] or ""),
+        })
+    return out

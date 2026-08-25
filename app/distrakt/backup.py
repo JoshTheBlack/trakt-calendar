@@ -47,7 +47,21 @@ _EXPORT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("distrakt_months", ("month", "closed", "totals_refreshed_at", "movies_json", "created_at")),
     ("distrakt_month_records", MONTH_RECORD_COLUMNS),
     ("distrakt_user_seasons", USER_RECORD_COLUMNS),
-    ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at")),
+    # `kind` TRAVELS, AND `created_at` STOPS BEING DECORATION. A refusal used to
+    # be one thing and permanent, so the timestamp was only ever a record of when.
+    # It is now the WATERMARK a history refusal is measured against, and `kind` is
+    # what says whether it is one — a restore that dropped either would turn every
+    # history refusal into a permanent veto, or every permanent one into a
+    # watermark that the next play lifts. See store.dismiss_prompt.
+    ("distrakt_prompt_dismissals", (*IDENTITY_COLUMNS, "season", "created_at", "kind")),
+    # THE QUESTIONS STILL OUTSTANDING, and they are backed up because they CANNOT
+    # BE REBUILT. The plays behind them never reach storage at all (watch_history's
+    # _PLAYS is in-memory by design), so a restore without these is a tracker that
+    # has quietly forgotten every question the viewer had not got round to
+    # answering, with nothing anywhere to raise them again until the show is
+    # watched some more. A handful of rows against losing them for good.
+    ("distrakt_open_prompts", (*IDENTITY_COLUMNS, "season", "number", "title",
+                               "ids_json", "watched_at", "created_at")),
     # `play_counts_json` is DELIBERATELY not here — see the declaration in
     # tests/distrakt/test_backup.py and the reasoning in tests/kernel/test_db.py.
     ("distrakt_watch_state", ("cursors_json", "beacons_json")),
