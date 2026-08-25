@@ -144,6 +144,42 @@ class NormalizerTests(unittest.TestCase):
         record = simkl_calendar.to_movie_record(_movie_entry())
         self.assertNotIn("mal", record.ids)
 
+    def test_an_entry_with_no_url_still_links_to_ITS_OWN_page(self):
+        """Simkl's API rules require that their data link "back to the Simkl
+        page for that specific item — not just a generic homepage link", and the
+        old fallback here was the homepage. Nothing on the author's instance
+        exercises it (38,090 of 38,090 stored entries carry a `url`), which is
+        exactly why it needed a test rather than watching."""
+        entry = _movie_entry(simkl_id=4242, slug="a-film")
+        entry.pop("url", None)
+        record = simkl_calendar.to_movie_record(entry)
+        self.assertEqual(record.detail_url, "https://simkl.com/movies/4242/a-film")
+
+    def test_a_show_with_no_url_uses_the_series_path_not_the_film_one(self):
+        entry = _tv_entry(simkl_id=99, slug="a-show")
+        entry.pop("url", None)
+        record = simkl_calendar.to_show_record(entry)
+        self.assertEqual(record.detail_url, "https://simkl.com/tv/99/a-show")
+
+    def test_a_slugless_entry_still_gets_an_item_link(self):
+        """The numeric form reaches the same page, so a missing slug costs the
+        link its readability and not its destination."""
+        entry = _movie_entry(simkl_id=7)
+        entry.pop("url", None)
+        entry["ids"].pop("slug", None)
+        record = simkl_calendar.to_movie_record(entry)
+        self.assertEqual(record.detail_url, "https://simkl.com/movies/7")
+
+    def test_nothing_to_point_at_is_empty_rather_than_the_homepage(self):
+        """With no id there is genuinely no item-specific page. Empty is what
+        app/calendar/resolve.py's source_links already skips; a homepage link
+        would be a rule violation dressed up as an answer."""
+        entry = _movie_entry()
+        entry.pop("url", None)
+        entry["ids"] = {"slug": "orphan"}
+        record = simkl_calendar.to_movie_record(entry)
+        self.assertEqual(record.detail_url, "")
+
 
 def _anime_entry(simkl_id=7, slug="an-anime", anime_type="tv", episode=1,
                  when="2026-07-07T00:00:00+09:00", release_date=None):

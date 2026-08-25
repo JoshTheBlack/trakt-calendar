@@ -240,6 +240,45 @@ def _poster_url(path) -> str | None:
     return f"https://simkl.in/posters/{path}_m.jpg"
 
 
+# Where a title lives on Simkl's own site: /movies/<id>/<slug> for a film and
+# /tv/<id>/<slug> for a series, matching the `url` Simkl's own calendar entries
+# carry.
+_SITE_PATHS = {Media.SHOW: "tv", Media.MOVIE: "movies"}
+
+
+def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
+    """The Simkl page for THIS title: the entry's own `url` when it carries one,
+    otherwise the same address rebuilt from the ids it does carry.
+
+    THE ENTRY'S OWN URL IS PREFERRED AND USED AS GIVEN, because a percent-encoded
+    slug is already correctly encoded there and re-deriving one risks spelling it
+    differently.
+
+    WHAT THIS REPLACES IS A LINK TO SIMKL'S HOMEPAGE, and that was not merely
+    unhelpful — Simkl's API rules require that wherever their data appears it
+    links "back to the Simkl page for that specific item — not just a generic
+    homepage link", so the old fallback was a rule violation waiting for an entry
+    that happened to omit `url`. Every entry measured on this instance carries
+    one (38,090 of 38,090), which is exactly why the fallback needed fixing
+    rather than watching: nothing exercises it, so nothing would report it.
+
+    The slug is optional in the same way Trakt's is (see that package's
+    `_detail_url`): the numeric form reaches the same page, so a title with no
+    slug still gets a real link rather than a homepage. With no usable id there
+    is genuinely nowhere item-specific to point, and "" is the honest answer —
+    `Record.detail_url` is already optional everywhere it is read, and
+    app/calendar/resolve.py's `source_links` skips a record without one.
+    """
+    if entry_url:
+        return str(entry_url)
+    simkl_id = raw_ids.get("simkl_id") or raw_ids.get("simkl")
+    if not simkl_id:
+        return ""
+    slug = str(raw_ids.get("slug") or "").strip()
+    path = f"{_SITE_PATHS[media]}/{simkl_id}"
+    return f"https://simkl.com/{path}/{slug}" if slug else f"https://simkl.com/{path}"
+
+
 def _simkl_ids(raw: dict) -> dict:
     """Simkl's ids block, remapped onto the app's ID_KEYS namespace.
     `simkl_id` -> `simkl`; everything else already matches. `collect_ids` drops
@@ -297,10 +336,7 @@ def to_show_record(entry: dict) -> Record | None:
         media=Media.SHOW,
         id=_record_id(ids_raw),
         ids=_simkl_ids(ids_raw),
-        # Simkl's own `url` is used AS GIVEN — a percent-encoded movie slug is
-        # the same trap here as on the movie side (see to_movie_record), and
-        # the entry's own url is already correctly encoded.
-        detail_url=entry.get("url") or "https://simkl.com",
+        detail_url=_detail_url(Media.SHOW, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
         air_ts=dt.timestamp(),
         poster=_poster_url(entry.get("poster")),
@@ -344,7 +380,7 @@ def to_movie_record(entry: dict) -> Record | None:
         media=Media.MOVIE,
         id=_record_id(ids_raw),
         ids=_simkl_ids(ids_raw),
-        detail_url=entry.get("url") or "https://simkl.com",
+        detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
         air_ts=dt.timestamp(),
         date_only=True,
@@ -394,7 +430,7 @@ def to_anime_film_record(entry: dict) -> Record | None:
         media=Media.MOVIE,
         id=_record_id(ids_raw),
         ids=_simkl_ids(ids_raw),
-        detail_url=entry.get("url") or "https://simkl.com",
+        detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
         air_ts=dt.timestamp(),
         poster=_poster_url(entry.get("poster")),
