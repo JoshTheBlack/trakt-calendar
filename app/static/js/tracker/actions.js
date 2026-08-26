@@ -7,21 +7,17 @@
 // destroys nothing, so it neither confirms nor redraws.
 
 // Delete a show from the tracker entirely (cleanup mistakes, incl. abandoned ones).
-// A row the calendar put here is also marked not-watching there — otherwise a
-// preview month hands it straight back — so the confirm says so BEFORE the click
-// for those rows, and stays quiet about the calendar for a row this page owns.
-// The server has the last word (`hidden_on_calendar`), since a row predating the
-// provenance column only finds out by asking the calendar.
+// NOTHING HERE REACHES THE CALENDAR ANY MORE. Removing a season used to mark the
+// show not-watching over there, which is why this used to warn about it and why
+// the server used to answer with what it had done. The two surfaces are separate
+// now: this ends the row, and hiding a show on the calendar is done on the
+// calendar. `addedBy` is no longer read for this reason and is left in the
+// signature only because the template passes it.
 async function deleteShow(key, season, event, addedBy) {
-    // A closed month never touches the calendar, whatever the row says — see
-    // api_distrakt_remove. Only an open month can, and only for a calendar row.
-    const hides = !monthClosed && (addedBy === 'calendar' || !addedBy);
     confirmInline(event.currentTarget,
-        hides
-            ? 'Remove this show and mark it not-watching on your calendar? This cannot be undone.'
-            : (monthClosed
-                ? 'Take this off what this month records? Your calendar is not touched. This cannot be undone.'
-                : 'Remove this show from the tracker for this month? This cannot be undone.'),
+        monthClosed
+            ? 'Take this off what this month records? This cannot be undone.'
+            : 'Remove this show from the tracker for this month? This cannot be undone.',
         async () => {
             try {
                 const res = await fetch('/api/distrakt/remove', {
@@ -31,9 +27,7 @@ async function deleteShow(key, season, event, addedBy) {
                 });
                 const d = await res.json();
                 if (!d.ok) throw new Error(d.error || 'failed');
-                toast(d.hidden_on_calendar
-                    ? 'Removed — and hidden on your calendar'
-                    : (monthClosed ? 'Taken off this month' : 'Removed from tracker'), true);
+                toast(monthClosed ? 'Taken off this month' : 'Removed', true);
                 applyMonthResponse(d);  // mutation returns the recomputed month (1d)
             } catch (e) {
                 toast('Could not remove show', false);

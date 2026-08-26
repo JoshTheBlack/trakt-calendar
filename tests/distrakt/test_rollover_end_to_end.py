@@ -97,6 +97,12 @@ _SEASONS = {
     # it is merely being ASKED about — that is the whole point of the question —
     # so it is here only for the answer that says yes.
     999: {"total": 12, "started": True, "finished": False, "watched": 1},
+    # Multi-season shows, for the rule that ending ONE season's run leaves the
+    # rest in hand. Keyed by show rather than by (show, season) like everything
+    # else here, so every season of these answers the same way — which is what
+    # these tests want: the seasons differ only in whether they were acted on.
+    950: {"total": 8, "started": True, "finished": False, "watched": 2},
+    951: {"total": 6, "started": True, "finished": False, "watched": 1},
 }
 
 
@@ -519,16 +525,6 @@ class GoingBackToSomethingYouGaveUpOnTests(RolloverOverHttpTestCase):
         self.assertNotIn(703, self.stored_ids(CLOSING),
                          "the month went on recording a verdict that was withdrawn")
 
-    def test_saying_yes_un_turns_it_away_on_the_calendar(self):
-        """Giving up wrote the mark; leaving it standing would have the next
-        load's turn-away reconciliation give the season up all over again."""
-        self.ask()
-        with fake_today(ON_THE_FIRST):
-            self.post("/api/distrakt/unknown-resume",
-                      {**self.GIVEN_UP, **_viewing(OPENING)})
-        marks = asyncio.run(calendar_state.not_watching_ids(self.user_id))
-        self.assertNotIn("slug-703", marks)
-
     def test_saying_yes_holds_across_the_next_load(self):
         """The whole reason the mark is cleared: without it the row comes back
         given-up with nothing to say why."""
@@ -869,122 +865,14 @@ class AMonthThatHasNotBegunHasNoWorkInHandTests(RolloverOverHttpTestCase):
         self.assertIn(701, self.listed_ids())
 
 
-class TheCalendarAndTheTrackerMirrorEachOtherTests(RolloverOverHttpTestCase):
-    """Turning a show away on the main calendar and giving up on it here are one
-    decision, said in two places.
-
-    THE CALENDAR CANNOT CALL IN — it has no idea the tracker exists — so the half
-    that starts over there is closed by reading the marks on the way past, every
-    time a month is read. That makes the loop the thing to watch: a verdict
-    reached here writes a mark, and a mark read here becomes a verdict, so the
-    steady state has to be silent or two page loads would argue with each other.
-
-    THE MONTH'S STANDING IS THE ONLY DISCRIMINATOR, never when a mark was made.
-    A month that has not begun has nothing in hand and no verdicts to reach, so a
-    turn-away there takes the row away instead of settling it; a month the
-    calendar has passed settled what it settled and is not reopened.
-    """
-
-    def _mark(self, slug: str, turned_away: bool) -> None:
-        """Turn a show away on the main calendar, or take that back — written in
-        the calendar's own terms, which is the slug it keys its cards by."""
-        asyncio.run(calendar_state.set_not_watching(self.user_id, slug, turned_away))
-
-    def _marks(self) -> set:
-        return asyncio.run(calendar_state.not_watching_ids(self.user_id))
-
-    def test_a_show_turned_away_over_there_is_given_up_on_here(self):
-        # 701 is on the viewer's own list and belongs to no month at all, which is
-        # the case the rule this replaces could never write a verdict for: it
-        # asked whether the title was one of the VIEWED month's premieres.
-        self.seed_the_closing_month()
-        self._mark("slug-701", True)
-        with fake_today(BEFORE_THE_FIRST):
-            self.get_month(CLOSING)
-        self.assertIn(distrakt_store.RecordKind.ABANDONED, self.kinds_on(CLOSING)[701])
-        self.assertNotIn(701, self.listed_ids())
-
-    def test_the_month_that_announced_it_still_says_so(self):
-        # Giving up settles a season; it does not retract the announcement that
-        # the season began.
-        self.seed_the_closing_month()
-        self._mark("slug-701", True)
-        with fake_today(BEFORE_THE_FIRST):
-            self.get_month(CLOSING)
-        self.assertIn(distrakt_store.RecordKind.SERIES_PREMIERE, self.kinds_on(CLOSING)[701])
-
-    def test_taking_the_mark_back_puts_it_back_in_hand(self):
-        self.seed_the_closing_month()
-        self._mark("slug-701", True)
-        with fake_today(BEFORE_THE_FIRST):
-            self.get_month(CLOSING)
-            self._mark("slug-701", False)
-            self.get_month(CLOSING)
-        self.assertNotIn(distrakt_store.RecordKind.ABANDONED, self.kinds_on(CLOSING)[701])
-        self.assertIn(701, self.listed_ids())
-
-    def test_reading_the_month_twice_over_changes_nothing(self):
-        """THE LOOP. An abandon writes a mark and a mark writes an abandon, so a
-        plain read has to be silent — otherwise every load rewrites the verdict it
-        just read, and the counts it was reached on go with it."""
-        self.seed_the_closing_month()
-        self._mark("slug-701", True)
-        with fake_today(BEFORE_THE_FIRST):
-            self.get_month(CLOSING)
-            settled = asyncio.run(distrakt_store.month_records(
-                self.user_id, CLOSING, distrakt_store.SETTLED_KINDS))
-            self.get_month(CLOSING)
-            again = asyncio.run(distrakt_store.month_records(
-                self.user_id, CLOSING, distrakt_store.SETTLED_KINDS))
-        self.assertEqual(settled, again)
-        self.assertEqual(self._marks(), {"slug-701", "slug-703"})
-
-    def test_giving_up_here_says_so_over_there(self):
-        # The other direction of the same mirror, over HTTP: the ✕ and Abandon
-        # both write the mark, whatever put the row on the tracker.
-        self.seed_the_closing_month()
-        with fake_today(BEFORE_THE_FIRST):
-            self.post("/api/distrakt/abandon", {
-                "year": 2026, "month": CLOSING_MONTH, "key": "show:tmdb:701",
-                "season": 1, "abandoned": True})
-        self.assertIn("slug-701", self._marks())
-
-    def test_a_verdict_reached_here_survives_the_next_load(self):
-        """The half of the loop that bites hardest: the mark the abandon wrote is
-        read back on the very next load, and reading it must confirm the verdict
-        rather than start over from the premiere record."""
-        self.seed_the_closing_month()
-        with fake_today(BEFORE_THE_FIRST):
-            self.post("/api/distrakt/abandon", {
-                "year": 2026, "month": CLOSING_MONTH, "key": "show:tmdb:701",
-                "season": 1, "abandoned": True})
-            self.get_month(CLOSING)
-        self.assertIn(distrakt_store.RecordKind.ABANDONED, self.kinds_on(CLOSING)[701])
-        self.assertNotIn(701, self.listed_ids())
-
-    def test_a_month_that_has_not_begun_loses_the_row_instead(self):
-        """THE ONE EXCEPTION. Nothing in that month has aired, so there is no
-        verdict to record — recording one would announce a decision about
-        something nobody has had the chance to watch. The announcement goes
-        instead, which is the same answer the import path reaches by never adding
-        a marked title in the first place."""
-        with fake_today(BEFORE_THE_FIRST):
-            self.import_month(OPENING, {OPENING: [_item(911, 1, "Not Aired Yet", "2026-08-08")]})
-            self._mark("slug-911", True)
-            self.get_month(OPENING)
-        self.assertEqual(self.kinds_on(OPENING), {})
-        self.assertEqual(self.listed_ids(), set())
-
-    def test_a_month_the_calendar_has_passed_is_not_reopened(self):
-        """A verdict belongs to the month it was reached in. Taking the mark back
-        afterwards is a decision made now, and it does not reach back into a month
-        that has already settled."""
-        self.seed_the_closing_month()
-        self.open_the_new_month()
-        self._mark("slug-703", False)
-        with fake_today(ON_THE_FIRST):
-            self.get_month(CLOSING)
-        self.assertEqual(self.kinds_on(CLOSING)[703], {distrakt_store.RecordKind.ABANDONED})
+# THE CALENDAR/TRACKER MIRROR WAS REMOVED, AND ITS TESTS WITH IT.
+# A class here used to assert that giving up on the tracker marked the show
+# not-watching on the calendar, that a mark read back became a verdict, and that
+# both reversed. None of that happens now: ending a season's run is the tracker's
+# own business, and a turn-away mark reaches the tracker at exactly one moment —
+# a month being BUILT skips a title the viewer has turned away
+# (calendar_import.add_premieres). That surviving direction is tested in
+# tests/distrakt/test_rollover.py's ATurnAwayKeepsATitleOutOfAMonthTests.
 
 
 class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):
@@ -1170,16 +1058,6 @@ class GivingUpAndGoingBackInTheSAMEMonthTests(RolloverOverHttpTestCase):
         self.assertNotIn(770, self.stored_ids(OPENING),
                          "the month went on recording a verdict that was withdrawn")
 
-    def test_saying_yes_un_turns_it_away_on_the_calendar(self):
-        """Giving up wrote the mark; left standing, the next load's turn-away
-        reconciliation gives the season up all over again."""
-        self.ask()
-        with fake_today(ON_THE_FIRST):
-            self.post("/api/distrakt/unknown-resume",
-                      {**self.ABANDONED, **_viewing(OPENING)})
-        marks = asyncio.run(calendar_state.not_watching_ids(self.user_id))
-        self.assertNotIn("slug-770", marks)
-
     def test_saying_yes_stops_it_being_offered_again(self):
         self.ask()
         with fake_today(ON_THE_FIRST):
@@ -1347,3 +1225,145 @@ class AddingFromAPromptBringsTheNetworkTests(RolloverOverHttpTestCase):
             self.post("/api/distrakt/unknown-add",
                       {**self.ROW, "network": "Stated By The Caller", **_viewing(OPENING)})
         self.assertEqual(self.listed_networks(), ["Stated By The Caller"])
+
+
+class RemovingOneSeasonLeavesTheOthersAloneTests(RolloverOverHttpTestCase):
+    """The ✕ ends ONE season, and nothing else.
+
+    THE REPORTED FAULT, WITH GOSSIP GIRL: pressing ✕ on season 3 of a four-season
+    show moved all four into the abandoned bucket. The route was always
+    season-scoped — the removal itself was correct — but it then told the calendar
+    the SHOW was turned away, because a calendar card is a show and there is
+    nowhere to put a season number. The next load read that mark back, found every
+    remaining season of the show matching it, and gave up on each.
+
+    THE SECOND FAULT WAS THE SAME MARK, READ LATER. Nothing cleared it, so a title
+    removed and later re-added came back abandoned on its first load, drawing a
+    frozen form over progress that was really there.
+
+    Both are gone because the mark is: ending a season's run is the tracker's own
+    business now, and the calendar is only read when a month is BUILT.
+    """
+
+    def seed_four_seasons(self) -> None:
+        async def _seed():
+            for season in (1, 2, 3, 4):
+                await distrakt_store.add_user_record(self.user_id, {
+                    "ids": {"trakt": 950, "tmdb": 950, "slug": "slug-950"},
+                    "season": season, "title": "Four Seasons", "network": "Net",
+                    "kind": distrakt_store.RecordKind.KEEPUP, "watched": 2, "total": 8,
+                })
+        asyncio.run(_seed())
+
+    def rows(self) -> dict[int, str]:
+        """{season: kind} for the show, off the viewer's list and the month."""
+        out = {}
+        for record in asyncio.run(distrakt_store.user_records(self.user_id)):
+            if int(record["match_id"]) == 950:
+                out[int(record["season"])] = record["kind"]
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, OPENING)) or {}
+        for record in doc.get("shows", []):
+            if int(record["match_id"]) == 950:
+                out[int(record["season"])] = record["kind"]
+        return out
+
+    def remove(self, season: int) -> None:
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/remove",
+                      {"key": "show:tmdb:950", "season": season, **_viewing(OPENING)})
+
+    def test_only_the_season_asked_for_leaves(self):
+        self.seed_four_seasons()
+        self.remove(3)
+        self.assertEqual(sorted(self.rows()), [1, 2, 4])
+
+    def test_the_others_are_not_abandoned(self):
+        """The fault as reported: the survivors moved into the abandoned bucket
+        rather than staying in hand."""
+        self.seed_four_seasons()
+        self.remove(3)
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING)
+        self.assertEqual(
+            {season: kind for season, kind in self.rows().items()},
+            {1: "keepup", 2: "keepup", 4: "keepup"})
+
+    def test_removing_writes_no_calendar_mark(self):
+        """The mechanism behind both faults. Hiding a show on the calendar is
+        done on the calendar."""
+        self.seed_four_seasons()
+        self.remove(3)
+        self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
+
+    def test_a_removed_season_added_back_is_not_abandoned(self):
+        """The second fault: the stale mark used to abandon the new row on its
+        very first load.
+
+        THE SLUG IS IN THE PAYLOAD ON PURPOSE. A mark is written under the
+        calendar's own id — the slug when there is one — so a re-add that carried
+        only the numeric ids would not have matched the mark and would have passed
+        this test while the bug was fully present. Reproducing the fault needs the
+        re-added row to be nameable the same way the removed one was.
+        """
+        self.seed_four_seasons()
+        self.remove(3)
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/unknown-add",
+                      {"key": "show:tmdb:950", "season": 3,
+                       "ids": {"trakt": 950, "tmdb": 950, "slug": "slug-950"},
+                       "title": "Four Seasons",
+                       **_viewing(OPENING)})
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING)
+        self.assertNotEqual(self.rows().get(3), "abandoned",
+                            "a freshly added season came back given up on")
+
+
+class AbandonEndsOneSeasonToo(RolloverOverHttpTestCase):
+    """Abandon shared the ✕'s fault, because it shared the same step.
+
+    Only the ✕ was reported, but both controls wrote the same show-level mark, so
+    giving up on one season of a multi-season show dragged the rest down on the
+    next load in exactly the same way.
+    """
+
+    def setUp(self):
+        super().setUp()
+        async def _seed():
+            for season in (1, 2):
+                await distrakt_store.add_user_record(self.user_id, {
+                    "ids": {"trakt": 951, "tmdb": 951, "slug": "slug-951"},
+                    "season": season, "title": "Two Seasons", "network": "Net",
+                    "kind": distrakt_store.RecordKind.KEEPUP, "watched": 1, "total": 6,
+                })
+        asyncio.run(_seed())
+
+    def kinds(self) -> dict[int, str]:
+        out = {}
+        for record in asyncio.run(distrakt_store.user_records(self.user_id)):
+            if int(record["match_id"]) == 951:
+                out[int(record["season"])] = record["kind"]
+        doc = asyncio.run(distrakt_store.load_month(self.user_id, OPENING)) or {}
+        for record in doc.get("shows", []):
+            if int(record["match_id"]) == 951:
+                out[int(record["season"])] = record["kind"]
+        return out
+
+    def test_giving_up_on_one_season_leaves_the_other_in_hand(self):
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/abandon",
+                      {"key": "show:tmdb:951", "season": 1, "abandoned": True,
+                       **_viewing(OPENING)})
+        with fake_today(ON_THE_FIRST):
+            self.get_month(OPENING)
+        kinds = self.kinds()
+        self.assertEqual(kinds.get(1), "abandoned")
+        self.assertEqual(kinds.get(2), "keepup",
+                         "abandoning one season gave up on the other as well")
+
+    def test_giving_up_writes_no_calendar_mark(self):
+        with fake_today(ON_THE_FIRST):
+            self.post("/api/distrakt/abandon",
+                      {"key": "show:tmdb:951", "season": 1, "abandoned": True,
+                       **_viewing(OPENING)})
+        self.assertEqual(asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())

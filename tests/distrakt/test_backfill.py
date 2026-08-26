@@ -515,7 +515,12 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
 
     def test_it_never_touches_the_calendar(self):
         """A season finished years ago is not something to start hiding from
-        today's calendar — even for a row the calendar itself put there."""
+        today's calendar — even for a row the calendar itself put there.
+
+        NOW STRUCTURALLY TRUE RATHER THAN A RULE THIS PATH KEEPS: nothing in the
+        tracker writes a turn-away mark any more. The assertion is kept because
+        what it protects is the OUTCOME, and a future change that reintroduced a
+        write would have to pass it."""
         for added_by in (distrakt.ADDED_BY_HISTORY, distrakt.ADDED_BY_CALENDAR, ""):
             with self.subTest(added_by=added_by):
                 asyncio.run(db.execute("DELETE FROM distrakt_months WHERE user_id = ?",
@@ -524,8 +529,7 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
                     "DELETE FROM distrakt_month_records WHERE user_id = ?",
                     (self.user_id,)))
                 self._freeze_march_with(added_by=added_by)
-                resp = self._remove()
-                self.assertFalse(resp.json()["hidden_on_calendar"])
+                self._remove()
                 self.assertEqual(
                     asyncio.run(calendar_state.not_watching_ids(self.user_id)), set())
 

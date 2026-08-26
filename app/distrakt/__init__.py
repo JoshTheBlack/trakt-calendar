@@ -48,7 +48,7 @@ from .backup import (
     export_user_data,
     restore_user_data,
 )
-from .calendar_import import calendar_mark_id, import_premieres, matches_not_watching
+from .calendar_import import import_premieres, matches_not_watching
 from .live import compute_live_shows, live_key
 from .prefs import DEFAULT_EMOJI, get_emoji_prefs, register_networks, set_emoji_prefs
 from .rollover import (
@@ -130,7 +130,7 @@ __all__ = [
     "USER_KINDS", "USER_RECORD_COLUMNS",
     "TOTALS_STALE_HOURS", "WATCHED_RECENCY_DAYS",
     "RestoreError", "UnkeyableRecord",
-    "add_month_record", "add_user_record", "bucket_of_kind", "calendar_mark_id",
+    "add_month_record", "add_user_record", "bucket_of_kind",
     "can_initialize",
     "clear_prompt_dismissal", "compute_live_shows", "dismiss_prompt",
     "close_prompt", "dismissed_prompts", "DISMISSAL_HISTORY",

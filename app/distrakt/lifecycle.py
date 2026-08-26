@@ -42,12 +42,6 @@ a service can later stop saying it: somebody sets a season back to unwatched, an
 the record goes on asserting a number nobody reports any more. unbacked_verdicts()
 notices, reopen() is what the viewer's yes runs, and nothing happens without one.
 
-GIVING UP IS ALSO SOMETHING THE MAIN CALENDAR CAN SAY, and that is a transition
-too rather than something a route assembles — reconcile_turn_aways() is give_up
-and take_back again, driven by a set of turn-away marks instead of by a button.
-Both directions of that mirror move the same record between the same two tables,
-so they belong beside each other and not one here and one in a request handler.
-
 WHY 4 AND 5 TAKE THEIR MONTH FROM DIFFERENT PLACES, and it is not an
 inconsistency. Finishing a season is something the history can date: the last
 episode was watched on a day, and that day names the month, however long ago it
@@ -72,9 +66,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import NamedTuple
 
-from . import calendar_import, counts, live, store, watch_history
+from . import counts, live, store, watch_history
 from .store import RecordKind
-from ..calendar import state as calendar_state
 from ..providers.base import ItemKey
 
 # What a season lookup may correct on a PREMIERE record. `watched` is deliberately
@@ -388,78 +381,6 @@ async def finish_if_done(user_id: int, row: dict,
     await finish(user_id, store.record_key(row), int(row["season"]), month=when[:7],
                  by_source=by_source_of(row))
     return True
-
-
-async def reconcile_turn_aways(user_id: int, month: str, *,
-                               standing: store.MonthStanding) -> None:
-    """Bring `month` into line with the viewer's main-calendar turn-away marks:
-    a marked title is given up on, and one whose mark has been taken back comes
-    back onto the list.
-
-    THE MARKS ARE THE CALENDAR'S HALF OF THE SAME DECISION the Abandon control
-    makes here, so this is the other direction of one mirror: giving up on the
-    tracker writes a mark (the routes do that as they act), and a mark made over
-    on the calendar becomes a verdict the next time the month is read. Run on
-    every load rather than at a moment of change because the calendar has no idea
-    the tracker exists — nothing over there can call in.
-
-    NOT BOUNDED BY WHERE THE RECORD LIVES. A mark is a statement about the SHOW,
-    so a title announced by some earlier month, or sitting on the viewer's own
-    list and belonging to no month at all, is given up on just the same. What the
-    month decides is only where the resulting verdict is FILED, which is what
-    give_up already says: the month under way, because giving up happens today.
-
-    A MONTH THAT HAS NOT BEGUN IS THE ONE EXCEPTION, and there the mark means the
-    row simply should not be there: nothing in it has aired, so there is no
-    verdict to record and abandoning would invent one. The premiere record is
-    removed instead — the same answer the import path reaches by never adding a
-    marked title in the first place.
-
-    A MONTH THE CALENDAR HAS PASSED IS LEFT ALONE ENTIRELY. It settled what it
-    settled; a decision made afterwards belongs to the month it was made in.
-
-    IN THE STEADY STATE THIS WRITES NOTHING, which it has to, or an ordinary read
-    of the page would rewrite records every time. A title already settled this
-    month is skipped whatever the marks say, and a record the calendar could not
-    name at all (no slug and no source id) is never un-abandoned on the strength
-    of a mark it could never have had.
-    """
-    if standing is store.MonthStanding.PAST:
-        return
-    marks = await calendar_state.not_watching_ids(user_id)
-    premieres = await store.month_records(user_id, month, store.PREMIERE_KINDS)
-
-    if standing is store.MonthStanding.FUTURE:
-        for record in premieres:
-            if calendar_import.matches_not_watching(record, marks):
-                await store.remove_month_record(
-                    user_id, month, record["kind"],
-                    store.record_key(record), int(record["season"]))
-        return
-
-    # Already settled here — completed as well as abandoned. A month says one
-    # thing about a season per verdict, and re-running give_up over its own
-    # output every load would overwrite the counts the verdict was reached on.
-    settled = await store.month_records(user_id, month, store.SETTLED_KINDS)
-    decided = {(record["key"], int(record["season"])) for record in settled}
-    # The viewer's own list first, and the month's announcements second. A season
-    # can be held in both at once, and only the listed copy carries how far
-    # through it they got — a verdict reached off the premiere record instead
-    # would freeze the abandoned line at nothing watched. `decided` grows as it
-    # goes so the second copy is not written over the first.
-    for record in (*await store.user_records(user_id), *premieres):
-        address = (record["key"], int(record["season"]))
-        if address in decided or not calendar_import.matches_not_watching(record, marks):
-            continue
-        await give_up(user_id, record, month=month)
-        decided.add(address)
-
-    for record in settled:
-        if (record["kind"] == RecordKind.ABANDONED
-                and calendar_import.calendar_mark_id(record)
-                and not calendar_import.matches_not_watching(record, marks)):
-            await take_back(user_id, store.record_key(record),
-                            int(record["season"]), month=month)
 
 
 async def find_season(user_id: int, key: ItemKey, season: int, *,

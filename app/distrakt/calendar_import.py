@@ -5,11 +5,13 @@ and decide which of them the user has already said they are not watching. The
 month document it merges into is the store's; what a premiere BECOMES afterwards
 is the lifecycle's.
 
-IT ALSO OWNS THE TRACKER'S HALF OF THE CALENDAR'S TURN-AWAY VOCABULARY — how a
-mark is recognised (matches_not_watching) and what id one is written under
-(calendar_mark_id). Those two are the same fact read in opposite directions, and
-they are stated together here so they cannot come to disagree about what a
-calendar card is called.
+IT ALSO OWNS HOW A TURN-AWAY MARK IS RECOGNISED (matches_not_watching), and that
+is now the ONLY direction there is. The tracker used to write marks too — giving
+up on a season marked the show on the calendar, and a mark read back here became
+a verdict — and both halves of that mirror are gone. A season is ended on the
+tracker by the row's own controls, and a calendar mark reaches the tracker at
+exactly one moment: a month being BUILT skips a title the viewer has turned away.
+Reading a mark is an import-time question and nothing else.
 
 WHICH PREMIERE A RECORD IS — a series premiere (a first season) or a season
 premiere (a later one) — is decided HERE, once, by store.premiere_kind, at the
@@ -42,20 +44,6 @@ def calendar_record(item: Item) -> dict:
         "season": int(item.season or 1),
         "network": str(item.network or ""),
     }
-
-
-def calendar_mark_id(rec: dict) -> str:
-    """The id the MAIN CALENDAR would key this title's card by: the slug when the
-    source gave one, else the source's own id. "" when it can name neither.
-
-    THIS IS NOT THE ID THE TRACKER FILES THE RECORD UNDER. A record is keyed by
-    whichever shared id the identity waterfall picked (store.record_key), and a
-    turn-away written in those terms would silently match no card at all. Both
-    directions of the calendar's marks are stated here, once, so the id a mark is
-    written under and the ids a mark is recognised by cannot drift apart.
-    """
-    ids = rec.get("ids") or {}
-    return str(ids.get("slug") or "") or str(ids.get("trakt") or "")
 
 
 def matches_not_watching(rec: dict, nw_ids: set[str]) -> bool:

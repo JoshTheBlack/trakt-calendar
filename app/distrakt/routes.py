@@ -42,9 +42,6 @@ from ..auth import simkl_routes, trakt_routes
 from ..auth import AuthLevel
 from ..calendar import detail_source
 from ..calendar import share_links
-# The turn-away marks themselves, written where a tracker verdict has to reach the
-# main calendar. Read back through lifecycle.reconcile_turn_aways rather than here.
-from ..calendar import state as calendar_state
 from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
@@ -661,20 +658,11 @@ async def _live_month_payload(user_id: int, doc: dict, month_key: str, settings,
     # instance this was found on, none of them chosen. Reading a month must not
     # decide what is in it.
     #
-    # THE MIRROR IS NOW ONE-WAY BEFORE THE 1st, and that is the cost of this being
-    # right. reconcile_turn_aways below still takes a title turned away on the
-    # calendar OFF a preview month; taking a mark BACK no longer puts the title
-    # back there by itself, because that would be an import and imports are asked
-    # for. Import from calendar re-adds it.
-
-    # BEFORE the records are read, because it changes them: a title turned away on
-    # the main calendar becomes a verdict here, and one whose mark has been taken
-    # back comes back. The calendar cannot call in — it does not know the tracker
-    # exists — so the mirror is closed by reading the marks on the way past.
-    # Reading the records first and reconciling afterwards would render the load
-    # that made the change against the state before it.
-    await lifecycle.reconcile_turn_aways(user_id, month_key, standing=standing)
-
+    # AND A TURN-AWAY ON THE CALENDAR NO LONGER REACHES A MONTH THAT EXISTS. It is
+    # read where a month is BUILT — app/distrakt/calendar_import.py's
+    # add_premieres skips a marked title, so one is never imported — and nowhere
+    # else. A record already on a month is the tracker's, and ending its run is
+    # what the row's own ✕ and Abandon are for.
     premieres = await distrakt_store.month_records(
         user_id, month_key, distrakt_store.PREMIERE_KINDS)
     under_way = standing is distrakt_store.MonthStanding.CURRENT
@@ -1331,45 +1319,6 @@ async def api_distrakt_set_emojis(request: Request):
     })
 
 
-async def _tell_the_calendar(user_id: int, record: dict | None, *,
-                             turned_away: bool) -> bool:
-    """Mirror a tracker verdict onto the viewer's main-calendar turn-away marks.
-    True when a mark was actually written or cleared.
-
-    ONE ANSWER FOR BOTH CONTROLS that end a title's run — the ✕ and Abandon.
-    They ask the identical question ("does this reach the calendar, and under which
-    id?"), and a second copy of the rule beside the second control would drift out
-    of step with the first in silence, because the two are only ever read one at a
-    time and nothing ever puts them side by side.
-
-    NEITHER A MONTH NOR A SEASON IS PART OF THE QUESTION, which is why neither is
-    a parameter. A mark is a statement about the SHOW: giving up in September
-    marks it turned away full stop, whatever month the record sits on and whatever
-    month is on screen. The rule this replaces asked whether the title was one of
-    the VIEWED month's premieres, so a show that premiered in July and was given
-    up on in September wrote nothing at all.
-
-    AND NOTHING IS ASKED ABOUT WHAT PUT THE ROW THERE. A mark on a show that never
-    appears on the calendar is inert — it hides nothing and re-adds nothing — so
-    there was never anything for a provenance guard to protect, and the guard cost
-    the marks that mattered.
-
-    THE ID IS THE CALENDAR'S OWN, not the one the tracker files the record under;
-    see calendar_import.calendar_mark_id. A record naming neither a slug nor a
-    source id cannot be pointed at a card at all, so nothing is written for it.
-    """
-    item_id = distrakt_store.calendar_mark_id(record or {})
-    if not item_id:
-        return False
-    # Read first so the answer is honest: pressing ✕ on something already turned
-    # away changes nothing, and the page's toast says so rather than claiming a
-    # mark it did not make.
-    if turned_away == (item_id in await calendar_state.not_watching_ids(user_id)):
-        return False
-    await calendar_state.set_not_watching(user_id, item_id, turned_away)
-    return True
-
-
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_remove(request: Request):
     """Take a show+season off the tracker entirely — the ✕ on a row, and the only
@@ -1403,12 +1352,7 @@ async def api_distrakt_remove(request: Request):
                             status_code=404)
 
     settings = await _distrakt_settings(user_id)
-    hidden = await _tell_the_calendar(
-        user_id, record.record if record else None, turned_away=True)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    # So the toast can say what actually happened rather than guessing.
-    if isinstance(payload, dict):
-        payload["hidden_on_calendar"] = hidden
     return JSONResponse(payload, status_code=status)
 
 
@@ -2077,7 +2021,6 @@ async def api_distrakt_abandon(request: Request):
             return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
                                 status_code=404)
 
-    await _tell_the_calendar(user_id, rec, turned_away=abandoned)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     return JSONResponse(payload, status_code=status)
 
@@ -2225,7 +2168,6 @@ async def api_distrakt_unknown_resume(request: Request):
         return authz.error("That season isn't recorded as given up on.", 404)
     await lifecycle.take_back(user_id, key, season, month=placed.month)
     await distrakt_store.close_prompt(user_id, key, season)
-    await _tell_the_calendar(user_id, placed.record, turned_away=False)
     settings = await _distrakt_settings(user_id)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     return JSONResponse(payload, status_code=status)
