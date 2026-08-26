@@ -184,7 +184,13 @@ class UnsettledTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_finish_is_dated_by_the_history_and_not_by_the_month_held(self):
         """A season held on August that the history says was finished in July is
         July's record. The month a row sat on says where it was TRACKED; only the
-        watch history says when it was finished."""
+        watch history says when it was finished.
+
+        JULY IS TRACKED HERE ON PURPOSE. A settle no longer creates a month that
+        does not exist, so without this the drain would leave the row alone and
+        the test would be asserting the guard rather than the dating rule it is
+        named for."""
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc("2026-07"))
         await self._held("2026-08", season=1)
         with lookup({("4242", 1): "2026-02-01"},
                     watched={("4242", 1): 8},

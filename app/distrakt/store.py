@@ -730,6 +730,25 @@ async def list_months(user_id: int) -> list[str]:
     return [r["month"] for r in rows]
 
 
+async def month_is_tracked(user_id: int, month: str) -> bool:
+    """Whether this user already has a month row for `month`.
+
+    NOT list_months WITH AN `in`, because the caller asking this is deciding about
+    ONE month and does not want a viewing life's worth of keys read to answer it.
+    Indexed on the primary key, so it is a lookup rather than a scan.
+
+    "Has a row" and "holds something" are different questions — see
+    months_with_shows beside this — and this is the first: a month that exists and
+    is empty is still a month the tracker knows about, and settling a verdict onto
+    it is not inventing history.
+    """
+    row = await db.fetch_one(
+        "SELECT 1 FROM distrakt_months WHERE user_id = ? AND month = ? LIMIT 1",
+        (user_id, month),
+    )
+    return row is not None
+
+
 async def months_with_shows(user_id: int) -> set[str]:
     """The months that actually HOLD something for this user.
 

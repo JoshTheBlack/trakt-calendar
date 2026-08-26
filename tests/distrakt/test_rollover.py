@@ -767,6 +767,17 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
         """SETTINGS plus the field the payload's share link reads."""
         return SimpleNamespace(**vars(SETTINGS), public_base_url="")
 
+    async def _track_the_prior_month(self):
+        """The month these completions are dated to is one the account TRACKS.
+
+        A settle no longer creates a month that does not exist — a read of today's
+        month conjuring a row for one years back is the defect that rule was added
+        for — so a fixture that left the prior month absent would be asserting the
+        old behaviour. Making it tracked keeps these tests about what they are
+        named for: WHICH month a completion lands on.
+        """
+        await distrakt.save_month(self.user_id, distrakt.new_month_doc(self.prior))
+
     async def _payload_for_the_month_under_way(self, progress: dict):
         """The month under way as the page asks for it, with Trakt itself the
         only thing mocked: the watch-history cache, the completion dates it
@@ -797,6 +808,7 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
         return {102: {1: {n: f"{day.isoformat()}T00:00:00Z" for n in range(1, 9)}}}
 
     async def test_the_completion_lands_on_the_month_the_history_names(self):
+        await self._track_the_prior_month()
         await self._listed(self.user_id, 102, title="Finished Last Month")
 
         await self._payload_for_the_month_under_way(self._finished_last_month())
@@ -808,6 +820,7 @@ class FinishingASeasonSettlesTheMonthItHappenedInTests(RolloverTestCase):
             await distrakt.load_month(self.user_id, self.current) or {"shows": []}), set())
 
     async def test_it_leaves_the_viewers_list_and_the_page_under_way(self):
+        await self._track_the_prior_month()
         await self._listed(self.user_id, 102, title="Finished Last Month")
 
         payload = await self._payload_for_the_month_under_way(self._finished_last_month())

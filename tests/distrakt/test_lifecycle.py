@@ -85,6 +85,14 @@ class LifecycleTestCase(unittest.IsolatedAsyncioTestCase):
             "INSERT INTO users (username, is_admin, calendar_approved, distrakt_approved, "
             "created_at, updated_at) VALUES ('tracker', 1, 1, 1, ?, ?)", (now, now))
         self.user_id = result.lastrowid
+        # THE TWO MONTHS THESE TESTS SETTLE ONTO ARE TRACKED, because a settle no
+        # longer CREATES a month that does not exist (lifecycle.finish_if_done). A
+        # fixture that leaves them absent is describing an account that never
+        # tracked the month its own history is about, which is a different case
+        # and has its own tests — see the class about a finish dated to an
+        # untracked month.
+        for month in (self.this_month, self.last_month):
+            await store.save_month(self.user_id, store.new_month_doc(month))
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -754,3 +762,62 @@ class WhatAMonthHandsItsReadersTests(LifecycleTestCase):
         self.assertEqual(shape.listed, [])
         self.assertEqual([s["match_id"] for s in shape.settled], ["2"])
         self.assertEqual(len(await store.user_records(self.user_id)), 1)
+
+
+class AFinishDatedToAnUntrackedMonthTests(LifecycleTestCase):
+    """A completion the history dates to a month the account never tracked.
+
+    THE REPORTED SHAPE: prior-year months appearing in a tracker that had never
+    been pointed at them — open, unfrozen, holding one record nobody asked for and
+    sitting years behind everything else. They were not created by VISITING them,
+    which is where the search went first: the read path refuses to build a past
+    month and does so correctly. They were created by an ordinary read of the
+    month under way. The live pass noticed a season was finished, the watch
+    history dated the last episode to 2022, and settling it there CREATED 2022,
+    because the writes underneath open with an INSERT ... ON CONFLICT DO NOTHING.
+
+    Filling a past month in is the backfill's job — it works months out from what
+    was actually watched and writes them outright. A read of a different month is
+    not allowed to do it as a side effect.
+    """
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        # LifecycleTestCase tracks this month and last. An untracked one has to be
+        # further back than that, and it must stay untracked.
+        self.untracked = _month_back(9)
+
+    async def _finish_dated_to(self, month: str, trakt_id: int) -> None:
+        await lifecycle.follow(self.user_id, _show(trakt_id, watched=8, total=8))
+        await lifecycle.advance(
+            self.user_id, self.this_month, premieres=[],
+            listed=[_show(trakt_id, kind=store.RecordKind.CATCHUP, watched=8,
+                          total=8, finished=True)],
+            completed_on={_live_key(trakt_id): f"{month}-14"})
+
+    async def test_the_month_is_not_created(self):
+        await self._finish_dated_to(self.untracked, 41)
+        self.assertNotIn(self.untracked, await store.list_months(self.user_id))
+
+    async def test_the_season_stays_on_the_viewers_list(self):
+        """The honest state: the tracker can see the completion and has nowhere
+        it may record it. Settling is the viewer's to ask for."""
+        await self._finish_dated_to(self.untracked, 42)
+        self.assertEqual(list(await self.listed_kinds()), [_live_key(42)])
+
+    async def test_no_verdict_is_filed_anywhere_else_instead(self):
+        """Not re-dated onto the month being read either — that would put a
+        verdict into a month the viewing had nothing to do with."""
+        await self._finish_dated_to(self.untracked, 43)
+        self.assertEqual(await self.month_kinds(self.this_month), {})
+        self.assertEqual(await self.month_kinds(self.last_month), {})
+
+    async def test_a_month_that_IS_tracked_still_takes_the_verdict(self):
+        """The rule is about months the account never tracked, not about old
+        months. One that exists — however far back, however empty — is a month
+        the tracker knows, and settling onto it invents nothing."""
+        await store.save_month(self.user_id, store.new_month_doc(self.untracked))
+        await self._finish_dated_to(self.untracked, 44)
+        self.assertEqual(await self.month_kinds(self.untracked),
+                         {_live_key(44): store.RecordKind.COMPLETED})
+        self.assertEqual(await self.listed_kinds(), {})

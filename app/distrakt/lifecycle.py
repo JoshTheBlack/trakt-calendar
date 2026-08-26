@@ -374,9 +374,29 @@ async def finish_if_done(user_id: int, row: dict,
     unknown" would have to guess a month, and a wrong completed record is worse
     than a season that lingers. The date the history gives names the month, and
     that month is usually not the one being looked at.
+
+    AND A SEASON WHOSE DATE NAMES A MONTH THE TRACKER NEVER TRACKED IS LEFT THERE
+    TOO, which is the same rule widened by one word: a settle onto such a month
+    CREATES it, because the writes underneath do (store.migrate_to_month opens
+    with an INSERT ... ON CONFLICT DO NOTHING). So a season last watched in 2022
+    conjured a 2022 month out of an ordinary read of today's — an open, unfrozen
+    month holding one record that nobody asked for, weeks or years behind
+    everything else the account tracks. Filling a past month in is what the
+    watch-history backfill is for; it works months out from what was actually
+    watched and writes them outright, which is a deliberate act rather than a side
+    effect of looking at something else.
+
+    WHAT THAT LEAVES BEHIND IS A ROW ON THE LIST that reads as still in hand while
+    the history says it is finished, and that is the honest state rather than a
+    tidy one: the tracker can see the completion and has nowhere it may record it.
+    Settling it is the viewer's to ask for — either by backfilling that month, or
+    through the re-watch question, which is where "you finished this in March 2025"
+    belongs.
     """
     when = str(completed_on.get(live.live_key(row)) or "")
     if not (is_finished(row) and when):
+        return False
+    if not await store.month_is_tracked(user_id, when[:7]):
         return False
     await finish(user_id, store.record_key(row), int(row["season"]), month=when[:7],
                  by_source=by_source_of(row))
