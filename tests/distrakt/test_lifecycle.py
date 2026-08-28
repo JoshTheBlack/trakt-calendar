@@ -25,7 +25,7 @@ from app import clock, db, distrakt
 from app.distrakt import lifecycle, store, watch_history
 from app.providers.base import ItemKey
 
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 
 def _key(tid: int) -> ItemKey:
@@ -76,8 +76,7 @@ class LifecycleTestCase(unittest.IsolatedAsyncioTestCase):
     today."""
 
     async def asyncSetUp(self):
-        new_db_path("lifecycle")
-        await db.migrate()
+        migrated_db("lifecycle")
         self.this_month = _month_back(0)
         self.last_month = _month_back(1)
         now = db.now()

@@ -38,7 +38,7 @@ from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
                                 UnlistedSeasons)
 from app.providers.simkl import SimklError
 from app.providers.trakt import TraktError
-from tests.support import AppTestCase, ORIGIN, new_db_path
+from tests.support import AppTestCase, ORIGIN, migrated_db
 
 # What each account's request-scoped Settings looks like. A source is "linked"
 # for the tracker exactly when this object carries a usable credential for it —
@@ -156,8 +156,7 @@ def _patch(source: str, *, progress=None, history=None, activities=BEACON,
 
 class TwoSourceTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("two-sources")
-        await db.migrate()
+        migrated_db("two-sources")
         self.user_id = await self._account("viewer")
 
     async def _account(self, username: str) -> int:

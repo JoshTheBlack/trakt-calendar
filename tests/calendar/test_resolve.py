@@ -28,7 +28,7 @@ from app.endpoints import get_endpoint
 from app.providers.base import Record, Source, render
 from app.providers.trakt import calendar as trakt_calendar
 from app.sources import prefs as source_prefs
-from tests.support import calendar_records, new_db_path, window_fetch
+from tests.support import calendar_records, migrated_db, window_fetch
 
 SHOWS = get_endpoint("shows")
 MOVIES = get_endpoint("movies")
@@ -113,8 +113,7 @@ class AMonthRendersExactlyAsItDidTests(unittest.IsolatedAsyncioTestCase):
     record: a whole month read for a Trakt-only instance, day by day."""
 
     async def asyncSetUp(self):
-        new_db_path("calresolve")
-        await db.migrate()
+        migrated_db("calresolve")
         self.settings = Settings()
 
     async def asyncTearDown(self):
@@ -422,8 +421,7 @@ class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
     that one row without either of them changing it."""
 
     async def asyncSetUp(self):
-        new_db_path("calsources")
-        await db.migrate()
+        migrated_db("calsources")
         self.settings = Settings()
 
     async def asyncTearDown(self):

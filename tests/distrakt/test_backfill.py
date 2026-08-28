@@ -21,7 +21,7 @@ from app.calendar import state as calendar_state
 from app.providers.base import ItemKey, PlayCounts
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import ORIGIN, migrated_db, new_db_path
+from tests.support import ORIGIN, migrated_db
 
 # The two credential flags the tracker's source selection reads. A fake
 # settings object has to answer both, because the selector asks every
@@ -100,8 +100,7 @@ class MonthMathTests(unittest.TestCase):
 
 class BackfillTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("backfill")
-        await db.migrate()
+        migrated_db("backfill")
         self.user_id = await _make_user("tracker")
 
     async def asyncTearDown(self):

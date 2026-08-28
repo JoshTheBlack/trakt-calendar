@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 from app import db
 from app.distrakt import watch_history as wh
 from app.providers.base import PlayCounts
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 # One linked service and nothing else, which is what almost every account has.
 # The tracker asks each registered source whether this request's settings carry a
@@ -242,8 +242,7 @@ class PureStateTests(unittest.TestCase):
 
 class WatchStateTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("wh")
-        await db.migrate()
+        migrated_db("wh")
         self.user_id = await _make_user("viewer")
 
     async def asyncTearDown(self):

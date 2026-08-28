@@ -26,7 +26,7 @@ from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Record, Source
 from app.sources import prefs as source_prefs
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 SHOWS = get_endpoint("shows")
 AIR_TS = 1784145600.0
@@ -387,8 +387,7 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
     """
 
     async def asyncSetUp(self):
-        new_db_path("calprecedence")
-        await db.migrate()
+        migrated_db("calprecedence")
         self.settings = Settings()
         self.window = calendar_cache.window_start(date(2026, 7, 15))
 
@@ -460,8 +459,7 @@ class WhatEnrichmentGetsToCompeteForTests(unittest.IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self):
-        new_db_path("calprecedence-enrich")
-        await db.migrate()
+        migrated_db("calprecedence-enrich")
         self.settings = Settings()
 
     async def asyncTearDown(self):
@@ -532,8 +530,7 @@ class ThePerEndpointSelectionTests(unittest.IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self):
-        new_db_path("calendpointprefs")
-        await db.migrate()
+        migrated_db("calendpointprefs")
         self.settings = Settings()
 
     async def asyncTearDown(self):

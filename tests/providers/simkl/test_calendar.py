@@ -18,7 +18,7 @@ from app.endpoints import get_endpoint
 from app.providers.base import Media, Source, SourceUnavailable
 from app.providers.simkl import calendar as simkl_calendar
 from app.providers.simkl.transport import SimklError
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 SETTINGS = object()  # fetch_window's settings arg is unused — see calendar.py's docstring
 
@@ -320,8 +320,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
     and the endpoint-to-file-and-derivation mapping."""
 
     async def asyncSetUp(self):
-        new_db_path("simkl-calendar")
-        await db.migrate()
+        migrated_db("simkl-calendar")
 
     async def asyncTearDown(self):
         db.close_thread_connection()

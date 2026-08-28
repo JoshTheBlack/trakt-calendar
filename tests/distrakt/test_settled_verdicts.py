@@ -36,7 +36,7 @@ from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
                                 SourceUnavailable,
                                 UnlistedSeasons)
 from app.providers.trakt import transport
-from tests.support import AppTestCase, ORIGIN, new_db_path
+from tests.support import AppTestCase, ORIGIN, migrated_db
 
 # One service's "last changed at" blob, the gate an incremental sync opens with.
 BEACON = {"episodes": {"watched_at": "T1", "removed_at": None},
@@ -156,8 +156,7 @@ class WhatTheServicesSayNowTests(unittest.IsolatedAsyncioTestCase):
     identical in storage unless the TITLE is consulted."""
 
     async def asyncSetUp(self):
-        new_db_path("settled-verdicts-state")
-        await db.migrate()
+        migrated_db("settled-verdicts-state")
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -274,8 +273,7 @@ class WhatTheDecidingServiceSaysTests(unittest.TestCase):
 
 class TheQuestionAMonthRaisesTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("settled-verdicts-question")
-        await db.migrate()
+        migrated_db("settled-verdicts-question")
         now = db.now()
         result = await db.execute(
             "INSERT INTO users (username, is_admin, calendar_approved, "

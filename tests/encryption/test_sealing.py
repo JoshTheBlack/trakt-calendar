@@ -27,7 +27,7 @@ from cryptography.fernet import Fernet
 from app import auth, config, db, secrets_box
 from app.auth import secrets_backfill, trakt_routes
 from app.config import Settings, load_settings, save_settings
-from tests.support import TMP, migrated_db, new_db_path
+from tests.support import TMP, migrated_db
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
@@ -64,8 +64,7 @@ def _sealed(value) -> bool:
 class IdentityTokenSealingTests(unittest.IsolatedAsyncioTestCase):
     """A per-user Trakt token: ciphertext on the row, plaintext at the read sites."""
     async def asyncSetUp(self):
-        new_db_path("sealing-identity")
-        await db.migrate()
+        migrated_db("sealing-identity")
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -233,8 +232,7 @@ class AppSecretSealingTests(unittest.TestCase):
 class BackfillTests(unittest.IsolatedAsyncioTestCase):
     """The seal-in-place conversion the encryption opt-in runs."""
     async def asyncSetUp(self):
-        new_db_path("sealing-backfill")
-        await db.migrate()
+        migrated_db("sealing-backfill")
 
     async def asyncTearDown(self):
         db.close_thread_connection()

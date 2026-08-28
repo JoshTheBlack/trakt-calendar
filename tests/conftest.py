@@ -95,6 +95,29 @@ _use_cheap_password_hashing()
 
 
 # ---------------------------------------------------------------------------
+# the shared schema template
+# ---------------------------------------------------------------------------
+
+def _build_schema_template() -> None:
+    """Migrate the shared empty database once, here, before any test runs.
+
+    support.migrated_db() copies that file instead of replaying the migrations,
+    which is measured at 1.1ms against 49ms — but it BUILDS the template on
+    first use, and the build calls asyncio.run. A class whose setUp is `async`
+    therefore could not be the one to trigger it: asyncio.run raises inside a
+    running loop, so those classes each replayed the migrations by hand
+    instead. Building it here means the first caller is never inside a loop, and
+    an async setUp can reach for a fresh database as cheaply as a sync one.
+    """
+    from tests import support
+
+    support._schema_template()
+
+
+_build_schema_template()
+
+
+# ---------------------------------------------------------------------------
 # outbound network guard
 # ---------------------------------------------------------------------------
 

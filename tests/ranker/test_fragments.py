@@ -27,7 +27,7 @@ from app.ranker import core as ranker, routes as ranker_routes
 from app.config import Settings, save_settings
 from app.media import user_images
 from app.main import app
-from tests.support import ORIGIN, STATIC_DIR, TEMPLATES_DIR, new_db_path
+from tests.support import ORIGIN, STATIC_DIR, TEMPLATES_DIR, migrated_db
 
 
 # Every template this feature owns. Named explicitly rather than globbed so a
@@ -51,9 +51,8 @@ def title_ref(match_id: str, title: str) -> dict:
 
 class FragmentTestCase(unittest.TestCase):
     def setUp(self):
-        new_db_path("frag")
+        migrated_db("frag")
         shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
-        asyncio.run(db.migrate())
         save_settings(Settings())
         self.client = TestClient(app, base_url=ORIGIN, headers={"Origin": ORIGIN})
         # Something has to exist or the first-run gate answers before any access

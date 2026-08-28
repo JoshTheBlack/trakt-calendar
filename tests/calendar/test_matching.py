@@ -22,7 +22,7 @@ import unittest
 from app import db
 from app.calendar import cache as calendar_cache, enrich as calendar_enrich
 from app.providers.base import Record, Source
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 # The instants below are the real ones. 2026-07-06T21:17:00Z and 21:20:00Z are
 # what the two services published for the same premiere — three minutes apart,
@@ -266,8 +266,7 @@ class TheIdBridgeAtFillTests(unittest.IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self):
-        new_db_path("matching")
-        await db.migrate()
+        migrated_db("matching")
 
     async def asyncTearDown(self):
         db.close_thread_connection()

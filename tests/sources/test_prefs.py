@@ -16,7 +16,7 @@ from dataclasses import replace
 from app import db
 from app.providers.base import Source
 from app.sources import prefs
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 
 class SelectionTests(unittest.TestCase):
@@ -182,8 +182,7 @@ class PerEndpointSelectionTests(unittest.TestCase):
 
 class StoreTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("source-prefs")
-        await db.migrate()
+        migrated_db("source-prefs")
         now = db.now()
         result = await db.execute(
             "INSERT INTO users (username, created_at, updated_at) VALUES ('viewer', ?, ?)",

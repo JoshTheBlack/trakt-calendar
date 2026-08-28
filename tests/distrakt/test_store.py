@@ -22,7 +22,7 @@ from app import clock, db, distrakt
 from app.distrakt import store
 from app.providers.base import ItemKey
 from app.providers.trakt.detail import _derive_season
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 UTC = ZoneInfo("UTC")
 NOW = datetime(2026, 8, 1, tzinfo=UTC)  # fixed "today" so started/finished is stable
@@ -59,8 +59,7 @@ async def make_user(username: str) -> int:
 class DistraktTestCase(unittest.IsolatedAsyncioTestCase):
     """Fresh database + one distrakt user per test."""
     async def asyncSetUp(self):
-        new_db_path("distrakt")
-        await db.migrate()
+        migrated_db("distrakt")
         self.user_id = await make_user("tracker")
 
     async def asyncTearDown(self):

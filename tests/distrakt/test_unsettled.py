@@ -28,7 +28,7 @@ from app import db, distrakt
 from app.config import Settings
 from app.distrakt import live, unsettled, watch_history
 from app.providers.trakt import TraktError
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 
 def settings() -> Settings:
@@ -103,8 +103,7 @@ class _all_of:
 
 class UnsettledTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("unsettled")
-        await db.migrate()
+        migrated_db("unsettled")
         now = db.now()
         result = await db.execute(
             "INSERT INTO users (username, is_admin, calendar_approved, "

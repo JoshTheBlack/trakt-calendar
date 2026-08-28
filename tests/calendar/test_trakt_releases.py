@@ -26,7 +26,7 @@ from app.endpoints import get_endpoint
 from app.config import Settings
 from app.providers.base import Media, Record, Source
 from app.providers.trakt import releases as trakt_releases
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 _AIR_TS = 1783425600.0
 
@@ -130,8 +130,7 @@ class TheStoreAndTheOverlayTests(unittest.IsolatedAsyncioTestCase):
     SETTINGS = Settings(trakt_client_id="cid")
 
     async def asyncSetUp(self):
-        new_db_path("trakt-releases")
-        await db.migrate()
+        migrated_db("trakt-releases")
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -189,8 +188,7 @@ class TheDrainTests(unittest.IsolatedAsyncioTestCase):
     SETTINGS = Settings(trakt_client_id="cid")
 
     async def asyncSetUp(self):
-        new_db_path("trakt-release-drain")
-        await db.migrate()
+        migrated_db("trakt-release-drain")
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -278,8 +276,7 @@ class TheDefectClosingEndToEndTests(unittest.IsolatedAsyncioTestCase):
     """
 
     async def asyncSetUp(self):
-        new_db_path("trakt-release-end-to-end")
-        await db.migrate()
+        migrated_db("trakt-release-end-to-end")
         # No credentials, exactly as the other end-to-end release tests do it:
         # a stored window whose `asked` set covers everything in play is a hit,
         # and nothing here is about fetching.
@@ -333,8 +330,7 @@ class WhatTheDrainOwesTests(unittest.IsolatedAsyncioTestCase):
     the cache currently name" question the Simkl side asks, on Trakt's films."""
 
     async def asyncSetUp(self):
-        new_db_path("trakt-release-owed")
-        await db.migrate()
+        migrated_db("trakt-release-owed")
 
     async def asyncTearDown(self):
         db.close_thread_connection()

@@ -21,7 +21,7 @@ from app.distrakt import watch_history
 from app.providers.trakt import transport
 from app.config import Settings
 from app.providers.trakt import TraktRateLimitError
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 # Minimal settings whose only job is to satisfy api_headers()/cached_get() — no real
 # token is ever put on the wire because the client is a fake.
@@ -224,6 +224,18 @@ def _key(trakt_id) -> str:
 class PerShowDegradeTests(unittest.IsolatedAsyncioTestCase):
     """compute_live_shows: one show's 429 degrades that show, not the roster."""
 
+    def setUp(self):
+        # compute_live_shows reads source_prefs to decide who answers, so this
+        # needs a schema even though nothing here is about storage. Without it
+        # the class passes only when some EARLIER file has left db pointing at a
+        # migrated database — which is what it was doing, and why running this
+        # file on its own failed with "no such table: source_prefs".
+        #
+        # In the SYNC setUp, because migrated_db builds the shared schema
+        # template on first use and that build calls asyncio.run, which raises
+        # inside a running loop.
+        migrated_db("pershowdegrade")
+
     async def _fake_fsd(self, settings, trakt_id, season, fresh=False, client=None):
         if int(trakt_id) == 2:
             raise TraktRateLimitError("rate limited", 429)
@@ -255,8 +267,7 @@ class TopLevelDegradeTests(unittest.IsolatedAsyncioTestCase):
     """_distrakt_month_payload: a shared-prerequisite 429 degrades the whole month
     to last-known totals + a notice at HTTP 200, never a false 0/0 or a 500."""
     async def asyncSetUp(self):
-        new_db_path("toplevel")
-        await db.migrate()
+        migrated_db("toplevel")
         now = db.now()
         result = await db.execute(
             "INSERT INTO users (username, is_admin, calendar_approved, distrakt_approved, "

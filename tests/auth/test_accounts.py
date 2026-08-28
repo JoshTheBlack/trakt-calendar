@@ -21,7 +21,7 @@ from fastapi import Response
 from app import auth, db
 from app.config import Settings
 from tests import support
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 DAY = 24 * 3600
 
@@ -44,8 +44,7 @@ def fake_request(*, peer="203.0.113.9", headers=None, cookies=None, scheme="http
 
 class AuthTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("auth")
-        await db.migrate()
+        migrated_db("auth")
         auth.cookies._warned_default_proxy = False
 
     async def asyncTearDown(self):

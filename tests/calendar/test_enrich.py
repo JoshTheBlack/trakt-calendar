@@ -25,7 +25,7 @@ from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.providers.simkl import titles as simkl_titles
 from app.providers.simkl import transport as simkl_transport
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 SHOWS = get_endpoint("shows")
 MOVIES = get_endpoint("movies")
@@ -63,8 +63,7 @@ def _simkl_record(simkl_id, *, title="Moonshadow", genres=(), country="", certif
 
 class EnrichTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("enrich")
-        await db.migrate()
+        migrated_db("enrich")
 
     async def asyncTearDown(self):
         db.close_thread_connection()
@@ -304,12 +303,27 @@ class DrainTests(EnrichTestCase):
         called at all — yet every single one is still found and fetched within
         a bounded number of drain ticks. That is impossible for a design whose
         drain can only ever see what a read happened to queue."""
-        total = calendar_enrich.DRAIN_BATCH_SIZE * 25 + 5  # > the old 500 cap
+        # 505 TITLES, AND THE BATCH SHRUNK TO REACH THEM OVER MANY TICKS. Both
+        # numbers are chosen against what the defect was rather than against the
+        # production batch: the old queue held 500 ENTRIES, so the stored window
+        # has to name more than 500 distinct titles for a dropped one to be
+        # possible at all, and the drain has to run more than once for "still
+        # found on a later tick" to mean anything. Sizing the roster off the real
+        # DRAIN_BATCH_SIZE instead named 7,505 titles and fetched every one of
+        # them, which cost 48 seconds — most of this file, and a tenth of the
+        # whole suite — to demonstrate nothing the 505 do not.
+        #
+        # The real batch size is not left untested: test_the_per_tick_bound_
+        # still_holds below is exactly that assertion, and it is the only thing
+        # here that should depend on the constant's value.
+        total = 505
+        batch = 25
         records = [_simkl_record(n, title=f"Title {n}") for n in range(1, total + 1)]
         await self._stored(records)
         fetched_total = 0
-        with patch("app.providers.simkl.titles.fetch_title", AsyncMock(return_value=_OK_FIELDS)):
-            for _ in range(30):  # ceil(total / DRAIN_BATCH_SIZE) with margin
+        with patch("app.providers.simkl.titles.fetch_title", AsyncMock(return_value=_OK_FIELDS)), \
+                patch.object(calendar_enrich, "DRAIN_BATCH_SIZE", batch):
+            for _ in range(total // batch + 5):  # ceil(total / batch) with margin
                 fetched = await calendar_enrich.drain(self.SETTINGS)
                 fetched_total += fetched
                 if fetched == 0:
@@ -481,8 +495,7 @@ class FilterExemptionThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase)
     report actually took."""
 
     async def asyncSetUp(self):
-        new_db_path("enrich-assemble")
-        await db.migrate()
+        migrated_db("enrich-assemble")
         self.settings = Settings()
 
     async def asyncTearDown(self):
@@ -561,8 +574,7 @@ class FilmPruneThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
     state where enrichment has not landed yet."""
 
     async def asyncSetUp(self):
-        new_db_path("enrich-film-prune")
-        await db.migrate()
+        migrated_db("enrich-film-prune")
         self.settings = Settings()
 
     async def asyncTearDown(self):
@@ -626,8 +638,7 @@ class RoutedAnimeFilmThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase)
     """
 
     async def asyncSetUp(self):
-        new_db_path("enrich-anime-film-routing")
-        await db.migrate()
+        migrated_db("enrich-anime-film-routing")
         self.settings = Settings()
 
     async def asyncTearDown(self):

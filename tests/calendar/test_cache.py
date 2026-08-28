@@ -31,7 +31,7 @@ from app.providers.trakt import calendar as trakt_calendar
 from app.config import Settings
 from app.providers import base
 from app.endpoints import ENDPOINTS, get_endpoint
-from tests.support import FIXTURES, calendar_records, new_db_path, window_fetch
+from tests.support import FIXTURES, calendar_records, migrated_db, window_fetch
 
 
 SHOWS = get_endpoint("shows")
@@ -64,8 +64,7 @@ class _CaptureClient:
 
 class CacheTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("calcache")
-        await db.migrate()
+        migrated_db("calcache")
         # A TRAKT CLIENT ID, because this file's subject is the fill and the read
         # against a TRAKT response and the fill now asks only sources whose
         # calendar this instance can actually read (cache._window_sources ->

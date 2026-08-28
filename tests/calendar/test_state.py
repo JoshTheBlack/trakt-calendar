@@ -13,7 +13,7 @@ import unittest
 
 from app import db
 from app.calendar import state as calendar_state
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 async def _make_user(username="viewer") -> int:
     now = db.now()
@@ -27,8 +27,7 @@ async def _make_user(username="viewer") -> int:
 
 class StateTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("calstate")
-        await db.migrate()
+        migrated_db("calstate")
         self.user_id = await _make_user()
 
     async def asyncTearDown(self):

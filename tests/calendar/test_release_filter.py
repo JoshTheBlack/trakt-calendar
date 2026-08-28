@@ -38,7 +38,7 @@ from app.calendar import filter as calendar_filter
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 MOVIES = get_endpoint("movies")
 SHOWS = get_endpoint("shows")
@@ -228,8 +228,7 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
     produces by ticking a box on the Filters panel."""
 
     async def asyncSetUp(self):
-        new_db_path("release-filter")
-        await db.migrate()
+        migrated_db("release-filter")
         self.settings = Settings()
 
     async def asyncTearDown(self):

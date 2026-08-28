@@ -32,7 +32,7 @@ from app.distrakt import live, routes as distrakt_routes
 from app.providers.base import PlayCounts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
-from tests.support import AppTestCase, ORIGIN, new_db_path
+from tests.support import AppTestCase, ORIGIN, migrated_db
 
 # THE INSTANCE'S CATALOGUE CREDENTIALS, WHICH ARE NOT ANYBODY'S TOKEN. Whether a
 # season's episode count can be looked up is a client id and nothing else (see
@@ -197,8 +197,7 @@ class _CatalogueFailureTestCase(unittest.IsolatedAsyncioTestCase):
               "title": "Silo", "ids": {"trakt": 7, "tmdb": 1}, "watched": 2, "total": 8}
 
     async def asyncSetUp(self):
-        new_db_path("without-trakt")
-        await db.migrate()
+        migrated_db("without-trakt")
         now = db.now()
         result = await db.execute(
             "INSERT INTO users (username, is_admin, calendar_approved, distrakt_approved, "

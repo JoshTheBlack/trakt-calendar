@@ -25,7 +25,7 @@ from app import auth, db, distrakt
 from app.distrakt import rollover, watch_history
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, PlayCounts, Source, SourceUnavailable
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 # The credential flags the tracker reads, all of which a fake settings object has
 # to answer. The first two are the source selection's: it asks every registered
@@ -175,8 +175,7 @@ class RolloverTestCase(unittest.IsolatedAsyncioTestCase):
     AHEAD = "2026-09"
 
     async def asyncSetUp(self):
-        new_db_path("rollover")
-        await db.migrate()
+        migrated_db("rollover")
         self.user_id = await _make_user("tracker")
 
     async def asyncTearDown(self):

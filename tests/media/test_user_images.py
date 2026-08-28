@@ -24,7 +24,7 @@ from app import auth, db
 from app.media import user_images
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import migrated_db, new_db_path
+from tests.support import migrated_db
 
 _user_id_seq = itertools.count(10_000)
 
@@ -357,12 +357,11 @@ class AccountDeletionCleanupTests(unittest.TestCase):
 
 class RouteTests(unittest.TestCase):
     def setUp(self):
-        new_db_path("routes")
+        migrated_db("routes")
         # A fresh database has to mean a fresh disk too: onboarding hands out the
         # same user id in every test, so images left by an earlier one would be
         # sitting exactly where this one's account looks for its own.
         shutil.rmtree(user_images.USER_DATA_DIR, ignore_errors=True)
-        asyncio.run(db.migrate())
         save_settings(Settings())
         self.client = TestClient(app, base_url="https://testserver",
                                   headers={"Origin": "https://testserver"})

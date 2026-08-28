@@ -20,7 +20,7 @@ from cryptography.fernet import Fernet
 from app import config, db, secrets_box
 from app.auth import encryption_flow
 from app.config import Settings, save_settings
-from tests.support import new_db_path
+from tests.support import migrated_db
 
 KEY = Fernet.generate_key().decode()
 OTHER_KEY = Fernet.generate_key().decode()
@@ -55,8 +55,7 @@ def _sealed(value) -> bool:
 
 class EncryptionFlowTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("encflow")
-        await db.migrate()
+        migrated_db("encflow")
 
     async def asyncTearDown(self):
         db.close_thread_connection()

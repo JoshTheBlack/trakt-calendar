@@ -72,8 +72,7 @@ async def _seed_dataset(user_id: int, *, tag: str) -> None:
 
 class ExportTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        new_db_path("export")
-        await db.migrate()
+        migrated_db("export")
         save_settings(Settings())
         self.user_id = await auth.create_user(
             username="tracker", password="hunter2hunter2", settings=Settings(),
