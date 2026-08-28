@@ -31,8 +31,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
-               share_links, state as calendar_state)
+from . import (cache as calendar_cache, detail_source, filter as calendar_filter,
+               resolve as calendar_resolve, share_links, state as calendar_state)
 from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
@@ -670,6 +670,12 @@ async def calendar_page(request: Request):
         # are right at first paint and stay right when only part of a month is on
         # screen. The card partial reads these two sets by membership.
         "not_watching": not_watching,
+        # WHETHER THIS PAGE MAY OFFER TO FILTER FROM A CARD'S OWN BADGES. True
+        # wherever a signed-in viewer has filters of their own to add to, and
+        # False on the public share page, which renders the same card for
+        # somebody who has none — a chip that looks pressable and does nothing is
+        # worse than one that never offered.
+        "can_filter": True,
         "new_ids": month_view.new_ids,
         "stats": {"total": month_view.total, "watching": month_view.watching,
                   "not_watching": month_view.not_watching_count},
@@ -802,6 +808,8 @@ async def calendar_day(request: Request):
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     context = {
         "request": request, "not_watching": not_watching,
+        # Same as the shell's — a day that arrives late offers the same badges.
+        "can_filter": True,
         # Empty on purpose: see the docstring — the shell owns the is-new answer.
         "new_ids": set(),
         "settings": settings, "is_admin": bool(user and user.is_admin),
@@ -1104,6 +1112,72 @@ async def post_me_prefs(request: Request):
     if await share_links.get(user.user_id) is not None:
         await share_links.update_owner_defaults(user.user_id, **updates)
     return JSONResponse({"ok": True})
+
+
+# Which stored preference each badge dimension writes into. Certification is the
+# only one that needs the card's media: TV Parental Guidelines and MPA ratings are
+# separate vocabularies stored in separate fields, and a card knows which it is.
+_BADGE_FIELDS = {
+    "genre": lambda media: "genres",
+    "country": lambda media: "countries",
+    "network": lambda media: "network_filter",
+    "certification": lambda media: (
+        "movie_certifications" if media == "movie" else "show_certifications"),
+}
+_BADGE_MODES = ("include", "exclude", "")
+
+
+@guard.post("/api/me/filters/badge", AuthLevel.CALENDAR_APPROVED)
+async def post_me_filter_badge(request: Request):
+    """Add one token to one of this viewer's filter dimensions — the offer a
+    card's own badge makes.
+
+    ITS OWN ROUTE RATHER THAN /api/me/prefs, because it is a different verb. That
+    one REPLACES whichever fields it is handed, which is what a modal holding
+    every value wants; this one changes a single token inside one field and must
+    leave the rest of that field alone. Sending the whole spec from a badge would
+    mean the client reading the current one first and merging it, which is a race
+    and, worse, a second statement of the spec format in another language.
+
+    THE MERGE HAPPENS HERE FOR THAT REASON. app/calendar/filter.py owns what a
+    spec IS — the leading '-', which dimensions fold case, that networks are a
+    list — and `merge_token` is written beside the parsers that read it. The
+    browser sends a dimension, a token and a verdict; it knows nothing about
+    specs and cannot drift from them.
+
+    IT DOES NOT RE-RENDER ANYTHING. Filtering is applied server-side while a month
+    is assembled, so a change lands on the next read — the next month, or a
+    refresh. Answering with the month would mean rebuilding it on every press,
+    and answering with a rendered fragment would put a second copy of the
+    calendar's own assembly behind this route. The page says so instead.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    dimension = str(data.get("dimension") or "")
+    resolve = _BADGE_FIELDS.get(dimension)
+    if resolve is None:
+        return authz.error("Not a filterable dimension")
+    token = str(data.get("token") or "").strip()
+    if not token:
+        return authz.error("Missing token")
+    mode = str(data.get("mode") or "")
+    if mode not in _BADGE_MODES:
+        return authz.error("Mode must be include, exclude, or empty to remove")
+
+    field = resolve(str(data.get("media") or ""))
+    prefs = await auth.get_user_prefs(user.user_id)
+    is_list = field == "network_filter"
+    merged = calendar_filter.merge_token(prefs.get(field), token, mode, is_list=is_list)
+    # THROUGH THE SAME NORMALIZERS THE MODAL'S OWN SAVE USES, so a spec written by
+    # a badge and one typed into the modal cannot come out in different shapes.
+    merged = _network_list(merged) if is_list else _filter_spec(merged)
+    await auth.update_user_prefs(user.user_id, **{field: merged})
+    # Mirrored into share_links exactly as post_me_prefs does — that table's
+    # owner-default columns are seeded from user_prefs and have no editor of
+    # their own, and a badge press is as much an edit as the modal's save.
+    if await share_links.get(user.user_id) is not None:
+        await share_links.update_owner_defaults(user.user_id, **{field: merged})
+    return JSONResponse({"ok": True, "field": field, "value": merged})
 
 
 @guard.post("/api/me/timezone", AuthLevel.CALENDAR_APPROVED)

@@ -1,0 +1,45 @@
+{# A card badge that offers to filter on itself.
+
+   THE DISCLOSURE IS <details>, NOT SCRIPT. Opening and closing, the keyboard, the
+   focus behaviour and the ARIA are the browser's, which is why this is markup and
+   a stylesheet rather than a widget: the only JavaScript left in the feature is
+   the part that cannot be declarative (writing the preference, which must be an
+   application/json request — see app/authz.py's request_shape_guard).
+
+   THE CHOICE IS A RADIO PAIR, so the browser holds it and the stylesheet can see
+   it: `details:has(:checked)` is what colours the badge, with no state kept
+   anywhere else and nothing to keep in step. The name carries the dimension and
+   the token so two badges for the same token on different cards are ONE group and
+   cannot disagree.
+
+   `token` IS WHAT THE FILTER MATCHES, WHICH IS NOT ALWAYS WHAT THE BADGE SAYS. A
+   genre reads "Game Show" and matches as "game-show"; a network's case is
+   load-bearing (tvN and TVN are different broadcasters). The caller passes the
+   matching form and the label is whatever it draws inside.
+
+   FILTER OUT LEADS because wanting something gone is what makes anybody reach for
+   a badge. It is still a second click: opening the badge changes nothing. #}
+{# `wrap` IS FOR A BADGE THAT IS POSITIONED RATHER THAN IN FLOW. The network mark
+   sits on the poster, bottom-right, and wrapping it in a <details> moves the
+   positioning onto the wrapper — so the caller says so and the stylesheet puts
+   the wrapper where the badge used to be. Everything else is an ordinary chip in
+   a row and passes nothing. #}
+{% macro badge(dimension, token, label, classes='', wrap='') %}
+<details class="filter-badge {{ wrap }}" data-filter="{{ dimension }}" data-token="{{ token }}">
+    <summary class="{{ classes }}" title="Filter on {{ label }}">{{ caller() }}</summary>
+    <div class="filter-offer">
+        <label class="filter-offer-btn out">
+            <input type="radio" name="fb:{{ dimension }}:{{ token }}" value="exclude">
+            <span>Filter out</span>
+        </label>
+        <label class="filter-offer-btn in">
+            <input type="radio" name="fb:{{ dimension }}:{{ token }}" value="include">
+            <span>Only this</span>
+        </label>
+        <label class="filter-offer-btn undo">
+            <input type="radio" name="fb:{{ dimension }}:{{ token }}" value="" checked>
+            <span>Undo</span>
+        </label>
+    </div>
+</details>
+{% endmacro %}

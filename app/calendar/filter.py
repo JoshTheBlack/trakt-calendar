@@ -61,6 +61,54 @@ def parse_spec(spec: str) -> tuple[set[str], set[str]]:
     return includes, excludes
 
 
+def merge_token(spec, token: str, mode: str, *, is_list: bool = False):
+    """`spec` with one token set to `mode` — "include", "exclude", or "" to drop
+    it entirely. Returns the same shape it was given: a list for networks, a
+    comma string for everything else.
+
+    IT LIVES BESIDE THE PARSERS BECAUSE IT WRITES WHAT THEY READ. The leading-'-'
+    convention, which dimensions fold case and which must not, and the fact that
+    networks are a list where the others are one string — every one of those is
+    stated above, and a second statement of them anywhere else is a second thing
+    to keep in step. A caller that offers to filter on something a card is
+    showing needs to ADD to a spec, and this is the only place that knows how.
+
+    ONE ANSWER PER TOKEN, so the spec can never hold a token twice or hold it
+    both ways: any earlier mention is removed before the new one is appended.
+    Choosing "only this" for something already excluded means the new answer
+    rather than both, which is what somebody pressing it plainly means.
+
+    MATCHED THE WAY THE MATCHING PARSER MATCHES. parse_spec lowercases, so a
+    token already present under a different case is the same token and is
+    replaced; parse_network_spec does not, because a single week of the calendar
+    held both 'TVN' and 'tvN' — a Polish broadcaster and a Korean one — so for
+    networks only an exact match is the same network.
+
+    ORDER IS OTHERWISE PRESERVED and the new token goes last, so a spec somebody
+    has been building up by hand reads in the order they built it.
+    """
+    token = str(token or "").strip()
+    if not token:
+        return spec
+    if is_list:
+        parts = [str(p).strip() for p in (spec or ()) if str(p).strip()]
+    else:
+        parts = [p.strip() for p in str(spec or "").split(",") if p.strip()]
+
+    def bare(part: str) -> str:
+        return (part[1:] if part.startswith("-") else part).strip()
+
+    def same(a: str, b: str) -> bool:
+        return a == b if is_list else a.lower() == b.lower()
+
+    kept = [p for p in parts if not same(bare(p), token)]
+    if mode == "exclude":
+        kept.append("-" + token)
+    elif mode == "include":
+        kept.append(token)
+    return kept if is_list else ", ".join(kept)
+
+
 def parse_network_spec(networks: Iterable[str] | None) -> tuple[set[str], set[str]]:
     """Split network names into (includes, excludes), CASE PRESERVED.
 

@@ -438,6 +438,15 @@ class Item(Record):
     air_display: str = ""   # "03 Jul 2026"
     air_time: str = ""      # "21:00"
     day_of_week: str = ""   # "Friday"
+    # THE GENRES AS THEY ARE MATCHED, beside `genres` as they are SHOWN. The
+    # display form is lossy in the one direction that matters: "Game Show" cannot
+    # be turned back into "game-show" by any rule this app should rely on, and a
+    # filter spec is written in slugs. Anything that offers to FILTER on a genre
+    # a card is drawing needs the slug the card was drawn from, so it is carried
+    # rather than reconstructed — see app/calendar/filter.py's own warning that
+    # matching the display form breaks every multi-word genre while leaving
+    # single-word ones working.
+    genre_slugs: list[str] = field(default_factory=list)
 
 
 def render(record: Record, tz: ZoneInfo) -> Item:
@@ -459,9 +468,11 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     if not record.date_only:
         moment = moment.astimezone(tz)
     values = {f.name: getattr(record, f.name) for f in fields(Record)}
-    values["genres"] = [str(g).replace("-", " ").title() for g in record.genres]
+    slugs = [str(g) for g in record.genres]
+    values["genres"] = [g.replace("-", " ").title() for g in slugs]
     return Item(
         **values,
+        genre_slugs=slugs,
         air_date=moment.strftime("%Y-%m-%d"),
         air_display=moment.strftime("%d %b %Y"),
         air_time=moment.strftime("%H:%M"),

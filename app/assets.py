@@ -66,6 +66,7 @@ PAGE_SCRIPTS = {
         "static/js/calendar/source-swap.js",
         "static/js/calendar/cert-picker.js",
         "static/js/calendar/filters.js",
+        "static/js/calendar/badge-filters.js",
         "static/js/calendar/settings.js",
         "static/js/calendar/settings-encryption.js",
         "static/js/calendar/settings-trakt.js",

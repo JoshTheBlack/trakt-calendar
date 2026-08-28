@@ -525,6 +525,11 @@ async def _render(request: Request, share_row) -> Response:
         # chrome rather than restated here, so a page cannot drift from what every
         # other page says about itself.
         **chrome.page_context(None),
+        # STATED RATHER THAN LEFT UNDEFINED. The share page draws the calendar's
+        # own cards, and those offer to filter from a badge — which needs filters
+        # of one's own to add to, and a visitor here has none. Relying on the name
+        # simply being absent would work and would say nothing.
+        "can_filter": False,
     }
     # Jinja renders SYNCHRONOUSLY on the event loop, and this template is one
     # block per airing — a busy month is a lot of string building with every other
