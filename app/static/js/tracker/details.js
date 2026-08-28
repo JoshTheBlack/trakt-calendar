@@ -8,7 +8,7 @@
 const SERVICE_NAMES = { trakt: 'Trakt', simkl: 'Simkl' };
 
 function closeDistraktDetails() {
-    document.getElementById('distraktDetailsModal').classList.remove('open');
+    closeModal('distraktDetailsModal');
 }
 
 async function openDistraktDetails(row, event) {

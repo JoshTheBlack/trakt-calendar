@@ -131,7 +131,7 @@ function renderShareDetails(d, poster, media, title, season) {
 }
 
 function closeShareDetails() {
-    document.getElementById('detailsModal').classList.remove('open');
+    closeModal('detailsModal');
 }
 
 document.addEventListener('keydown', (e) => {

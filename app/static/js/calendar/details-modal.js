@@ -156,4 +156,4 @@ function renderDetails(d, poster, media, title, season) {
     document.getElementById('detailsBody').innerHTML = html;
 }
 
-function closeDetails() { document.getElementById('detailsModal').classList.remove('open'); }
+function closeDetails() { closeModal('detailsModal'); }

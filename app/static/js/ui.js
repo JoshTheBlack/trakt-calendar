@@ -105,3 +105,35 @@ function confirmInline(trigger, message, onConfirm, opts) {
     pop._trigger = trigger;
     pop._dismiss = dismiss;
 }
+
+// Close a modal, and STOP WHATEVER IT WAS PLAYING.
+//
+// THE BUG THIS EXISTS FOR: the details modal embeds a trailer in an iframe, and
+// closing it only removed the `open` class — which hides the modal and leaves the
+// iframe loaded, so a trailer went on playing, audible, over a calendar with
+// nothing on screen to pause. It stopped only when another modal replaced the
+// markup, or on a reload, or when the video reached its end.
+//
+// HERE RATHER THAN IN EACH CLOSER because there are three of them — the calendar,
+// the share page and the tracker each open a details modal, all three build the
+// same trailer block, and all three had the same fault. Fixing it where they
+// already share code is what stops the next modal inheriting it.
+//
+// THE FRAME HAS TO GO, NOT JUST ITS `src`. Hiding an iframe does not stop it and
+// nor does anything CSS can do to it — the document inside goes on running. The
+// obvious next move, clearing the src, does not stop it either: checked in the
+// browser, the attribute reads back as null while the trailer is still audible,
+// because dropping the attribute does not tear down the document already loaded.
+// Removing the ELEMENT does. The modal body is rebuilt from the payload every
+// time one opens, so there is nothing here worth keeping.
+function closeModal(id) {
+    const modal = document.getElementById(id);
+    if (!modal) return;
+    modal.classList.remove('open');
+    modal.querySelectorAll('iframe').forEach(frame => frame.remove());
+    // Native media, for anything that grows one later: pausing is enough, and
+    // unlike an iframe it keeps its position if it is shown again.
+    modal.querySelectorAll('video, audio').forEach(media => {
+        try { media.pause(); } catch (e) { /* a detached element cannot pause */ }
+    });
+}
