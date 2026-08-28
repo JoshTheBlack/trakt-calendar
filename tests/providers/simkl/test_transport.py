@@ -85,6 +85,27 @@ def _no_catalog_pacing():
     return patch("app.providers.simkl.transport._pace_catalog", new=_immediately)
 
 
+def _frozen_clock(at: float = 1000.0):
+    """Stop the transport's monotonic clock, for tests that assert what the
+    pacer WAITED FOR rather than how long they themselves took to get there.
+
+    The pacer claims each slot against a real clock and sleeps for the
+    difference, so every recorded duration is one interval MINUS however much
+    time passed between two callers reaching the claim. That is real elapsed
+    work — a fake response served, a cache key built — and under a loaded suite
+    it is milliseconds rather than microseconds, which is enough to move the
+    arithmetic. Frozen, the durations are exactly the deadlines that were
+    claimed, so the assertions read the mechanism instead of the machine.
+
+    Only this module's handle on `time` is replaced, and `perf_counter` is
+    passed straight through: patching the stdlib module itself would reach
+    asyncio's own scheduling for the length of the test.
+    """
+    import time as _real_time
+    frozen = SimpleNamespace(monotonic=lambda: at, perf_counter=_real_time.perf_counter)
+    return patch("app.providers.simkl.transport._time", new=frozen)
+
+
 class TransportStateTestCase(unittest.IsolatedAsyncioTestCase):
     """Leaves the transport's three deadlines as it found them."""
 
@@ -112,15 +133,13 @@ class PostPacerTests(TransportStateTestCase):
     async def test_a_second_post_waits_out_the_interval(self):
         sleep = RecordingSleep()
         client = FakeClient([_resp(200), _resp(200)])
-        with _patch_sleep(sleep):
+        with _frozen_clock(), _patch_sleep(sleep):
             await transport.send(client, "POST", URL, pool=transport.SYNC_POOL, json={})
             await transport.send(client, "POST", URL, pool=transport.SYNC_POOL, json={})
         self.assertEqual(len(sleep.durations), 1)
-        # The recorded sleep never actually elapses, so the wait asked for is
-        # essentially the whole interval. Compared with a tolerance rather than
-        # exactly: the clock this is measured against has a coarser resolution
-        # than the arithmetic, and a strict bound fails on the odd tick.
-        self.assertAlmostEqual(sleep.durations[0], transport.POST_MIN_INTERVAL, places=2)
+        # The recorded sleep never elapses and the clock does not move, so the
+        # wait asked for is the whole interval and nothing else.
+        self.assertAlmostEqual(sleep.durations[0], transport.POST_MIN_INTERVAL, places=6)
 
     async def test_the_interval_clears_the_published_one_per_second_cap(self):
         """A flat 1.0 would be a coin flip: the cap is enforced on Simkl's clock,
@@ -182,15 +201,15 @@ class CatalogPacerTests(TransportStateTestCase):
         transport._open_breaker("/tv/1")
         self.assertGreater(transport._pace_until, transport._blocked_until)
         transport._close_breaker()  # the block lifted; pacing must NOT lift with it
-        transport._pace_until = transport._time.monotonic() + 60
 
         sleep = RecordingSleep()
         client = FakeClient([_resp(200), _resp(200)])
-        with _patch_sleep(sleep):
+        with _frozen_clock(), _patch_sleep(sleep):
+            transport._pace_until = transport._time.monotonic() + 60
             await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
             await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
         self.assertEqual(len(sleep.durations), 1)
-        self.assertAlmostEqual(sleep.durations[0], transport.CATALOG_MIN_INTERVAL, places=2)
+        self.assertAlmostEqual(sleep.durations[0], transport.CATALOG_MIN_INTERVAL, places=6)
 
     async def test_a_burst_claims_distinct_slots_rather_than_agreeing_on_one(self):
         """(Armed, as it would be after a refusal.)"""
@@ -199,28 +218,23 @@ class CatalogPacerTests(TransportStateTestCase):
         would wake together and burst exactly as before. Each claims its slot
         before awaiting, so the waits are staggered — 0, then one interval, then
         two, and so on."""
-        transport._pace_until = transport._time.monotonic() + 60
         sleep = RecordingSleep()
         client = FakeClient([_resp(200) for _ in range(5)])
-        with _patch_sleep(sleep):
+        with _frozen_clock(), _patch_sleep(sleep):
+            transport._pace_until = transport._time.monotonic() + 60
             await asyncio.gather(*(
                 transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
                 for _ in range(5)))
+        # ORDER AND SPACING, WHICH IS THE PROPERTY — five callers claimed FIVE
+        # DIFFERENT slots rather than agreeing on one. A check-then-sleep pacer
+        # would put every wait at the same value; this one hands out consecutive
+        # deadlines, so the waits are strictly increasing and exactly one
+        # interval apart, and the first caller leaves without waiting at all.
         self.assertEqual(len(sleep.durations), 4)
-        # ORDER AND SPACING, NOT WALL-CLOCK VALUES. The property under test is
-        # that the five callers claimed FIVE DIFFERENT slots rather than agreeing
-        # on one — that is what a check-then-sleep pacer would get wrong, and it
-        # is visible in the waits being strictly increasing and one interval
-        # apart. Asserting each duration against an absolute deadline instead
-        # measured how long the test itself took to get here: the slots are
-        # claimed against a real monotonic clock, so ordinary scheduler jitter
-        # moved every value by a few milliseconds and the assertion flaked at
-        # 10ms precision.
         waits = sorted(sleep.durations)
         self.assertEqual(waits, sorted(set(waits)), "two callers shared a slot")
-        gaps = [b - a for a, b in zip(waits, waits[1:])]
-        for gap in gaps:
-            self.assertAlmostEqual(gap, transport.CATALOG_MIN_INTERVAL, places=2)
+        for n, wait in enumerate(waits, start=1):
+            self.assertAlmostEqual(wait, n * transport.CATALOG_MIN_INTERVAL, places=6)
 
     async def test_the_interval_stays_under_the_published_ceiling(self):
         """10 GET/second is what Simkl publishes; the margin is because the cap is
@@ -375,9 +389,15 @@ class BreakerTests(TransportStateTestCase):
 
     async def test_the_cooldown_is_a_real_wait_by_default(self):
         client = FakeClient([_resp(412)])
-        with self.assertRaises(SimklBlockedError):
-            await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
-        remaining = transport.blocked_seconds_remaining()
+        # FROZEN, because the bound is exact and the clock is not: the deadline
+        # is monotonic() + 900 and the remainder subtracts monotonic() back off,
+        # and at the size monotonic() reaches after a couple of days of uptime a
+        # float has lost enough precision that the round trip lands a few
+        # picoseconds ABOVE 900. Real, and nothing to do with the cooldown.
+        with _frozen_clock():
+            with self.assertRaises(SimklBlockedError):
+                await transport.send(client, "GET", URL, pool=transport.CATALOG_POOL)
+            remaining = transport.blocked_seconds_remaining()
         self.assertGreater(remaining, 60.0)
         self.assertLessEqual(remaining, transport.BLOCK_COOLDOWN_SECONDS)
 

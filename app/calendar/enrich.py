@@ -164,11 +164,12 @@ DRAIN_BATCH_SIZE = 300
 # sixty-second heartbeat, and the backlog one instance actually had (86 films
 # across every window it holds) clears in two ticks rather than nine.
 #
-# AGAINST WHAT BUDGET: Trakt's documented average is around a thousand requests
-# per five minutes. Fifty a tick, every tick, would be a quarter of that — and
-# every tick is never full for long, because the set owed is what the calendar
-# NAMES and not what it holds. Once a backlog is gone this is a handful of films
-# a day, and most ticks fetch nothing at all.
+# AGAINST WHAT BUDGET: Trakt documents 500 GET requests per five minutes. Fifty
+# a tick on a sixty-second heartbeat is 250 across that window, so a batch that
+# stayed full would be HALF the budget — worth knowing, and still not the
+# binding constraint, because a full tick is a backlog and a backlog is
+# temporary: the set owed is what the calendar NAMES and not what it holds. Once
+# one is gone this is a handful of films a day and most ticks fetch nothing.
 #
 # WHY NOT LARGER STILL: the ceiling is not the rate limit, it is that this shares
 # a connection pool with work somebody is waiting on — a tracker refresh, a
