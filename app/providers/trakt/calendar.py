@@ -117,6 +117,17 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
 
 
 def poster(media: dict) -> str | None:
+    """Trakt's poster for a title, as Trakt's own address.
+
+    THE ORIGIN, NOT THE PROXY. Trakt asks that its images not be hotlinked, and
+    this app honours that in `render` — the one place a stored record becomes a
+    browser-facing one. Proxying here instead would also proxy the copy
+    app/media/artwork.py files in the poster registry, which exists so
+    app/media/posters.py can DOWNLOAD it server-side; that download is what Trakt
+    asks for, and routing it through a third party would neither help them nor
+    this app. Trakt publishes these paths without a scheme, which is why the
+    prefix is added rather than assumed.
+    """
     imgs = media.get("images") or {}
     posters = imgs.get("poster") or []
     if posters:

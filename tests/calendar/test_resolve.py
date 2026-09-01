@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from urllib.parse import quote
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -70,7 +71,14 @@ class ACardRendersExactlyAsItDidTests(unittest.TestCase):
         self.assertEqual(item.rating, 8.5)
         self.assertEqual(item.certification, "TV-14")
         self.assertEqual(item.overview, "An overview.")
-        self.assertEqual(item.poster, "https://img.tmdb.example/poster.jpg")
+        # THE ONE FIELD THAT IS DELIBERATELY NOT WHAT IT ALWAYS WAS. Trakt's
+        # artwork is addressed through the shared image proxy now, so what
+        # renders is the proxied form carrying the origin — asserted as those
+        # two facts because the proxy's tuning parameters are measured and will
+        # move, while "Trakt's CDN is never hotlinked" must not.
+        self.assertTrue(item.poster.startswith("https://wsrv.nl/?url="))
+        self.assertIn(quote("https://img.tmdb.example/poster.jpg", safe=""),
+                      item.poster)
         self.assertEqual(item.detail_url, "https://trakt.tv/shows/rich-show")
         self.assertEqual(item.episode_label, "S02E05")
         self.assertEqual(item.episode_title, "The One")
@@ -431,11 +439,11 @@ class TwoViewersOneWindowTests(unittest.IsolatedAsyncioTestCase):
         """One span read as `selection`, with the fill answering for both
         services. `allow_fetch=False` proves the read came out of the stored
         window rather than out of a fetch shaped by the viewer."""
-        async def fetch(endpoint, settings, start):
+        async def fetch(endpoint, settings, start, *, covered=()):
             if start != calendar_cache.window_start(date(2026, 7, 15)):
-                return [], ["trakt", "simkl"]
+                return [], ["trakt", "simkl"], []
             return [_record(Source.TRAKT, "trakt-only"),
-                    _record(Source.SIMKL, "simkl-only")], ["trakt", "simkl"]
+                    _record(Source.SIMKL, "simkl-only")], ["trakt", "simkl"], []
 
         prefs = source_prefs.SourcePrefs(user_id=1, calendar_source=selection)
         with patch("app.calendar.cache.fetch_window_records", fetch):

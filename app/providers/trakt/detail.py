@@ -224,6 +224,61 @@ async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: 
     return {"season": season, **_derive_season(episodes, tz)}
 
 
+async def fetch_season_episodes(settings: Settings, trakt_id, season: int,
+                                client: httpx.AsyncClient | None = None) -> list[dict]:
+    """Every episode of one season, with the per-episode facts a card and a modal
+    can draw: title, overview, runtime, rating, votes, first_aired, type.
+
+    `extended=full` ON THE SEASON'S EPISODE LIST, and the parameter matters more
+    than it looks. Measured against the live API: `extended=episodes` alone
+    returns the episode objects WITHOUT `first_aired`, so a caller asking for the
+    cheap form gets a list that looks complete and silently cannot say when
+    anything aired. `full` is what carries the dates, the runtimes and the
+    ratings together.
+
+    ONE CALL PER SEASON, WHICH IS WHAT MAKES THIS AFFORDABLE. The alternative —
+    /shows/{id}/seasons/{season}/episodes/{n} per episode — is one request per
+    episode of every season on the calendar, and the drain that feeds this is
+    bounded by seconds per pass rather than by a daily budget.
+
+    RETURNS AN EMPTY LIST FOR A SEASON TRAKT HAS NOTHING FOR (404), and RAISES
+    for anything else, on exactly the reasoning `fetch_season_detail` above
+    spells out: "no episodes" and "could not ask" are different answers, and
+    handing back the first for the second writes a fabricated blank over facts
+    this app already had.
+    """
+    c = client or transport.shared_client()
+    try:
+        episodes = await transport.cached_get(
+            c, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
+            ttl_seconds=SEASON_CACHE_TTL_SECONDS, raise_errors=True,
+        )
+    except TraktError as exc:
+        if getattr(exc, "status", None) == 404:
+            return []
+        raise
+    if not isinstance(episodes, list):
+        return []
+    out: list[dict] = []
+    for episode in episodes:
+        if not isinstance(episode, dict):
+            continue
+        number = episode.get("number")
+        if number is None:
+            continue
+        out.append({
+            "number": int(number),
+            "title": str(episode.get("title") or ""),
+            "overview": str(episode.get("overview") or ""),
+            "first_aired": str(episode.get("first_aired") or ""),
+            "episode_type": str(episode.get("episode_type") or ""),
+            "runtime": episode.get("runtime"),
+            "rating": episode.get("rating"),
+            "votes": episode.get("votes"),
+        })
+    return out
+
+
 async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     """/shows/{id}/seasons?extended=full -> [{season, episode_count}] for
     seasons Trakt has actually populated with episodes (skips season 0/

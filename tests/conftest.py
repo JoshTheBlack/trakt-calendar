@@ -236,6 +236,31 @@ def no_outbound_network(monkeypatch):
     assert not refused, f"outbound network calls escaped this test: {refused}"
 
 
+@pytest.fixture(autouse=True)
+def no_background_episode_lookups(monkeypatch):
+    """Stop the per-episode drain reaching the network in tests that never asked
+    for it.
+
+    THE DRAIN IS FIRE AND FORGET, so almost every test that stores a calendar
+    window starts one without meaning to — a fill schedules it, and unlike the
+    other two passes this one finds work in the ordinary fixtures (they store
+    SHOWS with seasons, which is exactly what it looks up). The outbound guard
+    above caught it as 55 errors across the route tests, which is the guard doing
+    its job and not a reason to weaken it.
+
+    THE PROVIDER CALL IS STUBBED, NOT THE DRAIN, so the drain's own logic still
+    runs — what is owed, what gets written, that a season with no episodes still
+    counts as answered. Only the request is removed. A test about the lookup
+    itself patches `fetch_season_episodes` with what it wants and gets that
+    instead, exactly as it would without this.
+    """
+    async def _nothing(settings, trakt_id, season, client=None):
+        return []
+
+    from app.providers.trakt import detail as trakt_detail
+    monkeypatch.setattr(trakt_detail, "fetch_season_episodes", _nothing)
+
+
 @pytest.fixture
 def db_path(tmp_path):
     """A freshly migrated, test-only database, distinct from every other test's."""

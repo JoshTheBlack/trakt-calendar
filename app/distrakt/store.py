@@ -224,13 +224,21 @@ MONTH_RECORD_COLUMNS = ("month", *_SHARED_COLUMNS, "abandoned_form",
                         "watched_by_source", "total_by_source")
 
 # Every distrakt_user_seasons column except user_id, in insert order.
-USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back", "missing_sources_json")
+#
+# `history_from` is where the viewer's own history starts for this season — the
+# watermark that tells a re-watch from the tracker meeting an old completion for
+# the first time. It is here rather than only in the schema because it is a
+# DECISION somebody made, not a derived count: nothing recomputes it, so a
+# backup that omitted it would restore a tracker that had forgotten it and start
+# counting a finished run's episodes all over again.
+USER_RECORD_COLUMNS = (*_SHARED_COLUMNS, "came_back", "missing_sources_json",
+                       "history_from")
 
 # Columns whose value is coerced on the way to the database. Everything else
 # passes through as the caller stated it.
 _INT_COLUMNS = frozenset(("season", "watched", "total"))
 _BOOL_COLUMNS = frozenset(("started_airing", "finished_airing", "came_back"))
-_TEXT_COLUMNS = frozenset(("title", "network", "added_by"))
+_TEXT_COLUMNS = frozenset(("title", "network", "added_by", "history_from"))
 # Columns whose value is a small mapping in a record and JSON text in the
 # database. Named here rather than serialized at each call site so a record can
 # be handed around as a record — every reader of `watched_by_source` gets a dict,
@@ -270,9 +278,15 @@ _UPDATABLE_MONTH_COLUMNS = frozenset(MONTH_RECORD_COLUMNS) - {
 # opinion on the matter, so leaving it updatable would have each of those quietly
 # clear a mark by omission — the mark would appear after a removal check and
 # vanish on the very next page load, which reads as the check not working.
+#
+# `history_from` is excluded on the `came_back` reasoning exactly: it is the
+# viewer's answer to a question, and every other write of a user record is a
+# counts refresh built from a roster that has no opinion about it. Leaving it
+# updatable would have each of those clear the watermark by omission, so a
+# re-watch the viewer had just declared would last until the next page load.
 _UPDATABLE_USER_COLUMNS = frozenset(USER_RECORD_COLUMNS) - {
     *IDENTITY_COLUMNS, "season", "added_by", "created_at", "came_back",
-    "missing_sources_json"}
+    "missing_sources_json", "history_from"}
 
 
 def _insert_sql(table: str, columns: tuple[str, ...]) -> str:

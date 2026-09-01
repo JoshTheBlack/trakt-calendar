@@ -47,6 +47,7 @@ from .auth import simkl_routes
 from .auth import trakt_routes
 from .calendar import cache as calendar_cache
 from .calendar import enrich as calendar_enrich
+from .calendar import entries as calendar_entries
 from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
@@ -138,6 +139,11 @@ async def _sweep_auth_rows() -> None:
     # window is not urgent to keep — the next read that resolves to that
     # title just queues it again (see app/calendar/enrich.py).
     await calendar_enrich.sweep(now)
+    # And the calendar's own rows, which left api_cache with the window blobs and
+    # so are no longer reached by the sweep above. Six months from last store —
+    # see entries.RETAIN_SECONDS, which records what that costs a share link to a
+    # months-old page.
+    await calendar_entries.sweep(now)
     # Drop poster-URL sightings past their retention window, and hold the
     # on-disk poster tile cache under its own size cap, oldest file first. The
     # tile sweep is filesystem walking, not a DB call, so it goes through a
@@ -168,7 +174,7 @@ async def _heartbeat_tick() -> None:
         integrations_routes.refresh_integration_health,
         settings_routes.maybe_refresh_trakt_token,
         _sweep_auth_rows,
-        lambda: calendar_cache.prewarm_calendar_cache(load_settings()),
+        lambda: calendar_cache.refresh_months(load_settings()),
         # run_drain, not drain directly — the same coalescing latch a fill
         # uses (app/calendar/enrich.py's schedule_drain), so a heartbeat tick
         # landing while a fill-triggered pass is already running folds into

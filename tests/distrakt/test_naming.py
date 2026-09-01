@@ -12,46 +12,73 @@ is exactly the state a fill leaves behind.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 
 from app import db, distrakt
 from app.calendar import cache as calendar_cache
 from app.distrakt import naming, store
-from app.providers.base import ItemKey
+from app.providers.base import ItemKey, Media, Record, Source
 from tests.distrakt.test_store import DistraktTestCase, a_record, month_back
 
-# One stored calendar group in the shape group_records writes: the match result
-# hoisted onto `ids`, and each source's record kept WHOLE under its own name.
-# The slugs are read from the per-source records rather than the merge, because
-# the merge cannot say whose a bare `slug` was.
-GROUP = {
-    "key": "k1",
-    "ids": {"tmdb": 900, "simkl": 222, "simkl_slug": "a-show",
-            "trakt": 111, "trakt_slug": "a-show-2019"},
-    "by_source": {
-        "simkl": {"media": "show", "ids": {"simkl": 222, "simkl_slug": "a-show"}},
-        "trakt": {"media": "show", "ids": {"trakt": 111, "trakt_slug": "a-show-2019"}},
-    },
-}
-
-# The same title as a window stored BEFORE the two slugs were told apart: each
-# source's record carries only the ambiguous shared key. Provenance is what makes
-# it readable anyway — a record filed under `simkl` states Simkl's slug.
-LEGACY_GROUP = {
-    "key": "k1",
-    "ids": {"tmdb": 900, "simkl": 222, "trakt": 111, "slug": "a-show-2019"},
-    "by_source": {
-        "simkl": {"media": "show", "ids": {"simkl": 222, "slug": "a-show"}},
-        "trakt": {"media": "show", "ids": {"trakt": 111, "slug": "a-show-2019"}},
-    },
-}
+# 2026-07-15 12:00Z, inside the span these are stored under.
+_AIR_DAY = date(2026, 7, 15)
 
 
-async def store_groups(groups: list[dict]) -> None:
-    """Put groups in the calendar cache the way a fill does, so the read under
-    test is reading real stored state rather than a stub."""
-    await calendar_cache.store_groups("shows", date(2026, 7, 1), groups,
-                                      ttl_seconds=3600, now=db.now())
+def _noon(day: date) -> float:
+    """Midday UTC on `day`. An airing is filed under its own UTC date now, so a
+    fixture dated outside the span it is seeded into is trimmed rather than
+    stored — the timestamp and the span have to agree."""
+    return datetime(day.year, day.month, day.day, 12, tzinfo=timezone.utc).timestamp()
+
+
+def a_calendar_record(source: str, ids: dict, *, media: str = "show") -> Record:
+    """One source's record for the title these tests share, as a fill stores it."""
+    return Record(
+        source=Source(source), media=Media(media),
+        id=str(ids.get(source) or source), ids=dict(ids), detail_url="",
+        title="A Show", air_ts=_noon(_AIR_DAY), season=1, episode_number=1,
+        episode_label="S01E01")
+
+
+def named() -> list[Record]:
+    """Both services listing one title, each naming it in its OWN slug namespace.
+
+    They are one group because they share tmdb 900, which is also why the
+    tracker's row — filed under tmdb — is reachable from either. Built fresh per
+    call rather than shared as a constant: these are mutable records and a test
+    that stored one must not be able to change what the next test seeds.
+    """
+    return [
+        a_calendar_record("simkl", {"tmdb": 900, "simkl": 222, "simkl_slug": "a-show"}),
+        a_calendar_record("trakt", {"tmdb": 900, "trakt": 111, "trakt_slug": "a-show-2019"}),
+    ]
+
+
+def legacy() -> list[Record]:
+    """The same title as it was stored before the two slugs were told apart: each
+    record carries only the ambiguous bare `slug`. Provenance is what makes it
+    readable anyway — a record filed under `simkl` states Simkl's slug, by
+    construction and with nothing to resolve."""
+    return [
+        a_calendar_record("simkl", {"tmdb": 900, "simkl": 222, "slug": "a-show"}),
+        a_calendar_record("trakt", {"tmdb": 900, "trakt": 111, "slug": "a-show-2019"}),
+    ]
+
+
+async def store_calendar(records: list[Record], *, day: date = _AIR_DAY,
+                         now: int | None = None) -> None:
+    """Put the calendar in the state a fill leaves it in.
+
+    STRAIGHT TO `store_window`, because that is what a fill calls. This used to
+    be an adapter that wrote pre-grouped entries: storage held finished groups,
+    so a test could hand one over directly. Grouping happens at READ now, so
+    seeding groups would be seeding a shape production never writes.
+    """
+    for record in records:
+        record.air_ts = _noon(day)
+    await calendar_cache.store_window(
+        "shows", calendar_cache.window_start(day), list(records), 3600,
+        db.now() if now is None else now, sources=["trakt", "simkl"])
 
 
 class FillingFromTheStoredCalendarTests(DistraktTestCase):
@@ -71,7 +98,7 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             season=1, kind=distrakt.RecordKind.COMPLETED,
             ids={"tmdb": 900, "simkl": 222, "trakt": 111}))
-        await store_groups([GROUP])
+        await store_calendar(named())
 
         # Two names on one row: the return counts names written, not rows.
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 2)
@@ -87,28 +114,22 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             season=1, kind=distrakt.RecordKind.COMPLETED,
             ids={"tmdb": 900, "simkl": 222, "trakt": 111}))
-        await store_groups([LEGACY_GROUP])
+        await store_calendar(legacy())
 
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 2)
         ids = await self._month_ids(distrakt.RecordKind.COMPLETED)
         self.assertEqual(ids["simkl_slug"], "a-show")
         self.assertEqual(ids["trakt_slug"], "a-show-2019")
 
-    async def test_the_ambiguous_merged_slug_is_never_attributed_to_a_service(self):
-        """The hoisted `slug` is first-writer-wins across sources, so for a title
-        both services listed it belongs to whichever the declared order reached
-        first — and nothing records which. A group with no per-source record to
-        read it from teaches nothing rather than guessing."""
-        await distrakt.add_month_record(self.user_id, self.month, a_record(
-            ids={"tmdb": 900, "simkl": 222, "trakt": 111}))
-        await store_groups([{"key": "k1", "by_source": {},
-                             "ids": {"tmdb": 900, "simkl": 222, "trakt": 111,
-                                     "slug": "whose-is-this"}}])
-
-        self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
-        ids = await self._month_ids()
-        self.assertNotIn("simkl_slug", ids)
-        self.assertNotIn("trakt_slug", ids)
+    # THE AMBIGUOUS-MERGED-SLUG TEST IS GONE, AND ITS SUBJECT WITH IT. It seeded
+    # a group whose hoisted ids carried a bare `slug` with NO per-source record to
+    # attribute it to, and pinned that nothing was learned from it. That group is
+    # now unrepresentable: hoisted ids are the UNION of the records in a group, so
+    # every hoisted slug came from a record, and every record states its own
+    # source. The ambiguity the rule guarded against cannot be constructed.
+    #
+    # What survives of it is that a bare `slug` is read as belonging to the source
+    # whose record carries it, which is exactly what the legacy test above pins.
 
     async def test_it_never_writes_a_shared_id_the_record_is_filed_under(self):
         """A calendar match may say what a title is CALLED on a service. It may
@@ -117,7 +138,14 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         would be a re-identification wearing a repair's clothes."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             ids={"tmdb": 900, "simkl": 222}))
-        await store_groups([{**GROUP, "ids": {**GROUP["ids"], "imdb": "tt-from-calendar"}}])
+        await store_calendar([
+            a_calendar_record("simkl", {"tmdb": 900, "simkl": 222,
+                                        "simkl_slug": "a-show",
+                                        "imdb": "tt-from-calendar"}),
+            a_calendar_record("trakt", {"tmdb": 900, "trakt": 111,
+                                        "trakt_slug": "a-show-2019",
+                                        "imdb": "tt-from-calendar"}),
+        ])
 
         await naming.fill_from_calendar(self.user_id)
         self.assertNotIn("imdb", await self._month_ids())
@@ -128,7 +156,7 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         built from; this one came off a cross-service match."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             ids={"tmdb": 900, "simkl": 222, "simkl_slug": "already-known"}))
-        await store_groups([GROUP])
+        await store_calendar(named())
 
         await naming.fill_from_calendar(self.user_id)
         self.assertEqual((await self._month_ids())["simkl_slug"], "already-known")
@@ -139,7 +167,7 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         pass would go on inflating every stored window to discover that again."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             ids={"tmdb": 900, "simkl": 222}))  # no Trakt id: Trakt never named it
-        await store_groups([GROUP])
+        await store_calendar(named())
 
         await naming.fill_from_calendar(self.user_id)
         ids = await self._month_ids()
@@ -152,7 +180,7 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         nothing rather than rewrite what it already wrote."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             ids={"tmdb": 900, "simkl": 222, "trakt": 111}))
-        await store_groups([GROUP])
+        await store_calendar(named())
 
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 2)
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
@@ -169,7 +197,7 @@ class FillingFromTheStoredCalendarTests(DistraktTestCase):
         pick up the slugs of whichever title happened to be in the cache."""
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             tmdb=555, ids={"tmdb": 555, "simkl": 999}))
-        await store_groups([GROUP])
+        await store_calendar(named())
 
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
         rec = await distrakt.find_month_record(
@@ -213,7 +241,7 @@ class NotLookingAgainForNothingTests(DistraktTestCase):
         self._count_walks()
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             tmdb=555, ids={"tmdb": 555, "simkl": 999}))
-        await store_groups([GROUP])
+        await store_calendar(named())
 
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
@@ -226,11 +254,10 @@ class NotLookingAgainForNothingTests(DistraktTestCase):
         self._count_walks()
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             ids={"tmdb": 900, "simkl": 222}))
-        await store_groups([])
+        await store_calendar([])
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
 
-        await calendar_cache.store_groups("shows", date(2026, 8, 1), [GROUP],
-                                          ttl_seconds=3600, now=db.now() + 1)
+        await store_calendar(named(), day=date(2026, 8, 12), now=db.now() + 1)
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 1)
         self.assertEqual((await distrakt.find_month_record(
             self.user_id, self.month, distrakt.RecordKind.SERIES_PREMIERE,
@@ -243,7 +270,7 @@ class NotLookingAgainForNothingTests(DistraktTestCase):
         self._count_walks()
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             tmdb=555, ids={"tmdb": 555, "simkl": 999}))
-        await store_groups([GROUP])
+        await store_calendar(named())
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 0)
 
         await distrakt.add_month_record(self.user_id, self.month, a_record(
@@ -257,7 +284,7 @@ class NotLookingAgainForNothingTests(DistraktTestCase):
         self._count_walks()
         await distrakt.add_month_record(self.user_id, self.month, a_record(
             ids={"tmdb": 900, "simkl": 222}))
-        await store_groups([GROUP])
+        await store_calendar(named())
         self.assertEqual(await naming.fill_from_calendar(self.user_id), 1)
 
         other = await db.execute(

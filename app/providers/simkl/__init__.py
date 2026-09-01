@@ -108,8 +108,10 @@ class _SimklCalendarPort:
         return True
 
     async def fetch_window(self, endpoint: Endpoint, settings: Settings,
-                           start: date, days: int) -> list[Record]:
-        return await calendar.fetch_window(endpoint, settings, start, days)
+                           start: date, days: int,
+                           revalidate: bool = True) -> list[Record]:
+        return await calendar.fetch_window(endpoint, settings, start, days,
+                                           revalidate=revalidate)
 
 
 class _SimklDetailPort:

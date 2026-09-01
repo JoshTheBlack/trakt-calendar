@@ -1,78 +1,76 @@
 """Simkl calendar enrichment: the background drain that fills in the fields
 Simkl's calendar CDN files never carry (genres, network, country,
-certification, runtime, status, overview), and the read-time overlay that
-applies what it found.
+certification, runtime, status, overview), and the write-time application of
+what it found.
 
-WHY THIS EXISTS. app/providers/simkl/calendar.py's Records arrive with every
-one of those fields at its default and `enriched=False` — the calendar CDN
-files simply do not carry them at all, verified against the live files. Doing
-the lookup inline, on the fill or the read path, does not scale: a busy
-window can reference several hundred distinct titles and Simkl's rate ceiling
-is 10 GET/second, so a viewer loading a month would wait on it. Instead:
+WHY THIS EXISTS. app/providers/simkl/calendar.py's Records arrive with every one
+of those fields at its default and `enriched=False` — the calendar CDN files
+simply do not carry them at all, verified against the live files. Doing the
+lookup inline, on the fill or the read path, does not scale: a busy window can
+reference several hundred distinct titles and Simkl's rate ceiling is 10
+GET/second, so a viewer loading a month would wait on it. Instead:
 
-  FILL    stores the window exactly as normalized, unenriched — see
-          app/providers/simkl/calendar.py. Nothing here runs at fill time.
-  READ    `overlay_records` reads `simkl_titles` — ONE BATCHED QUERY, NO
-          NETWORK CALL — and fills in whatever it already knows for the Simkl
-          records this read resolved to. A record this overlay cannot answer
-          for is simply left at `enriched=False`; it does not need to queue
-          anything for the drain to eventually find it (see DRAIN below).
-  DRAIN   the heartbeat calls `drain()`, which asks
-          app/calendar/cache.py's `cached_calendar_groups` for every Simkl id
-          ANY currently-stored calendar window names, subtracts the ones
-          `simkl_titles` already has a usable answer for (or a failure still
-          inside its backoff), fetches a bounded batch of what is left through
-          app/providers/simkl/titles.py, and UPSERTs the answer (or the fact
-          that it failed) into `simkl_titles`. A FILL also asks for a drain
-          the moment it stores new records, through `run_drain`/
-          `schedule_drain` below, rather than only ever waiting for the next
-          heartbeat tick — see that section for the coalescing latch that
-          keeps ten simultaneous fills from running ten passes.
+  FILL    `apply_stored_enrichment` gives each Simkl record whatever
+          `simkl_titles` ALREADY knows, and the record is stored carrying it.
+          One batched query, no network call. A title nobody has looked up is
+          stored `enriched=False`, which is what lets app/calendar/filter.py
+          exempt it rather than judge it on values nobody has fetched yet.
+  DRAIN   the heartbeat calls `drain()`, which asks app/calendar/entries.py for
+          every Simkl id the stored calendar names, subtracts the ones
+          `simkl_titles` already answers for (or a failure still inside its
+          backoff), fetches a bounded batch of what is left, and writes the
+          answer to BOTH `simkl_titles` and the calendar row it belongs to. A
+          FILL also asks for a drain the moment it stores new records, through
+          `run_drain`/`schedule_drain` below.
+  READ    does nothing. The fields are on the row.
+
+THERE IS NO READ-TIME OVERLAY ANY MORE, and its removal is the point of the
+storage change rather than a side effect. It existed because a stored window was
+one compressed blob: a refill replaced it wholesale with a fresh, unenriched
+payload, so anything written into it was erased and the only way a viewer saw
+enrichment was to reapply it on every single read. Rows removed what that rested
+on — a refill rewrites the airings but is forbidden to demote an enriched title
+(entries._UPSERT_TITLE), and the drain updates the row directly — so a stored
+value is never older than the last drain pass rather than as old as the window,
+and `enriched` records what the row CONTAINS instead of what a reader would have
+to look up to find out.
 
 THE DRAIN'S WORK IS DERIVED FROM THE STORED CALENDAR, NOT FROM AN IN-MEMORY
-QUEUE A READ HAPPENED TO POPULATE. An earlier version of this module fed the
-drain from a `_pending` dict that `overlay_records` filled and a full queue
-silently dropped an id from — measured on a live instance, `simkl_titles` grew
-100 -> 260 rows over several minutes while two specific titles (which had
-aired, rendered, and been read many times) were never attempted even once,
-because the queue was full on every read that offered them and nothing
-preferred an older offer over a newer one. Deriving the owed set fresh from
-`api_cache` every drain tick cannot drop an id that way: a window's Simkl ids
-are knowable the moment FILL stores it, whether or not any viewer has read it
-yet, and asking "what does the cache currently hold, minus what
-`simkl_titles` already answered" is complete and idempotent — an id either
-shows up in the difference or it does not, with no queue state to lose it in
-between. It also survives a restart for free, which the queue design gave up
-on deliberately and which turned out to be the wrong trade.
+QUEUE A READ HAPPENED TO POPULATE. An earlier version fed the drain from a
+`_pending` dict that the read overlay filled and a full queue silently dropped an
+id from — measured on a live instance, `simkl_titles` grew 100 -> 260 rows over
+several minutes while two specific titles (which had aired, rendered, and been
+read many times) were never attempted even once, because the queue was full on
+every read that offered them. Deriving the owed set fresh from storage every tick
+cannot drop an id that way: a span's Simkl ids are knowable the moment FILL
+stores them, whether or not any viewer has read them, and the difference between
+"what the calendar names" and "what `simkl_titles` answers" is complete and
+idempotent. It also survives a restart for free.
 
-A TITLE Simkl DOES NOT KNOW STILL GETS A ROW, WITH AN EMPTY PAYLOAD. That is
-what stops the same id being re-attempted on every single drain tick after
-the first failed attempt — presence of a row with a real payload is what
-`overlay_records` reads as "already attempted and answered";
-`failed_at`/`fail_count` are what decide whether an empty row is worth
-attempting again yet, and the same backoff rule is what keeps a failed id out
-of `drain`'s owed set until it has waited long enough.
+A TITLE Simkl DOES NOT KNOW STILL GETS A ROW, WITH AN EMPTY PAYLOAD. That is what
+stops the same id being re-attempted on every drain tick after the first failed
+attempt — a row with a real payload is what `drain` reads as "already attempted
+and answered"; `failed_at`/`fail_count` decide whether an empty row is worth
+attempting again yet.
 
-THIS MODULE NEVER MAKES A NETWORK CALL FROM overlay_records. That function is
-called from app/calendar/cache.py's assemble_range, which a public share page
-reaches with allow_fetch=False — the same rule that page holds everywhere else
-in the calendar package applies here too, and is why enrichment can only ever
-be discovered as pending, never performed, on a read.
+NEITHER THIS MODULE NOR THE READ PATH MAKES A NETWORK CALL FOR ENRICHMENT.
+`apply_stored_enrichment` reads one table and fetches nothing, which is what lets
+a public share page — which reaches the calendar with allow_fetch=False — store
+and serve without ever spending the instance's Simkl budget.
 
-"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION". A ROW A NARROWER
+"ALREADY ANSWERED" ALSO MEANS "UNDER THE CURRENT EXTRACTION". A row a narrower
 extraction wrote — every simkl_titles row that existed before ids/type/
 anime_type/trailers/etc. were added to what app/providers/simkl/titles.py's
 `_extract` keeps — carries no `extract_version` key at all, and `drain` reads
-that the same way it reads a version number that does not match: owed, not
-done, exactly like a title never attempted. Without this an already-answered
-row from the old shape would sit there for its full 30-day retention window
-before the wider extraction ever touched it, which is not what "owed" is
-supposed to mean. Backoff still governs FAILURES (a stored empty payload);
-a stale-shaped SUCCESS is re-fetched on the very next drain tick regardless of
-backoff, because nothing about it failed. `overlay_records` is unaffected —
-it applies whatever fields an old row already carries in the meantime, so a
-title enriched under the old shape stays enriched (just missing the newer
-fields) while it waits its turn to be re-fetched.
+that the same way it reads a version number that does not match: owed, not done,
+exactly like a title never attempted. Without this an already-answered row from
+the old shape would sit there for its full 30-day retention before the wider
+extraction ever touched it. Backoff still governs FAILURES (a stored empty
+payload); a stale-shaped SUCCESS is re-fetched on the next drain tick regardless
+of backoff, because nothing about it failed. `apply_stored_enrichment` is NOT
+gated on the version — it applies whatever fields an old row already carries, so
+a title enriched under the old shape stays enriched (just missing the newer
+fields) while it waits its turn.
 """
 from __future__ import annotations
 
@@ -83,10 +81,12 @@ import zlib
 from typing import Any
 
 from . import cache as calendar_cache
+from . import entries
 from .. import db
-from ..providers.base import Media, Record, Source
+from ..providers.base import Media, Record, Source, SourceUnavailable
 from ..providers.simkl import titles as simkl_titles
 from ..providers.simkl import transport as simkl_transport
+from ..providers.trakt import detail as trakt_detail
 from ..providers.trakt import releases as trakt_releases
 
 logger = logging.getLogger(__name__)
@@ -150,7 +150,7 @@ DRAIN_BATCH_SIZE = 300
 # recheck, the same TTL detail.py's episode lists use and for the same reason:
 # long enough that this table does not become the thing generating most of
 # the instance's Simkl traffic, short enough that "wrong forever" cannot
-# happen. A swept row is simply "never attempted" again to `overlay_records`,
+# happen. A swept row is simply "never attempted" again to the drain,
 # so ordinary traffic re-queues and re-fetches it — no separate un-sweep path
 # is needed.
 # How many Trakt films one tick may look up. Smaller than the Simkl batch beside
@@ -230,6 +230,24 @@ async def _read_rows(keys) -> dict[tuple[int, str], dict]:
 
 
 async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> None:
+    """Record what a lookup found, in BOTH places, and they are not duplicates.
+
+    `simkl_titles` keeps the RAW ANSWER — the whole payload, under the extraction
+    version that produced it, with the failure backoff beside it. It is what
+    makes a re-fetch decidable: a row written by a narrower extraction is owed
+    again, and only the payload can say which extraction wrote it.
+
+    `calendar_titles` takes the PROJECTION of that answer onto the stored title,
+    which is what the read path serves. Writing it here is what retired the
+    read-time overlay: the fields are on the row a viewer's month already reads,
+    so nothing has to be joined back in per request, and `enriched` becomes a
+    statement about what the row CONTAINS rather than about what a reader would
+    have to look up to find out.
+
+    The second write is a projection of the first and can be rebuilt from it, so
+    this is one fact stored once and materialized once, not two truths to keep
+    in step.
+    """
     blob = _compress(fields)
     await db.execute(
         "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
@@ -239,6 +257,7 @@ async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> 
         "failed_at = NULL, fail_count = 0",
         (simkl_id, media, blob, now),
     )
+    await entries.apply_enrichment(str(Source.SIMKL), simkl_id, media, fields, now)
 
 
 async def _upsert_failure(simkl_id: int, media: str, now: int) -> None:
@@ -312,10 +331,10 @@ async def overlay_match_ids(records: list[Record]) -> list[Record]:
     """Merge stored enrichment's `ids` into the Simkl records a FILL is about to
     group — and nothing else about them. Mutates in place and returns `records`.
 
-    WHY A FILL CONSULTS THIS TABLE AT ALL, WHEN `overlay_records` BELOW ALREADY
-    APPLIES IT AT READ. A group key is derived at FILL, from the ids the calendar
-    FILE carries; the read-time overlay is exactly that, an overlay, and arrives
-    strictly after the key that would have used it. So an id enrichment learns
+    WHY THIS IS SEPARATE FROM `apply_stored_enrichment`, WHICH READS THE SAME
+    TABLE. A group key is derived from the ids the calendar FILE carries, and it
+    is derived BEFORE the records are stored — so an id that arrives with the
+    rest of the answer arrives strictly after the key that would have used it. So an id enrichment learns
     can never reach the key by itself, and re-reading a stored window never
     re-keys it. Measured on a live instance: 835 enrichment rows carrying a tmdb
     id on 747 of them made no difference at all to how many entries merged,
@@ -323,12 +342,13 @@ async def overlay_match_ids(records: list[Record]) -> list[Record]:
     are to inform matching, the fill has to go and ask for them, which is what
     this function is.
 
-    IT APPLIES ONLY THE IDS, AND THAT RESTRAINT IS THE POINT. Every other field
-    enrichment holds — genres, network, country, certification, runtime, status,
-    overview — stays a READ-time overlay, because baking those into a stored
-    window would freeze one moment's enrichment into a row served for the whole
-    TTL and would make `enriched` a lie about what the window contains. An id is
-    the one thing a fill genuinely needs before it can do its own job.
+    IT APPLIES ONLY THE IDS, AND THAT RESTRAINT IS STILL THE POINT — but the
+    reason has changed and the old one must not be left standing. It used to be
+    that every other field had to stay a read-time overlay; they are stored now.
+    What is left is a question of ORDER: an id is the one thing needed BEFORE the
+    match runs, and this is the only moment early enough to supply it. The rest
+    of the answer is applied by `apply_stored_enrichment` on the way to storage,
+    which is late enough not to need saying twice.
 
     WHAT IT CANNOT DO IS HELP A TITLE NOBODY HAS ENRICHED YET. The first fill of
     an unfamiliar month finds no rows, keys on the calendar files alone, and only
@@ -356,72 +376,105 @@ async def overlay_match_ids(records: list[Record]) -> list[Record]:
     return records
 
 
-def _apply(record: Record, fields: dict[str, Any]) -> None:
-    record.genres = list(fields.get("genres") or [])
-    record.network = str(fields.get("network") or "")
-    record.country = str(fields.get("country") or "")
-    record.certification = str(fields.get("certification") or "")
-    record.runtime = fields.get("runtime")
-    record.status = str(fields.get("status") or "")
-    record.overview = str(fields.get("overview") or "")
-    # THE THREE THE CALENDAR FILES NEVER CARRY AND THE CARD ALREADY DRAWS.
-    # Simkl's calendar CDN entries have no language, no year and no rating at
-    # all, so a Simkl card showed none — the fields were there and nothing
-    # filled them in. Each is left at its own default when enrichment has no
-    # answer (a row from the narrower extraction has no key here), which is the
-    # same value the record already held, so an old row applies exactly as much
-    # as it knows and nothing more.
-    record.language = str(fields.get("language") or "")
-    year = fields.get("year")
-    record.year = year if isinstance(year, int) else ""
-    rating = fields.get("rating")
-    record.rating = float(rating) if isinstance(rating, (int, float)) else None
-    # Missing on a row written by the older, narrower extraction — reads as ""
-    # exactly like an unenriched record, which is the honest answer until the
-    # drain re-fetches it under the wider shape (see EXTRACT_VERSION below and
-    # app/calendar/filter.py's prune_disguised_films, the only reader of this).
-    record.anime_type = str(fields.get("anime_type") or "")
-    # {country: [release type]} for a film, empty for everything else and for
-    # every row the narrower extraction wrote. app/calendar/filter.py's release
-    # rule reads it, and an empty map means "this record cannot answer" rather
-    # than "this film is released nowhere" — see keep_release there.
-    releases = fields.get("release_types_by_country")
-    record.release_types_by_country = dict(releases) if isinstance(releases, dict) else {}
-    _merge_ids(record, fields.get("ids") or {})
-    record.enriched = True
+async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
+    """Give the Simkl records a fill is about to STORE whatever `simkl_titles`
+    already knows about them. Mutates in place and returns `records`.
 
+    THIS IS THE READ-TIME OVERLAY, MOVED TO WRITE TIME, which is the whole point
+    of storing records instead of a blob. The old objection was exact and applied
+    to the old shape: a value baked into a stored WINDOW would be frozen for that
+    window's whole TTL, because a refill replaced the blob wholesale with a
+    fresh, unenriched payload. So the only way a viewer ever saw enrichment was
+    to reapply it on every single read.
 
-async def overlay_records(records: list[Record]) -> list[Record]:
-    """Fill in whatever `simkl_titles` already knows about the Simkl records in
-    `records`, mutating them in place. Returns `records` for convenience at
-    the call site.
+    Rows removed what that rested on. A refill rewrites the airings but is
+    forbidden to demote an enriched title (entries._UPSERT_TITLE), and the drain
+    writes the row directly, so a stored value is never older than the last drain
+    pass rather than as old as the window.
 
-    NO NETWORK CALL HAPPENS HERE, EVER — see the module docstring. A record
-    this overlay cannot answer for is simply left at `enriched=False`, which
-    is what lets app/calendar/filter.py exempt it rather than judge it on
-    values it has not been able to look up yet. It does not need to queue
-    anything for `drain` to find later, either: `drain` derives its own work
-    straight from the stored calendar cache (see `_owed_titles` below), so a
-    record read here and a record nobody has ever read are equally visible to
-    the next drain tick.
+    IT RUNS AT STORAGE RATHER THAN AT FETCH so that every path which stores
+    records gets it — the fetch is only one of them, and a caller that assembles
+    records itself would otherwise write rows that read as unenriched while the
+    answer sat in the next table along. `overlay_match_ids` stays separate and
+    stays ids-only: it has to run before the group keys are derived, which is a
+    different job at a different moment.
     """
     candidates = _simkl_candidates(records)
     if not candidates:
         return records
-
     rows = await _read_rows(candidates.keys())
     for key, group in candidates.items():
-        row = rows.get(key)
-        if row is None:
-            continue
-        fields = row["fields"]
+        fields = (rows.get(key) or {}).get("fields")
         if not fields:
-            # A stored failure: nothing to apply. Whether it is worth
-            # attempting again yet is `drain`'s question, not a read's.
-            continue
+            continue  # never looked up, or a stored failure: leave it unenriched
         for record in group:
             _apply(record, fields)
     return records
+
+
+def _apply(record: Record, fields: dict[str, Any]) -> None:
+    """Put what a lookup found onto one record.
+
+    IT READS THE PAYLOAD THROUGH `entries.enrichment_values` AND NOT ITSELF. The
+    other writer — the drain updating a stored row directly — goes through the
+    same function, and when each had its own reading they drifted: one looked for
+    `ratings` where the payload says `rating`, and 225 titles on a live instance
+    lost their score depending only on which path reached them. What is left here
+    is the RECORD-shaped half of the write; what a field means lives in one
+    place.
+    """
+    value = entries.enrichment_values(fields)
+    record.genres = list(value["genres"])
+    record.network = value["network"]
+    record.country = value["country"]
+    record.certification = value["certification"]
+    record.runtime = value["runtime"]
+    record.status = value["status"]
+    record.overview = value["overview"]
+    # THE THREE THE CALENDAR FILES NEVER CARRY AND THE CARD ALREADY DRAWS. Simkl's
+    # calendar CDN entries have no language, no year and no rating at all, so a
+    # Simkl card showed none of them — the fields were there and nothing filled
+    # them in. Each stays at its own default when the payload has no answer.
+    record.language = value["language"]
+    record.year = value["year"]
+    record.rating = value["rating"]
+    # Missing on a row written by the older, narrower extraction — reads as ""
+    # exactly like an unenriched record, which is the honest answer until the
+    # drain re-fetches it under the wider shape (app/calendar/filter.py's
+    # prune_disguised_films is the only reader).
+    record.anime_type = value["anime_type"]
+    # {country: [release type]} for a film, empty for everything else. An empty
+    # map means "this record cannot answer" rather than "released nowhere" —
+    # see keep_release in app/calendar/filter.py.
+    record.release_types_by_country = dict(value["release_types_by_country"])
+    _merge_ids(record, value["ids"])
+    record.enriched = True
+
+
+# THERE IS NO `overlay_records` ANY MORE, AND THE REASON IS WORTH KEEPING.
+#
+# It read `simkl_titles` on every calendar read and painted genres, network,
+# country and certification onto that read's Simkl records, because the stored
+# window COULD NOT HOLD THEM: a fill replaced the whole compressed blob with a
+# fresh, unenriched payload, so anything written into it was erased on the next
+# refill. The docstring on `overlay_match_ids` still states that objection, and
+# it was accurate about the design it described -- a value baked into a window
+# would be frozen for the window's whole TTL, and `enriched` would be a lie about
+# what the window contained.
+#
+# BOTH HALVES ARE ANSWERED BY THE DRAIN BECOMING A WRITER OF THE ROW. It updates
+# `calendar_titles` when it learns something, so a stored value is never older
+# than the last drain pass rather than as old as the window; and a refill is
+# forbidden to demote an enriched field (entries._UPSERT_TITLE), so the fields
+# survive the thing that used to erase them. `enriched` now records what the row
+# CONTAINS instead of what a reader would have to look up to find out, which
+# makes it more accurate, not less.
+#
+# WHAT REPLACED IT IS NOT ONLY THE WRITE. A title whose answer was stored before
+# its current row existed is answered in `simkl_titles` and blank on the row --
+# the state every one of an instance's stored answers is in the moment the
+# calendar moves to rows. `drain` gives those rows their answer without fetching
+# anything; see the rebuild branch there.
 
 
 # ---------------------------------------------------------------------------
@@ -444,25 +497,7 @@ async def _owed_titles() -> dict[tuple[int, str], str]:
     this function's — it stays a pure "what does the cache currently name"
     question so it has exactly one reason to change.
     """
-    groups = await calendar_cache.cached_calendar_groups()
-    media_values = _media_values()
-    owed: dict[tuple[int, str], str] = {}
-    for group in groups:
-        record = (group.get("by_source") or {}).get(str(Source.SIMKL))
-        if not isinstance(record, dict):
-            continue
-        media = record.get("media")
-        if media not in media_values:
-            continue
-        raw_id = (record.get("ids") or {}).get("simkl")
-        try:
-            simkl_id = int(raw_id)
-        except (TypeError, ValueError):
-            continue
-        key = (simkl_id, media)
-        if key not in owed:
-            owed[key] = str(record.get("title") or "")
-    return owed
+    return await entries.stored_titles(str(Source.SIMKL), "simkl", _media_values())
 
 
 async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
@@ -530,6 +565,21 @@ async def drain(settings, *, now: int | None = None) -> int:
     if not owed:
         return 0
     rows = await _read_rows(owed.keys())
+    # WHICH STORED TITLES HAVE AN ANSWER BUT HAVE NOT BEEN GIVEN IT. A calendar
+    # row starts unenriched and only a write marks it otherwise, so a title whose
+    # lookup landed a moment after its row was written — or whose answer was
+    # stored by a version of this app that did not yet project onto the calendar
+    # — is answered in `simkl_titles` and blank on the row a viewer reads.
+    #
+    # THE SKIP BELOW IS WHY THIS CANNOT BE LEFT TO SORT ITSELF OUT. A title the
+    # per-title table already answers is never fetched again, so nothing would
+    # ever revisit it; the row would stay blank for as long as it existed. It was
+    # briefly argued that applying enrichment at FILL made this unreachable, and
+    # that was wrong: the fill covers rows it CREATES, not rows that already
+    # exist and are waiting. Five films on one real August calendar sat unenriched
+    # with complete stored answers beside them.
+    unprojected = await entries.unenriched(str(Source.SIMKL), "simkl")
+    rebuild: list[tuple[int, str, dict]] = []
     batch: list[tuple[int, str, str]] = []
     for (simkl_id, media), title in owed.items():
         if len(batch) >= DRAIN_BATCH_SIZE:
@@ -539,7 +589,14 @@ async def drain(settings, *, now: int | None = None) -> int:
             fields = row["fields"]
             current = bool(fields) and fields.get("extract_version") == simkl_titles.EXTRACT_VERSION
             if current:
-                continue  # already answered, under the current extraction
+                # Already answered under the current extraction: NOTHING TO
+                # FETCH, but possibly something to write. Bounded like the fetch
+                # batch, so a large backlog is many small ticks rather than one
+                # long one.
+                if ((simkl_id, media) in unprojected
+                        and len(rebuild) < DRAIN_BATCH_SIZE):
+                    rebuild.append((simkl_id, media, fields))
+                continue
             # A SUCCESS ROW WITH NO fields IS A STORED FAILURE (see
             # _upsert_failure); anything else with fields but the WRONG (or
             # no) extract_version is a row the OLDER, narrower extraction
@@ -551,6 +608,14 @@ async def drain(settings, *, now: int | None = None) -> int:
             if not fields and not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
                 continue  # failed recently; not worth asking again yet
         batch.append((simkl_id, media, title))
+    if rebuild:
+        # BEFORE THE FETCH AND WITHOUT ONE. These are answers this instance has
+        # already paid for; handing them to the rows that lack them is a local
+        # write, and doing it first means a pass with nothing to fetch still
+        # makes progress.
+        written = await entries.apply_enrichment_many(str(Source.SIMKL), rebuild, ts)
+        logger.info("Simkl enrichment: gave %d stored answer(s) to calendar rows "
+                    "that did not have them; no lookup was needed.", written)
     if not batch:
         return 0
     results = await asyncio.gather(
@@ -676,7 +741,7 @@ async def overlay_releases(records: list[Record]) -> list[Record]:
     """Fill in what `trakt_releases` already knows about the Trakt films in
     `records`, mutating them in place.
 
-    NO NETWORK CALL HAPPENS HERE, EVER — the same promise `overlay_records`
+    NO NETWORK CALL HAPPENS HERE, EVER — the same promise `apply_stored_enrichment`
     makes. A film with no stored answer is left with an empty map, which
     app/calendar/filter.py reads as "this record cannot answer" and keeps, so a
     film waiting on its first lookup is never dropped by a filter.
@@ -708,19 +773,8 @@ async def _owed_films() -> dict[int, str]:
     which about 25 came from Trakt. This costs tens of calls a month, not
     thousands.
     """
-    groups = await calendar_cache.cached_calendar_groups()
-    owed: dict[int, str] = {}
-    for group in groups:
-        record = (group.get("by_source") or {}).get(str(Source.TRAKT))
-        if not isinstance(record, dict) or record.get("media") != str(Media.MOVIE):
-            continue
-        try:
-            trakt_id = int((record.get("ids") or {}).get("trakt"))
-        except (TypeError, ValueError):
-            continue
-        if trakt_id not in owed:
-            owed[trakt_id] = str(record.get("title") or "")
-    return owed
+    films = await entries.stored_titles(str(Source.TRAKT), "trakt", (str(Media.MOVIE),))
+    return {trakt_id: title for (trakt_id, _media), title in films.items()}
 
 
 async def _fetch_one_release(settings, trakt_id: int, now: int) -> bool:
@@ -827,6 +881,64 @@ _drain_rerun_requested = False
 _drain_tasks: set[asyncio.Task] = set()
 
 
+# How many SEASONS one tick may look up. Seasons rather than episodes because
+# that is the shape of the call — Trakt answers a whole season's episode list in
+# one request — and small because each of those requests is bigger than a title
+# lookup and nobody is waiting on it. The Simkl batch beside this one is 300; the
+# difference is that this goes through Trakt's shared connection pool and its
+# 500-GET-per-5-minutes budget, and a calendar month names far fewer distinct
+# SEASONS than it does titles.
+EPISODE_DRAIN_BATCH_SIZE = 25
+
+
+async def drain_episodes(settings, *, now: int | None = None) -> int:
+    """One heartbeat's worth of per-episode lookups — level 2 of the stored
+    calendar.
+
+    WHAT THIS FILLS IN THAT NOTHING ELSE CAN. A calendar feed names an episode
+    and, at best, titles it. The facts that genuinely vary per episode — the
+    overview, the runtime, the rating — have never been stored by this app at
+    all: the modal shows a season's worth of them today by stamping the SHOW's
+    runtime and rating onto every one, which is wrong on any show with a
+    double-length finale and wrong about every episode's rating.
+
+    ONE REQUEST PER SEASON, NOT PER EPISODE, which is the whole reason this is
+    affordable — see providers/trakt/detail.py's fetch_season_episodes, and note
+    the `extended=full` it depends on: `extended=episodes` alone returns episode
+    objects with no `first_aired` at all.
+
+    SEQUENTIALLY, and for the same reason drain_releases is: Trakt's transport
+    gates every call behind one semaphore sized under its connection pool, so
+    firing a batch would queue on that gate rather than go faster while making a
+    429 storm harder to read.
+    """
+    if not settings.trakt_catalogue_configured:
+        return 0
+    ts = db.now() if now is None else now
+    owed = await entries.owed_episodes(str(Source.TRAKT), "trakt",
+                                       EPISODE_DRAIN_BATCH_SIZE)
+    if not owed:
+        return 0
+    written = 0
+    for trakt_id, media, season in owed:
+        if media != str(Media.SHOW):
+            continue
+        try:
+            episodes = await trakt_detail.fetch_season_episodes(settings, trakt_id, season)
+        except SourceUnavailable as exc:
+            # One season's failure is not the batch's: the rest are independent
+            # lookups and this one is owed again next tick.
+            logger.debug("episode lookup failed for trakt id %s season %s: %s",
+                         trakt_id, season, exc)
+            continue
+        written += await entries.store_episodes(
+            str(Source.TRAKT), trakt_id, media, season, episodes, ts)
+    if written:
+        logger.info("calendar episode drain: filled %d episode(s) across %d season(s).",
+                    written, len(owed))
+    return written
+
+
 async def run_drain(settings) -> int:
     """Run one latched pass of `drain`, or fold this call into the pass
     already running — see the module note above this function for why a
@@ -884,6 +996,14 @@ async def run_drain(settings) -> int:
             # Never let the other service's pass fail this one's answer — the
             # heartbeat asks again in a minute and nothing is waiting on it.
             logger.error("Trakt release drain failed.", exc_info=True)
+        try:
+            # LEVEL 2, LAST, because it is the least urgent of the three: a card
+            # with no genres looks broken, a film with no release map is filtered
+            # wrongly, and an episode with no overview simply shows less in a
+            # modal nobody has opened yet.
+            await drain_episodes(settings)
+        except Exception:
+            logger.error("Calendar episode drain failed.", exc_info=True)
         return fetched
     finally:
         _drain_active = False
@@ -911,7 +1031,7 @@ def schedule_drain(settings) -> None:
     tick. Call this when a window FILL stores new records (see
     app/calendar/cache.py's `load_window`) — never from a read: the read path
     already promises no outbound call (see the module docstring), and firing
-    a drain from `overlay_records` would put that promise in the same
+    a drain from a read would put that promise in the same
     function it is meant to hold for.
 
     FIRE AND FORGET, ON PURPOSE, AND NEVER AWAITED BY THE CALLER. The caller

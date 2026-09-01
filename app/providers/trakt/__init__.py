@@ -47,7 +47,12 @@ class _TraktCalendarPort:
         return settings.trakt_catalogue_configured
 
     async def fetch_window(self, endpoint, settings: Settings,
-                           start: date, days: int) -> list[Record]:
+                           start: date, days: int,
+                           revalidate: bool = True) -> list[Record]:
+        # `revalidate` IS ACCEPTED AND IGNORED, which is the honest shape for
+        # this source rather than an oversight. Trakt's calendar endpoints carry
+        # no ETag and no Last-Modified (verified against the live API), so this
+        # source has no validator to suppress and can never answer "unchanged".
         return await calendar.fetch_window(endpoint, settings, start, days)
 
 

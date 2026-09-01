@@ -266,6 +266,12 @@ html.has-distrakt #distraktNav { display: flex; }
 }
 .stat-pop { animation: statPop 0.55s cubic-bezier(.36,.07,.19,.97); }
 .delta-msg { font-size: 0.7rem; color: #a1a1aa; margin-top: 2px; display: block; }
+/* The release filter's own count, in the same red a falling total uses: both
+   say "there is less here than you might expect", and one colour for that is
+   one thing to learn instead of two. The link inherits it so the whole row
+   reads as one statement rather than a number with a control stuck on. */
+.stats-row.stats-filtered, .stats-row.stats-filtered strong { color: #f87171; }
+.stats-row.stats-filtered a { color: inherit; text-decoration: underline dotted; }
 /* The direction of the change, decided server-side and carried as a class so the
    line arrives coloured rather than being tinted by script after paint. */
 .delta-msg.up { color: #34d399; }

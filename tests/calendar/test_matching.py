@@ -18,6 +18,7 @@ nothing — are all shapes nobody would have invented.
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from app import db
 from app.calendar import cache as calendar_cache, enrich as calendar_enrich
@@ -337,19 +338,55 @@ class TheIdBridgeAtFillTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.ids, before)
 
 
-class AWindowStoredUnderTheOlderRuleTests(unittest.TestCase):
-    """A stored window is keyed under whatever the matcher said when it was
-    filled, so the rule moving means the stored version moves with it."""
+class TheMatchIsMadeAtReadTests(unittest.IsolatedAsyncioTestCase):
+    """A CHANGE TO THE MATCHING RULE NEEDS NO REFILL, which is new and is the
+    point of storing records rather than groups.
 
-    def test_the_version_moved(self):
-        self.assertEqual(calendar_cache.PAYLOAD_VERSION, 3)
+    This replaces a pair of tests about a versioned envelope. A stored window
+    used to hold the FINISHED groups, so it was keyed under whatever the matcher
+    said on the day it was filled — and a change to that rule had to invalidate
+    every window on the instance, because a month spans five or six of them and a
+    mixture would show one airing merged in a refilled window and split in a
+    stale one, on the same page. That is what `PAYLOAD_VERSION` existed to force.
 
-    def test_a_window_from_the_previous_rule_reads_as_a_miss(self):
-        """Not an error and not a partial: a miss, so it is refetched and re-keyed
-        under the current rule. A month spans five or six windows, and a mixture
-        would show one airing merged in a refilled window and split in a stale
-        one, on the same page."""
-        stale = calendar_cache._compress(
-            {"v": 2, "sources": ["trakt"], "asked": ["trakt"],
-             "entries": [{"key": "show:tmdb:1|1|1", "ids": {}, "by_source": {}}]})
-        self.assertIsNone(calendar_cache._decompress(stale))
+    Rows carry no group key. The match runs over whatever the span holds, every
+    read, so the mixture is unrepresentable and there is nothing to invalidate.
+    """
+
+    async def asyncSetUp(self):
+        migrated_db("matchatread")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_the_same_stored_rows_regroup_when_the_rule_changes(self):
+        from datetime import date
+
+        from app.providers.base import Media
+
+        day = date(2026, 7, 15)
+        records = [
+            Record(source=Source.TRAKT, media=Media.SHOW, id="a", ids={"trakt": 1},
+                   detail_url="", title="A", air_ts=1784131200.0, season=1,
+                   episode_number=1),
+            Record(source=Source.SIMKL, media=Media.SHOW, id="b", ids={"simkl": 2},
+                   detail_url="", title="B", air_ts=1784131200.0, season=1,
+                   episode_number=1),
+        ]
+        await calendar_cache.store_window(
+            "shows", calendar_cache.window_start(day), records, 600, 1000,
+            sources=["trakt", "simkl"])
+
+        # Sharing no id space, these are two airings under the real rule.
+        window, _ = await calendar_cache.read_cached_window(
+            "shows", calendar_cache.window_start(day))
+        self.assertEqual(len(window.groups), 2)
+
+        # A rule that calls them one airing changes the answer with NOTHING
+        # refetched and nothing rewritten — the stored rows are the same rows.
+        with patch.object(calendar_cache, "match_keys",
+                          lambda recs: ["one"] * len(recs)):
+            window, _ = await calendar_cache.read_cached_window(
+                "shows", calendar_cache.window_start(day))
+        self.assertEqual(len(window.groups), 1)
+        self.assertEqual(sorted(window.groups[0]["by_source"]), ["simkl", "trakt"])

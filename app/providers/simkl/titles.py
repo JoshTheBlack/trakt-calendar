@@ -72,7 +72,7 @@ _DETAIL_PATHS = {Media.SHOW: "tv", Media.MOVIE: "movies"}
 # safely as an explicit mismatch would. app/calendar/enrich.py's drain reads
 # this to decide whether an already-successful row is actually DONE or only
 # owed a re-fetch under the wider extraction — see its own comment for why
-# that is the only place the distinction has to be made: overlay_records
+# that is the only place the distinction has to be made: the calendar's enrichment
 # still applies whatever an old row happens to carry in the meantime, so a
 # title already enriched under the old shape does not regress to unenriched
 # while it waits its turn to be re-fetched.

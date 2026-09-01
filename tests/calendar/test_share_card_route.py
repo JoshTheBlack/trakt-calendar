@@ -690,15 +690,20 @@ class TheOwnersSourcePreferenceReachesBothSurfacesTests(ShareCardTestCase):
         would merge — two different titles, two different id spaces."""
         from app.providers.base import Media, Record, Source
 
+        # THE TIMESTAMP AND THE DAY HAVE TO AGREE NOW. An airing is filed
+        # under its OWN UTC date rather than under whichever window the fill
+        # was addressed by, so a record dated outside the span it is seeded
+        # into is trimmed rather than stored. These two used to disagree by
+        # three days and the blob did not care.
         day = date(2026, 8, 12)
         records = [
             Record(source=Source.TRAKT, media=Media.SHOW, id="trakt-only",
                    ids={"trakt": 55, "slug": "trakt-only"},
                    detail_url="https://trakt.tv/shows/trakt-only", title="Trakt Only",
-                   air_ts=1786276800.0, season=1, episode_number=1, episode_label="S01E01"),
+                   air_ts=1786536000.0, season=1, episode_number=1, episode_label="S01E01"),
             Record(source=Source.SIMKL, media=Media.SHOW, id="simkl-only",
                    ids={"simkl": 77}, detail_url="https://simkl.com/tv/77",
-                   title="Simkl Only", air_ts=1786276800.0, season=1,
+                   title="Simkl Only", air_ts=1786536000.0, season=1,
                    episode_number=1, episode_label="S01E01"),
         ]
         asyncio.run(calendar_cache.store_window(
@@ -784,15 +789,20 @@ class ALinkThatNamesItsOwnSourcesTests(ShareCardTestCase):
     def seed_two_sources(self) -> None:
         from app.providers.base import Media, Record, Source
 
+        # THE TIMESTAMP AND THE DAY HAVE TO AGREE NOW. An airing is filed
+        # under its OWN UTC date rather than under whichever window the fill
+        # was addressed by, so a record dated outside the span it is seeded
+        # into is trimmed rather than stored. These two used to disagree by
+        # three days and the blob did not care.
         day = date(2026, 8, 12)
         records = [
             Record(source=Source.TRAKT, media=Media.SHOW, id="trakt-only",
                    ids={"trakt": 91, "slug": "trakt-only"},
                    detail_url="https://trakt.tv/shows/trakt-only", title="Trakt Only",
-                   air_ts=1786276800.0, season=1, episode_number=1, episode_label="S01E01"),
+                   air_ts=1786536000.0, season=1, episode_number=1, episode_label="S01E01"),
             Record(source=Source.SIMKL, media=Media.SHOW, id="simkl-only",
                    ids={"simkl": 92}, detail_url="https://simkl.com/tv/92",
-                   title="Simkl Only", air_ts=1786276800.0, season=1,
+                   title="Simkl Only", air_ts=1786536000.0, season=1,
                    episode_number=1, episode_label="S01E01"),
         ]
         asyncio.run(calendar_cache.store_window(

@@ -21,10 +21,72 @@ from dataclasses import dataclass, field, fields
 from datetime import date, datetime, timedelta, timezone
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol, runtime_checkable
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 if TYPE_CHECKING:  # import-only-for-annotations: endpoints.py imports Media from here
     from ..config import Settings
+
+
+# The image proxy every source's artwork is addressed through. Simkl's own image
+# conventions name this proxy and `q=90` (https://api.simkl.org/conventions/
+# images.md), which they document as matching their origin quality.
+_IMAGE_PROXY = "https://wsrv.nl/"
+# 440 IS TWICE THE WIDEST CARD (style.css's `--card-w: 220px`), so a retina
+# screen gets its two device pixels per CSS pixel and nothing gets more than
+# that. THE WIDTH IS NOT OPTIONAL, measured 2026-08-28 against real stored
+# posters: unbounded, the proxy re-encodes Trakt's 600x900 original to WebP at
+# q=90 and hands back 32.5 KB where the origin served 24.3 KB -- routing images
+# through a proxy to be a better citizen would have made every card HEAVIER. At
+# w=440 it is 24.6 KB, parity with the direct fetch at the size actually drawn.
+#
+# `we` IS "WITHOUT ENLARGEMENT" AND IS THE OTHER HALF OF THAT. wsrv.nl upscales
+# by default: Simkl's origin is 340x500, and asking for 440 without this returned
+# a 440x647 image of 77.7 KB against the origin's 43.3 KB -- half again the bytes
+# for a picture that is genuinely blurrier. With it, a source smaller than the
+# card is passed through at its own size.
+_IMAGE_PARAMS = "q=90&w=440&we"
+
+
+def proxied_image(url: str | None) -> str | None:
+    """A poster URL addressed through the shared image proxy.
+
+    ONE IMPLEMENTATION FOR EVERY SOURCE, which is the point of it living here
+    rather than in either provider package. The rule is about how this app treats
+    other people's image hosts, not about any one of them: Trakt asks that its
+    images "be cached in your app or server and not loaded directly from our
+    CDN", and Simkl publishes this exact proxy as their own recommended form. A
+    per-provider copy would be the same policy written twice, free to drift, with
+    neither copy able to say it was the rule.
+
+    RETURNS THE INPUT UNCHANGED WHEN THERE IS NOTHING TO PROXY -- an empty or
+    absent URL stays empty, so a title with no artwork does not acquire a proxy
+    address that resolves to nothing. An already-proxied URL is left alone too,
+    so a stored record read back and re-normalized cannot be wrapped twice.
+    """
+    if not url:
+        return url
+    text = str(url)
+    if text.startswith(_IMAGE_PROXY):
+        return text
+    return f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{_IMAGE_PARAMS}"
+
+
+class SourceNotModified(Exception):
+    """A source has confirmed that nothing it would return has changed.
+
+    NOT A FAILURE, AND THE DISTINCTION IS THE WHOLE REASON IT IS ITS OWN TYPE.
+    `SourceUnavailable` means "could not answer" and leaves a span partial;
+    this means "answered, and the answer is the one you already stored". A
+    caller keeps its rows, advances its schedule, and reports the source as
+    having replied.
+
+    It exists because a conditional GET's 304 carries no body. Under a design
+    that stored the body beside the validator the distinction never surfaced --
+    a 304 was served from the stored copy and looked like an ordinary answer.
+    Storing only the validator is what makes "unchanged" something the caller
+    has to be told rather than something the transport can hide.
+    """
 
 
 class SourceUnavailable(Exception):
@@ -463,6 +525,19 @@ def render(record: Record, tz: ZoneInfo) -> Item:
       - the genre slugs become their display form ("game-show" -> "Game Show").
         This is after every filter has run, which is the entire reason it is here
         rather than in a normalizer.
+      - the poster is addressed through the image proxy.
+
+    WHY THE PROXY IS A RENDER STEP AND NOT A NORMALIZER ONE, which is a
+    distinction worth stating because getting it wrong is invisible. What the
+    services ask is that their CDN not be hotlinked BY A BROWSER; Trakt's wording
+    is that images be "cached in your app or server", and a server-side download
+    is that, not a breach of it. `Record.poster` is read by both — the card
+    hotlinks it, and app/media/artwork.py files it in the poster registry that
+    app/media/posters.py later DOWNLOADS from. Proxying at the normalizer sends
+    this app's own download through somebody else's cache for no reason and
+    stores a proxy address where the origin belongs, so the registry can no
+    longer say where a picture came from. Proxying here reaches the browser and
+    nothing else.
     """
     moment = datetime.fromtimestamp(record.air_ts, tz=timezone.utc)
     if not record.date_only:
@@ -470,6 +545,20 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     values = {f.name: getattr(record, f.name) for f in fields(Record)}
     slugs = [str(g) for g in record.genres]
     values["genres"] = [g.replace("-", " ").title() for g in slugs]
+    # BOTH SIDES OR NEITHER. `alternatives["poster"]` holds each service's own
+    # address, and the card decides which service is on screen by asking which of
+    # those the rendered poster EQUALS (see _card.html's `won_by`) — so proxying
+    # one and not the other makes every card claim it does not know whose picture
+    # it is showing. The source-swap control has the same problem one step later:
+    # it swaps in a value straight out of this map, which would hotlink the very
+    # CDN the proxy exists to keep this app off.
+    values["poster"] = proxied_image(record.poster)
+    if record.alternatives.get("poster"):
+        values["alternatives"] = {
+            **record.alternatives,
+            "poster": {name: proxied_image(url)
+                       for name, url in record.alternatives["poster"].items()},
+        }
     return Item(
         **values,
         genre_slugs=slugs,
@@ -845,8 +934,18 @@ class CalendarPort(Protocol):
         ...
 
     async def fetch_window(self, endpoint, settings: Settings,
-                           start: date, days: int) -> list["Record"]:
+                           start: date, days: int,
+                           revalidate: bool = True) -> list["Record"]:
         """What this source says airs in [start, start + days), as Records.
+
+        `revalidate=False` FORBIDS ANSWERING "unchanged". A source that caches a
+        conditional-GET validator may normally raise SourceNotModified instead of
+        re-deriving records — but that is only sound when the CALLER STILL HOLDS
+        the rows it derived last time. A validator is per FILE while rows are per
+        (endpoint, span), and several endpoints can read one file: the first to
+        fill it records the validator, and every sibling then gets a 304 for a
+        span it has nothing stored for. The caller knows which of those it is;
+        this is how it says so. A source with no validators ignores it.
 
         NORMALIZING IS THE SOURCE'S JOB AND IS DECLARED HERE SO IT CAN ONLY BE
         DONE ONCE. The alternative — handing back a payload for somebody else to

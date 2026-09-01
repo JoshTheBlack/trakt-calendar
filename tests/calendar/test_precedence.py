@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from urllib.parse import quote
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -395,10 +396,10 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
         db.close_thread_connection()
 
     async def fill(self):
-        async def fetch(endpoint, settings, start):
+        async def fetch(endpoint, settings, start, *, covered=()):
             if start != self.window:
-                return [], ["trakt", "simkl"]
-            return [_record(Source.TRAKT), _record(Source.SIMKL)], ["trakt", "simkl"]
+                return [], ["trakt", "simkl"], []
+            return [_record(Source.TRAKT), _record(Source.SIMKL)], ["trakt", "simkl"], []
         with patch("app.calendar.cache.fetch_window_records", fetch):
             await self.read(_prefs())
 
@@ -410,10 +411,25 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
         return [i for g in grouped for i in g["items"]]
 
     async def stored(self):
-        row = await db.fetch_one(
-            "SELECT payload, cached_at FROM api_cache WHERE cache_key = ?",
-            (calendar_cache.cache_key(SHOWS.key, self.window),))
-        return bytes(row["payload"]), row["cached_at"]
+        """Everything the calendar holds for this span, as a comparable value.
+
+        The claim is unchanged — a preference change must rewrite nothing — but
+        there is no longer a blob whose bytes can be compared. What stands in for
+        it is every row the span owns, INCLUDING each row's `stored_at`, so a
+        rewrite that happened to produce identical values is still caught.
+        """
+        airings = await db.fetch_all(
+            "SELECT source, source_id, air_ts, stored_at FROM calendar_airings "
+            "WHERE endpoint = ? ORDER BY source, source_id, air_ts", (SHOWS.key,))
+        coverage = await db.fetch_all(
+            "SELECT source, asked, answered, stored_at FROM calendar_coverage "
+            "WHERE endpoint = ? AND span_start = ? ORDER BY source",
+            (SHOWS.key, self.window.isoformat()))
+        titles = await db.fetch_all(
+            "SELECT source, source_id, fetched_at FROM calendar_titles "
+            "ORDER BY source, source_id")
+        return ([tuple(r) for r in airings], [tuple(r) for r in coverage],
+                [tuple(r) for r in titles])
 
     async def test_a_new_preference_needs_no_fetch_and_rewrites_no_row(self):
         await self.fill()
@@ -430,7 +446,11 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(first[0].title, "Trakt Title")
         self.assertEqual(second[0].title, "Simkl Title")
         self.assertEqual(third[0].title, "Trakt Title")
-        self.assertEqual(third[0].poster, "https://simkl.test/p.jpg")
+        # A RENDERED poster is display-form, so what is asserted is that the
+        # preference moved it to SIMKL'S picture — the origin the proxy was
+        # handed — rather than the exact string, which the proxy's measured
+        # parameters will move again.
+        self.assertIn(quote("https://simkl.test/p.jpg", safe=""), third[0].poster)
         # Byte-identical, and cached at the same instant: nothing was rewritten,
         # so nothing expired early either.
         self.assertEqual(await self.stored(), before)
@@ -448,14 +468,19 @@ class ChangingAPreferenceInvalidatesNothingTests(unittest.IsolatedAsyncioTestCas
 
 
 class WhatEnrichmentGetsToCompeteForTests(unittest.IsolatedAsyncioTestCase):
-    """Resolution happens in two halves with the enrichment overlay between
-    them, and the ordering is a decision.
+    """Resolution happens in two halves with enrichment applied between them, and
+    the ordering is a decision.
 
-    The overlay fills in the fields one source's calendar files do not carry. It
+    Enrichment fills in the fields one source's calendar files do not carry. It
     has to act on THAT SOURCE'S OWN RECORD, before anything picks between the
     sources — otherwise a merged group whose other source supplies the card never
     has its enrichment considered at all, and a value only the enriched source
     knows can never win however the viewer set their preference.
+
+    IT IS APPLIED AT STORAGE NOW RATHER THAN AT READ, and the ordering claim is
+    untouched by that: what these pin is that a source's own record carries its
+    own answer by the time resolution sees it, whichever side of the write that
+    happened on.
     """
 
     async def asyncSetUp(self):
@@ -486,7 +511,7 @@ class WhatEnrichmentGetsToCompeteForTests(unittest.IsolatedAsyncioTestCase):
         from app.calendar import enrich as calendar_enrich
         group = self.group()
         records = calendar_resolve.admitted_records(group, prefs)
-        await calendar_enrich.overlay_records(records)
+        await calendar_enrich.apply_stored_enrichment(records)
         return calendar_resolve.resolve_records(group, records, prefs)
 
     async def test_a_preferred_sources_enriched_value_can_win_the_field(self):
@@ -562,8 +587,8 @@ class ThePerEndpointSelectionTests(unittest.IsolatedAsyncioTestCase):
                          ["trakt"])
 
     async def test_the_override_reaches_the_read_path(self):
-        async def fetch(endpoint, settings, start):
-            return [_record(Source.TRAKT), _record(Source.SIMKL)], ["trakt", "simkl"]
+        async def fetch(endpoint, settings, start, *, covered=()):
+            return [_record(Source.TRAKT), _record(Source.SIMKL)], ["trakt", "simkl"], []
 
         prefs = source_prefs.SourcePrefs(
             user_id=1, endpoint_sources={SHOWS.key: "simkl"})

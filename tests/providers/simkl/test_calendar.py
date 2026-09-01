@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import cache, db
 from app.endpoints import get_endpoint
-from app.providers.base import Media, Source, SourceUnavailable
+from app.providers.base import Media, Source, SourceNotModified, SourceUnavailable
 from app.providers.simkl import calendar as simkl_calendar
 from app.providers.simkl.transport import SimklError
 from tests.support import migrated_db
@@ -89,6 +89,10 @@ class NormalizerTests(unittest.TestCase):
         self.assertEqual(record.episode_number, 1)
         self.assertFalse(record.date_only)
         self.assertEqual(record.ids["tmdb"], "822653")
+        # SIMKL'S OWN ADDRESS, NOT THE PROXY. A normalizer produces the origin;
+        # `render` is what puts a browser-facing URL through the image proxy, so
+        # that the copy this app files in its poster registry — and later
+        # DOWNLOADS server-side — stays addressed to the service that has it.
         self.assertEqual(record.poster, "https://simkl.in/posters/19/abc123_m.jpg")
 
     def test_an_entry_with_no_episode_object_does_not_crash_the_normalizer(self):
@@ -341,7 +345,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("?", url)  # no cache-buster, no query string at all
 
     async def test_shows_unions_tv_and_anime(self):
-        async def fake_get(url):
+        async def fake_get(url, *, revalidate=True):
             return [_tv_entry(simkl_id=1)] if "tv.json" in url else [_tv_entry(simkl_id=2, slug="b")]
         with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
             records = await simkl_calendar.fetch_window(SHOWS, SETTINGS, date(2026, 7, 6), 7)
@@ -354,7 +358,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         film = _anime_entry(simkl_id=3157124, slug="shiranuhi", anime_type="movie")
         film["title"] = "Shiranuhi"
 
-        async def fake_get(url):
+        async def fake_get(url, *, revalidate=True):
             if "anime.json" in url:
                 return [film]
             return [_movie_entry(simkl_id=11)]
@@ -373,7 +377,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         film = _anime_entry(simkl_id=3157124, slug="shiranuhi", anime_type="movie")
         film["title"] = "Shiranuhi"
 
-        async def fake_get(url):
+        async def fake_get(url, *, revalidate=True):
             if "anime.json" in url:
                 return [film, _anime_entry(simkl_id=8, slug="a-series", anime_type="ona")]
             return [_tv_entry(simkl_id=1)]
@@ -387,7 +391,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_serial_anime_stays_on_the_series_endpoints_and_off_the_movies_one(self):
         """ona/ova/tv/special are serial formats. None of them is routed."""
-        async def fake_get(url):
+        async def fake_get(url, *, revalidate=True):
             if "anime.json" in url:
                 return [_anime_entry(simkl_id=100 + n, slug=f"s{n}", anime_type=serial)
                         for n, serial in enumerate(("ona", "ova", "tv", "special"))]
@@ -408,7 +412,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         unlabelled = _anime_entry(simkl_id=55, slug="unlabelled")
         del unlabelled["anime_type"]
 
-        async def fake_get(url):
+        async def fake_get(url, *, revalidate=True):
             return [unlabelled] if "anime.json" in url else []
 
         with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
@@ -424,45 +428,82 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
         records = await simkl_calendar.fetch_window(finales, SETTINGS, date(2026, 7, 6), 7)
         self.assertEqual(records, [])
 
-    async def test_a_304_serves_the_stored_copy_and_makes_no_second_request(self):
-        url = f"{simkl_calendar.CDN_BASE}/2026/7/movie_release.json"
-        await cache.set(simkl_calendar._cdn_cache_key(url), {
-            "etag": '"cached"', "last_modified": "Mon, 01 Jan 2026 00:00:00 GMT",
-            "data": [_movie_entry(simkl_id=42)],
-        })
-        # The movies fill reads the anime archive too (an anime film lives
-        # there), so that file gets a stored copy of its own — otherwise this
-        # would be testing the 304 path on one file and the cold path on
-        # another.
+    async def _validator(self, url: str, etag: str, last_modified: str = "") -> None:
+        """A stored validator for one archive file — an ETag and NO BODY, which
+        is the whole of what this app now keeps for a CDN file."""
+        await cache.record_source_file(
+            url, "simkl", "2026-07", etag=etag, last_modified=last_modified,
+            entries=0, now=1000, changed=True)
+
+    async def test_every_file_unchanged_reports_not_modified_and_fetches_no_body(self):
+        """THE POINT OF STORING VALIDATORS INSTEAD OF BODIES. A 304 carries no
+        body and this app no longer keeps one to serve in its place — the airings
+        already derived from the file ARE the stored copy. So "unchanged" travels
+        back to the caller as an answer rather than being hidden by the
+        transport, and no second request is made to fetch what did not change."""
+        movie_url = f"{simkl_calendar.CDN_BASE}/2026/7/movie_release.json"
         anime_url = f"{simkl_calendar.CDN_BASE}/2026/7/anime.json"
-        await cache.set(simkl_calendar._cdn_cache_key(anime_url), {
-            "etag": '"cached-anime"', "last_modified": None, "data": [],
-        })
+        await self._validator(movie_url, '"cached"', "Mon, 01 Jan 2026 00:00:00 GMT")
+        await self._validator(anime_url, '"cached-anime"')
+
         client = _Client(_Resp(status=304))
         with patch("app.providers.simkl.transport.cdn_client", return_value=client):
-            records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
-        # One request PER FILE — the 304 itself — and no second request to
-        # fetch a body the 304 said had not changed.
+            with self.assertRaises(SourceNotModified):
+                await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
+        # One request per file — the 304 itself — and nothing more.
         self.assertEqual(len(client.urls), 2)
-        self.assertEqual(len(records), 1)
-        self.assertEqual(records[0].ids.get("simkl"), 42)
-        # And the conditional headers carried the stored ETag/Last-Modified.
         sent = dict(zip((u.rsplit("/", 1)[-1] for u in client.urls), client.headers))
         self.assertEqual(sent["movie_release.json"].get("If-None-Match"), '"cached"')
         self.assertEqual(sent["movie_release.json"].get("If-Modified-Since"),
                          "Mon, 01 Jan 2026 00:00:00 GMT")
 
-    async def test_a_200_replaces_the_stored_copy(self):
+    async def test_a_sibling_changing_forces_the_unchanged_file_to_be_read_anyway(self):
+        """A 304 DOES NOT COMPOSE ACROSS FILES. A window is built from two of
+        them together; if one moved and the other did not, this app holds the
+        changed body and only a validator for the other, so it cannot rebuild the
+        window from what it has. The unchanged sibling is therefore re-read
+        UNCONDITIONALLY — no If-None-Match — paying for a body it chose not to
+        keep. Simkl regenerates a month's files within a second of each other, so
+        this is the rare case rather than the ordinary one."""
+        anime_url = f"{simkl_calendar.CDN_BASE}/2026/7/anime.json"
+        await self._validator(anime_url, '"unchanged-anime"')
+
+        def _answer(url, headers=None, timeout=None):
+            if "anime.json" in url:
+                return _Resp(status=304) if headers.get("If-None-Match") else _Resp([])
+            return _Resp([_movie_entry(simkl_id=7)], headers={"ETag": '"new"'})
+
+        class _Conditional:
+            def __init__(self):
+                self.urls, self.headers = [], []
+
+            async def get(self, url, headers=None, timeout=None):
+                self.urls.append(url)
+                self.headers.append(headers or {})
+                return _answer(url, headers or {}, timeout)
+
+        client = _Conditional()
+        with patch("app.providers.simkl.transport.cdn_client", return_value=client):
+            records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
+        # anime.json asked twice: once conditionally (304), once without.
+        anime_calls = [h for u, h in zip(client.urls, client.headers) if "anime.json" in u]
+        self.assertEqual(len(anime_calls), 2)
+        self.assertIn("If-None-Match", anime_calls[0])
+        self.assertNotIn("If-None-Match", anime_calls[1])
+        self.assertEqual([r.ids.get("simkl") for r in records], [7])
+
+    async def test_a_200_records_the_new_validator_and_no_body(self):
         url = f"{simkl_calendar.CDN_BASE}/2026/7/movie_release.json"
-        await cache.set(simkl_calendar._cdn_cache_key(url), {
-            "etag": '"old"', "last_modified": None, "data": [_movie_entry(simkl_id=1)],
-        })
+        await self._validator(url, '"old"')
         client = _Client(_Resp([_movie_entry(simkl_id=2)], headers={"ETag": '"new"'}))
         with patch("app.providers.simkl.transport.cdn_client", return_value=client):
             records = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
         self.assertEqual([r.ids.get("simkl") for r in records], [2])
-        stored = await cache.get_stale(simkl_calendar._cdn_cache_key(url))
-        self.assertEqual(stored["etag"], '"new"')
+        etag, _ = await cache.source_file_validator(url)
+        self.assertEqual(etag, '"new"')
+        # The body is NOT kept: the airings derived from it are the stored copy.
+        self.assertIsNone(await db.fetch_value(
+            "SELECT COUNT(*) FROM api_cache WHERE cache_key LIKE 'simkl-cdn:%'") or None)
 
     async def test_a_404_archive_month_is_an_empty_answer_not_a_refusal(self):
         """The fill only asks for months inside the declared Capabilities

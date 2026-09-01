@@ -176,6 +176,70 @@ async def set(key: str, value, retain_seconds: int | None = RETAIN_SECONDS) -> N
         pass
 
 
+# ---------------------------------------------------------------------------
+# conditional-GET validators for the files a source publishes
+# ---------------------------------------------------------------------------
+#
+# IN THE KERNEL, NOT IN THE CALENDAR, and the reason is a layering one. A
+# provider has to READ a validator before it sends the request and WRITE one
+# after — so wherever these live, `providers/` calls them. Putting them in
+# app/calendar/ made a provider import a feature package, which is exactly
+# backwards and is what tests/kernel/test_layering.py refused. Asking "has this
+# file changed since I last read it" is a caching question and this module is
+# where the app's other caching answers live.
+#
+# THE ROW HOLDS NO BODY, which is the whole design. Its predecessor kept the
+# decoded file beside its ETag -- 15.15 MB of JSON on the machine this was
+# written for -- because a 304 carries no body and the WINDOW that needed it
+# could be evicted separately. Once a fill stores rows, a 304 needs no body at
+# all: "unchanged" means the rows already derived from this file are still
+# correct. What is left is about a kilobyte of validators.
+
+
+
+async def source_file_validator(url: str) -> tuple[str, str]:
+    """(etag, last_modified) for one source file, or two empty strings.
+
+    THE ROW HOLDS NO BODY, WHICH IS THE POINT. Its predecessor kept the whole
+    decoded file beside its ETag -- 15.15 MB of JSON on the machine this was
+    written for, 2.57 MB compressed -- because a 304 carries no body and the
+    WINDOW that needed it might have been evicted separately. Under rows a 304
+    needs no body at all: "unchanged" means the airings already derived from this
+    file are still correct, so the answer is to do nothing. What is left is about
+    a kilobyte of validators.
+    """
+    row = await db.fetch_one(
+        "SELECT etag, last_modified FROM calendar_source_files WHERE url = ?", (url,))
+    if row is None:
+        return "", ""
+    return str(row["etag"] or ""), str(row["last_modified"] or "")
+
+
+async def record_source_file(url: str, source: str, month: str, *, etag: str,
+                             last_modified: str, entries: int, now: int,
+                             changed: bool) -> None:
+    """Note that a source file was read, and whether its content moved.
+
+    `fetched_at` AND `changed_at` ARE DIFFERENT QUESTIONS. The first advances on
+    every look, including a 304; the second only when a 200 actually brought
+    something new. One number cannot answer both "is this due another look" and
+    "how stale can the rows derived from it be", and conflating them is how a
+    file that is checked hourly and changes monthly comes to look perpetually
+    fresh or perpetually stale depending on which meaning won.
+    """
+    await db.execute(
+        "INSERT INTO calendar_source_files "
+        "(url, source, month, etag, last_modified, fetched_at, changed_at, entries) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(url) DO UPDATE SET "
+        "etag = excluded.etag, last_modified = excluded.last_modified, "
+        "fetched_at = excluded.fetched_at, entries = excluded.entries, "
+        "changed_at = CASE WHEN ? THEN excluded.changed_at "
+        "                  ELSE calendar_source_files.changed_at END",
+        (url, source, month, etag, last_modified, now, now if changed else 0,
+         entries, 1 if changed else 0))
+
+
 async def sweep(now: int | None = None, max_bytes: int | None = None) -> int:
     """Evict from api_cache and return how many rows were deleted.
 

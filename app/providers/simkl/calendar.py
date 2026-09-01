@@ -38,7 +38,7 @@ from datetime import date, datetime, timedelta
 
 from ...config import Settings
 from ...endpoints import Endpoint
-from ..base import Media, Record, Source
+from ..base import Media, Record, Source, SourceNotModified
 from . import _ids, transport
 from .transport import SimklError
 
@@ -106,31 +106,45 @@ def is_anime_film(entry: dict) -> bool:
 # fetching the CDN files, with conditional GET
 # ---------------------------------------------------------------------------
 
-def _cdn_cache_key(url: str) -> str:
-    return f"simkl-cdn:{url}"
+# The month a CDN archive covers, from its own URL — the grain the refresh
+# schedule and the retention sweep both work in.
+def _file_month(url: str) -> str:
+    parts = url.rstrip("/").split("/")
+    try:
+        return f"{int(parts[-3]):04d}-{int(parts[-2]):02d}"
+    except (IndexError, ValueError):
+        return ""
 
 
-async def _conditional_get(url: str) -> list:
-    """One CDN file's entries, using ETag / If-Modified-Since so an unchanged
-    file costs a 304 rather than the megabytes it actually holds.
+async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
+    """One CDN file's entries, or None when the file has not changed.
 
-    Cached through the kernel's blob cache (app/cache.py), keyed by URL, with
-    NO ttl_seconds cutoff on the read: the freshness question here is answered
-    by Simkl's own ETag, not by our clock, so the stored copy is read
-    regardless of its age and only ever replaced when the CDN says it changed.
+    NONE IS AN ANSWER, NOT AN ABSENCE. A 304 carries no body, and this app no
+    longer keeps one to serve in its place: `calendar_source_files` holds the
+    ETag and nothing else, because the airings already derived from this file ARE
+    the stored copy. So "unchanged" has to travel back to the caller, which knows
+    what it already has.
 
-    Raises SimklError — which IS SourceUnavailable — for anything that is not a
-    200 or a 304 against a copy we actually hold, so a caller degrades this
-    source rather than storing an empty answer as fact.
+    MEASURED, 2026-08-28, AND THE REASON THIS IS WORTH THE INDIRECTION: the
+    archive is tiered. The current month and the two ahead of it are regenerated
+    roughly hourly; every month behind is frozen — 2026-06 and 2025-08 both
+    answered with a Last-Modified 38.9 days old. Eighteen of eighteen probes
+    returned 304 with a zero-byte body against the validator they had just been
+    handed. Past months are where the big files are (2025/8/tv.json is 4 MB), and
+    they are exactly the ones a 304 now costs nothing to confirm.
+
+    `revalidate=False` asks unconditionally, for the caller that needs THIS
+    file's body because a SIBLING changed — see fetch_window.
+
+    Raises SimklError (which IS SourceUnavailable) for anything that is not a
+    200, a 304 or a 404, so a caller degrades this source rather than storing an
+    empty answer as fact.
     """
     from ... import cache  # deferred: providers/ reads the kernel's cache module
 
-    key = _cdn_cache_key(url)
-    stored = await cache.get_stale(key)
     headers = {"User-Agent": transport.USER_AGENT}
-    if isinstance(stored, dict):
-        etag = stored.get("etag")
-        last_modified = stored.get("last_modified")
+    if revalidate:
+        etag, last_modified = await cache.source_file_validator(url)
         if etag:
             headers["If-None-Match"] = etag
         if last_modified:
@@ -145,13 +159,15 @@ async def _conditional_get(url: str) -> list:
                (_time.perf_counter() - t0) * 1000.0)
 
     if resp.status_code == 304:
-        if isinstance(stored, dict) and isinstance(stored.get("data"), list):
-            # THE WHOLE POINT: the stored copy is served and NO second request
-            # is made — a 304 carries no body to parse anyway.
-            return stored["data"]
-        raise SimklError(
-            f"Simkl's calendar CDN answered 304 for {url} with no cached copy "
-            f"to serve — the cache row must have been evicted between requests.")
+        # The validator is re-recorded so the file counts as LOOKED AT even
+        # though nothing moved — see record_source_file on why that is a
+        # different field from when it last changed.
+        await cache.record_source_file(
+            url, str(Source.SIMKL), _file_month(url),
+            etag=headers.get("If-None-Match", ""),
+            last_modified=headers.get("If-Modified-Since", ""),
+            entries=0, now=int(_time.time()), changed=False)
+        return None
     if resp.status_code == 404:
         # A month outside the published archive range. Not an error: the
         # caller (fetch_window) only asks for months inside the declared
@@ -168,11 +184,11 @@ async def _conditional_get(url: str) -> list:
         raise SimklError(f"Simkl's calendar CDN returned an unreadable response for {url}.")
     if not isinstance(data, list):
         data = []
-    await cache.set(key, {
-        "etag": resp.headers.get("ETag"),
-        "last_modified": resp.headers.get("Last-Modified"),
-        "data": data,
-    })
+    await cache.record_source_file(
+        url, str(Source.SIMKL), _file_month(url),
+        etag=str(resp.headers.get("ETag") or ""),
+        last_modified=str(resp.headers.get("Last-Modified") or ""),
+        entries=len(data), now=int(_time.time()), changed=True)
     return data
 
 
@@ -182,9 +198,51 @@ def _archive_url(year: int, month: int, filename: str) -> str:
     return f"{CDN_BASE}/{year}/{month}/{filename}"
 
 
-async def _fetch_file(year: int, month: int, filename: str) -> list[dict]:
-    entries = await _conditional_get(_archive_url(year, month, filename))
+async def _fetch_file(year: int, month: int, filename: str,
+                      *, revalidate: bool = True) -> list[dict] | None:
+    entries = await _conditional_get(_archive_url(year, month, filename),
+                                     revalidate=revalidate)
+    if entries is None:
+        return None
     return _dedupe_file_entries([e for e in entries if isinstance(e, dict)])
+
+
+async def _read_files(wanted: list[tuple[int, int, str]], *,
+                      revalidate: bool = True) -> list[list[dict]]:
+    """Every file a window needs, or SourceNotModified when none of them moved.
+
+    A WINDOW IS DERIVED FROM MORE THAN ONE FILE, and a 304 does not compose. The
+    show endpoints read tv.json AND anime.json; movies reads movie_release.json
+    AND anime.json. If one moved and the other did not, this app has the changed
+    one's body and NOT the unchanged one's — it kept only a validator for it — so
+    it cannot rebuild the window from what it holds.
+
+    SO THE UNIT IS THE MONTH, AND THE ANSWER IS ALL-OR-NOTHING. Every file
+    unchanged means the stored airings stand and nothing is rebuilt. Anything
+    changed means the siblings are re-read UNCONDITIONALLY, paying for a body
+    this app chose not to keep.
+
+    THAT COSTS ALMOST NOTHING BECAUSE SIMKL REGENERATES A MONTH AS A BATCH.
+    Measured 2026-08-28 across four months: a month's three files carry
+    Last-Modified values within ONE SECOND of each other (2026-07 at 22:12:01 and
+    22:12:02; 2025-08 identical to the second across all three). A mixed answer
+    is possible and handled; it is not the ordinary case.
+    """
+    results = await asyncio.gather(
+        *(_fetch_file(year, month, name, revalidate=revalidate)
+          for year, month, name in wanted))
+    if all(entries is None for entries in results):
+        raise SourceNotModified(
+            f"Simkl's calendar archive is unchanged for {len(wanted)} file(s).")
+    stale = [i for i, entries in enumerate(results) if entries is None]
+    if stale:
+        logger.debug("%d of %d Simkl archive file(s) were unchanged while a sibling "
+                     "moved; re-reading them for their bodies.", len(stale), len(wanted))
+        refetched = await asyncio.gather(
+            *(_fetch_file(*wanted[i], revalidate=False) for i in stale))
+        for i, entries in zip(stale, refetched):
+            results[i] = entries
+    return [entries or [] for entries in results]
 
 
 def _dedupe_file_entries(entries: list[dict]) -> list[dict]:
@@ -499,7 +557,8 @@ def _premieres(entries: list[dict]) -> list[dict]:
 # the port
 # ---------------------------------------------------------------------------
 
-async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days: int) -> list[Record]:
+async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days: int,
+                       revalidate: bool = True) -> list[Record]:
     """What Simkl's calendar says airs in [start, start + days), as Records.
 
     READS ONLY THE MONTHLY ARCHIVE FILES, for every window, including the
@@ -532,10 +591,10 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
         # 3674) and the show endpoints are already fetching it for these same
         # months through the same conditional GET, so the second read is
         # ordinarily a 304 against a copy the blob cache already holds.
-        movie_results, anime_results = await asyncio.gather(
-            asyncio.gather(*(_fetch_file(year, month, _MOVIE_FILE) for year, month in months)),
-            asyncio.gather(*(_fetch_file(year, month, _ANIME_FILE) for year, month in months)),
-        )
+        wanted = ([(year, month, _MOVIE_FILE) for year, month in months]
+                  + [(year, month, _ANIME_FILE) for year, month in months])
+        read = await _read_files(wanted, revalidate=revalidate)
+        movie_results, anime_results = read[:len(months)], read[len(months):]
         raw = [e for batch in movie_results for e in batch]
         films = [e for batch in anime_results for e in batch if is_anime_film(e)]
         records = [to_movie_record(e) for e in raw]
@@ -549,10 +608,10 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
         # is a safety net, not a path anything reaches today.
         return []
 
-    tv_results, anime_results = await asyncio.gather(
-        asyncio.gather(*(_fetch_file(year, month, _TV_FILE) for year, month in months)),
-        asyncio.gather(*(_fetch_file(year, month, _ANIME_FILE) for year, month in months)),
-    )
+    wanted = ([(year, month, _TV_FILE) for year, month in months]
+              + [(year, month, _ANIME_FILE) for year, month in months])
+    read = await _read_files(wanted, revalidate=revalidate)
+    tv_results, anime_results = read[:len(months)], read[len(months):]
     tv_entries = [e for batch in tv_results for e in batch]
     # THE OTHER HALF OF THE SPLIT ABOVE, AND IT HAS TO BE THE OTHER HALF OF THE
     # SAME PREDICATE. A film the movies branch claims must leave the show

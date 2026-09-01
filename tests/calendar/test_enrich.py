@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from app import db
 from app.calendar import cache as calendar_cache, enrich as calendar_enrich
+from app.calendar import entries as calendar_entries
 from app.config import Settings
 from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
@@ -71,26 +72,47 @@ class EnrichTestCase(unittest.IsolatedAsyncioTestCase):
     async def _stored(self, records, *, start=date(2026, 7, 6), now=1000):
         """Store one calendar window naming `records`, exactly as FILL would —
         the only thing `_owed_titles`/`drain` read from, and deliberately never
-        touched by `overlay_records` in these tests unless a test says so."""
+        given any enrichment in these tests unless a test says so."""
         await calendar_cache.store_window(
             SHOWS.key, start, records, 600, now,
             sources=["simkl"], asked=["simkl"])
 
 
-class OverlayTests(EnrichTestCase):
-    async def test_a_record_with_no_row_is_left_unenriched(self):
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
-        self.assertFalse(got.enriched)
+class EnrichmentReachesTheStoredRowTests(EnrichTestCase):
+    """What a lookup learned, as the calendar READ hands it back.
 
-    async def test_a_row_that_answered_fills_the_record_and_marks_it_enriched(self):
+    THESE ARE THE OVERLAY'S TESTS, ASKED OF THE NEW PATH. The claims have not
+    changed -- a title nobody has looked up stays unenriched, an answered one
+    comes back filled, a narrower answer leaves the fields it never carried at
+    their defaults, ids are added but never overwritten, and one row answers
+    twenty airings. What changed is where the answer lives: the drain writes it
+    onto `calendar_titles` and the read serves the row, instead of every read
+    joining `simkl_titles` back in.
+
+    So each of these stores a window FIRST and enriches after, which is the real
+    order of events -- a fill lands, the drain answers later -- and reads through
+    `read_span`, the same call the calendar itself makes.
+    """
+
+    async def _one(self, simkl_id=1):
+        records, *_ = await calendar_entries.read_span(
+            SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
+        return records[0]
+
+    async def test_a_title_nobody_has_looked_up_is_left_unenriched(self):
+        await self._stored([_simkl_record(1)])
+        got = await self._one()
+        self.assertFalse(got.enriched)
+        self.assertEqual(got.genres, [])
+
+    async def test_an_answered_title_comes_back_filled_and_marked(self):
+        await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", {
             "genres": ["drama", "game-show"], "network": "AMC", "country": "US",
             "certification": "TV-MA", "runtime": 45, "status": "ended",
             "overview": "An overview.", "ids": {"tvdb": "999"},
         }, now=1000)
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
+        got = await self._one()
         self.assertTrue(got.enriched)
         self.assertEqual(got.genres, ["drama", "game-show"])
         self.assertEqual(got.country, "US")
@@ -100,106 +122,89 @@ class OverlayTests(EnrichTestCase):
         self.assertEqual(got.ids["tvdb"], "999")
 
     async def test_the_movie_fields_reach_the_record_the_card_draws(self):
-        """Simkl's calendar CDN entries carry no language, no year and no
-        rating, so those chips were blank on every Simkl card — the fields
-        existed on the Record and nothing filled them in. The overlay is where
-        they arrive, exactly like genres and network."""
+        """Simkl's calendar CDN entries carry no language and no year, so those
+        chips were blank on every Simkl card — the fields existed on the Record
+        and nothing filled them in."""
+        await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", {
-            "language": "EN", "year": 2026, "rating": 6.5,
+            "language": "EN", "year": 2026,
         }, now=1000)
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
-        self.assertEqual((got.language, got.year, got.rating), ("EN", 2026, 6.5))
+        got = await self._one()
+        self.assertEqual((got.language, got.year), ("EN", 2026))
 
-    async def test_a_row_from_before_those_fields_leaves_them_at_their_defaults(self):
+    async def test_a_narrower_answer_leaves_the_fields_it_never_had_at_defaults(self):
         """A row the narrower extraction wrote has no key for any of them, and
         must read as "nothing to say" rather than as a value — it is owed a
-        re-fetch (see the extract_version tests below) and still applies
-        everything it does know in the meantime."""
+        re-fetch and still applies everything it does know in the meantime."""
+        await self._stored([_simkl_record(1)])
         await calendar_enrich._upsert_success(1, "show", {
             "genres": ["drama"], "network": "AMC",
         }, now=1000)
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
-        self.assertEqual((got.language, got.year, got.rating), ("", "", None))
+        got = await self._one()
+        self.assertEqual((got.language, got.year), ("", ""))
         self.assertEqual(got.genres, ["drama"])
 
     async def test_enrichment_upgrades_ids_without_overwriting_ones_already_there(self):
-        """The calendar file's own tmdb must survive; enrichment only ADDS a
-        namespace the fill never had (tvdb, mal, anidb)."""
-        await calendar_enrich._upsert_success(1, "show", {
-            "genres": [], "network": "", "country": "", "certification": "",
-            "runtime": None, "status": "", "overview": "",
-            "ids": {"tvdb": "999", "mal": "should-not-override"},
-        }, now=1000)
+        """The calendar file's own ids must survive; enrichment only ADDS a
+        namespace the fill never had (tvdb, mal, anidb). A lookup overwriting one
+        would be re-identifying the title under cover of enriching it."""
         record = _simkl_record(1)
         record.ids["mal"] = "already-there"
-        [got] = await calendar_enrich.overlay_records([record])
+        await self._stored([record])
+        await calendar_enrich._upsert_success(1, "show", {
+            "genres": [], "ids": {"tvdb": "999", "mal": "should-not-override"},
+        }, now=1000)
+        got = await self._one()
         self.assertEqual(got.ids["tvdb"], "999")
         self.assertEqual(got.ids["mal"], "already-there")
+        self.assertEqual(got.ids["simkl"], 1)
 
     async def test_a_twenty_airing_show_is_answered_from_one_row(self):
-        """One title airing many times in a window reads one row, not twenty —
-        the whole reason simkl_titles is keyed on the title."""
-        await calendar_enrich._upsert_success(1, "show", {
-            "genres": ["drama"], "network": "", "country": "", "certification": "",
-            "runtime": None, "status": "", "overview": "", "ids": {},
-        }, now=1000)
-        records = [_simkl_record(1) for _ in range(20)]
-        got = await calendar_enrich.overlay_records(records)
-        self.assertTrue(all(r.enriched for r in got))
+        """One title airing twenty times is twenty airings and ONE title row, so
+        the answer arrives on all of them from a single write. Under the overlay
+        this was a claim about one query serving twenty records; it is now a
+        claim about there being one row to write at all.
+
+        TWENTY DISTINCT AIR TIMES, because that is what twenty airings ARE. The
+        air instant is part of an airing's identity, so twenty records naming the
+        same one are not twenty airings — they are one, listed twenty times, and
+        `dedupe_records` removes exactly that before a fill ever reaches storage.
+        """
+        airings = []
+        for hour in range(20):
+            record = _simkl_record(1)
+            record.air_ts = _AIR_TS + hour * 3600
+            airings.append(record)
+        await self._stored(airings)
+        await calendar_enrich._upsert_success(1, "show", {"genres": ["drama"]}, now=1000)
+        records, *_ = await calendar_entries.read_span(
+            SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
+        self.assertEqual(len(records), 20)
+        self.assertTrue(all(r.enriched for r in records))
+        self.assertTrue(all(r.genres == ["drama"] for r in records))
+        self.assertEqual(
+            await db.fetch_value("SELECT COUNT(*) FROM calendar_titles"), 1)
 
     async def test_a_trakt_record_is_left_alone(self):
-        trakt_record = Record(
+        """Trakt's calendar carries these fields already, so its records arrive
+        enriched and no lookup is owed for them."""
+        await self._stored([Record(
             source=Source.TRAKT, media=Media.SHOW, id="x", ids={"trakt": 1},
-            detail_url="https://trakt.tv", title="X", air_ts=1784145600.0,
-        )
-        [got] = await calendar_enrich.overlay_records([trakt_record])
+            detail_url="https://trakt.tv", title="X", air_ts=_AIR_TS)])
+        got = await self._one()
         self.assertTrue(got.enriched)
 
-    async def test_overlay_makes_no_outbound_call(self):
+    async def test_the_read_makes_no_outbound_call(self):
         """The read path may never enrich — see app/calendar/enrich.py's module
-        docstring. A patched fetch_title that is never awaited is the proof."""
+        docstring. A patched fetch_title that is never awaited is the proof, and
+        it matters more now than it did: the read serves stored columns, so
+        there is no join left that could tempt anyone to fall back to a fetch."""
+        await self._stored([_simkl_record(1)])
         spy = AsyncMock(side_effect=AssertionError("must not fetch"))
         with patch("app.providers.simkl.titles.fetch_title", spy):
-            await calendar_enrich.overlay_records([_simkl_record(1)])
+            await calendar_entries.read_span(
+                SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         spy.assert_not_awaited()
-
-    async def test_a_stored_failure_leaves_the_record_unenriched(self):
-        """Whether the failure is inside or past its backoff is `drain`'s
-        question, not the read's — either way there is nothing to apply yet."""
-        await calendar_enrich._upsert_failure(1, "show", now=1000)
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
-        self.assertFalse(got.enriched)
-
-    async def test_a_failure_does_not_erase_a_previous_success(self):
-        """A title that once answered and then fails a later attempt keeps its
-        last good data — a transient failure is not "this title has nothing"."""
-        await calendar_enrich._upsert_success(1, "show", {
-            "genres": ["drama"], "network": "", "country": "US", "certification": "",
-            "runtime": None, "status": "", "overview": "", "ids": {},
-        }, now=1000)
-        await calendar_enrich._upsert_failure(1, "show", now=2000)
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
-        self.assertTrue(got.enriched)
-        self.assertEqual(got.genres, ["drama"])
-
-    async def test_records_of_different_media_do_not_share_a_row(self):
-        """Simkl's own id spaces are per media kind, so the same numeric id for
-        a show and a movie must not read each other's enrichment."""
-        await calendar_enrich._upsert_success(1, "show", {
-            "genres": ["drama"], "network": "", "country": "", "certification": "",
-            "runtime": None, "status": "", "overview": "", "ids": {},
-        }, now=1000)
-        movie = Record(
-            source=Source.SIMKL, media=Media.MOVIE, id="1", ids={"simkl": 1},
-            detail_url="https://simkl.com", title="Movie One", air_ts=1784145600.0,
-            date_only=True, enriched=False,
-        )
-        [got] = await calendar_enrich.overlay_records([movie])
-        self.assertFalse(got.enriched)
 
 
 class OwedTitlesTests(EnrichTestCase):
@@ -282,7 +287,7 @@ class DrainTests(EnrichTestCase):
 
     async def test_owed_work_survives_a_restart_with_nothing_in_memory(self):
         """The stored calendar window and simkl_titles are the only things
-        that decide what is owed — no overlay_records call ever happens here,
+        that decide what is owed — no read ever happens here,
         which is the point: nothing in memory has to survive a restart for the
         drain to find its work."""
         await self._stored([_simkl_record(9001, title="Moonshadow")])
@@ -299,7 +304,7 @@ class DrainTests(EnrichTestCase):
         attempted, because the old in-memory queue capped at 500 entries and
         silently dropped anything offered while full. Here the calendar cache
         alone names more distinct titles than that old cap — and, crucially,
-        overlay_records (the only thing that ever fed the old queue) is never
+        no read (the only thing that ever fed the old queue) is
         called at all — yet every single one is still found and fetched within
         a bounded number of drain ticks. That is impossible for a design whose
         drain can only ever see what a read happened to queue."""
@@ -405,18 +410,20 @@ class DrainTests(EnrichTestCase):
         self.assertEqual(fetched, 1)
         spy.assert_awaited_once()
 
-    async def test_a_stale_row_still_overlays_its_old_fields_while_owed(self):
-        """The overlay is not gated on extract_version — it applies whatever
-        an old row already carries, so a title enriched under the narrower
-        extraction does not regress to unenriched while it waits for the
+    async def test_a_stale_row_still_applies_its_old_fields_while_owed(self):
+        """Applying stored enrichment is not gated on extract_version — it uses
+        whatever an old row already carries, so a title enriched under the
+        narrower extraction does not regress to unenriched while it waits for the
         drain to re-fetch it under the wider shape."""
         await calendar_enrich._upsert_success(1, "show", {
             "genres": ["drama"], "network": "AMC", "country": "US",
             "certification": "", "runtime": None, "status": "", "overview": "",
             "ids": {"tvdb": "999"},
         }, now=1000)
-        record = _simkl_record(1)
-        [got] = await calendar_enrich.overlay_records([record])
+        await self._stored([_simkl_record(1)])
+        records, *_ = await calendar_entries.read_span(
+            SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
+        got = records[0]
         self.assertTrue(got.enriched)
         self.assertEqual(got.network, "AMC")
         self.assertEqual(got.anime_type, "")  # not carried by the old shape
@@ -450,6 +457,142 @@ class DrainTests(EnrichTestCase):
             with self.assertLogs("app.calendar.enrich", level="DEBUG") as captured:
                 await calendar_enrich.drain(self.SETTINGS)
         self.assertTrue(any("Moonshadow" in line for line in captured.output))
+
+
+class AnAnswerThatArrivedAfterTheRowStillReachesItTests(EnrichTestCase):
+    """THE CASE A DELETED MECHANISM LEFT BEHIND, found on a live calendar.
+
+    A calendar row starts unenriched and only a write marks it otherwise. The
+    drain SKIPS any title `simkl_titles` already answers — so a row whose answer
+    landed a moment after it was written, or was stored by a version of this app
+    that did not yet project onto the calendar, is answered in one table and
+    blank in the other, and never revisited. It stays blank for as long as it
+    exists.
+
+    THIS WAS BUILT, THEN REMOVED ON A WRONG ARGUMENT: that applying enrichment at
+    FILL made it unreachable. Fill-time application covers rows a fill CREATES,
+    not rows that already exist and are waiting — and a span that has been filled
+    is not due another fill for a day. Five films on one real August calendar sat
+    unenriched with complete stored answers beside them.
+
+    NO FILL HAPPENS IN THESE TESTS, deliberately. That is the whole gap: the
+    other class below covers the fill path, and it passing is exactly what made
+    the removal look safe.
+    """
+
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
+
+    async def _one(self):
+        records, *_ = await calendar_entries.read_span(
+            SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
+        return records[0]
+
+    async def test_a_stored_answer_reaches_a_row_that_never_got_it(self):
+        # The row first, unenriched, exactly as a fill leaves one.
+        await self._stored([_simkl_record(1)])
+        self.assertFalse((await self._one()).enriched)
+        # Then the answer, written WITHOUT the projection — the state a lookup
+        # that crossed with the row leaves behind.
+        await calendar_enrich._upsert_success(1, "show", {
+            "extract_version": simkl_titles.EXTRACT_VERSION,
+            "genres": ["drama"], "network": "AMC",
+        }, now=1000)
+        await db.execute("UPDATE calendar_titles SET enriched = 0, genres_json = '[]', "
+                         "network = '' WHERE source = 'simkl'")
+        self.assertFalse((await self._one()).enriched)
+
+        never = AsyncMock(side_effect=AssertionError("a stored answer was refetched"))
+        with patch("app.providers.simkl.titles.fetch_title", never):
+            await calendar_enrich.drain(self.SETTINGS, now=2000)
+        got = await self._one()
+        self.assertTrue(got.enriched)
+        self.assertEqual(got.genres, ["drama"])
+        self.assertEqual(got.network, "AMC")
+        never.assert_not_awaited()
+
+    async def test_a_stored_failure_is_not_mistaken_for_an_answer(self):
+        """A title Simkl returns nothing for has a row with an EMPTY payload, and
+        that is not something to project. Its record stays unenriched, which is
+        what keeps the filter exempting it rather than judging it on defaults it
+        never had."""
+        await self._stored([_simkl_record(1)])
+        await calendar_enrich._upsert_failure(1, "show", now=1000)
+        with patch("app.providers.simkl.titles.fetch_title",
+                   AsyncMock(return_value=_OK_FIELDS)):
+            await calendar_enrich.drain(self.SETTINGS, now=1000 + 10)
+        self.assertFalse((await self._one()).enriched)
+
+    async def test_a_second_pass_finds_nothing_left_to_hand_over(self):
+        """Bounded work, not work every tick: `enriched` is what says the row has
+        its answer."""
+        await self._stored([_simkl_record(1)])
+        await calendar_enrich._upsert_success(1, "show", {
+            "extract_version": simkl_titles.EXTRACT_VERSION, "genres": ["drama"],
+        }, now=1000)
+        await db.execute("UPDATE calendar_titles SET enriched = 0 WHERE source = 'simkl'")
+        with patch("app.providers.simkl.titles.fetch_title",
+                   AsyncMock(return_value=_OK_FIELDS)):
+            await calendar_enrich.drain(self.SETTINGS, now=2000)
+        self.assertEqual(
+            await calendar_entries.unenriched("simkl", "simkl"), set())
+
+
+class AnAnswerAlreadyPaidForGoesInWithTheFillTests(EnrichTestCase):
+    """A REFILL MUST NOT BLANK WHAT IS ALREADY KNOWN, and this is the case that
+    would have made it look like enrichment never worked.
+
+    A fresh calendar payload is unenriched by construction. Stored as-is, every
+    title the drain had already answered for would render bare until some later
+    drain tick noticed — and on the machine this was written for that was 13,634
+    titles the moment the calendar moved to rows, since every stored answer
+    predates every stored row. The read-time overlay used to hide the whole
+    problem by reapplying the answer on every read; there is no overlay now, so
+    the answer has to go in WITH the records.
+    """
+
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
+
+    async def _one(self):
+        records, *_ = await calendar_entries.read_span(
+            SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
+        return records[0]
+
+    async def test_a_refill_carries_the_stored_answer_in_with_it(self):
+        await calendar_enrich._upsert_success(1, "show", {
+            "extract_version": simkl_titles.EXTRACT_VERSION,
+            "genres": ["drama"], "network": "AMC", "country": "US",
+            "certification": "TV-MA", "runtime": 45, "status": "ended",
+            "overview": "An overview.",
+        }, now=1000)
+        # The refill: a fresh, unenriched payload for a title already answered.
+        await self._stored([_simkl_record(1)])
+        got = await self._one()
+        self.assertTrue(got.enriched)
+        self.assertEqual(got.genres, ["drama"])
+        self.assertEqual(got.network, "AMC")
+
+    async def test_it_costs_no_lookup(self):
+        """These are answers the instance already paid for. Reaching for the
+        network here would turn every refill into a burst of lookups for titles
+        nothing had forgotten."""
+        await calendar_enrich._upsert_success(1, "show", {
+            "extract_version": simkl_titles.EXTRACT_VERSION, "genres": ["drama"],
+        }, now=1000)
+        never = AsyncMock(side_effect=AssertionError("a stored answer was refetched"))
+        with patch("app.providers.simkl.titles.fetch_title", never):
+            await self._stored([_simkl_record(1)])
+        never.assert_not_awaited()
+        self.assertTrue((await self._one()).enriched)
+
+    async def test_a_title_with_no_answer_is_stored_unenriched(self):
+        """The other side of the branch: nothing known means nothing claimed, so
+        the filter goes on exempting it rather than judging it on defaults."""
+        await self._stored([_simkl_record(2)])
+        got = await self._one()
+        self.assertFalse(got.enriched)
+        self.assertEqual(got.genres, [])
 
 
 class SweepTests(EnrichTestCase):
@@ -894,3 +1037,68 @@ class RunDrainLatchTests(EnrichTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
+    """THE DRIFT GUARD, and it exists because the drift already happened.
+
+    A lookup's answer is written in two places: onto a RECORD on the way into a
+    fill (`_apply`), and onto a stored ROW when the drain answers for a title
+    whose row already exists (`entries.apply_enrichment`). Each used to read the
+    payload itself, and they disagreed — one looked for `ratings` where the
+    payload says `rating`. Measured on a live instance: 1,505 titles kept their
+    score and 225 lost it, decided by nothing but which path happened to reach
+    them.
+
+    Neither path's own tests could catch that: each was right about itself. What
+    catches it is asking both to write the SAME payload and comparing the rows.
+    """
+
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
+
+    PAYLOAD = {
+        "extract_version": simkl_titles.EXTRACT_VERSION,
+        "genres": ["drama", "game-show"], "network": "AMC", "country": "US",
+        "language": "EN", "certification": "TV-MA", "runtime": 45,
+        "status": "ended", "overview": "An overview.", "year": 2026,
+        "rating": 8.4, "anime_type": "", "ids": {"tvdb": "999"},
+        "release_types_by_country": {"US": [3]},
+    }
+
+    COLUMNS = ("network", "country", "language", "certification", "status",
+               "overview", "runtime", "year", "genres_json", "ratings_json",
+               "anime_type", "release_types_json", "enriched")
+
+    async def _row(self):
+        row = await db.fetch_one(
+            f"SELECT {', '.join(self.COLUMNS)} FROM calendar_titles WHERE source = 'simkl'")
+        return tuple(row[name] for name in self.COLUMNS)
+
+    async def test_the_fill_path_and_the_row_path_store_the_same_thing(self):
+        # PATH A — the answer is known before the fill, so `apply_stored_enrichment`
+        # puts it on the record and the row is written carrying it.
+        await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
+        await self._stored([_simkl_record(1)])
+        through_the_fill = await self._row()
+
+        # PATH B — the row exists first and the drain updates it in place.
+        await db.execute("DELETE FROM calendar_titles")
+        await db.execute("DELETE FROM simkl_titles")
+        await self._stored([_simkl_record(1)])
+        await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
+        through_the_row = await self._row()
+
+        self.assertEqual(through_the_fill, through_the_row)
+
+    async def test_the_rating_survives_both_of_them(self):
+        """The field the drift actually cost. Named on its own because a tuple
+        comparison failing says "these differ" and this says which."""
+        await self._stored([_simkl_record(1)])
+        await calendar_enrich._upsert_success(1, "show", self.PAYLOAD, now=1000)
+        self.assertEqual(
+            await db.fetch_value("SELECT ratings_json FROM calendar_titles"),
+            '{"simkl": 8.4}')
+        records, *_ = await calendar_entries.read_span(
+            SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
+        self.assertEqual(records[0].rating, 8.4)

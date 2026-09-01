@@ -139,7 +139,6 @@ async function openSettings() {
         // Shown in GB: the sensible values here are far larger than the API cache's.
         document.getElementById('s_postercap').value = Math.round((s.poster_cache_max_bytes ?? 10737418240) / GB);
         document.getElementById('s_hide').checked = !!s.hide_not_watching;
-        document.getElementById('s_prewarm').checked = !!s.calendar_prewarm_enabled;
         document.getElementById('s_genres').value = s.genres || '';
         document.getElementById('s_countries').value = s.countries || '';
         setCertPicker(document.getElementById('s_show_certifications'), s.show_certifications || '');
@@ -349,7 +348,6 @@ async function saveSettings(event) {
         api_cache_max_bytes: (parseInt(document.getElementById('s_cachecap').value, 10) || 1024) * MB,
         poster_cache_max_bytes: (parseInt(document.getElementById('s_postercap').value, 10) || 10) * GB,
         hide_not_watching: document.getElementById('s_hide').checked,
-        calendar_prewarm_enabled: document.getElementById('s_prewarm').checked,
         genres: document.getElementById('s_genres').value,
         countries: document.getElementById('s_countries').value,
         show_certifications: readCertPicker(document.getElementById('s_show_certifications')),

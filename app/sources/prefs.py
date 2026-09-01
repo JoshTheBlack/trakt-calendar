@@ -145,6 +145,28 @@ def admits(selection: str, source: Source | str, linked) -> bool:
     return name in named
 
 
+def _as_order(default) -> tuple:
+    """An account's default preference as an ORDERED SEQUENCE of source names.
+
+    A LIST OR A BARE NAME, AND BOTH KEEP WORKING. It was one name because there
+    were two services and naming one settled the other by elimination; with a
+    third that stops being true — preferring TMDB says nothing about whether
+    Trakt or Simkl comes second, and the answer to that is a real preference
+    somebody may hold. Reading a bare string as a one-element order means every
+    row written before this, and every account that has only ever picked one
+    service, means exactly what it always did.
+
+    ANYTHING ELSE READS AS "no preference", which is the same degrade-to-the-
+    declared-order rule the rest of this module follows: a document written by a
+    newer version of the app must not stop an older one rendering a page.
+    """
+    if isinstance(default, str):
+        return (default,)
+    if isinstance(default, (list, tuple)):
+        return tuple(name for name in default if isinstance(name, str))
+    return ()
+
+
 @dataclass(frozen=True)
 class SourcePrefs:
     """One account's whole row, or the defaults when it has none.
@@ -180,7 +202,7 @@ class SourcePrefs:
         46, because Simkl's movie calendar is a global release calendar and
         Trakt's is a curated one. The same account's SHOW calendar is where Simkl
         adds coverage that is plainly worth having. Those are opposite answers
-        about one service, and a single selection can only give one of them — so
+        about one service, and a single selection can only give one of them â€” so
         somebody would be choosing between an unreadable movies page and losing
         Simkl's shows entirely.
 
@@ -208,8 +230,8 @@ class SourcePrefs:
 
         IT TAKES NO `linked`, AND THAT IS THE WHOLE DIVERGENCE FROM `admits`.
         A calendar is fetched with the INSTANCE's credentials or with none at
-        all — Trakt's windows go out under this instance's client id and secret,
-        and one source's calendar files are static public JSON needing nothing —
+        all â€” Trakt's windows go out under this instance's client id and secret,
+        and one source's calendar files are static public JSON needing nothing â€”
         so no viewer's identity is spent reading one, and there is no credential
         for a link to supply. Gating on links would make a signed-in account see
         LESS than an anonymous visitor to a share link on the same instance,
@@ -217,8 +239,8 @@ class SourcePrefs:
         whose only link happens to be to the other service.
 
         So `auto` here means "every source this INSTANCE can fill from", not
-        "every source this account has linked". A STATED selection — the services
-        named — is still exactly what it says and is honoured whatever is linked;
+        "every source this account has linked". A STATED selection â€” the services
+        named â€” is still exactly what it says and is honoured whatever is linked;
         this only ever widens the default.
         """
         named = named_sources(self.calendar_selection(endpoint))
@@ -253,9 +275,9 @@ class SourcePrefs:
         names = [str(s) for s in sources]
         document = self.precedence if isinstance(self.precedence, dict) else {}
         fields = document.get("fields")
-        preferred = []
+        preferred: list[str] = []
         stated = (fields or {}).get(field_name) if isinstance(fields, dict) else None
-        for candidate in (stated, document.get("default")):
+        for candidate in (stated, *_as_order(document.get("default"))):
             if isinstance(candidate, str) and candidate in names and candidate not in preferred:
                 preferred.append(candidate)
         return preferred + [name for name in names if name not in preferred]

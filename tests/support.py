@@ -86,14 +86,17 @@ def window_fetch(entries):
     span read the same whichever sources answered; a test about per-viewer source
     selection needs records from two services and builds them itself.
     """
-    async def fetch(endpoint, settings, start):
+    async def fetch(endpoint, settings, start, *, covered=()):
         from app.providers.simkl import _SimklProvider
 
         rows = entries(endpoint, start) if callable(entries) else entries
         sources = ["trakt"]
         if _SimklProvider.capabilities.answers(endpoint.key):
             sources.append("simkl")
-        return calendar_records(rows, endpoint), sources
+        # (records, answered, unchanged) — the stub never reports a source as
+        # unchanged, because a test that wants that case is testing the
+        # conditional GET and builds its own stub for it.
+        return calendar_records(rows, endpoint), sources, []
     return fetch
 
 

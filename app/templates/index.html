@@ -215,6 +215,25 @@
     <hr class="stats-divider">
     <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">{{ stats.watching }}</strong></div>
     <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">{{ stats.not_watching }}</strong></div>
+    {# A RELEASE FILTER REMOVES FILMS RATHER THAN MOVING THEM: a film out only in
+       Brazil does not match a filter asking for American releases at all, so this
+       one can empty a month completely — which is exactly the state that reads as
+       a broken calendar if the page says nothing. It sits here rather than in a
+       banner above the grid because it is a COUNT ABOUT THIS MONTH, which is what
+       every other line in this card is; a banner made the one filter that can
+       hide everything look like an error, and pushed the calendar down the page
+       to say it.
+
+       RED, ON THE SAME RULE AS A FALLING TOTAL. `.delta-msg.down` is what this
+       calendar already uses for "there is less here than you might expect", and a
+       second colour for a second kind of absence would be a second thing to
+       learn. Clicking it opens the filter that caused it. #}
+    {% if release_filtered %}
+    <div class="stats-row stats-filtered" title="Films with no release in the countries or formats you picked">
+        <span>🎬 <a href="#" onclick="openFilters(); return false;">Filtered:</a></span>
+        <strong id="statFiltered">{{ release_filtered }}</strong>
+    </div>
+    {% endif %}
     <div id="historyLog" class="history-log">
         {% if history %}<strong>History:</strong>
         {% for entry in history %}
@@ -270,18 +289,6 @@
 <div class="hint enrichment-note">⏳ {{ unenriched }} item{{ '' if unenriched == 1 else 's' }} here
   {{ 'is' if unenriched == 1 else 'are' }} still being looked up, so your filters
   haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
-{% endif %}
-{# A release filter REMOVES films rather than moving them: a film out only in
-   Brazil does not match a filter asking for American releases at all. So this
-   one can empty a month completely, which is exactly the state that reads as a
-   broken calendar if the page says nothing. It is said whether or not the month
-   came out empty, because a month showing twelve films out of thirteen hundred
-   is just as much a filter's doing and just as worth being able to undo. #}
-{% if release_filtered %}
-<div class="hint enrichment-note">🎬 {{ release_filtered }} film{{ '' if release_filtered == 1 else 's' }}
-  {{ 'is' if release_filtered == 1 else 'are' }} hidden by your release filter — they have no release
-  in the countries or formats you picked.
-  <a href="#" onclick="openFilters(); return false;">Change it</a>.</div>
 {% endif %}
 
 <main>
@@ -659,14 +666,6 @@
                 <div class="field checkbox">
                     <input type="checkbox" id="s_hide" name="hide_not_watching">
                     <label for="s_hide">Hide not-watching by default</label>
-                </div>
-                <div class="field checkbox">
-                    <input type="checkbox" id="s_prewarm" name="calendar_prewarm_enabled">
-                    <label for="s_prewarm">Pre-warm calendar cache (background)</label>
-                    <span class="hint">Periodically fetches upcoming calendar windows in the
-                        background so viewers get instant loads. This spends Trakt API calls on
-                        a schedule even when no one is viewing, and only takes effect when the
-                        calendar cache TTL is 24h or higher.</span>
                 </div>
                 </div>
 

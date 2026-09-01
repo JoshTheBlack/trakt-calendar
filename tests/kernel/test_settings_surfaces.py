@@ -202,9 +202,17 @@ class CacheSettingsWidgetTests(SettingsSurfaceTestCase):
         self.assertIn("api_cache_max_bytes", payload)
 
 
-class PrewarmSettingWidgetTests(SettingsSurfaceTestCase):
-    """calendar_prewarm_enabled: the checkbox and its round trip through
-    /api/settings, coerced to a real bool the way hide_not_watching is."""
+class CheckboxSettingCoercionTests(SettingsSurfaceTestCase):
+    """A checkbox setting's round trip through /api/settings, coerced to a real
+    bool by `_as_bool`.
+
+    IT USED TO BE `calendar_prewarm_enabled` THAT CARRIED THIS, and that setting
+    is gone — the scheduled month refresh replaced the pre-warm it gated, and a
+    flag whose only job was to enable something that no longer exists would be a
+    switch with nothing behind it. The coercion is what mattered here and it is
+    not specific to that setting, so it moves to one that remains rather than
+    being deleted with it.
+    """
 
     def setUp(self):
         super().setUp()
@@ -212,28 +220,26 @@ class PrewarmSettingWidgetTests(SettingsSurfaceTestCase):
 
     def test_the_settings_screen_renders_the_toggle(self):
         body = self.client.get("/?month=1&year=2026").text
-        self.assertIn('name="calendar_prewarm_enabled"', body)
+        self.assertIn('name="hide_not_watching"', body)
 
     def test_saving_it_persists_as_a_bool(self):
-        resp = self.client.post("/api/settings", json={"calendar_prewarm_enabled": True})
+        resp = self.client.post("/api/settings", json={"hide_not_watching": True})
         self.assertEqual(resp.status_code, 200, resp.text)
-        settings = load_settings()
-        self.assertIs(settings.calendar_prewarm_enabled, True)
+        self.assertIs(load_settings().hide_not_watching, True)
 
-        resp = self.client.post("/api/settings", json={"calendar_prewarm_enabled": False})
+        resp = self.client.post("/api/settings", json={"hide_not_watching": False})
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertIs(load_settings().calendar_prewarm_enabled, False)
+        self.assertIs(load_settings().hide_not_watching, False)
 
     def test_a_checkbox_style_string_value_coerces_to_a_bool(self):
-        """A form posts "true"/"false", not a JSON boolean; _as_bool must still
+        """A form posts "true"/"false", not a JSON boolean; `_as_bool` must still
         turn that into a real bool rather than storing the truthy string."""
-        resp = self.client.post("/api/settings", json={"calendar_prewarm_enabled": "true"})
+        resp = self.client.post("/api/settings", json={"hide_not_watching": "true"})
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertIs(load_settings().calendar_prewarm_enabled, True)
+        self.assertIs(load_settings().hide_not_watching, True)
 
     def test_it_is_readable_back_through_the_settings_endpoint(self):
-        payload = self.client.get("/api/settings").json()
-        self.assertIn("calendar_prewarm_enabled", payload)
+        self.assertIn("hide_not_watching", self.client.get("/api/settings").json())
 
 
 class SimklPublicCalendarSettingWidgetTests(SettingsSurfaceTestCase):

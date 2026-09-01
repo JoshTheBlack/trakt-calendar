@@ -308,14 +308,26 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i.title for g in grouped for i in g["items"]], ["A Series"])
         self.assertEqual(meta["release_filtered"], 0)
 
-    async def test_the_release_map_never_reaches_a_stored_window(self):
-        """Only enrichment sets it, and enrichment is a READ-time overlay — a
-        window carrying one moment's release schedule would be a stored row
-        whose contents depend on how far the drain had got when it was filled."""
+    async def test_the_release_map_is_stored_with_the_entry(self):
+        """THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the design.
+
+        It read: only enrichment sets this, enrichment is a READ-time overlay, so
+        a window carrying one moment's release schedule would be a stored row
+        whose contents depend on how far the drain had got when it was filled.
+        That was a true objection to storing a value inside a BLOB, where a
+        refill replaced everything wholesale and nothing could update one title.
+
+        A row can be updated. The drain writes the release map onto the title it
+        belongs to, a refill is forbidden to demote it, and the value is
+        therefore never older than the last drain pass rather than frozen at
+        whatever moment the window happened to be filled. Storing it is what lets
+        the read stop rebuilding it per viewer."""
         await self._enrich(1, {"US": [THEATRICAL]})
         await self._stored([_film(1, title="American")])
         groups = await calendar_cache.cached_calendar_groups()
         stored = [g for g in groups if (g.get("by_source") or {}).get("simkl")]
         self.assertTrue(stored)
         for group in stored:
-            self.assertNotIn("release_types_by_country", group["by_source"]["simkl"])
+            self.assertEqual(
+                group["by_source"]["simkl"]["release_types_by_country"],
+                {"US": [THEATRICAL]})

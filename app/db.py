@@ -2508,6 +2508,299 @@ ALTER TABLE distrakt_prompt_dismissals
     ADD COLUMN kind TEXT NOT NULL DEFAULT 'verdict';
 """
 
+MIGRATION_35 = """
+-- THE CALENDAR STOPS BEING A PILE OF WINDOWS AND BECOMES ROWS.
+--
+-- What it replaces: one compressed blob per (endpoint, 7 days) in api_cache,
+-- holding every source's records for that span. Reading a month inflated four or
+-- five of them and filtered the result; asking "which titles does the stored
+-- calendar name" inflated EVERY window an instance held, which is why the drain
+-- spent hundreds of milliseconds of event-loop time before it made a request.
+-- Neither question is one a blob can answer, and both are ordinary SQL over rows.
+--
+-- THREE LEVELS, BECAUSE THE FACTS HAVE THREE DIFFERENT LIFETIMES. Measured
+-- across 4,330 (source, title) pairs holding more than one airing: runtime
+-- varies on 0.1% of them, certification 0.2%, genres 0.4%, network 0.8%, status
+-- 0.8%, language and country 0.0%. Those are TITLE facts, and storing them once
+-- per airing is what let one title's airings disagree with each other -- not
+-- because a source said anything different, but because two airings were fetched
+-- a week apart. episode_title varies 95.5%, which is the opposite finding and
+-- the reason level 2 exists at all. Level 3 is the airing itself, kept separate
+-- from level 2 because one episode can air more than once and collapsing them
+-- would silently drop a repeat the calendar has always drawn.
+--
+-- PER SOURCE AT EVERY LEVEL. Two services describing one title are two rows and
+-- neither overwrites the other; which one a given viewer sees is decided at READ
+-- against their own precedence, exactly as the window model decided it. Storing
+-- a merged answer would bake one viewer's preference into shared storage, which
+-- is the invariant this whole design exists to keep.
+
+-- LEVEL 1 -- what a source says about a TITLE.
+CREATE TABLE calendar_titles (
+    -- 'trakt' | 'simkl' | 'tmdb'. An open set of names rather than a CHECK,
+    -- following show_posters.source: adding a provider is not a migration.
+    source        TEXT    NOT NULL,
+    media         TEXT    NOT NULL,
+    -- The SOURCE's own id for this title (Record.id), never the shared key: it
+    -- is what a refetch has to be addressed by.
+    source_id     TEXT    NOT NULL,
+    -- The CROSS-SOURCE identity (app/calendar/cache.py's group_base -- the
+    -- waterfall in providers/base.py's resolve_key, stringified). Denormalized
+    -- onto every level so grouping two services' rows into one card is a join on
+    -- one column rather than a per-row id-waterfall in Python. A title the
+    -- waterfall cannot key gets a per-source value here and so can never merge,
+    -- which is deliberate: a visible duplicate is safer than a wrong merge.
+    title_key     TEXT    NOT NULL,
+    title         TEXT    NOT NULL DEFAULT '',
+    -- CASE-FOLDED AND ACCENT-STRIPPED, for search. Its own column rather than a
+    -- function index because the folding rule lives in Python and must be the
+    -- same one the query folds with; a stored column keeps one implementation.
+    title_fold    TEXT    NOT NULL DEFAULT '',
+    ids_json      TEXT    NOT NULL DEFAULT '{}',
+    detail_url    TEXT    NOT NULL DEFAULT '',
+    year          TEXT    NOT NULL DEFAULT '',
+    network       TEXT    NOT NULL DEFAULT '',
+    country       TEXT    NOT NULL DEFAULT '',
+    language      TEXT    NOT NULL DEFAULT '',
+    certification TEXT    NOT NULL DEFAULT '',
+    status        TEXT    NOT NULL DEFAULT '',
+    overview      TEXT    NOT NULL DEFAULT '',
+    poster        TEXT    NOT NULL DEFAULT '',
+    runtime       INTEGER,
+    -- The source's RAW SLUGS, lowercase and hyphenated ("game-show"), never the
+    -- title-cased display form -- the per-viewer filter matches on the slug, and
+    -- a stored "Game Show" breaks every multi-word genre filter while leaving
+    -- single-word ones working. The title-casing happens in render(), on the far
+    -- side of the filter.
+    genres_json   TEXT    NOT NULL DEFAULT '[]',
+    -- {service: score}, NOT one number. Record.rating is "one number shown under
+    -- one service's mark", and the card draws two services' ratings side by side
+    -- without ever averaging them; a map keeps that true while giving IMDb's
+    -- score -- which Simkl hands over and this app has never kept -- somewhere to
+    -- live that is not the field labelled with somebody else's name. A map rather
+    -- than a column per service for the same reason `source` has no CHECK.
+    ratings_json  TEXT    NOT NULL DEFAULT '{}',
+    -- Simkl's own "is this actually a film" answer; only 'movie' means a film
+    -- masquerading on a series endpoint. Empty for every source that never sets
+    -- it and for the serial formats that must NOT be pruned.
+    anime_type    TEXT    NOT NULL DEFAULT '',
+    -- {country: [release type]} in TMDB's numbering. Distribution, not origin --
+    -- deliberately not a plural `country`, which is where a title was MADE.
+    release_types_json TEXT NOT NULL DEFAULT '{}',
+    -- WHETHER THE FIELDS ABOVE ARE ANSWERS OR JUST DEFAULTS. Simkl's calendar
+    -- files carry none of them, so its rows land 0 and are filled by the drain.
+    -- The filter reads this to tell "nothing to say" from "nobody has looked
+    -- yet", and exempts the second rather than judging it on values it cannot
+    -- answer for. Storing it makes that distinction survive a restart, which the
+    -- read-time overlay it replaces could only recompute.
+    enriched      INTEGER NOT NULL DEFAULT 0,
+    fetched_at    INTEGER NOT NULL,
+    -- WHEN THIS ROW GOES STALE, as an instant rather than a policy. The tier
+    -- (current month 24h, previous 7d, older than six months 30d, older than a
+    -- year 90d) is decided once by the writer; storing the RESULT means "what is
+    -- due a refresh" is an index range scan instead of a rule re-evaluated per
+    -- row in Python.
+    stale_after   INTEGER NOT NULL DEFAULT 0,
+    failed_at     INTEGER,
+    fail_count    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, media, source_id)
+);
+-- Search (a prefix/substring match over folded titles).
+CREATE INDEX ix_calendar_titles_fold ON calendar_titles(title_fold);
+-- Grouping a card: every source's row for one shared identity.
+CREATE INDEX ix_calendar_titles_key ON calendar_titles(title_key);
+-- The drain's owed set and the refresh sweep, which is the whole reason the
+-- old "inflate every window to find out" disappears.
+CREATE INDEX ix_calendar_titles_due ON calendar_titles(enriched, stale_after);
+-- Retention (a flat six months from last store -- see calendar_source_files).
+CREATE INDEX ix_calendar_titles_fetched ON calendar_titles(fetched_at);
+
+-- LEVEL 2 -- what a source says about ONE EPISODE. Genuinely varies per episode
+-- (episode_title 95.5%), and this app has never held it: the modal shows a
+-- season's worth of episode facts today by stamping the SHOW's runtime and
+-- rating onto each one. Two of three sources can fill this and one can half-fill
+-- it (Simkl publishes no per-episode runtime or rating), so a MISSING ROW IS THE
+-- ORDINARY CASE and never an error.
+CREATE TABLE calendar_episodes (
+    source        TEXT    NOT NULL,
+    media         TEXT    NOT NULL,
+    source_id     TEXT    NOT NULL,
+    season        INTEGER NOT NULL,
+    number        INTEGER NOT NULL,
+    title         TEXT    NOT NULL DEFAULT '',
+    overview      TEXT    NOT NULL DEFAULT '',
+    still         TEXT    NOT NULL DEFAULT '',
+    first_aired   TEXT    NOT NULL DEFAULT '',
+    episode_type  TEXT    NOT NULL DEFAULT '',
+    runtime       INTEGER,
+    rating        REAL,
+    votes         INTEGER,
+    fetched_at    INTEGER NOT NULL,
+    stale_after   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (source, media, source_id, season, number)
+);
+CREATE INDEX ix_calendar_episodes_due ON calendar_episodes(stale_after);
+CREATE INDEX ix_calendar_episodes_fetched ON calendar_episodes(fetched_at);
+
+-- LEVEL 3 -- one AIRING, as one source listed it on one endpoint.
+CREATE TABLE calendar_airings (
+    source          TEXT    NOT NULL,
+    media           TEXT    NOT NULL,
+    source_id       TEXT    NOT NULL,
+    -- Which app endpoint this appeared on. Several endpoints are different
+    -- DERIVATIONS over the same source file, so the same airing legitimately
+    -- exists on more than one and each is its own row.
+    endpoint        TEXT    NOT NULL,
+    title_key       TEXT    NOT NULL,
+    -- POSIX seconds. The sort key, and the only time fact a source must supply.
+    air_ts          REAL    NOT NULL,
+    -- The UTC date of air_ts, stored so a month or day is a range scan on an
+    -- index rather than arithmetic over every row. A VIEWER's local date is
+    -- still derived at read -- this is the shared, absolute one.
+    air_date        TEXT    NOT NULL,
+    -- WHETHER THAT INSTANT IS REALLY AN INSTANT. A film released on the 6th is
+    -- released on the 6th wherever you are; rendering a UTC-midnight timestamp
+    -- in a viewer's timezone moves a UTC-8 viewer's release to the day before.
+    date_only       INTEGER NOT NULL DEFAULT 0,
+    -- -1 RATHER THAN NULL, and that is load-bearing: SQLite permits NULLs in a
+    -- non-INTEGER PRIMARY KEY, so a nullable coordinate here would let the same
+    -- airing insert twice over. A third of premiere entries state no season or
+    -- no episode number -- overwhelmingly Simkl anime, where an absolute episode
+    -- number is simply how the entry is spelled -- so "unstated" is the ordinary
+    -- case and needs a value the key can actually compare.
+    season          INTEGER NOT NULL DEFAULT -1,
+    episode_number  INTEGER NOT NULL DEFAULT -1,
+    -- HOW THIS AIRING SPELLS ITS EPISODE ("S01E02", or an absolute number for an
+    -- anime entry that has no season). Genuinely an AIRING fact and the reason
+    -- there is no episode TITLE beside it: the coordinate above already keys the
+    -- calendar_episodes row, so a repeat airing points at the same episode for
+    -- free, and a title stored here would be a second home for a level-2 fact.
+    -- MEASURED, 45,827 stored source-records: 1,577 coordinates air more than
+    -- once and 14 of them DISAGREED with themselves -- {'Once in a Blue Moon': 2,
+    -- 'Episode 1': 1} for one show's S01E01 -- because two airings were fetched
+    -- on different days and one caught Trakt's placeholder. One row per episode
+    -- cannot produce that. Nothing is stranded by the move: of the 7,387 records
+    -- stating no coordinate, ZERO carried an episode title.
+    episode_label   TEXT    NOT NULL DEFAULT '',
+    stored_at       INTEGER NOT NULL,
+    PRIMARY KEY (source, media, source_id, endpoint, air_ts, season, episode_number)
+);
+-- The month read, which is the hot path.
+CREATE INDEX ix_calendar_airings_month ON calendar_airings(endpoint, air_date);
+-- A REFRESH DELETES BY (source, endpoint, span) AND RE-INSERTS, rather than
+-- upserting row by row. It has to: a title the source has STOPPED listing leaves
+-- no row to upsert, and an upsert-only refresh would keep drawing it for ever.
+-- The window model got this free by replacing a whole blob; rows have to say it.
+CREATE INDEX ix_calendar_airings_refresh ON calendar_airings(source, endpoint, air_date);
+-- Grouping, and the tracker's name resolution.
+CREATE INDEX ix_calendar_airings_key ON calendar_airings(title_key);
+CREATE INDEX ix_calendar_airings_stored ON calendar_airings(stored_at);
+
+-- THE VALIDATORS, AND THE REFRESH CLOCK -- one row per source file per month.
+--
+-- IT HOLDS NO BODY, AND THAT IS THE POINT. The old rows kept the whole decoded
+-- file beside its ETag, because a 304 carries no body and the window that needed
+-- it might have been evicted independently. Under entries a 304 needs no body at
+-- all: "unchanged" means the rows already derived from it are still correct, so
+-- the answer is to do nothing. Measured on the live CDN: prod held 2.57 MB
+-- compressed for 15.15 MB of JSON, and the validators alone are about a
+-- kilobyte.
+--
+-- WORTH KEEPING BECAUSE THE ARCHIVE IS TIERED, measured 2026-08-28 against
+-- data.simkl.in: the current month and the two ahead of it had all been
+-- regenerated 1.3 hours earlier and share one ETag prefix, while 2026-06 and
+-- 2025-08 were both 38.9 days old and likewise share one -- past months are
+-- frozen. So a conditional GET on an old month is a 304 essentially always, and
+-- those are the big files (2025/8/tv.json is 4 MB). Eighteen of eighteen probes
+-- answered 304 with a zero-byte body.
+CREATE TABLE calendar_source_files (
+    url           TEXT    PRIMARY KEY,
+    source        TEXT    NOT NULL,
+    -- The calendar month this file covers, 'YYYY-MM'. The unit the refresh
+    -- schedule works in, because the month is the display unit: a rolling
+    -- 14-or-42-day window would refresh half of what a viewer is looking at.
+    month         TEXT    NOT NULL,
+    etag          TEXT    NOT NULL DEFAULT '',
+    last_modified TEXT    NOT NULL DEFAULT '',
+    -- When it was last ASKED ABOUT, which a 304 advances; and when its content
+    -- last actually MOVED, which only a 200 does. Two fields because they answer
+    -- different questions -- "is this due a check" and "how stale can the rows
+    -- derived from it be" -- and one number cannot mean both.
+    fetched_at    INTEGER NOT NULL,
+    changed_at    INTEGER NOT NULL DEFAULT 0,
+    stale_after   INTEGER NOT NULL DEFAULT 0,
+    entries       INTEGER NOT NULL DEFAULT 0,
+    failed_at     INTEGER,
+    fail_count    INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX ix_calendar_source_files_due ON calendar_source_files(stale_after);
+
+-- WHO WAS ASKED, AND WHO ANSWERED -- one row per (endpoint, span, source).
+--
+-- THE TWO ARE DIFFERENT FACTS AND CONFLATING THEM IS WHAT MADE THE "incomplete
+-- data" BANNER PERMANENT. A source that was asked and could not answer is the
+-- only thing "partial" should ever mean. A source in neither column was not in
+-- play when this span was filled -- it did not exist on the instance yet, or its
+-- declared reach does not cover this span -- and that is a MISS to refill, not a
+-- failure to report. Storing only "who answered" left the reader measuring
+-- today's sources against a span filled weeks ago, so every span read as partial
+-- the moment a source was added, and one outside a source's reach read as
+-- partial for ever because refilling it changed nothing.
+--
+-- IT SURVIVES THE MOVE FROM BLOBS BECAUSE IT HAS TO. The window envelope carried
+-- both lists; rows have nowhere to put them, and deriving coverage from "are
+-- there any airings from this source" is exactly the wrong answer -- a source
+-- that legitimately lists nothing in a span is indistinguishable from one that
+-- was never asked, which is the confusion this table exists to end.
+--
+-- SPAN RATHER THAN MONTH, because the span is what a fill actually covers: the
+-- aligned seven-day window the read path already stitches months out of. The
+-- refresh schedule works in months by enumerating the spans inside one.
+CREATE TABLE calendar_coverage (
+    endpoint    TEXT    NOT NULL,
+    -- The aligned window start, 'YYYY-MM-DD'.
+    span_start  TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    -- Asked is written on every attempt; answered only when the source actually
+    -- returned records rather than raising.
+    asked       INTEGER NOT NULL DEFAULT 1,
+    answered    INTEGER NOT NULL DEFAULT 0,
+    stored_at   INTEGER NOT NULL,
+    stale_after INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (endpoint, span_start, source)
+);
+-- Reading a month asks for its spans at once.
+CREATE INDEX ix_calendar_coverage_span ON calendar_coverage(endpoint, span_start);
+-- The refresh sweep, and retention.
+CREATE INDEX ix_calendar_coverage_due ON calendar_coverage(stale_after);
+CREATE INDEX ix_calendar_coverage_stored ON calendar_coverage(stored_at);
+
+-- THE CUTOVER IS A DROP AND A REFILL, AND THE DROP IS EXPLICIT.
+--
+-- Not left to the TTL sweep, which would leave the dead blobs sitting until the
+-- ninety-day grace expired -- 5.29 MB of them on the machine this was written
+-- on. Both prefixes go: 'calendar:' is the window blobs this table replaces, and
+-- 'simkl-cdn:' is the decoded file bodies the row above deliberately stops
+-- keeping. Nothing else in api_cache is touched; the per-title detail lookups
+-- ('https:') are a different cache with a different reason to exist.
+DELETE FROM api_cache WHERE cache_key LIKE 'calendar:%' OR cache_key LIKE 'simkl-cdn:%';
+
+-- WHERE A VIEWER'S HISTORY STARTS FOR THIS SEASON, so a re-watch can be told
+-- from the tracker learning about an old completion for the first time.
+--
+-- A WATERMARK RATHER THAN A SECOND SET OF EPISODES, which is what makes this one
+-- column instead of a table. distrakt_show_progress has held {episode:
+-- watched_at} since migration 17, and the dates in it are the service's
+-- last_watched_at -- so an episode watched again carries the NEW date and one
+-- left behind in the old pass keeps the old. Filtering that map by a start date
+-- is therefore already the whole of "progress through the current pass", and a
+-- second stored pass would be a copy of something derivable.
+--
+-- EMPTY MEANS "COUNT EVERYTHING", so every existing row keeps exactly the
+-- behaviour it was written with.
+ALTER TABLE distrakt_user_seasons ADD COLUMN history_from TEXT NOT NULL DEFAULT '';
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2543,6 +2836,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (32, MIGRATION_32),
     (33, MIGRATION_33),
     (34, MIGRATION_34),
+    (35, MIGRATION_35),
 ]
 
 
