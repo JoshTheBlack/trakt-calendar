@@ -84,7 +84,7 @@ from . import resolve as calendar_resolve
 from .. import db
 from .. import providers
 from ..media import artwork
-from ..perftrace import span
+from ..perftrace import activity, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
     Item, Provider, Record, SourceNotModified, SourceUnavailable, render,
@@ -822,7 +822,9 @@ def schedule_refill(endpoint: Endpoint, settings, start: date) -> bool:
 
     async def _run() -> None:
         try:
-            await load_window(endpoint, settings, start, allow_fetch=True, force=True)
+            with activity("background refill"):
+                await load_window(endpoint, settings, start,
+                                  allow_fetch=True, force=True)
         except SourceUnavailable as exc:
             logger.debug("background refill of the %s span starting %s failed: %s",
                          endpoint.key, start, exc)
@@ -1324,6 +1326,7 @@ def _months_ahead(today: date, ahead: int) -> tuple[int, int]:
     return today.year + month // 12, month % 12 + 1
 
 
+@job("scheduled refresh")
 async def refresh_months(settings, *, now: int | None = None) -> int:
     """Re-fetch the months a viewer is most likely to be looking at, on a
     schedule, and return how many spans were refilled.

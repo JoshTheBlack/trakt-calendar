@@ -20,7 +20,9 @@
     {% macro hero_controls() %}
             <div class="control" title="{{ endpoint.description }}">
                 <label for="endpointSelect">📡</label>
-                <select id="endpointSelect" onchange="switchPickEndpoint(this.value)">
+                {# See index.html: a restored value overriding the rendered
+                   `selected` is unreachable on a select that acts on `change`. #}
+                <select id="endpointSelect" autocomplete="off" data-url-state onchange="switchPickEndpoint(this.value)">
                     {% for ep in endpoints %}
                     <option value="{{ ep.key }}"{% if ep.key == endpoint.key %} selected{% endif %}>{{ ep.label }}</option>
                     {% endfor %}

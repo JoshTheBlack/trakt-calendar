@@ -157,11 +157,17 @@ class Settings:
     pagination_limit: int = 300
     hide_not_watching: bool = False
     cache_ttl_minutes: int = 720  # detail/cast/episode cache lifetime
-    # Calendar window cache lifetime. Trakt's calendar endpoints carry no ETag or
-    # Last-Modified (verified against the live API), so a window is refreshed on a
-    # short TTL rather than a conditional request. Short because premiere dates in
-    # the current/near month shift; a far-past or far-future month rarely changes
-    # but costs nothing to leave on the same clock.
+    # THE FLOOR ON HOW STALE A STORED SPAN MAY BE, not the whole answer. Trakt's
+    # calendar endpoints carry no ETag or Last-Modified (verified against the live
+    # API), so a Trakt span is refreshed on a clock rather than revalidated; Simkl's
+    # CDN archives do carry validators and are confirmed with a conditional GET,
+    # which costs a request but no body.
+    #
+    # IT IS A FLOOR BECAUSE THE SPAN'S OWN AGE EXTENDS IT — see cache._STALENESS_TIERS,
+    # which is where the tiering and the measurements behind it live. This value
+    # governs the month a viewer is actually in, and an operator asking for ten
+    # minutes still gets ten minutes there. What it no longer does is put a frozen
+    # archive from last year on the same clock as tonight's premieres.
     calendar_cache_ttl_minutes: int = 10
     # Total budget for the shared api_cache blob table. The heartbeat evicts the
     # least-recently-stored entries once the summed byte_size crosses this. Detail

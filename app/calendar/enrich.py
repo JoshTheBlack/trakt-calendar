@@ -83,6 +83,7 @@ from typing import Any
 from . import cache as calendar_cache
 from . import entries
 from .. import db
+from .. import perftrace
 from ..providers.base import Media, Record, Source, SourceUnavailable
 from ..providers.simkl import titles as simkl_titles
 from ..providers.simkl import transport as simkl_transport
@@ -195,6 +196,14 @@ def _compress(fields: dict) -> bytes:
     return zlib.compress(json.dumps(fields, separators=(",", ":")).encode("utf-8"))
 
 
+# HOW BIG A STORED FAILURE IS, so SQL can recognise one without decompressing
+# every row. `_upsert_failure` writes the compressed empty object and nothing
+# else, so this length IS the marker — derived from the function rather than
+# written as a number, because a change to the compression would otherwise make
+# the constant quietly wrong and the query quietly stop matching anything.
+_EMPTY_PAYLOAD_MAX_BYTES = len(_compress({}))
+
+
 def _decompress(blob: bytes) -> dict:
     try:
         data = json.loads(zlib.decompress(blob).decode("utf-8"))
@@ -260,21 +269,57 @@ async def _upsert_success(simkl_id: int, media: str, fields: dict, now: int) -> 
     await entries.apply_enrichment(str(Source.SIMKL), simkl_id, media, fields, now)
 
 
-async def _upsert_failure(simkl_id: int, media: str, now: int) -> None:
-    """Record an attempt that found nothing usable. The payload written on the
-    FIRST attempt is the empty answer (there is nothing else to store yet); a
-    later failure of a title that once succeeded deliberately leaves the old
-    payload in place — a transient failure must not erase data this app
-    already has a good answer for, it only says "this attempt did not
-    confirm it"."""
+async def _upsert_failure(simkl_id: int, media: str, now: int) -> int:
+    """Record an attempt that found nothing usable, and answer how many times
+    this title has now failed in a row.
+
+    The payload written on the FIRST attempt is the empty answer (there is
+    nothing else to store yet); a later failure of a title that once succeeded
+    deliberately leaves the old payload in place — a transient failure must not
+    erase data this app already has a good answer for, it only says "this attempt
+    did not confirm it".
+
+    `fetched_at` IS DELIBERATELY NOT TOUCHED ON CONFLICT, and _GIVE_UP_AFTER
+    depends on that: it is what lets a row the drain has given up on still age
+    out of the table on the clock it was first written on, and so be asked about
+    again from scratch rather than never again.
+    """
     blob = _compress({})
-    await db.execute(
+    row = await db.fetch_one(
         "INSERT INTO simkl_titles (simkl_id, media, payload, fetched_at, failed_at, fail_count) "
         "VALUES (?, ?, ?, ?, ?, 1) "
         "ON CONFLICT(simkl_id, media) DO UPDATE SET "
-        "failed_at = excluded.failed_at, fail_count = simkl_titles.fail_count + 1",
+        "failed_at = excluded.failed_at, fail_count = simkl_titles.fail_count + 1 "
+        "RETURNING fail_count",
         (simkl_id, media, blob, now, now),
     )
+    return int(row["fail_count"]) if row else 1
+
+
+# CONSECUTIVE FAILURES BEFORE THE DRAIN STOPS ASKING ABOUT A TITLE. Simkl's
+# calendar files name titles Simkl's own API cannot answer for — measured on a
+# real instance, six fan films and shorts sat at fail_count 27, each having been
+# asked about once a day for the better part of a month.
+#
+# FIVE BECAUSE THE BACKOFF CAPS AT SIX. _backoff_elapsed doubles from an hour and
+# reaches _BACKOFF_MAX_SECONDS at the sixth failure, so five is the point where
+# waiting longer stops buying anything: roughly thirty-one hours of attempts,
+# which comfortably outlasts an outage but not a title that does not exist.
+#
+# NOT app/media/artwork.py's MAX_FAIL_COUNT, WHICH IS THREE, and the difference
+# is deliberate rather than drift. A poster is retried when somebody asks for it,
+# so three attempts can span months; this is retried on a doubling clock whether
+# anyone is looking or not, so the same number would give up in seven hours.
+#
+# WHAT MAKES THIS A PAUSE RATHER THAN A HOLE — and it is the assumption the whole
+# ceiling rests on: `sweep` deletes a simkl_titles row 30 days after its
+# `fetched_at`, and `_upsert_failure` deliberately does NOT touch `fetched_at` on
+# conflict. So a given-up row still ages out on the clock it was first written
+# on, and the next drain tick that finds the title still named by a stored window
+# sees no row at all and asks again from scratch. If a later change starts
+# refreshing `fetched_at` on failure, this stops being a pause and becomes
+# permanent — that is the one edit that would break it.
+_GIVE_UP_AFTER = 5
 
 
 def _backoff_elapsed(fail_count: int, failed_at: int | None, now: int) -> bool:
@@ -515,12 +560,22 @@ async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
         # earned.
         if simkl_transport.blocked_seconds_remaining() > 0:
             return False
-        await _upsert_failure(simkl_id, media, now)
+        failures = await _upsert_failure(simkl_id, media, now)
+        if failures == _GIVE_UP_AFTER:
+            # ONCE, AT THE TRANSITION, rather than on every tick that skips it:
+            # a title being given up on is an event worth reading, and a line
+            # repeated hourly for a month is not. INFO because the page stops
+            # counting this title from here on, and the log is then the only
+            # place it is visible at all.
+            logger.info("Simkl enrichment: giving up on simkl id %s (%s) after %d "
+                        "failed lookups; it will be asked about again when its "
+                        "stored row ages out.", simkl_id, media, failures)
         return False
     await _upsert_success(simkl_id, media, fields, now)
     return True
 
 
+@perftrace.job("title enrichment")
 async def drain(settings, *, now: int | None = None) -> int:
     """One heartbeat's worth of enrichment: derive what the stored calendar
     still owes (see `_owed_titles`), fetch detail for a bounded batch of what
@@ -605,6 +660,11 @@ async def drain(settings, *, now: int | None = None) -> int:
             # it is owed a re-fetch regardless of backoff, which exists to
             # slow down repeated FAILURES, not to protect a stale success
             # from being refreshed.
+            if not fields and row["fail_count"] >= _GIVE_UP_AFTER:
+                # Asked about enough times to conclude Simkl has no answer. Not
+                # forever: the row ages out of `simkl_titles` and the title is
+                # asked about again from scratch — see _GIVE_UP_AFTER.
+                continue
             if not fields and not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
                 continue  # failed recently; not worth asking again yet
         batch.append((simkl_id, media, title))
@@ -786,6 +846,7 @@ async def _fetch_one_release(settings, trakt_id: int, now: int) -> bool:
     return True
 
 
+@perftrace.job("film releases")
 async def drain_releases(settings, *, now: int | None = None) -> int:
     """One heartbeat's worth of Trakt release lookups, bounded exactly as the
     Simkl drain above is bounded and for the same reason.
@@ -891,6 +952,7 @@ _drain_tasks: set[asyncio.Task] = set()
 EPISODE_DRAIN_BATCH_SIZE = 25
 
 
+@perftrace.job("episode lookup")
 async def drain_episodes(settings, *, now: int | None = None) -> int:
     """One heartbeat's worth of per-episode lookups — level 2 of the stored
     calendar.
@@ -911,12 +973,18 @@ async def drain_episodes(settings, *, now: int | None = None) -> int:
     gates every call behind one semaphore sized under its connection pool, so
     firing a batch would queue on that gate rather than go faster while making a
     429 storm harder to read.
+
+    IT DOES NOT STOP WHEN EVERY SEASON HAS BEEN ANSWERED ONCE. A season falls due
+    again on a clock keyed to when its episodes AIRED — see
+    entries.episode_stale_after — because the titles and overviews this fills in
+    are routinely corrected in the days after broadcast, not only published
+    before it. Never-answered seasons still take the batch first.
     """
     if not settings.trakt_catalogue_configured:
         return 0
     ts = db.now() if now is None else now
     owed = await entries.owed_episodes(str(Source.TRAKT), "trakt",
-                                       EPISODE_DRAIN_BATCH_SIZE)
+                                       EPISODE_DRAIN_BATCH_SIZE, ts)
     if not owed:
         return 0
     written = 0
@@ -937,6 +1005,48 @@ async def drain_episodes(settings, *, now: int | None = None) -> int:
         logger.info("calendar episode drain: filled %d episode(s) across %d season(s).",
                     written, len(owed))
     return written
+
+
+async def backlog(*, now: int | None = None) -> tuple[int, int]:
+    """(titles awaiting enrichment, seasons awaiting an episode lookup).
+
+    WHAT THIS IS FOR: a drain reports only what it just DID, so "filled 121
+    episodes across 25 seasons" reads identically whether there are 26 seasons
+    left or twenty thousand. Without a number that counts DOWN there is no way
+    to tell a drain working through a backlog from one looping on work it has
+    already finished — and this calendar has shipped that second bug twice, both
+    times found by a person watching the log and guessing.
+
+    INSTANCE-WIDE, NOT THE VIEWER'S MONTH, because settling is instance-wide. A
+    count scoped to what is on screen would reach zero while the drain still had
+    hours to run: the reassuring answer rather than the true one.
+
+    IT LIVES HERE RATHER THAN IN entries.py BECAUSE THIS MODULE IS WHERE "which
+    source each drain covers" is decided. Level 2 is Trakt-only — it needs a
+    per-season episode list, which is the one thing Simkl's public files do not
+    carry — and stating that fact in the storage layer as well would be a second
+    place to change when it stops being true.
+
+    A TITLE THE DRAIN HAS GIVEN UP ON IS NOT COUNTED, which is the whole reason
+    the title half of this is a join rather than entries.py's plain COUNT. Six
+    fan films Simkl's API cannot answer for would otherwise hold the number at
+    six for ever, and a readout that never reaches zero cannot say "settled" —
+    which is the one thing it was added to say. Giving up is logged where it
+    happens, so the titles are not lost, only uncounted.
+    """
+    ts = db.now() if now is None else now
+    titles = await db.fetch_value(
+        "SELECT COUNT(*) FROM calendar_titles t "
+        "LEFT JOIN simkl_titles s "
+        "  ON s.simkl_id = json_extract(t.ids_json, '$.simkl') AND s.media = t.media "
+        "WHERE t.enriched = 0 "
+        # An empty payload is a stored failure (see _upsert_failure); a row WITH
+        # a payload is an answer this title has not been given yet, and no number
+        # of later failures makes that stop being owed.
+        "  AND NOT (s.fail_count >= ? AND (s.payload IS NULL OR length(s.payload) <= ?))",
+        (_GIVE_UP_AFTER, _EMPTY_PAYLOAD_MAX_BYTES))
+    return (int(titles or 0),
+            await entries.owed_season_count(str(Source.TRAKT), "trakt", ts))
 
 
 async def run_drain(settings) -> int:

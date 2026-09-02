@@ -114,7 +114,11 @@ PAGE_SCRIPTS = {
     "admin": ("static/js/ui.js", "static/js/nav.js"),
     "account": ("static/js/ui.js", "static/js/nav.js", "static/js/plex-auth.js"),
     "sources": ("static/js/ui.js", "static/js/nav.js"),
-    "pick": ("static/js/nav.js",),
+    # ui.js for its URL-state select resync alone: this page's endpoint
+    # picker acts on `change` and is restored by the bfcache exactly like
+    # the calendar's, and leaving one copy of that bug unfixed is how the
+    # other two came to differ in the first place.
+    "pick": ("static/js/ui.js", "static/js/nav.js"),
     "sign-in": ("static/js/plex-auth.js",),
     "register": ("static/js/plex-auth.js",),
     "share": ("static/js/ui.js", "static/js/share.js"),

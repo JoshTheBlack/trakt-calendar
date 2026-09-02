@@ -28,6 +28,7 @@ import httpx
 from ... import cache
 from ... import changelog
 from ... import http_pool
+from ... import perftrace
 from ...config import Settings
 from ..base import SourceUnavailable
 
@@ -872,8 +873,9 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
         pages = max(1, int(resp.headers.get("x-pagination-page-count") or 1))
     except (TypeError, ValueError):
         pages = 1
-    _perf.debug("netGET    %s -> %s  %.0fms%s", path, resp.status_code,
-                (_time.perf_counter() - t0) * 1000.0, " (fresh)" if fresh else " (miss)")
+    _perf.debug("netGET    %s -> %s  %.0fms%s%s", path, resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0,
+                " (fresh)" if fresh else " (miss)", perftrace.activity_tag())
     if resp.status_code != 200:
         logger.warning("Simkl GET %s -> HTTP %s: %s", path, resp.status_code, resp.text[:200])
         if raise_errors:

@@ -40,6 +40,7 @@ import logging
 import os
 import time
 from contextlib import contextmanager
+from functools import wraps
 
 import anyio.to_thread
 
@@ -115,6 +116,69 @@ def detach() -> None:
     stand alone, which is also the honest picture: nobody is waiting on them.
     """
     _current.set(None)
+
+
+# ---------------------------------------------------------------------------
+# who asked
+# ---------------------------------------------------------------------------
+
+# WHAT BACKGROUND JOB THE CURRENT TASK IS, if any. Every outbound call this app
+# makes logs one netGET line, and on a busy heartbeat those interleave: three
+# season lookups, a title enrichment and a calendar refill land in the same
+# second looking identical apart from their paths. Reading a path back to the job
+# that wanted it is guesswork, and it is guesswork exactly when something is
+# looping and somebody is trying to work out which loop.
+#
+# A CONTEXTVAR RATHER THAN A PARAMETER, for the same reason `_current` above is
+# one: the label would otherwise have to be threaded through every transport,
+# every provider and every helper between the job and the socket, and every one
+# of those signatures exists for a different reason.
+_activity: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "perftrace_activity", default="",
+)
+
+
+@contextmanager
+def activity(label: str):
+    """Name the background job running in this task, for the log lines its
+    outbound calls emit.
+
+        with perftrace.activity("episode drain"):
+            ...
+
+    Nests by restoring the previous label rather than clearing it, so a job that
+    calls another one does not leave the outer one anonymous on the way out.
+    """
+    token = _activity.set(label)
+    try:
+        yield
+    finally:
+        _activity.reset(token)
+
+
+def job(label: str):
+    """Decorator form of `activity`, for a coroutine that IS one job.
+
+    On the function rather than at the call site because a drain is called from
+    the heartbeat, from a fill that has just stored records, and from tests —
+    and a label attached at one of those is a label missing from the other two,
+    which is precisely the case (something running when nobody expected it) the
+    label exists to explain.
+    """
+    def decorate(fn):
+        @wraps(fn)
+        async def wrapper(*args, **kwargs):
+            with activity(label):
+                return await fn(*args, **kwargs)
+        return wrapper
+    return decorate
+
+
+def activity_tag() -> str:
+    """The current job's label as a log suffix, or "" when a request or the
+    heartbeat itself is the caller and there is nothing to disambiguate."""
+    label = _activity.get()
+    return f"  [{label}]" if label else ""
 
 
 # ---------------------------------------------------------------------------

@@ -734,10 +734,91 @@ async def sweep(now: int | None = None) -> int:
 # level 2 — what a source says about ONE EPISODE
 # ---------------------------------------------------------------------------
 
-async def owed_episodes(source: str, id_namespace: str, limit: int
-                        ) -> list[tuple[int, str, int]]:
+# HOW LONG AN ANSWERED EPISODE MAY GO UNREFETCHED, by how long ago it AIRED.
+# Keyed on the episode's own air date rather than on when it was looked up,
+# because that is what the accuracy of the answer actually tracks: episode facts
+# are CORRECTED AFTER AIR at least as often as they are published before it. A
+# mystery-box show ships "Episode 7" as the title and a placeholder overview,
+# and the real ones arrive once people have watched — so the week AFTER an
+# episode airs is when a re-read is worth most, which a "refetch old rows less
+# often" rule keyed on fetch time gets exactly backwards.
+#
+# These are NOT the span tiers in cache.py and must not be merged with them.
+# Those describe how often a source REGENERATES A FILE; these describe how long
+# a fact stays wrong after somebody fixes it. Same shape, different reason to
+# change.
+#
+# (days since this episode aired, seconds its row may go unrefetched)
+_EPISODE_TIERS = (
+    (-36500, 24 * 60 * 60),   # still upcoming: a day, and details firm up late
+    (0, 24 * 60 * 60),        # aired within the week: a day, the correction window
+    (7, 30 * 24 * 60 * 60),   # settled: a month
+    (183, 90 * 24 * 60 * 60),  # older than retention sweeps anyway: a quarter
+)
+
+
+def episode_stale_after(air_ts: float | None, now: int) -> int:
+    """When a just-answered episode row falls due again.
+
+    An airing with no stated time is treated as upcoming — the fast tier. It is
+    the cheap direction to be wrong in: the alternative parks a row nobody can
+    date on the slow tier for a month, and an undated row is far more likely to
+    be an imminent episode the feed has not pinned down than a settled one.
+    """
+    try:
+        aired_days = (now - float(air_ts)) / 86400.0
+    except (TypeError, ValueError):
+        aired_days = 0.0
+    ttl = _EPISODE_TIERS[0][1]
+    for days, seconds in _EPISODE_TIERS:
+        if aired_days >= days:
+            ttl = seconds
+    return now + ttl
+
+
+# WHICH SEASONS THE LEVEL-2 DRAIN STILL OWES WORK ON. Written once and shared by
+# the drain's batch and by the count the page shows, because those two answering
+# differently is the exact failure that makes a backlog readout untrustworthy:
+# a number that never reaches zero while the drain insists it is finished tells
+# a reader nothing except that one of the two is lying.
+#
+# Parameters, in order: the id namespace to read out of ids_json, the source, and
+# the clock a due date is compared against.
+_OWED_SEASONS = (
+    "SELECT json_extract(t.ids_json, '$.' || ?) AS service_id, "
+    "       a.media, a.season, "
+    # NULL and 0 both mean "never answered", and both must sort ahead of every
+    # real timestamp — hence the coalesce rather than MIN alone.
+    "       MIN(COALESCE(e.fetched_at, 0)) AS answered_at, "
+    "       MAX(a.stored_at) AS newest "
+    "FROM calendar_airings a "
+    "JOIN calendar_titles t ON t.source = a.source AND t.media = a.media "
+    "                      AND t.source_id = a.source_id "
+    "LEFT JOIN calendar_episodes e ON e.source = a.source AND e.media = a.media "
+    "                             AND e.source_id = a.source_id "
+    "                             AND e.season = a.season "
+    "                             AND e.number = a.episode_number "
+    "WHERE a.source = ? AND a.season >= 0 AND a.episode_number >= 0 "
+    "  AND (e.fetched_at IS NULL OR e.fetched_at = 0 OR e.stale_after <= ?) "
+    "GROUP BY service_id, a.media, a.season"
+)
+
+
+async def owed_season_count(source: str, id_namespace: str, now: int) -> int:
+    """How many seasons `owed_episodes` would hand out if nothing capped it.
+
+    The same query the batch comes from, so the number a reader watches count
+    down cannot disagree with the work actually being done.
+    """
+    return int(await db.fetch_value(
+        f"SELECT COUNT(*) FROM ({_OWED_SEASONS})",
+        (id_namespace, source, now)) or 0)
+
+
+async def owed_episodes(source: str, id_namespace: str, limit: int,
+                        now: int) -> list[tuple[int, str, int]]:
     """[(service id, media, season)] for seasons on the calendar whose episodes
-    nobody has looked up yet.
+    nobody has looked up yet, or whose answers have fallen due again.
 
     A SEASON AT A TIME, NOT AN EPISODE AT A TIME, because that is the shape of
     the call that answers it — one request returns a season's whole episode list.
@@ -754,21 +835,16 @@ async def owed_episodes(source: str, id_namespace: str, limit: int
     never gave, so such an airing came back owed on EVERY pass, and the drain
     re-read those seasons once a minute for ever. The symptom was a heartbeat
     that logged a screenful of season lookups while nobody was browsing.
+
+    NEVER-LOOKED-UP SEASONS GO FIRST, and only then the ones falling due. A
+    season that has never been answered shows placeholder facts to somebody
+    RIGHT NOW; a due one shows facts that were true when they were fetched. With
+    a fixed batch size the two compete for the same tick, and serving the
+    re-reads first would let a large calendar starve its own first pass.
     """
     rows = await db.fetch_all(
-        "SELECT DISTINCT json_extract(t.ids_json, '$.' || ?) AS service_id, "
-        "       a.media, a.season "
-        "FROM calendar_airings a "
-        "JOIN calendar_titles t ON t.source = a.source AND t.media = a.media "
-        "                      AND t.source_id = a.source_id "
-        "LEFT JOIN calendar_episodes e ON e.source = a.source AND e.media = a.media "
-        "                             AND e.source_id = a.source_id "
-        "                             AND e.season = a.season "
-        "                             AND e.number = a.episode_number "
-        "WHERE a.source = ? AND a.season >= 0 AND a.episode_number >= 0 "
-        "  AND (e.fetched_at IS NULL OR e.fetched_at = 0) "
-        "ORDER BY a.stored_at DESC LIMIT ?",
-        (id_namespace, source, limit))
+        _OWED_SEASONS + " ORDER BY answered_at ASC, newest DESC LIMIT ?",
+        (id_namespace, source, now, limit))
     out: list[tuple[int, str, int]] = []
     for row in rows:
         try:
@@ -786,6 +862,12 @@ async def store_episodes(source: str, service_id: int, media: str, season: int,
     rows are stamped even when the list is empty: without it a season Trakt has
     nothing for is owed again on every pass for ever, which is the same
     starvation the enrichment drain's failure rows exist to prevent.
+
+    WHEN EACH ROW FALLS DUE AGAIN IS DECIDED PER EPISODE, from that episode's own
+    latest AIRING rather than from the season's or from the lookup's clock — a
+    season part-aired sits on both sides of the correction window at once, and
+    one date for the whole season would put the aired half on the slow tier or
+    the unaired half on the fast one.
     """
     rows = await db.fetch_all(
         "SELECT source_id FROM calendar_titles "
@@ -802,18 +884,24 @@ async def store_episodes(source: str, service_id: int, media: str, season: int,
             # Every airing of this season, so a stub the fill wrote is answered
             # even when the lookup did not mention that episode.
             owed = conn.execute(
-                "SELECT DISTINCT episode_number FROM calendar_airings "
-                "WHERE source = ? AND media = ? AND source_id = ? AND season = ?",
+                "SELECT episode_number, MAX(air_ts) FROM calendar_airings "
+                "WHERE source = ? AND media = ? AND source_id = ? AND season = ? "
+                "GROUP BY episode_number",
                 (source, media, source_id, season)).fetchall()
-            for (number,) in owed:
+            for (number, air_ts) in owed:
                 if number is None or number < 0:
                     continue
+                # The LAST airing, not the first: a re-airing is another chance
+                # for somebody to have corrected the record, so the correction
+                # window opens again behind it.
+                due = episode_stale_after(air_ts, now)
                 fields = by_number.get(int(number)) or {}
                 conn.execute(
                     "INSERT INTO calendar_episodes "
                     "(source, media, source_id, season, number, title, overview, "
-                    " still, first_aired, episode_type, runtime, rating, votes, fetched_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?) "
+                    " still, first_aired, episode_type, runtime, rating, votes, "
+                    " fetched_at, stale_after) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(source, media, source_id, season, number) DO UPDATE SET "
                     # THE LOOKUP WINS EXCEPT WHERE IT HAS NOTHING TO SAY. The fill
                     # already stored an episode title from the calendar feed, and
@@ -823,13 +911,14 @@ async def store_episodes(source: str, service_id: int, media: str, season: int,
                     "  overview = excluded.overview, first_aired = excluded.first_aired, "
                     "  episode_type = excluded.episode_type, runtime = excluded.runtime, "
                     "  rating = excluded.rating, votes = excluded.votes, "
-                    "  fetched_at = excluded.fetched_at",
+                    "  fetched_at = excluded.fetched_at, "
+                    "  stale_after = excluded.stale_after",
                     (source, media, source_id, season, int(number),
                      str(fields.get("title") or ""), str(fields.get("overview") or ""),
                      str(fields.get("first_aired") or ""),
                      str(fields.get("episode_type") or ""),
                      fields.get("runtime"), fields.get("rating"), fields.get("votes"),
-                     now))
+                     now, due))
                 written += 1
         return written
 

@@ -1102,3 +1102,114 @@ class BothWritersReadThePayloadTheSameWayTests(EnrichTestCase):
         records, *_ = await calendar_entries.read_span(
             SHOWS.key, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual(records[0].rating, 8.4)
+
+
+class GivingUpOnATitleTests(EnrichTestCase):
+    """Simkl's calendar names titles Simkl's own API cannot answer for.
+
+    Observed live: six fan films and shorts sat at fail_count 27, each having
+    been asked about once a day for the better part of a month. The backoff caps
+    at a day and never stops, so nothing ever concluded there was no answer —
+    which also meant the page's backlog readout could not reach zero, and a
+    number that never reaches zero cannot say "settled".
+    """
+
+    SETTINGS = SimpleNamespace(simkl_client_id="cid", simkl_access_token="",
+                               simkl_catalogue_configured=True)
+
+    async def _fail_until(self, count, *, now=1_000_000):
+        """Drive one title to `count` consecutive failures the way the drain
+        does, rather than writing the row by hand — the give-up rule reads what
+        `_upsert_failure` writes, so a hand-built row could pass while the real
+        path did not."""
+        await self._stored([_simkl_record(9001, title="Nobody Knows This One")])
+        calls = 0
+        for attempt in range(count):
+            # Far enough apart that the backoff never suppresses an attempt; this
+            # test is about the ceiling, not about the wait between tries.
+            ts = now + attempt * 10 * 24 * 60 * 60
+            with patch("app.providers.simkl.titles.fetch_title",
+                       AsyncMock(return_value=None)) as fetch:
+                await calendar_enrich.drain(self.SETTINGS, now=ts)
+                calls += fetch.await_count
+        return calls, now + count * 10 * 24 * 60 * 60
+
+    async def test_it_stops_asking_after_the_ceiling(self):
+        _calls, later = await self._fail_until(calendar_enrich._GIVE_UP_AFTER)
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("the drain asked about a title it had given up on")
+
+        with patch("app.providers.simkl.titles.fetch_title", _explode):
+            self.assertEqual(await calendar_enrich.drain(self.SETTINGS, now=later), 0)
+
+    async def test_it_keeps_asking_below_the_ceiling(self):
+        """The other side: a ceiling that fired early would abandon titles over a
+        service hiccup that lasted an afternoon."""
+        calls, later = await self._fail_until(calendar_enrich._GIVE_UP_AFTER - 1)
+        self.assertEqual(calls, calendar_enrich._GIVE_UP_AFTER - 1)
+
+        with patch("app.providers.simkl.titles.fetch_title",
+                   AsyncMock(return_value=None)) as fetch:
+            await calendar_enrich.drain(self.SETTINGS, now=later)
+        self.assertEqual(fetch.await_count, 1)
+
+    async def test_giving_up_does_not_refresh_the_rows_age(self):
+        """THE ASSUMPTION THE WHOLE CEILING RESTS ON. `sweep` deletes a row 30
+        days after its `fetched_at`, and that is the only thing that makes this a
+        pause rather than a permanent hole: the row ages out and the title is
+        asked about again from scratch. A failure that refreshed `fetched_at`
+        would keep the row alive for ever and never retry it."""
+        first = 1_000_000
+        await self._fail_until(calendar_enrich._GIVE_UP_AFTER, now=first)
+        fetched_at = await db.fetch_value(
+            "SELECT fetched_at FROM simkl_titles WHERE simkl_id = 9001")
+        self.assertEqual(fetched_at, first,
+                         "a later failure moved the row's age forward")
+
+        swept = await calendar_enrich.sweep(
+            now=first + calendar_enrich.RETENTION_SECONDS + 1)
+        self.assertEqual(swept, 1)
+
+        with patch("app.providers.simkl.titles.fetch_title",
+                   AsyncMock(return_value=_OK_FIELDS)) as fetch:
+            await calendar_enrich.drain(
+                self.SETTINGS, now=first + calendar_enrich.RETENTION_SECONDS + 2)
+        self.assertEqual(fetch.await_count, 1,
+                         "a given-up title was never retried after its row aged out")
+
+    async def test_a_given_up_title_stops_being_counted(self):
+        """A readout that cannot reach zero cannot say "settled", which is the
+        one thing it was added to say."""
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 0)
+
+        _calls, later = await self._fail_until(calendar_enrich._GIVE_UP_AFTER - 1)
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 1, "a title still being attempted was not counted")
+
+        # The clock has to keep moving: starting the last failure back at the
+        # first one's timestamp puts it inside the backoff, and the attempt that
+        # crosses the ceiling never happens.
+        with patch("app.providers.simkl.titles.fetch_title",
+                   AsyncMock(return_value=None)):
+            await calendar_enrich.drain(self.SETTINGS, now=later)
+
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 0, "a title given up on is still holding the count up")
+
+    async def test_a_title_with_a_real_answer_is_still_counted(self):
+        """Failures AFTER a success leave the payload in place, and that row is
+        an answer this title has not been given yet — a local write the drain
+        will make. No number of later failures makes that stop being owed."""
+        await self._stored([_simkl_record(9001, title="Moonshadow")])
+        with patch("app.providers.simkl.titles.fetch_title",
+                   AsyncMock(return_value=_OK_FIELDS)):
+            await calendar_enrich.drain(self.SETTINGS, now=1000)
+        await db.execute("UPDATE calendar_titles SET enriched = 0")
+        await db.execute("UPDATE simkl_titles SET fail_count = ?, failed_at = 2000",
+                         (calendar_enrich._GIVE_UP_AFTER + 10,))
+
+        titles, _seasons = await calendar_enrich.backlog()
+        self.assertEqual(titles, 1,
+                         "a row holding a real answer was written off as given up")

@@ -162,7 +162,7 @@
         shown.</p>
       <div class="row">
         <span class="label">Everything, unless said otherwise</span>
-        <select id="precedenceDefault">
+        <select id="precedenceDefault" autocomplete="off">
           <option value=""{% if not precedence_default %} selected{% endif %}>The app decides</option>
           {% for source in sources %}
           <option value="{{ source.name }}"{% if precedence_default == source.name %} selected{% endif %}>{{ source.label }}</option>
@@ -172,7 +172,7 @@
       {% for field in precedence_fields %}
       <div class="row">
         <span class="label">{{ field.label }}</span>
-        <select data-field="{{ field.name }}">
+        <select data-field="{{ field.name }}" autocomplete="off">
           <option value=""{% if not field.chosen %} selected{% endif %}>The app decides</option>
           {% for source in sources %}
           <option value="{{ source.name }}"{% if field.chosen == source.name %} selected{% endif %}>{{ source.label }}</option>

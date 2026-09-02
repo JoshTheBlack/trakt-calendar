@@ -204,7 +204,7 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
         "answered" would leave every episode with a title and no runtime for
         ever."""
         await self._store(1, 2)
-        owed = await calendar_entries.owed_episodes("trakt", "trakt", 10)
+        owed = await calendar_entries.owed_episodes("trakt", "trakt", 10, 3000)
         self.assertEqual(owed, [(abs(hash("severance")) % 9999, "show", 1)])
 
     async def test_a_lookup_fills_every_airing_of_the_season(self):
@@ -240,7 +240,7 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
         await self._store(1)
         trakt_id = abs(hash("severance")) % 9999
         await calendar_entries.store_episodes("trakt", trakt_id, "show", 1, [], now=2000)
-        self.assertEqual(await calendar_entries.owed_episodes("trakt", "trakt", 10), [])
+        self.assertEqual(await calendar_entries.owed_episodes("trakt", "trakt", 10, 3000), [])
 
     async def test_an_empty_answer_does_not_blank_the_feeds_episode_title(self):
         """The fill already stored a title from the calendar; a season the lookup
@@ -388,12 +388,12 @@ class ARefillDoesNotUndoTheEpisodeDrainTests(unittest.IsolatedAsyncioTestCase):
         await calendar_entries.store_episodes(
             "trakt", trakt_id, "show", 3,
             [{"number": 7, "title": "Chikhai Bardo", "runtime": 82}], now=2000)
-        self.assertEqual(await calendar_entries.owed_episodes("trakt", "trakt", 10), [])
+        self.assertEqual(await calendar_entries.owed_episodes("trakt", "trakt", 10, 3000), [])
 
         await self._fill(3000)          # the span refills, exactly as it does daily
 
         self.assertEqual(
-            await calendar_entries.owed_episodes("trakt", "trakt", 10), [],
+            await calendar_entries.owed_episodes("trakt", "trakt", 10, 3000), [],
             "a refill put an answered episode back on the owed list")
         records, *_ = await calendar_entries.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
@@ -405,4 +405,130 @@ class ARefillDoesNotUndoTheEpisodeDrainTests(unittest.IsolatedAsyncioTestCase):
         guard would have turned "do not demote" into "never look at all"."""
         await self._fill(1000)
         await self._fill(3000)
-        self.assertEqual(len(await calendar_entries.owed_episodes("trakt", "trakt", 10)), 1)
+        self.assertEqual(len(await calendar_entries.owed_episodes("trakt", "trakt", 10, 3000)), 1)
+
+
+class EpisodesFallDueAgainTests(unittest.IsolatedAsyncioTestCase):
+    """Answering a season once is not answering it for ever.
+
+    Episode facts are CORRECTED AFTER AIR at least as often as they are
+    published before it: a mystery-box show ships "Episode 7" and a placeholder
+    overview, and the real title arrives once people have watched. So the clock
+    is keyed on when the episode AIRED, not on when it was fetched, and the week
+    behind an airing is the fast tier rather than the first thing to go cold.
+    """
+
+    async def asyncSetUp(self):
+        migrated_db("calduelevel2")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    def test_an_upcoming_episode_is_on_the_fast_tier(self):
+        now = int(AIR) - 30 * 86400
+        self.assertEqual(calendar_entries.episode_stale_after(AIR, now),
+                         now + 86400)
+
+    def test_the_week_after_air_is_still_the_fast_tier(self):
+        now = int(AIR) + 3 * 86400
+        self.assertEqual(calendar_entries.episode_stale_after(AIR, now),
+                         now + 86400)
+
+    def test_a_settled_episode_drops_to_the_slow_tier(self):
+        now = int(AIR) + 30 * 86400
+        self.assertEqual(calendar_entries.episode_stale_after(AIR, now),
+                         now + 30 * 86400)
+
+    def test_an_undated_episode_is_treated_as_upcoming(self):
+        """The cheap direction to be wrong in: an airing the feed could not pin
+        down is far likelier to be imminent than settled, and parking it on the
+        slow tier would freeze a placeholder title for a month."""
+        self.assertEqual(calendar_entries.episode_stale_after(None, 5000),
+                         5000 + 86400)
+
+    async def _fill(self, now):
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record("severance", 3, 7, AIR)], 600, now,
+            sources=["trakt"], asked=["trakt"])
+
+    async def test_an_answered_season_comes_back_once_its_row_falls_due(self):
+        await self._fill(int(AIR))
+        trakt_id = abs(hash("severance")) % 9999
+        answered_at = int(AIR) + 3600
+        await calendar_entries.store_episodes(
+            "trakt", trakt_id, "show", 3,
+            [{"number": 7, "title": "Episode 7"}], now=answered_at)
+
+        self.assertEqual(
+            await calendar_entries.owed_episodes("trakt", "trakt", 10,
+                                                 answered_at + 3600),
+            [], "a season answered an hour ago was asked for again")
+
+        due = await calendar_entries.owed_episodes(
+            "trakt", "trakt", 10, answered_at + 2 * 86400)
+        self.assertEqual(due, [(trakt_id, "show", 3)],
+                         "an aired episode never came back for its correction")
+
+    async def test_never_answered_seasons_take_the_batch_first(self):
+        """With a fixed batch size the two compete, and letting re-reads go first
+        would starve the first pass on a large calendar — a season nobody has
+        looked up is showing placeholder facts to somebody right now."""
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record("severance", 3, 7, AIR), _record("shrinking", 2, 4, AIR)],
+            600, int(AIR), sources=["trakt"], asked=["trakt"])
+        settled = abs(hash("severance")) % 9999
+        fresh = abs(hash("shrinking")) % 9999
+        await calendar_entries.store_episodes(
+            "trakt", settled, "show", 3, [{"number": 7}], now=int(AIR))
+
+        owed = await calendar_entries.owed_episodes(
+            "trakt", "trakt", 1, int(AIR) + 2 * 86400)
+        self.assertEqual(owed, [(fresh, "show", 2)])
+
+
+class BacklogCountTests(unittest.IsolatedAsyncioTestCase):
+    """The number a reader watches count down has to be the work being done.
+
+    Both drains log only what they just DID, so "filled 121 episodes across 25
+    seasons" reads identically whether 26 seasons remain or twenty thousand. A
+    count that disagreed with the batch would tell a reader nothing except that
+    one of the two was lying — which is why the two come from one query.
+    """
+
+    async def asyncSetUp(self):
+        migrated_db("calbacklog")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def test_the_count_matches_what_the_batch_would_hand_out(self):
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record(name, 1, n, AIR + n * 3600)
+             for name in ("severance", "shrinking", "silo") for n in (1, 2)],
+            600, int(AIR), sources=["trakt"], asked=["trakt"])
+
+        now = int(AIR) + 3600
+        uncapped = await calendar_entries.owed_episodes("trakt", "trakt", 999, now)
+        self.assertEqual(
+            await calendar_entries.owed_season_count("trakt", "trakt", now),
+            len(uncapped))
+        self.assertEqual(len(uncapped), 3, "one row per season, not per airing")
+
+    async def test_the_count_falls_as_the_drain_answers(self):
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record("severance", 1, 1, AIR), _record("shrinking", 1, 1, AIR)],
+            600, int(AIR), sources=["trakt"], asked=["trakt"])
+        now = int(AIR) + 3600
+        self.assertEqual(
+            await calendar_entries.owed_season_count("trakt", "trakt", now), 2)
+
+        await calendar_entries.store_episodes(
+            "trakt", abs(hash("severance")) % 9999, "show", 1,
+            [{"number": 1, "title": "Chikhai Bardo"}], now=now)
+
+        self.assertEqual(
+            await calendar_entries.owed_season_count("trakt", "trakt", now), 1)

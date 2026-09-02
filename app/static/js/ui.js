@@ -137,3 +137,47 @@ function closeModal(id) {
         try { media.pause(); } catch (e) { /* a detached element cannot pause */ }
     });
 }
+
+
+// A SELECT WHOSE VALUE IS PART OF THE URL MUST NOT SURVIVE A RESTORE SAYING
+// OTHERWISE. `autocomplete="off"` in the markup handles the browser reapplying a
+// control's value over a freshly parsed page; it has nothing to say about the
+// two RESTORES that hand back a whole DOM:
+//
+//   - the back/forward cache, which returns the page exactly as it was left,
+//     including the choice the visitor made a moment before navigating away;
+//   - htmx's history cache, which serves a boosted Back from a snapshot and
+//     makes no request at all.
+//
+// Both put a select on screen naming a view the page is not showing, and because
+// these selects act on `change`, picking that same entry back fires no event —
+// so that view becomes unreachable until a third one is chosen first. The share
+// page shows it plainly: Back leaves the wrong endpoint named, and only F5
+// clears it.
+//
+// OPT-IN VIA data-url-state, NOT EVERY SELECT ON THE PAGE. The calendar's card
+// style and day packing are saved preferences that change nothing about the URL,
+// and a restored page showing the visitor's own saved choice is CORRECT — this
+// would revert it. The rule is narrow on purpose: it is for a control whose value
+// is a fact about the address bar.
+function resyncUrlStateSelects() {
+    document.querySelectorAll('select[data-url-state]').forEach(select => {
+        // The `selected` ATTRIBUTE, which is what the server rendered, rather
+        // than the current value, which is what a restore may have overwritten.
+        // `defaultSelected` reflects the attribute and no user interaction
+        // changes it, so this is the page's own answer even on a restored DOM.
+        const declared = Array.from(select.options).find(o => o.defaultSelected);
+        if (declared && select.value !== declared.value) select.value = declared.value;
+    });
+}
+
+window.addEventListener('pageshow', event => {
+    // `persisted` is the bfcache restore. The plain load case needs nothing —
+    // the markup is what it says — but running it anyway would cost a query
+    // selector on every page for no reason.
+    if (event.persisted) resyncUrlStateSelects();
+});
+
+// htmx's own history restore, which is a different path from the bfcache and
+// fires no pageshow at all.
+document.body.addEventListener('htmx:historyRestore', resyncUrlStateSelects);

@@ -55,7 +55,12 @@
         {% if source %}<input type="hidden" name="source" value="{{ source }}">{% endif %}
         <div class="control" title="Which calendar to show">
             <label for="shareEndpoint">📡</label>
-            <select id="shareEndpoint" name="endpoint" onchange="this.form.submit()">
+            {# autocomplete="off" throughout: the server decides what is selected
+               here, and a browser restores a control's live value over the
+               rendered `selected` on history navigation and on reload. Since
+               these submit on `change`, a restored value the page is not showing
+               cannot be chosen back -- picking it fires no event. #}
+            <select id="shareEndpoint" name="endpoint" autocomplete="off" data-url-state onchange="this.form.submit()">
                 {% for ep in endpoints %}
                 <option value="{{ ep.key }}"{% if ep.key == endpoint_key %} selected{% endif %}>{{ ep.label }}</option>
                 {% endfor %}
@@ -63,7 +68,7 @@
         </div>
         <div class="control">
             <label for="shareCard">🎬</label>
-            <select id="shareCard" name="card" onchange="this.form.submit()">
+            <select id="shareCard" name="card" autocomplete="off" data-url-state onchange="this.form.submit()">
                 {% for style in card_styles %}
                 <option value="{{ style }}"{% if style == view.card_style %} selected{% endif %}>
                     {{ {'vertical': 'Poster on top', 'horizontal': 'Poster beside', 'poster': 'Poster only'}[style] }}
@@ -73,7 +78,7 @@
         </div>
         <div class="control">
             <label for="sharePacking">🗓️</label>
-            <select id="sharePacking" name="packing" onchange="this.form.submit()">
+            <select id="sharePacking" name="packing" autocomplete="off" data-url-state onchange="this.form.submit()">
                 {% for packing in day_packings %}
                 <option value="{{ packing }}"{% if packing == view.day_packing %} selected{% endif %}>
                     {{ 'Stacked' if packing == 'stacked' else 'Packed beside' }}
@@ -83,7 +88,7 @@
         </div>
         <div class="control" title="Times and day grouping are rendered in this timezone">
             <label for="shareTz">🌐</label>
-            <select id="shareTz" name="tz" onchange="this.form.submit()">
+            <select id="shareTz" name="tz" autocomplete="off" data-url-state onchange="this.form.submit()">
                 {% for tzgroup in timezone_groups %}
                 <optgroup label="{{ tzgroup.group }}">
                     {% for tz in tzgroup['options'] %}
@@ -99,7 +104,7 @@
            values always send one. #}
         <div class="control" title="Items the owner marked not watching">
             <label for="shareHide">🚫</label>
-            <select id="shareHide" name="hidenw" onchange="this.form.submit()">
+            <select id="shareHide" name="hidenw" autocomplete="off" data-url-state onchange="this.form.submit()">
                 <option value="0"{% if not hide_not_watching %} selected{% endif %}>Showing all</option>
                 <option value="1"{% if hide_not_watching %} selected{% endif %}>Hiding not-watching</option>
             </select>

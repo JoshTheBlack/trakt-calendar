@@ -22,6 +22,7 @@ import time as _time
 from datetime import date, datetime
 from urllib.parse import urlencode
 
+from ... import perftrace
 from ...config import Settings
 from ...endpoints import Endpoint
 from ..base import Media, Record, Source
@@ -88,8 +89,9 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     t0 = _time.perf_counter()
     resp = await transport.send(transport.shared_client(), "GET", url,
                                 headers=transport.api_headers(settings, paginate=False))
-    _perf.debug("netGET    calendar/%s/%s+%dd -> %s  %.0fms", endpoint.key, start.isoformat(),
-                days, resp.status_code, (_time.perf_counter() - t0) * 1000.0)
+    _perf.debug("netGET    calendar/%s/%s+%dd -> %s  %.0fms%s", endpoint.key, start.isoformat(),
+                days, resp.status_code, (_time.perf_counter() - t0) * 1000.0,
+                perftrace.activity_tag())
     if resp.status_code == 401:
         raise TraktError("Trakt rejected the credentials (401). Check Client ID / Access Token in Settings.", 401)
     if resp.status_code != 200:

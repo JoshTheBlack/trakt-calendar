@@ -17,6 +17,7 @@ import httpx
 
 from ... import cache
 from ... import http_pool
+from ... import perftrace
 from ...config import Settings
 from ..base import SourceUnavailable
 
@@ -312,8 +313,9 @@ async def _fetch_json(client: httpx.AsyncClient, settings: Settings, url: str, p
         # own for the same reason — the affected caller degrades it deliberately.)
         logger.warning("Trakt GET %s failed: %s", path, exc)
         raise TraktError(f"Could not reach Trakt: {exc}") from exc
-    _perf.debug("netGET    %s -> %s  %.0fms%s", path, resp.status_code,
-                (_time.perf_counter() - t0) * 1000.0, " (fresh)" if fresh else " (miss)")
+    _perf.debug("netGET    %s -> %s  %.0fms%s%s", path, resp.status_code,
+                (_time.perf_counter() - t0) * 1000.0,
+                " (fresh)" if fresh else " (miss)", perftrace.activity_tag())
     if resp.status_code != 200:
         logger.warning("Trakt GET %s -> HTTP %s: %s", path, resp.status_code, resp.text[:200])
         if raise_errors:

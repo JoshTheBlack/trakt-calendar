@@ -36,6 +36,7 @@ import logging
 import time as _time
 from datetime import date, datetime, timedelta
 
+from ... import perftrace
 from ...config import Settings
 from ...endpoints import Endpoint
 from ..base import Media, Record, Source, SourceNotModified
@@ -155,8 +156,8 @@ async def _conditional_get(url: str, *, revalidate: bool = True) -> list | None:
         transport.cdn_client(), "GET", url,
         pool=transport.CDN_POOL, headers=headers, timeout=45,
     )
-    _perf.debug("netGET    %s -> %s  %.0fms", url, resp.status_code,
-               (_time.perf_counter() - t0) * 1000.0)
+    _perf.debug("netGET    %s -> %s  %.0fms%s", url, resp.status_code,
+               (_time.perf_counter() - t0) * 1000.0, perftrace.activity_tag())
 
     if resp.status_code == 304:
         # The validator is re-recorded so the file counts as LOOKED AT even
