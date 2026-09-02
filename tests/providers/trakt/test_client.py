@@ -137,6 +137,55 @@ class _FakeCache:
         self.writes.append((url, data))
 
 
+class _StaleOnlyCache(_FakeCache):
+    """A cache holding one EXPIRED row: the fresh read misses, the stale read
+    hits. That is the exact state the two no-network flags disagree about."""
+
+    def __init__(self, value):
+        super().__init__()
+        self.value = value
+
+    async def get_stale(self, url):
+        return self.value
+
+
+class TestTheTwoNoNetworkFlagsAreNotTheSameQuestion:
+    """`cache_only` and `only_if_cached` both refuse to call, and they answer
+    differently on an EXPIRED row — which is the only state where it shows.
+
+    `cache_only` is a public share request: stale beats a blank card, and that
+    caller can never trigger a refresh to fix a hard miss anyway.
+    `only_if_cached` is a background drain deciding whether an item costs a
+    request, on its way to refreshing something that has fallen due. Handing it
+    the expired response it already stored would let it mark that row fresh
+    without learning anything — the exact failure the due date exists to cause.
+    """
+
+    def _run(self, **kwargs):
+        cache = _StaleOnlyCache({"stale": True})
+        # A client that fails the test if it is reached at all: neither flag may
+        # produce a request, and asserting on the return value alone would not
+        # notice one.
+        class _Explode:
+            async def get(self, *a, **kw):
+                raise AssertionError("a no-network read made a request")
+
+        with patch.object(transport, "cache", cache):
+            return asyncio.run(transport.cached_get(_Explode(), SETTINGS, "x", {}, **kwargs))
+
+    def test_cache_only_serves_the_expired_row(self):
+        assert self._run(cache_only=True) == {"stale": True}
+
+    def test_only_if_cached_refuses_it(self):
+        assert self._run(only_if_cached=True) is None
+
+    def test_only_if_cached_wins_when_both_are_passed(self):
+        """A caller that says both is asking the stricter question; serving
+        stale to it would be the silent failure, so the stricter one is
+        checked first."""
+        assert self._run(cache_only=True, only_if_cached=True) is None
+
+
 class TestCachedGetStoresOnlyRealAnswers:
     """The caching half, now that it is separable from the call."""
 

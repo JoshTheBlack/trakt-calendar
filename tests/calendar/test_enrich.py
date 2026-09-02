@@ -1213,3 +1213,126 @@ class GivingUpOnATitleTests(EnrichTestCase):
         titles, _seasons = await calendar_enrich.backlog()
         self.assertEqual(titles, 1,
                          "a row holding a real answer was written off as given up")
+
+
+class ThePacingIsOnRequestsNotOnSeasonsTests(EnrichTestCase):
+    """The batch size exists to pace this instance against Trakt's rate limit,
+    and it was being charged for work that costs no request at all.
+
+    Measured on a real instance with 397 seasons owed: 362 of them (91%) were
+    already in the response cache. A queue needing 35 requests was paced as
+    though it needed 397 and took a quarter of an hour to do a few seconds of
+    outbound work.
+    """
+
+    SETTINGS = SimpleNamespace(trakt_catalogue_configured=True)
+
+    async def _owe(self, count, *, season_base=1):
+        """`count` distinct seasons owed a lookup, stored the way a fill stores
+        them."""
+        records = [
+            Record(source=Source.TRAKT, media=Media.SHOW, id=f"show-{n}",
+                   ids={"trakt": 5000 + n}, detail_url="u", title=f"Show {n}",
+                   air_ts=_AIR_TS, season=season_base + n, episode_number=1,
+                   episode_label="S01E01")
+            for n in range(count)
+        ]
+        await calendar_cache.store_window(
+            SHOWS.key, date(2026, 7, 6), records, 600, 1000,
+            sources=["trakt"], asked=["trakt"])
+
+    def _lookup(self, cached: set):
+        """A stand-in for fetch_season_episodes that answers from `cached` for
+        free and demands a request for anything else, recording both."""
+        calls = {"free": [], "network": []}
+
+        async def _fetch(settings, trakt_id, season, client=None, *,
+                         only_if_cached=False):
+            if only_if_cached:
+                calls["free"].append((trakt_id, season))
+                if (trakt_id, season) not in cached:
+                    return None
+                return [{"number": 1, "title": "From cache"}]
+            calls["network"].append((trakt_id, season))
+            return [{"number": 1, "title": "Fetched"}]
+
+        return _fetch, calls
+
+    async def test_a_queue_the_cache_can_answer_costs_no_requests(self):
+        await self._owe(40)
+        owed = await calendar_entries.owed_episodes("trakt", "trakt", 999, 2000)
+        fetch, calls = self._lookup(cached={(t, s) for t, _m, s in owed})
+
+        with patch("app.providers.trakt.detail.fetch_season_episodes", fetch):
+            written = await calendar_enrich.drain_episodes(self.SETTINGS, now=2000)
+
+        self.assertEqual(calls["network"], [],
+                         "a season the cache could answer still spent a request")
+        self.assertEqual(len(calls["free"]), 40)
+        self.assertEqual(written, 40, "40 seasons owed, 40 filled in one tick")
+
+    async def test_only_the_cache_misses_are_charged_against_the_budget(self):
+        await self._owe(40)
+        fetch, calls = self._lookup(cached=set())   # nothing cached: all misses
+
+        with patch("app.providers.trakt.detail.fetch_season_episodes", fetch):
+            await calendar_enrich.drain_episodes(self.SETTINGS, now=2000)
+
+        self.assertEqual(len(calls["network"]),
+                         calendar_enrich.EPISODE_DRAIN_BATCH_SIZE,
+                         "the request budget was not the thing being paced")
+
+    async def test_a_spent_budget_does_not_stop_the_free_ones_behind_it(self):
+        """`continue`, not `break`. Stopping at the first miss past the budget
+        would restore the old behaviour for everything behind it in the queue —
+        which is most of the queue, on the instance this was measured against."""
+        await self._owe(60)
+        owed = await calendar_entries.owed_episodes("trakt", "trakt", 999, 2000)
+        # The first 30 miss (exhausting a budget of 25); the rest are free.
+        cached = {(t, s) for t, _m, s in owed[30:]}
+        fetch, calls = self._lookup(cached=cached)
+
+        with patch("app.providers.trakt.detail.fetch_season_episodes", fetch):
+            written = await calendar_enrich.drain_episodes(self.SETTINGS, now=2000)
+
+        self.assertEqual(len(calls["network"]),
+                         calendar_enrich.EPISODE_DRAIN_BATCH_SIZE)
+        self.assertEqual(written, 55,
+                         "25 fetched plus 30 free; the free ones behind the "
+                         "exhausted budget were skipped")
+
+    async def test_the_local_limit_still_bounds_a_free_tick(self):
+        """"Free" is not "unbounded": an instance that has just stored a year of
+        calendar would otherwise hand one tick tens of thousands of rows."""
+        self.assertLess(calendar_enrich.EPISODE_DRAIN_BATCH_SIZE,
+                        calendar_enrich.EPISODE_DRAIN_LOCAL_LIMIT)
+        await self._owe(calendar_enrich.EPISODE_DRAIN_LOCAL_LIMIT + 20)
+        owed = await calendar_entries.owed_episodes("trakt", "trakt", 999, 2000)
+        fetch, calls = self._lookup(cached={(t, s) for t, _m, s in owed})
+
+        with patch("app.providers.trakt.detail.fetch_season_episodes", fetch):
+            await calendar_enrich.drain_episodes(self.SETTINGS, now=2000)
+
+        self.assertEqual(len(calls["free"]),
+                         calendar_enrich.EPISODE_DRAIN_LOCAL_LIMIT)
+
+    async def test_an_empty_season_is_not_a_cache_miss(self):
+        """Three different answers, and collapsing any two writes one of them
+        down as something it is not: [] is a season Trakt has nothing for and is
+        worth storing; None is "not without a request"; a raise is "could not
+        ask"."""
+        await self._owe(1)
+        seen = []
+
+        async def _fetch(settings, trakt_id, season, client=None, *,
+                         only_if_cached=False):
+            seen.append(only_if_cached)
+            return []
+
+        with patch("app.providers.trakt.detail.fetch_season_episodes", _fetch):
+            await calendar_enrich.drain_episodes(self.SETTINGS, now=2000)
+
+        self.assertEqual(seen, [True], "an empty answer was retried over the network")
+        self.assertEqual(
+            await calendar_entries.owed_episodes("trakt", "trakt", 10, 2000), [],
+            "a season answered from cache with no episodes was left owed")

@@ -1006,6 +1006,7 @@ async def cached_get(
     even past its TTL — or None. This is what lets a public page reuse data the
     owner's own views already fetched without a stranger being able to make this
     instance spend its Simkl budget on demand.
+
     """
     # TWO ADDRESSES, DELIBERATELY. The request carries the client id because
     # Simkl will not answer a cold one without it; the cached copy is filed

@@ -225,7 +225,8 @@ async def fetch_season_detail(settings: Settings, trakt_id, season: int, fresh: 
 
 
 async def fetch_season_episodes(settings: Settings, trakt_id, season: int,
-                                client: httpx.AsyncClient | None = None) -> list[dict]:
+                                client: httpx.AsyncClient | None = None,
+                                *, only_if_cached: bool = False) -> list[dict] | None:
     """Every episode of one season, with the per-episode facts a card and a modal
     can draw: title, overview, runtime, rating, votes, first_aired, type.
 
@@ -246,13 +247,24 @@ async def fetch_season_episodes(settings: Settings, trakt_id, season: int,
     spells out: "no episodes" and "could not ask" are different answers, and
     handing back the first for the second writes a fabricated blank over facts
     this app already had.
+
+    AND None FOR A THIRD ANSWER, reachable only under `only_if_cached`: "not
+    without a request". A caller pacing itself against Trakt's limits asks that
+    first, so the seasons already in the response cache cost it nothing and its
+    budget is spent on the ones that genuinely need the network. It is a
+    separate value from `[]` for the same reason `[]` is separate from a raise —
+    three different facts, and collapsing any two of them writes one of the
+    others down as something it is not.
     """
     c = client or transport.shared_client()
     try:
         episodes = await transport.cached_get(
             c, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
             ttl_seconds=SEASON_CACHE_TTL_SECONDS, raise_errors=True,
+            only_if_cached=only_if_cached,
         )
+        if only_if_cached and episodes is None:
+            return None
     except TraktError as exc:
         if getattr(exc, "status", None) == 404:
             return []

@@ -942,14 +942,33 @@ _drain_rerun_requested = False
 _drain_tasks: set[asyncio.Task] = set()
 
 
-# How many SEASONS one tick may look up. Seasons rather than episodes because
-# that is the shape of the call — Trakt answers a whole season's episode list in
-# one request — and small because each of those requests is bigger than a title
-# lookup and nobody is waiting on it. The Simkl batch beside this one is 300; the
-# difference is that this goes through Trakt's shared connection pool and its
-# 500-GET-per-5-minutes budget, and a calendar month names far fewer distinct
-# SEASONS than it does titles.
+# How many REQUESTS one tick may spend on season lookups — not how many seasons
+# it may deal with; see EPISODE_DRAIN_LOCAL_LIMIT below, which is the other half
+# of that sentence. Seasons rather than episodes because that is the shape of the
+# call: Trakt answers a whole season's episode list in one request. Small because
+# each of those is bigger than a title lookup and nobody is waiting on it. The
+# Simkl batch beside this one is 300; the difference is that this goes through
+# Trakt's shared connection pool and its 500-GET-per-5-minutes budget, and a
+# calendar month names far fewer distinct SEASONS than it does titles.
 EPISODE_DRAIN_BATCH_SIZE = 25
+
+# How many seasons one tick may WORK THROUGH, as opposed to spend requests on.
+#
+# THE TWO WERE ONE NUMBER AND THAT WAS THE BUG. The cap exists to pace this
+# instance against Trakt's rate limit, but it was applied to every owed season
+# whether or not that season cost a request — and the response cache answers a
+# great many of them for nothing. Measured on a real instance with 397 seasons
+# owed, 362 of them (91%) were already in the response cache: a queue that needed
+# 35 requests was being paced as though it needed 397, and took a quarter of an
+# hour to do a few seconds of outbound work.
+#
+# SIZED ON MEASURED LOCAL COST, not guessed. A cache-answered season is one
+# `cache.get` — a worker-thread round trip plus a zlib decompress — measured at
+# 0.33ms each over 400 real cached season responses, so this bound is worth about
+# 130ms of a heartbeat tick and none of it on the event loop. It exists at all
+# because "free" is not "unbounded": an instance that has just stored a year of
+# calendar could otherwise hand one tick tens of thousands of rows.
+EPISODE_DRAIN_LOCAL_LIMIT = 400
 
 
 @perftrace.job("episode lookup")
@@ -979,20 +998,46 @@ async def drain_episodes(settings, *, now: int | None = None) -> int:
     entries.episode_stale_after — because the titles and overviews this fills in
     are routinely corrected in the days after broadcast, not only published
     before it. Never-answered seasons still take the batch first.
+
+    THE PACING IS ON REQUESTS, NOT ON SEASONS, and those are very different
+    quantities: the response cache answers a large share of any queue for
+    nothing. Each season is asked for free first (`only_if_cached`), and only a
+    miss is charged against EPISODE_DRAIN_BATCH_SIZE — so a tick clears
+    everything already held and spends its budget on what actually needs the
+    network. The free ask is not free of ALL cost, which is what
+    EPISODE_DRAIN_LOCAL_LIMIT bounds.
     """
     if not settings.trakt_catalogue_configured:
         return 0
     ts = db.now() if now is None else now
     owed = await entries.owed_episodes(str(Source.TRAKT), "trakt",
-                                       EPISODE_DRAIN_BATCH_SIZE, ts)
+                                       EPISODE_DRAIN_LOCAL_LIMIT, ts)
     if not owed:
         return 0
     written = 0
+    requests_spent = 0
+    from_cache = 0
     for trakt_id, media, season in owed:
         if media != str(Media.SHOW):
             continue
         try:
-            episodes = await trakt_detail.fetch_season_episodes(settings, trakt_id, season)
+            # FREE FIRST. None here means "not without a request" — distinct
+            # from [], which is a season Trakt genuinely has nothing for and is
+            # a real answer worth storing.
+            episodes = await trakt_detail.fetch_season_episodes(
+                settings, trakt_id, season, only_if_cached=True)
+            if episodes is None:
+                if requests_spent >= EPISODE_DRAIN_BATCH_SIZE:
+                    # Budget gone. Not `break`: the seasons after this one may
+                    # still be answerable for free, and stopping here would put
+                    # the old behaviour back for everything behind the first
+                    # cache miss in the queue.
+                    continue
+                requests_spent += 1
+                episodes = await trakt_detail.fetch_season_episodes(
+                    settings, trakt_id, season)
+            else:
+                from_cache += 1
         except SourceUnavailable as exc:
             # One season's failure is not the batch's: the rest are independent
             # lookups and this one is owed again next tick.
@@ -1002,8 +1047,16 @@ async def drain_episodes(settings, *, now: int | None = None) -> int:
         written += await entries.store_episodes(
             str(Source.TRAKT), trakt_id, media, season, episodes, ts)
     if written:
-        logger.info("calendar episode drain: filled %d episode(s) across %d season(s).",
-                    written, len(owed))
+        # THE SPLIT IS THE POINT OF THE LINE NOW. "Filled 121 across 25" said
+        # nothing about what it cost, and the cost is the thing being paced:
+        # a tick that answered two hundred seasons out of the cache and spent
+        # three requests is a healthy tick, and it used to be indistinguishable
+        # from one that spent two hundred. `len(owed)` would be wrong here — it
+        # is the LOCAL limit's worth of candidates, most of which may not have
+        # been shows at all.
+        logger.info("calendar episode drain: filled %d episode(s) across %d season(s) "
+                    "— %d from cache, %d request(s) spent.",
+                    written, from_cache + requests_spent, from_cache, requests_spent)
     return written
 
 

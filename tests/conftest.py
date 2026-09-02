@@ -254,7 +254,11 @@ def no_background_episode_lookups(monkeypatch):
     itself patches `fetch_season_episodes` with what it wants and gets that
     instead, exactly as it would without this.
     """
-    async def _nothing(settings, trakt_id, season, client=None):
+    async def _nothing(settings, trakt_id, season, client=None, *,
+                       only_if_cached=False):
+        # [] rather than None even under `only_if_cached`: None means "not
+        # without a request", which would send the drain on to make the very
+        # call this fixture exists to prevent.
         return []
 
     from app.providers.trakt import detail as trakt_detail

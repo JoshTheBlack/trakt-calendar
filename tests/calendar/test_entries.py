@@ -259,7 +259,11 @@ class EpisodeLevelTests(unittest.IsolatedAsyncioTestCase):
         await self._store(1, 2, 3, 4, 5)
         calls = []
 
-        async def _fetch(settings, trakt_id, season, client=None):
+        async def _fetch(settings, trakt_id, season, client=None, *,
+                         only_if_cached=False):
+            # Answering the free ask as well as the paid one: the drain asks
+            # `only_if_cached` first, and a double that refused it would send
+            # every season down the network path and count the seasons twice.
             calls.append((trakt_id, season))
             return [{"number": n, "runtime": 40 + n} for n in range(1, 6)]
 

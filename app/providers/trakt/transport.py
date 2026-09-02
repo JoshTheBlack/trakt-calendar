@@ -342,6 +342,7 @@ async def cached_get(
     raise_errors: bool = False,
     private: bool = False,
     cache_only: bool = False,
+    only_if_cached: bool = False,
 ):
     """GET a Trakt path (with disk caching keyed by path+params). Returns parsed JSON or None.
 
@@ -360,6 +361,13 @@ async def cached_get(
     mirrors app/calendar/cache.py's load_window `not allow_fetch` bypass: a share visitor
     can never trigger a refresh, so stale-but-real data beats a blank card.
 
+    `only_if_cached=True` also never calls, but answers None on anything the
+    fresh read could not supply — NO stale fallback. It is the question a
+    BACKGROUND DRAIN asks before deciding whether an item costs a request:
+    answer for free, or say you cannot. The name is HTTP's own
+    (`Cache-Control: only-if-cached`), which means exactly this. The two flags
+    are not interchangeable in either direction, and the branch below says why.
+
     `private=True` means the RESPONSE DEPENDS ON WHOSE TOKEN ASKED — a watch
     history, a progress record, an activity beacon. The cache is keyed by URL and
     shared by the whole instance, so such a response must never be written to it:
@@ -373,6 +381,14 @@ async def cached_get(
         if cached is not None:
             _perf.debug("cacheHIT  %s", path)  # DEBUG: 1 line/season, noisy on warm loads
             return cached
+    if only_if_cached:
+        # NOT THE SAME AS cache_only, AND THE DIFFERENCE IS THE STALE FALLBACK.
+        # A caller asking this is trying to REFRESH something that has fallen
+        # due; answering it with the expired response it already stored would
+        # reset that row's clock without learning anything, which is the exact
+        # failure the due date exists to cause. So the fresh read above is the
+        # only chance, and a miss is an honest "not without a request".
+        return None
     if cache_only:
         # A public share request: never reach for the network. Fall back to
         # whatever's cached even past its TTL — stale beats a blank card, and
