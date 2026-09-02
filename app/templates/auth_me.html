@@ -337,6 +337,48 @@
     </div>
     {% endif %}
 
+    {# WHOSE DESCRIPTION OF A TITLE YOU READ. Shown only when more than one
+       service can describe one, for the same reason the tracker order above is:
+       with a single service answering there is no order to state and the control
+       could only confuse.
+
+       IT SITS BESIDE THE TRACKER'S ORDER because they are the same shape of
+       question — two services disagree, which one leads — and deliberately not
+       merged with it, because they settle different arguments and somebody can
+       reasonably answer them differently. #}
+    {% if metadata_order %}
+    <div class="auth-list" id="metadataOrder">
+      <div class="row">
+        <span class="label">Which service describes titles</span>
+        <div class="row-main">
+          <ol class="tracker-priority-list" id="metadataOrderList">
+            {% for entry in metadata_order %}
+            <li class="tracker-priority-item" data-source="{{ entry.source }}">
+              <span class="tracker-priority-name">{{ entry.label }}</span>
+              {# Buttons rather than drag alone, exactly as above: dragging is
+                 not reachable from a keyboard and this is a preference, not a
+                 game. #}
+              {% if not loop.first %}
+              <button class="btn-ghost tiny" type="button" data-move="up"
+                      aria-label="Move {{ entry.label }} up">↑</button>
+              {% endif %}
+              {% if not loop.last %}
+              <button class="btn-ghost tiny" type="button" data-move="down"
+                      aria-label="Move {{ entry.label }} down">↓</button>
+              {% endif %}
+            </li>
+            {% endfor %}
+          </ol>
+          <p class="auth-sub">When two services describe the same show differently — its
+            poster, overview, network or rating — the one at the top wins. A detail only
+            one of them has is still shown, whichever order this is in. Which services
+            appear at all is set in the calendar's 🔎 Filters.</p>
+          <span class="auth-error" id="metadataOrderError" role="alert"></span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
     {# WHOSE NUMBERS STILL COUNT. Unlinking a service stops it being ASKED, but
        the numbers it already contributed stay in the watch history and go on
        being shown — correctly flagged as belonging to a service nobody asked,
@@ -485,19 +527,26 @@ async function submitCredentialForm(form, url, ok) {
   }
 }
 
-// WHICH LINKED TRACKER DECIDES. One delegated listener on the list rather than a
-// handler per button, matching the pattern the rest of this app's rows use — the
-// buttons are re-rendered whenever the order changes, and per-button handlers
-// would have to be re-bound each time or silently stop working.
-const trackerPriorityList = document.getElementById('trackerPriorityList');
-if (trackerPriorityList) {
-  const err = document.getElementById('trackerPriorityError');
+// A LIST WHOSE ORDER IS A PREFERENCE. Two of them on this page — which linked
+// tracker decides a season, and whose description of a title you read — and they
+// are the same control over different endpoints, so they are one function rather
+// than two copies. The second was a copy for about ten minutes and that is
+// exactly how the copies in this app have always started.
+//
+// One delegated listener on the list rather than a handler per button, matching
+// the pattern the rest of this app's rows use: the buttons are re-rendered
+// whenever the order changes, and per-button handlers would have to be re-bound
+// each time or silently stop working.
+function reorderableList(listId, errorId, endpoint, failure) {
+  const list = document.getElementById(listId);
+  if (!list) { return; }
+  const err = document.getElementById(errorId);
 
   // Redrawn from the DOM's own order after every move, so the arrows a row is
   // allowed to show follow the position it is actually in. Rebuilding the list
   // from a separate array would be a second copy of the order to keep in step.
   const redraw = () => {
-    const items = [...trackerPriorityList.children];
+    const items = [...list.children];
     items.forEach((item, i) => {
       item.querySelectorAll('[data-move]').forEach((b) => b.remove());
       const name = item.querySelector('.tracker-priority-name').textContent;
@@ -516,21 +565,21 @@ if (trackerPriorityList) {
 
   const save = async () => {
     err.textContent = '';
-    const order = [...trackerPriorityList.children].map((li) => li.dataset.source);
+    const order = [...list.children].map((li) => li.dataset.source);
     try {
-      const resp = await fetch('/api/me/tracker-order', {
+      const resp = await fetch(endpoint, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({order}),
       });
       const data = await resp.json().catch(() => ({}));
-      if (!resp.ok || !data.ok) { err.textContent = data.error || 'Could not save that order.'; }
+      if (!resp.ok || !data.ok) { err.textContent = data.error || failure; }
     } catch (e) {
       err.textContent = 'Could not reach the server.';
     }
   };
 
-  trackerPriorityList.addEventListener('click', (e) => {
+  list.addEventListener('click', (e) => {
     const button = e.target.closest('[data-move]');
     if (!button) { return; }
     const item = button.closest('.tracker-priority-item');
@@ -547,6 +596,11 @@ if (trackerPriorityList) {
     save();
   });
 }
+
+reorderableList('trackerPriorityList', 'trackerPriorityError',
+                '/api/me/tracker-order', 'Could not save that order.');
+reorderableList('metadataOrderList', 'metadataOrderError',
+                '/api/me/metadata-order', 'Could not save that order.');
 
 // WHOSE STORED NUMBERS STILL COUNT. Each box is one service; unchecked means
 // "I have moved off this one, stop counting what it left behind". The whole set

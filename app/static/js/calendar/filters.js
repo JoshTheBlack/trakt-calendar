@@ -16,6 +16,15 @@ async function openFilters() {
         document.getElementById('f_release_countries').value = p.movie_release_countries || '';
         setCertPicker(document.getElementById('f_release_types'), p.movie_release_types || '');
         document.getElementById('f_networks').value = (p.network_filter || []).join(', ');
+        // The service boxes are SERVER-RENDERED and come from a different row, so
+        // there is nothing to fetch for them — but a viewer who unticks one and
+        // then cancels would otherwise reopen the panel still showing the change
+        // they abandoned. `defaultChecked` is what the page was rendered with and
+        // no interaction changes it, which is the same property the calendar's
+        // own restored selects are put back from.
+        document.querySelectorAll('input[name="calendar_sources"]').forEach((box) => {
+            box.checked = box.defaultChecked;
+        });
     } catch (e) {
         console.error(e);
         toast('Could not load your filters', false);
@@ -36,6 +45,13 @@ function clearFilters() {
     ['f_show_certifications', 'f_movie_certifications', 'f_release_types'].forEach(id => {
         clearCertPicker(document.getElementById(id));
     });
+    // "Clear all" means "narrow nothing", so every service comes back on rather
+    // than every box clearing — an unticked box here is a NARROWING, and leaving
+    // them cleared would be the one control that read the button backwards. It
+    // is also the only state the save would refuse.
+    document.querySelectorAll('input[name="calendar_sources"]').forEach((box) => {
+        box.checked = true;
+    });
 }
 
 async function saveFilters(event) {
@@ -49,7 +65,29 @@ async function saveFilters(event) {
         movie_release_types: readCertPicker(document.getElementById('f_release_types')),
         network_filter: document.getElementById('f_networks').value
     };
+    // WHICH SERVICES SHOW IS A SEPARATE REQUEST because it is a separate row:
+    // the narrowing above belongs to this account's calendar preferences and
+    // this belongs to its source preferences, and one route writing both tables
+    // would put a second owner on each. The page reloads either way, so two
+    // sequential calls cost nothing a viewer can perceive.
+    const sourceBoxes = [...document.querySelectorAll('input[name="calendar_sources"]')];
     try {
+        if (sourceBoxes.length) {
+            const chosen = sourceBoxes.filter((b) => b.checked).map((b) => b.value);
+            const res = await fetch('/api/me/calendar-sources', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sources: chosen })
+            });
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok || !d.ok) {
+                // Refused BEFORE the filters are written, so the two cannot land
+                // half-applied: unticking everything is the one refusal here and
+                // it leaves the panel exactly as the viewer left it.
+                toast(d.error || 'Could not save which services show', false);
+                return false;
+            }
+        }
         const res = await fetch('/api/me/prefs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

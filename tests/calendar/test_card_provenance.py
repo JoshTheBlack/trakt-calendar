@@ -205,7 +205,7 @@ class ADisagreementIsDrawnWhereThereIsOneTests(unittest.TestCase):
         html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, title="Another Title"),
-            prefs=source_prefs.SourcePrefs(user_id=1, precedence={"default": "simkl"}))
+            prefs=source_prefs.SourcePrefs(user_id=1, metadata_order=["simkl"]))
         self.assertIn('data-field="title" data-source="simkl"', html)
         self.assertIn("Another Title", html)
 
@@ -307,7 +307,7 @@ class BothServicesPagesAreOfferedTests(unittest.TestCase):
         html = _card_html(
             _record(Source.TRAKT),
             _record(Source.SIMKL, rating=7.9),
-            prefs=source_prefs.SourcePrefs(user_id=1, precedence={"default": "simkl"}))
+            prefs=source_prefs.SourcePrefs(user_id=1, metadata_order=["simkl"]))
         order = re.findall(r'title="View on (\w+)"', html)
         self.assertEqual(order, ["Trakt", "Simkl"])
 

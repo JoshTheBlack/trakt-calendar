@@ -4,6 +4,10 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## 🏷️ [1.2.1] - Unreleased
 
+### Changed
+- 🔀 **The Sources screen is gone, and its two useful questions moved to where you already answer that kind of thing.** Which services show on your calendar is a tick-box in 🔎 **Filters**, beside the genre and certification narrowing it works exactly like. Which service's description you read — its poster, overview, network and rating — is an order on your 👤 **Account** page, beside the one that already says which tracker decides a season. Everything else that screen asked has been dropped: naming a different service per FIELD, restating the choice per calendar, and telling the tracker which services to read when the ones you have linked already said it. Any preference you had stated for a service overall is carried across.
+- 🖼️ **A shared link's preview picture now shows the same artwork the page does.** It resolved posters from TMDB whichever service your calendar was actually drawing, so a link could advertise a picture of a show that looked nothing like the one on the page behind it. Posters are now filed per service and picked in your own order.
+
 ### Fixed
 - 🖼️ **A calendar card whose describing service can no longer be reached now shows what was last known about it, instead of going blank.** Pulling a credential used to erase a row's details the moment the cached answer expired, even though the app had perfectly good information from before. It now draws what it has and says which service it can no longer ask.
 - 🔗 **A card's link to Trakt no longer opens Trakt's front page instead of the title.** When there was no slug on hand to build a proper link, it now falls back to the numeric id, which Trakt resolves just as well.
@@ -16,6 +20,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### 🥚
 - It can go looking somewhere it hadn't thought to before, when the first place comes up empty-handed.
+- It knows which of the two you'd rather hear from, and asks in that order without being reminded.
 - Where the two of them number differently, it's learned to tell which one means what — and to fill in what one left blank from what the other already knew.
 - Looking ahead at a month that hadn't started yet used to quietly add everything to it. Looking is just looking, now.
 - It doesn't need to read everything again just to notice what changed since it last asked.

@@ -1211,7 +1211,13 @@ class AssembleRangeTests(CacheTestCase):
         self.assertEqual(meta["total"], 2)
         self.assertEqual(meta["watching"], 1)
         self.assertEqual(meta["not_watching"], 1)
-        self.assertEqual(set(meta["show_ids"]), {"a", "b"})
+        # THE COUNTS ABOVE PROVE THE LEGACY MARK STILL MATCHES: `b` was marked
+        # under the id a card used to carry, and it is still counted. What the
+        # id list is SPELLED in is the mark key, because this list is what the
+        # is-new diff compares between visits and it may not move when a viewer
+        # reorders their sources. These fixtures name no shared id space, so the
+        # key falls back to source-and-id.
+        self.assertEqual(set(meta["show_ids"]), {"trakt:a", "trakt:b"})
         self.assertFalse(meta["partial"])  # complete month
 
     async def test_read_month_serves_partial_data_without_raising(self):

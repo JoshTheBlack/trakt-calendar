@@ -573,7 +573,6 @@ TMDB_CONTENT_PAGES = {
     "distrakt.html",        # tracker rows: network logos
     "ranker.html",          # the board: poster tiles
     "pick.html",            # the month picker, same chrome as the calendar
-    "sources.html",
     "admin.html",
     "auth_me.html",
 }

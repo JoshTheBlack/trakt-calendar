@@ -355,11 +355,15 @@ class TestIdentityWaterfall:
             parse_item_key(bad)
 
 
-# A preference that admits everything, the set of every service name, and a
-# Settings carrying a usable credential for both — the three arguments the
-# selector takes, spelled once because most of these tests vary exactly one of
-# them.
-_ALL_SOURCES = prefs.SourcePrefs(user_id=1, tracker_source=prefs.BOTH)
+# A preference, the set of every service name, and a Settings carrying a usable
+# credential for both — the three arguments the selector takes, spelled once
+# because most of these tests vary exactly one of them.
+#
+# THE PREFERENCE NO LONGER NARROWS THE TRACKER AT ALL, which is why this one is
+# the bare default: reading somebody's history needs their token, so what they
+# have LINKED is the whole statement, and a second one beside it could only
+# agree with the links or contradict them.
+_ALL_SOURCES = prefs.SourcePrefs(user_id=1)
 _ALL_NAMES = frozenset(str(source) for source in providers.Source)
 _CONFIGURED = Settings(trakt_client_id="c", trakt_access_token="t",
                        simkl_client_id="c", simkl_access_token="t")
@@ -381,18 +385,22 @@ class TestTrackerPort:
         ports = providers.for_tracker_ports(_ALL_SOURCES, _ALL_NAMES, _CONFIGURED)
         assert ports[0][0] is Source.TRAKT
 
-    def test_a_preference_naming_one_source_admits_only_that_one(self):
+    def test_the_links_are_the_whole_of_what_is_asked(self):
+        """A service this account has not connected has nothing to answer with,
+        so it is not asked. This used to be a preference AND the links; the
+        preference is gone and the links are what remain, which is what they
+        always actually meant."""
         ports = providers.for_tracker_ports(
-            prefs.SourcePrefs(user_id=1, tracker_source=str(Source.SIMKL)),
-            _ALL_NAMES, _CONFIGURED)
+            _ALL_SOURCES, {str(Source.SIMKL)}, _CONFIGURED)
         assert [source for source, _p in ports] == [Source.SIMKL]
 
-    def test_auto_follows_the_links(self):
-        """`auto` is the default and asks whatever the account has connected, so
-        an account with one service is on exactly the path it always was."""
+    def test_an_account_with_one_link_is_on_the_path_it_always_was(self):
         ports = providers.for_tracker_ports(
             prefs.SourcePrefs(user_id=1), {str(Source.TRAKT)}, _CONFIGURED)
         assert [source for source, _p in ports] == [Source.TRAKT]
+
+    def test_an_account_with_no_links_is_asked_nothing(self):
+        assert providers.for_tracker_ports(_ALL_SOURCES, set(), _CONFIGURED) == []
 
     def test_an_unconfigured_source_is_never_asked(self):
         """Admitted by the preference and linked, but with no credential on this

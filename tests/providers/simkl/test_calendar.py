@@ -319,6 +319,54 @@ class DedupeTests(unittest.TestCase):
         self.assertEqual(len(simkl_calendar._dedupe_file_entries([first, second])), 2)
 
 
+class TwoShowsCanShareOneSlugTests(unittest.TestCase):
+    """A SLUG IS NOT AN IDENTITY, and this is the live case that proved it.
+
+    Measured against the CDN on 2026-09-02, 2026/8/tv.json and 2026/9/tv.json
+    between them carry two different shows whose slug is exactly `brothers`:
+    simkl 2976021, a Thai drama running 11 Aug to 14 Sep, and simkl 2415129, the
+    Apple TV comedy premiering 23 Sep. Different tmdb ids, overlapping runs,
+    neither a rename of the other.
+
+    WHAT IT COST WHEN THE SLUG WAS THE KEY. Storage is keyed on
+    (source, media, source_id), so both shows became one row and one set of
+    airings — a season 1 holding two different S01E01s. The rule that a fill may
+    not demote what enrichment learned then locked it in: the drama enriched
+    first, the comedy's fill overwrote the title and ids but could not touch the
+    country, and the row ended up claiming to be the comedy while carrying the
+    drama's country. A viewer excluding Thailand lost an American show.
+    """
+
+    def _entry(self, simkl_id, slug, tmdb, when):
+        return {"date": when, "title": "Brothers",
+                "ids": {"simkl_id": simkl_id, "slug": slug, "tmdb": tmdb},
+                "episode": {"season": 1, "episode": 1}}
+
+    def test_two_shows_sharing_a_slug_keep_separate_identities(self):
+        drama = simkl_calendar.to_show_record(
+            self._entry(2976021, "brothers", "299801", "2026-08-11T20:00:00-04:00"))
+        comedy = simkl_calendar.to_show_record(
+            self._entry(2415129, "brothers", "250203", "2026-09-23T20:00:00-04:00"))
+        self.assertNotEqual(drama.id, comedy.id)
+        self.assertEqual({drama.id, comedy.id}, {"2976021", "2415129"})
+
+    def test_the_slug_is_still_addressable(self):
+        """It is kept in `ids` — a way to ADDRESS the title, which is what it was
+        always good for, rather than the thing storage is keyed on."""
+        record = simkl_calendar.to_show_record(
+            self._entry(2415129, "brothers", "250203", "2026-09-23T20:00:00-04:00"))
+        self.assertEqual(record.ids.get("slug"), "brothers")
+        self.assertEqual(record.ids.get("simkl"), 2415129)
+
+    def test_an_entry_with_no_id_still_falls_back_to_its_slug(self):
+        """Better a slug than nothing: an entry this app cannot key at all is an
+        entry it cannot store."""
+        record = simkl_calendar.to_show_record(
+            {"date": "2026-09-23T20:00:00-04:00", "title": "Brothers",
+             "ids": {"slug": "brothers"}, "episode": {"season": 1, "episode": 1}})
+        self.assertEqual(record.id, "brothers")
+
+
 class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
     """The port: one archive file per (year, month) needed, conditional GET,
     and the endpoint-to-file-and-derivation mapping."""
@@ -349,7 +397,8 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
             return [_tv_entry(simkl_id=1)] if "tv.json" in url else [_tv_entry(simkl_id=2, slug="b")]
         with patch("app.providers.simkl.calendar._conditional_get", side_effect=fake_get):
             records = await simkl_calendar.fetch_window(SHOWS, SETTINGS, date(2026, 7, 6), 7)
-        self.assertEqual({r.id for r in records}, {"a-show", "b"})
+        # BY SIMKL ID, NOT SLUG: two live shows share the slug `brothers`.
+        self.assertEqual({r.id for r in records}, {"1", "2"})
 
     async def test_an_anime_film_lands_on_the_movies_endpoint(self):
         """Shiranuhi's shape: in anime.json, marked `anime_type: "movie"`, and
@@ -419,7 +468,7 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
             movies = await simkl_calendar.fetch_window(MOVIES, SETTINGS, date(2026, 7, 6), 7)
             series = await simkl_calendar.fetch_window(SHOWS, SETTINGS, date(2026, 7, 6), 7)
         self.assertEqual(movies, [])
-        self.assertEqual([r.id for r in series], ["unlabelled"])
+        self.assertEqual([r.id for r in series], ["55"])
 
     async def test_shows_finales_is_not_answered(self):
         """Not in Capabilities.endpoints (no such concept exists on the

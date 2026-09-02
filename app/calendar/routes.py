@@ -130,7 +130,8 @@ def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
     land where the day really is) if it knows how many rows of cards are coming."""
     cap = _COLUMN_CAPS.get(card_style, _COLUMN_CAP_DEFAULT)
     for group in grouped:
-        visible = sum(1 for item in group["items"] if item.id not in not_watching)
+        visible = sum(1 for item in group["items"]
+                      if item.mark_key not in not_watching)
         shown = visible if hide_not_watching else len(group["items"])
         group["cols"] = max(1, min(shown, cap))
         group["collapsed"] = hide_not_watching and visible == 0
@@ -194,12 +195,7 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     saved = await source_prefs.load(user.user_id)
     requested = request.query_params.get("source")
     if requested and source_prefs.is_selection(requested):
-        # The override replaces the account-wide value AND clears the per-
-        # endpoint ones: a link that says "show me Trakt instead" has to mean
-        # that on the calendar the reader is looking at, and a stored override
-        # for that endpoint would quietly win over the thing they just clicked.
-        return dataclasses.replace(saved, calendar_source=requested,
-                                   endpoint_sources={})
+        return dataclasses.replace(saved, calendar_source=requested)
     return saved
 
 
@@ -242,9 +238,11 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     here out of the query string rather than out of the stored row. `?source=`
     has always been a transient override (see `_viewer_source_selection`); this
     is the way to reach it without typing one. Choosing something re-reads THIS
-    page and writes nothing — the account's answer is stated on /sources, in one
-    place, and a control on the calendar that quietly rewrote it would change
-    every other view the account has as a side effect of a look.
+    page and writes nothing — the account's answer is stated once, in the 🔎
+    Filters panel beside the rest of its per-viewer narrowing, and a control on
+    the toolbar that quietly rewrote it would change every other view the account
+    has as a side effect of a look. The two are deliberately not merged: this one
+    is "show me that for a moment", the panel is "this is what my calendar is".
 
     THE FIRST OPTION IS THE STORED ANSWER, unnamed, because it is whatever the
     account said and this control is not the place that says it. It is also the
@@ -291,10 +289,10 @@ def _share_source_choices(endpoint, settings) -> list[dict]:
     so the panel and the toolbar disappear together.
 
     TICKS RATHER THAN A LIST OF ANSWERS, because a source selection is a SET.
-    It is what the Sources screen already draws for the account-wide version of
-    this same question, and it is the shape that survives a service being
-    registered: a list of answers would have to enumerate the combinations, and
-    those double per service.
+    It is the same shape the 🔎 Filters panel draws for the stored version of
+    this question, and it is the shape that survives a service being registered:
+    a list of answers would have to enumerate the combinations, and those double
+    per service.
 
     NOTHING TICKED IS THE DEFAULT AND MEANS "MY SOURCES" — the link carries no
     source at all and the page resolves the owner's own preference, which is
@@ -349,19 +347,13 @@ def _coverage_gap(prefs: source_prefs.SourcePrefs,
     then" when the honest answer is "this source does not reach that far", and
     only the route knows which of those happened.
 
-    IT ASKS THE ENDPOINT'S OWN SELECTION, not the account-wide one, because a
-    per-calendar override is what actually governs what this page will show. A
-    viewer whose movies calendar alone names one service would otherwise get an
-    unexplained empty month while the account-wide value said several services
-    were answering.
     """
     from .. import providers  # deferred: see the DECLARED_EDGES note for CALENDAR -> SOURCES
 
-    selection = prefs.calendar_selection(endpoint.key if endpoint is not None else None)
-    named_sources = source_prefs.named_sources(selection)
+    named_sources = source_prefs.named_sources(prefs.calendar_source)
     if named_sources is None or len(named_sources) != 1:
         return None, None
-    admitted = providers.calendar_sources(prefs=prefs, settings=settings, endpoint=endpoint)
+    admitted = providers.calendar_sources(prefs=prefs, settings=settings)
     if not admitted or any(calendar_cache.month_covered(p, year, month) for p in admitted):
         return None, None
     named = admitted[0].label
@@ -397,6 +389,8 @@ class MonthAssembly:
     # may be missing days. A warning, distinct from `error`.
     partial: bool = False
     new_ids: set[str] = dataclasses.field(default_factory=set)
+    # This viewer's marks as MARK KEYS, expanded once by the assembler.
+    not_watching_keys: set[str] = dataclasses.field(default_factory=set)
     delta: dict = dataclasses.field(default_factory=lambda: {"text": "", "kind": "none"})
     history: list[dict] = dataclasses.field(default_factory=list)
     # How many cards each show has this month. The stats tiles need it to keep
@@ -475,6 +469,12 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.total = meta["total"]
         assembly.watching = meta["watching"]
         assembly.not_watching_count = meta["not_watching"]
+        # THE EXPANDED MARKS, as mark keys — see cache.assemble_range, which is
+        # the one place a stored mark's spelling is translated. Everything the
+        # shell hands the template asks the plain membership question against
+        # this, so the page and the counts above cannot disagree about which
+        # cards are marked.
+        assembly.not_watching_keys = meta["not_watching_keys"]
         # A window Trakt couldn't supply is skipped rather than failing the
         # whole month; flag it so the page can say the month is incomplete
         # instead of silently showing a short one.
@@ -482,7 +482,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         assembly.unenriched = meta["unenriched"]
         assembly.release_filtered = meta["release_filtered"]
         assembly.show_counts = Counter(
-            item.id for group in assembly.grouped for item in group["items"])
+            item.mark_key for group in assembly.grouped for item in group["items"])
         # The is-new diff and its baseline commit belong to whoever produced
         # the cards, over the SERVER's full id list. Skipped on the error
         # paths: committing an empty month as the baseline would make the whole
@@ -542,7 +542,8 @@ def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
     """
     counts = {group["date"]: len(group["items"]) for group in assembly.grouped}
     shown = {
-        group["date"]: sum(1 for item in group["items"] if item.id not in not_watching)
+        group["date"]: sum(1 for item in group["items"]
+                           if item.mark_key not in not_watching)
         for group in assembly.grouped
     } if hide_not_watching else counts
     chips = []
@@ -619,8 +620,12 @@ async def calendar_page(request: Request):
     # more than one that ticks, and it costs the page less than asking for it
     # would.
     backlog_titles, backlog_seasons = await calendar_enrich.backlog()
+    # THE SAVED PREFERENCE, not `source_selection` above — that one carries the
+    # `?source=` override, and the panel must offer to make permanent what this
+    # account actually stated rather than what it is looking at right now.
+    saved_sources = await source_prefs.load(user.user_id)
 
-    _apply_day_layout(month_view.grouped, not_watching=not_watching,
+    _apply_day_layout(month_view.grouped, not_watching=month_view.not_watching_keys,
                       hide_not_watching=view["hide_not_watching"],
                       card_style=view["card_style"])
 
@@ -649,6 +654,20 @@ async def calendar_page(request: Request):
         # draws nothing at all rather than an inert control.
         "source_choices": _source_choices(
             endpoint, request.query_params.get("source"), settings),
+        # THE STORED ANSWER THE TOOLBAR CONTROL ABOVE IS A TEMPORARY OVERRIDE OF,
+        # drawn in the 🔎 Filters panel beside the genre and certification
+        # narrowing because it is the same kind of thing: a per-viewer decision
+        # applied at read over rows every viewer shares. Built from the SAVED
+        # preference and never from `?source=`, so a look at one service does not
+        # leave the panel offering to make that permanent.
+        #
+        # Empty on an instance with nothing to choose between, by the same rule
+        # the toolbar control uses — one service showing is not a choice.
+        "source_toggles": [
+            {"source": name, "label": label,
+             "on": saved_sources.admits_calendar(name)}
+            for name, label in _answering_services(endpoint, settings)
+        ],
         # The Share panel's own Sources control, which asks a narrower question
         # than the toolbar's — see _share_source_choices — and is likewise absent
         # when there is nothing to choose between. TWO SHAPES OF THE SAME ANSWER:
@@ -676,7 +695,9 @@ async def calendar_page(request: Request):
         # history log are all computed above and rendered with the page, so they
         # are right at first paint and stay right when only part of a month is on
         # screen. The card partial reads these two sets by membership.
-        "not_watching": not_watching,
+        # THE EXPANDED SET, so the template's membership tests agree with the
+        # counts beside them — see cache.assemble_range.
+        "not_watching": month_view.not_watching_keys,
         # WHETHER THIS PAGE MAY OFFER TO FILTER FROM A CARD'S OWN BADGES. True
         # wherever a signed-in viewer has filters of their own to add to, and
         # False on the public share page, which renders the same card for
@@ -688,9 +709,13 @@ async def calendar_page(request: Request):
                   "not_watching": month_view.not_watching_count},
         "delta": month_view.delta,
         "history": month_view.history,
-        "view_data": _view_data(month_view, not_watching),
+        # EVERY CONSUMER GETS THE EXPANDED SET, not the raw stored one. Mixing
+        # the two is how a mark hides a card but not its day's chip: the card
+        # asks about `mark_key` and the chip would be counting raw ids.
+        "view_data": _view_data(month_view, month_view.not_watching_keys),
         "day_chips": _day_chips(month_view, year, month, days,
-                                not_watching, view["hide_not_watching"]),
+                                month_view.not_watching_keys,
+                                view["hide_not_watching"]),
         "error": month_view.error,
         "partial": month_view.partial,
         "unenriched": month_view.unenriched,
@@ -847,10 +872,14 @@ async def calendar_day(request: Request):
                 prefs=source_selection,
             )
             sp.set(items=meta["total"])
+        # The expanded marks for THIS day's items, from the same assembler the
+        # shell used — a day fetched late must decide "is this marked" by exactly
+        # the rule the shell's own blocks were drawn with.
+        context["not_watching"] = meta["not_watching_keys"]
         # Same per-day presentation the shell's own blocks were rendered with, so a
         # day that arrives late is laid out correctly on arrival rather than being
         # re-packed (and, in hide mode, collapsed) a frame after it appears.
-        _apply_day_layout(grouped, not_watching=not_watching,
+        _apply_day_layout(grouped, not_watching=meta["not_watching_keys"],
                           hide_not_watching=prefs["hide_not_watching"],
                           card_style=prefs["card_style"] or settings.card_style)
     except TraktError as exc:
@@ -1117,8 +1146,8 @@ async def post_me_prefs(request: Request):
         # NUMBERS ONLY, AND A BAD TOKEN IS DROPPED HERE RATHER THAN AT READ.
         # The read path already ignores one it cannot parse, so storing it would
         # be storing a preference that silently does nothing forever — the same
-        # reason the Sources screen refuses an unknown selection on the way in
-        # while resolution tolerates one on the way out.
+        # reason /api/me/calendar-sources refuses an unknown service on the way
+        # in while resolution tolerates one on the way out.
         updates["movie_release_types"] = _release_type_spec(data["movie_release_types"])
     if "network_filter" in data:
         updates["network_filter"] = _network_list(data["network_filter"])

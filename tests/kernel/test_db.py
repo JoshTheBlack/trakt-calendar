@@ -436,11 +436,81 @@ class MigrationTests(DbTestCase):
         finally:
             conn.close()
 
+    async def test_migration_36_carries_the_stated_order_out_of_the_precedence_map(self):
+        """The one thing migration 36 is not free to drop.
+
+        `precedence_json` held a per-FIELD map AND a `default` — and the default
+        is exactly what the new column means, so a stated one has to survive. The
+        rest of the document does not: naming a service for the overview and
+        another for the poster was a question with a screen of its own and almost
+        no askers.
+
+        A BARE STRING IS A ONE-ELEMENT ORDER, which is how that document was
+        written before an order was possible; a document naming only fields
+        stated no default at all and correctly comes out empty. Verified against
+        a copy of a real database as well as here.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "precedence-carry.db"
+        path.unlink(missing_ok=True)
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None  # the runner issues its own BEGIN IMMEDIATE
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 35]):
+                db.migrate_sync(conn)
+            now = db.now()
+            shapes = {
+                901: '{"default": "simkl"}',
+                902: '{"default": ["simkl", "trakt"]}',
+                903: '{"default": "simkl", "fields": {"poster": "trakt"}}',
+                904: '{"fields": {"poster": "trakt"}}',
+                905: 'not json at all',
+                906: '{}',
+            }
+            for uid, document in shapes.items():
+                conn.execute(
+                    "INSERT INTO users (id, username, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?)", (uid, f"seed{uid}", now, now))
+                conn.execute(
+                    "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
+                    "precedence_json, endpoint_sources_json) "
+                    "VALUES (?, 'trakt+simkl', 'auto', ?, '{\"movies\": \"trakt\"}')",
+                    (uid, document))
+
+            db.migrate_sync(conn)
+
+            carried = {r["user_id"]: json.loads(r["metadata_order_json"]) for r in
+                       conn.execute("SELECT user_id, metadata_order_json FROM source_prefs")}
+            self.assertEqual(carried, {
+                901: ["simkl"],          # a bare name is a one-element order
+                902: ["simkl", "trakt"],  # an order survives whole
+                903: ["simkl"],          # the default carries, the field map does not
+                904: [],                 # fields only stated no default
+                905: [],                 # unreadable degrades rather than raising
+                906: [],
+            })
+            # WHICH SERVICES SHOW IS UNTOUCHED, and it is the one preference on
+            # this row that people actually state.
+            self.assertEqual(
+                {r["calendar_source"] for r in
+                 conn.execute("SELECT calendar_source FROM source_prefs")},
+                {"trakt+simkl"})
+            columns = {r["name"] for r in conn.execute("PRAGMA table_info(source_prefs)")}
+            self.assertNotIn("precedence_json", columns)
+            self.assertNotIn("tracker_source", columns)
+            self.assertNotIn("endpoint_sources_json", columns)
+        finally:
+            conn.close()
+
     async def test_migration_22_source_prefs_default_to_having_no_opinion(self):
-        """An account that has never stated a preference gets 'auto' for both
-        halves — every service it has linked — and an empty precedence map. The
-        row is only written when somebody states something, so the defaults are
-        what almost every account will ever read."""
+        """An account that has never stated a preference shows every service and
+        has no metadata order, so the app's declared order stands. The row is
+        only written when somebody states something, so the defaults are what
+        almost every account will ever read."""
         now = db.now()
         await db.execute(
             "INSERT INTO users (username, created_at, updated_at) "
@@ -449,8 +519,7 @@ class MigrationTests(DbTestCase):
         await db.execute("INSERT INTO source_prefs (user_id) VALUES (?)", (user_id,))
         row = await db.fetch_one("SELECT * FROM source_prefs WHERE user_id = ?", (user_id,))
         self.assertEqual(row["calendar_source"], "auto")
-        self.assertEqual(row["tracker_source"], "auto")
-        self.assertEqual(row["precedence_json"], "{}")
+        self.assertEqual(row["metadata_order_json"], "[]")
 
         # It belongs to the account and goes with it.
         await db.execute("DELETE FROM users WHERE id = ?", (user_id,))

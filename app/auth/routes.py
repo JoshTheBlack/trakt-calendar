@@ -76,16 +76,15 @@ TRAKT_RECONNECT_NOTICE = "trakt_reconnect_notice"
 def _source_prefs():
     """app/sources/prefs, imported at the point of use rather than at the top.
 
-    THE PLACEMENT IS THE WHOLE REASON THIS IS A FUNCTION. app/sources/routes.py
-    imports THIS package for its access levels, so naming that package at load
-    time here would close an import cycle — and auth is a layer every feature may
-    depend on, which only stays true while it names none of them at module level.
+    THE PLACEMENT IS THE WHOLE REASON THIS IS A FUNCTION. auth is a LAYER every
+    feature may depend on, and that only stays true while it names none of them
+    at module level; a feature package imported at the top of this file would
+    make the layer a peer.
 
-    Reached at all because the account page is where somebody says which of their
-    linked trackers decides a season is finished: it is the page that shows what
-    they have linked. The preference itself is stored with the other per-account
-    source preferences rather than in a second place that answers "which service
-    leads".
+    Reached at all because the account page is where the two ORDERS are stated —
+    which linked tracker decides a season is finished, and whose description of a
+    title you read. Both are stored with the other per-account source preferences
+    rather than in a second place that answers "which service leads".
     """
     from ..sources import prefs
     return prefs
@@ -607,6 +606,13 @@ async def me_page(request: Request):
     linked_trackers = [str(source) for source in providers.registered()
                        if str(source) in providers.tracker_sources() and str(source) in linked]
     tracker_prefs = await _source_prefs().load(user.user_id)
+    # THE SERVICES THAT DESCRIBE TITLES, which is not the same list as the linked
+    # trackers above: a calendar is read with the instance's own credentials or
+    # with none at all, so every source this instance can fill a calendar from
+    # describes titles for every account. Asked through the registry's own
+    # function so that an operator switching one off empties this control by the
+    # same rule that empties the calendar.
+    describing = [str(p.source) for p in providers.calendar_sources(settings=settings)]
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
@@ -648,6 +654,26 @@ async def me_page(request: Request):
             {"source": name, "label": providers.registered()[name].label}
             for name in tracker_prefs.tracker_order(linked_trackers)
         ] if len(linked_trackers) > 1 else [],
+        # WHOSE DESCRIPTION OF A TITLE A VIEWER READS, when two services describe
+        # the same one differently. The tracker's order above answers a different
+        # argument with the same shape — that one picks whose COUNT decides a
+        # season, this one whose overview, poster and network a card shows.
+        #
+        # NOT NARROWED TO WHAT IS LINKED, and this is where it differs sharply
+        # from the list above it. A calendar is read with the instance's own
+        # credentials or with none at all, so every registered calendar source
+        # describes titles for every account whether they have linked it or not
+        # — narrowing this to links would hide the choice from exactly the people
+        # who have one to make.
+        #
+        # ORDERED THROUGH THE SAME FUNCTION THE CALENDAR RESOLVES WITH
+        # (prefs.source_order), for the reason the tracker's list is: a screen
+        # with its own reading of the preference could disagree with the code
+        # acting on it, and a viewer would have no way to tell which was lying.
+        "metadata_order": [
+            {"source": name, "label": providers.registered()[name].label}
+            for name in tracker_prefs.source_order(describing)
+        ] if len(describing) > 1 else [],
         # WHOSE STORED NUMBERS STILL COUNT — every tracker service, linked or not.
         #
         # DELIBERATELY NOT NARROWED TO THE LINKED ONES, and narrowing it would
@@ -794,6 +820,84 @@ async def set_own_tracker_order(request: Request):
     except ValueError as exc:
         return authz.error(str(exc))
     return JSONResponse({"ok": True, "order": list(saved.tracker_priority)})
+
+
+@guard.post("/api/me/metadata-order", AuthLevel.SESSION)
+async def set_own_metadata_order(request: Request):
+    """State whose description of a title this account reads, when two services
+    describe the same one differently.
+
+    THE SAME SHAPE AS THE TRACKER ORDER BESIDE IT and deliberately so: stored
+    whole rather than as "promote this one", because with a third service
+    registered "Simkl first" says nothing about the other two. `source_prefs.save`
+    refuses a name this app has never heard of and one named twice.
+
+    IT IS A REORDERING AND NEVER A FILTER. Whether a service appears on this
+    account's calendar at all is a different question, stated in the calendar's
+    own filters panel; this only decides who leads among the ones that do. A
+    viewer who prefers a service that did not describe some title still sees the
+    title.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    order = data.get("order")
+    if not isinstance(order, list):
+        return authz.error("An order must be a list of service names.")
+    source_prefs = _source_prefs()
+    prefs = await source_prefs.load(user.user_id)
+    try:
+        saved = await source_prefs.save(dataclasses.replace(
+            prefs, metadata_order=[str(name) for name in order]))
+    except ValueError as exc:
+        return authz.error(str(exc))
+    return JSONResponse({"ok": True, "order": list(saved.metadata_order)})
+
+
+@guard.post("/api/me/calendar-sources", AuthLevel.SESSION)
+async def set_own_calendar_sources(request: Request):
+    """State which services this account's calendar shows.
+
+    IT IS A NARROWING AND IT BELONGS WITH THE OTHER NARROWINGS, which is why it
+    is stated in the calendar's own 🔎 Filters panel rather than on a screen of
+    its own. Excluding a service is the same KIND of act as excluding a genre:
+    both are read-time decisions over rows every viewer shares, neither changes
+    what is fetched or stored, and both take effect on the next page rather than
+    after a cache expires.
+
+    EVERY SERVICE SELECTED IS `auto` AND NOT A NAMED SET, and the difference
+    outlives this request. `auto` means "whatever there is, now and later", so an
+    instance that registers a third service starts showing it; a named set is a
+    choice made from the menu that existed at the time, and a third service is
+    not something the chooser agreed to. Somebody who ticks everything means the
+    first, which is also the state they started in.
+
+    NONE SELECTED IS REFUSED rather than stored. An empty calendar with no
+    explanation reads as a broken app, and the honest way to see nothing is to
+    stop opening the page. `source_prefs.save` would take it — the column can
+    hold any named set — so the refusal is here, where the intent is legible.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    names = data.get("sources")
+    if not isinstance(names, list):
+        return authz.error("Sources must be a list of service names.")
+    source_prefs = _source_prefs()
+    chosen = {str(name) for name in names}
+    available = {str(p.source) for p in providers.calendar_sources(settings=load_settings())}
+    unknown = chosen - available
+    if unknown:
+        return authz.error(f"This app has no calendar source called {sorted(unknown)[0]!r}.")
+    if not chosen:
+        return authz.error("At least one service has to be showing.")
+    selection = (source_prefs.AUTO if chosen == available
+                 else source_prefs.SEPARATOR.join(sorted(chosen)))
+    prefs = await source_prefs.load(user.user_id)
+    try:
+        saved = await source_prefs.save(dataclasses.replace(
+            prefs, calendar_source=selection))
+    except ValueError as exc:
+        return authz.error(str(exc))
+    return JSONResponse({"ok": True, "sources": saved.calendar_source})
 
 
 @guard.post("/api/me/tracker-retired", AuthLevel.SESSION)

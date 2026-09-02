@@ -583,9 +583,11 @@ async def warm_board_posters(board_uid: str, request: Request):
 
     pairs = [(item["media"], item["tmdb"]) for item in wanted if item["tmdb"]]
     # THE HEAVIEST THING THE RANKER ASKS FOR, and until now the least visible: up
-    # to MAX_WARM_ITEMS titles, each a provider lookup plus an image download and
-    # a Pillow re-encode. It is bounded in count but not in time, and a cold board
-    # pays all of it at once.
+    # to MAX_WARM_ITEMS titles, each a provider lookup plus an image download.
+    # It is bounded in count but not in time, and a cold board pays all of it at
+    # once. (It was heavier still until the resize moved to the image proxy —
+    # see app/media/posters.py — which took a Pillow decode and re-encode per
+    # title off this path.)
     with span("ranker.warm", n=len(pairs)) as sp:
         generated = await posters.ensure_posters(load_settings(), pairs)
         sp.set(generated=generated)

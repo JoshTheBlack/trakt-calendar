@@ -12,6 +12,7 @@ a finished card is addressed and swept by tests/calendar/test_share_card_cache.p
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import unittest
 import warnings
@@ -42,7 +43,7 @@ from tests.support import APP_DIR, AppTestCase, ORIGIN, calendar_records
 _ARTWORK = sorted((APP_DIR / "static" / "images").glob("*.png"))
 
 
-async def _no_warm(settings, refs) -> int:
+async def _no_warm(settings, refs, order=None) -> int:
     return 0
 
 
@@ -97,14 +98,20 @@ class ShareCardTestCase(AppTestCase):
                 endpoint, start, calendar_records(group, get_endpoint(endpoint)),
                 600, db.now(), sources=["trakt"]))
 
-    def write_poster(self, tmdb: int, *, media: str = "show", source: Path | None = None) -> Path:
-        """A poster on disk for (media, tmdb), as if it had already resolved.
+    def write_poster(self, tmdb: int, *, media: str = "show", source: Path | None = None,
+                     service: str = "trakt") -> Path:
+        """A poster on disk for (media, tmdb, service), as if it had resolved.
+
+        `service` is part of the key because two viewers with opposite artwork
+        precedence want different pictures for the same title — the default is
+        the first service in the declared order, which is what an owner with no
+        stated preference resolves to.
 
         The poster cache is one directory for the whole process, so anything
         written here is removed again afterwards rather than left to decide what
         another test's month looks like.
         """
-        path = posters.POSTER_DIR / media / f"{tmdb}.jpg"
+        path = posters.POSTER_DIR / media / f"{tmdb}.{service}.jpg"
         path.parent.mkdir(parents=True, exist_ok=True)
         with Image.open(source or _ARTWORK[tmdb % len(_ARTWORK)]) as raw:
             raw.convert("RGB").resize((posters.POSTER_W, posters.POSTER_H),
@@ -323,7 +330,7 @@ class CardPosterBoundTests(ShareCardTestCase):
         """Patches ensure_posters and returns the list of ref batches it saw."""
         seen: list[list] = []
 
-        async def _spy(settings, refs) -> int:
+        async def _spy(settings, refs, order=None) -> int:
             seen.append(list(refs))
             return 0
 
@@ -405,7 +412,7 @@ class CardPosterBoundTests(ShareCardTestCase):
         after Discord stopped listening is not a slower embed — it is no embed.
         What lands inside the budget is drawn; the rest is next request's
         problem."""
-        async def _slow(settings, refs) -> int:
+        async def _slow(settings, refs, order=None) -> int:
             await anyio.sleep(30)
             return 0
 
@@ -450,7 +457,7 @@ class PosterWarmTests(unittest.IsolatedAsyncioTestCase):
         which is the failure this shape exists to avoid."""
         seen: list[list] = []
 
-        async def _spy(settings, refs) -> int:
+        async def _spy(settings, refs, order=None) -> int:
             seen.append(list(refs))
             return 0
 
@@ -458,7 +465,8 @@ class PosterWarmTests(unittest.IsolatedAsyncioTestCase):
         with warnings.catch_warnings(record=True) as caught, \
                 patch.object(posters, "ensure_posters", _spy):
             warnings.simplefilter("always")
-            share_routes._spawn_poster_warm(self.a_view(), 1, [self.an_item("Show", 4242)], None)
+            share_routes._spawn_poster_warm(self.a_view(), 1, [self.an_item("Show", 4242)],
+                                            None, posters.DEFAULT_ORDER)
             self.assertTrue(share_routes._warm_tasks, "no task was created")
             await asyncio.gather(*list(share_routes._warm_tasks))
         self.assertEqual(seen, [[("show", 4242)]])
@@ -472,7 +480,7 @@ class PosterWarmTests(unittest.IsolatedAsyncioTestCase):
         started = anyio.Event()
         release = anyio.Event()
 
-        async def _blocking(settings, refs) -> int:
+        async def _blocking(settings, refs, order=None) -> int:
             started.set()
             await release.wait()
             return 0
@@ -480,9 +488,9 @@ class PosterWarmTests(unittest.IsolatedAsyncioTestCase):
         share_routes._warming.clear()
         with patch.object(posters, "ensure_posters", _blocking):
             view, items = self.a_view(), [self.an_item("Show", 4243)]
-            share_routes._spawn_poster_warm(view, 1, items, None)
+            share_routes._spawn_poster_warm(view, 1, items, None, posters.DEFAULT_ORDER)
             await started.wait()
-            share_routes._spawn_poster_warm(view, 1, items, None)
+            share_routes._spawn_poster_warm(view, 1, items, None, posters.DEFAULT_ORDER)
             self.assertEqual(len(share_routes._warm_tasks), 1)
             release.set()
             await asyncio.gather(*list(share_routes._warm_tasks))
@@ -656,6 +664,120 @@ class PageAndCardAgreeTests(ShareCardTestCase):
         self.assertIn("networks=Netflix", image)
         self.assertEqual(self.card_count("year=2026&month=8&networks=Netflix"),
                          self.page_total("year=2026&month=8&networks=Netflix"))
+
+
+class TheCardDrawsTheSameArtworkAsThePageTests(ShareCardTestCase):
+    # Imported here rather than at module scope, matching the other classes in
+    # this file that reach for the source layer.
+
+    """CLAUDE.md's share-card invariant, on the axis it was not being held to.
+
+    "A share link's preview picture renders the SAME view its page does" was
+    written about COUNTS and read as being about the view, and the artwork was
+    the half nobody was checking. It could not have held: the page draws
+    `Record.poster`, whatever the service filling that calendar published, while
+    the preview resolved TMDB-first regardless. For Halloween Wars that was a
+    genuinely different picture of a genuinely different-looking show — verified
+    against the live services rather than assumed, so this is not a case of one
+    of them being wrong.
+    """
+
+    def an_item(self, title: str, tmdb: int, source=None):
+        from app.providers.base import Item, Media, Source
+
+        return Item(source=source or Source.TRAKT, media=Media.SHOW,
+                    id=f"show:{title}", ids={"tmdb": tmdb}, detail_url="",
+                    air_date="2026-08-04", air_ts=4.0, air_display="",
+                    air_time="", day_of_week="", title=title, season=1,
+                    episode_number=1)
+
+    def _set_precedence(self, preference) -> None:
+        asyncio.run(db.execute(
+            "INSERT INTO source_prefs (user_id, metadata_order_json) VALUES (1, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET "
+            "metadata_order_json = excluded.metadata_order_json",
+            (json.dumps(preference),)))
+
+    def _order_used(self, preference=None) -> tuple:
+        from app.sources import prefs as source_prefs
+
+        """The order the card resolves artwork with, for an owner whose stored
+        precedence says `preference`."""
+        if preference is not None:
+            self._set_precedence(preference)
+        prefs = asyncio.run(source_prefs.load(1))
+        return share_routes._poster_order(prefs)
+
+    def test_the_order_is_the_owners_own_metadata_precedence(self):
+        """Asking `source_order` is asking the identical question the calendar
+        asks when it decides whose picture a card shows. Anything else would be
+        a second answer to one question, free to drift."""
+        self.assertEqual(self._order_used(["simkl", "trakt"])[:2], ("simkl", "trakt"))
+        self.assertEqual(self._order_used(["trakt", "simkl"])[:2], ("trakt", "simkl"))
+
+    def test_tmdb_is_the_backstop_and_never_the_default(self):
+        """It stays in the order — it is the only artwork the ranker's own
+        imported titles have, since they were never on anyone's calendar — but
+        it no longer decides what a share link advertises."""
+        order = self._order_used(["simkl", "trakt"])
+        self.assertEqual(order[-1], "tmdb")
+        self.assertNotEqual(order[0], "tmdb")
+
+    def test_an_owner_with_no_preference_still_gets_the_declared_order(self):
+        from app.providers.base import Source
+
+        order = self._order_used()
+        self.assertEqual(order, tuple(str(s) for s in Source) + ("tmdb",))
+
+    def test_the_card_draws_the_tile_of_the_service_the_page_RESOLVED(self):
+        """THE BUG THIS CLASS EXISTS FOR, AND THE OWNER'S ORDER IS NOT ENOUGH TO
+        CLOSE IT.
+
+        Artwork is resolved against the `show_posters` registry, which remembers
+        every service that has ever mentioned a tmdb id — including services that
+        do not describe this title on this calendar at all. Halloween Wars is
+        Simkl-only in one real stored calendar, so the page drew Simkl's picture;
+        the registry also held a Trakt row from some other read, the owner's
+        order put Trakt first, and the card advertised a different picture of a
+        different-looking show.
+
+        So the item's OWN source leads: it is what the page resolved, which makes
+        the two agree by construction rather than by both happening to prefer the
+        same service.
+        """
+        self.seed([self.an_entry("Two Pictures", 4, tmdb=7777)])
+        self.write_poster(7777, service="trakt", source=_ARTWORK[0])
+        self.write_poster(7777, service="simkl", source=_ARTWORK[1])
+        # The owner prefers Simkl's descriptions — but nothing Simkl says is on
+        # this calendar, so the card must still draw what the page drew.
+        self._set_precedence(["simkl", "trakt"])
+
+        drawn: list[share_card.Card] = []
+        real = share_card.build_card
+        with patch.object(share_card, "build_card",
+                          side_effect=lambda card: drawn.append(card) or real(card)),                 patch.object(posters, "ensure_posters", _no_warm):
+            resp = self.client.get(f"/s/{self.token}/og.jpg?year=2026&month=8")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(drawn), 1)
+        self.assertEqual([tile.poster.name for tile in drawn[0].tiles],
+                         ["7777.trakt.jpg"])
+
+    def test_the_owners_order_still_decides_what_follows(self):
+        """The lead is the item's own service; everything behind it is the
+        owner's preference, which is what answers "that service has no artwork
+        for this one, now what"."""
+        item = self.an_item("Two Pictures", 7777)
+        self.assertEqual(
+            share_routes._item_order(item, ("simkl", "trakt", "tmdb")),
+            ("trakt", "simkl", "tmdb"))
+
+    def test_the_lead_is_not_repeated_further_down_the_order(self):
+        """A duplicated entry would make `is_negative` ask about one service
+        twice and never reach the last one."""
+        item = self.an_item("Two Pictures", 7777)
+        order = share_routes._item_order(item, ("trakt", "simkl", "tmdb"))
+        self.assertEqual(order, ("trakt", "simkl", "tmdb"))
+        self.assertEqual(len(order), len(set(order)))
 
 
 class _FakeRequest:
@@ -1042,7 +1164,7 @@ class TheGridFillsFromTheRankingTests(ShareCardTestCase):
         cost a stat each and are drawn only if their artwork already landed."""
         asked: list[int] = []
 
-        async def _count(settings, refs) -> int:
+        async def _count(settings, refs, order=None) -> int:
             asked.append(len(refs))
             return 0
 

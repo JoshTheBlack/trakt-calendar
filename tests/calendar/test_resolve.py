@@ -158,7 +158,11 @@ class AMonthRendersExactlyAsItDidTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([i.id for i in grouped[0]["items"]], ["alpha", "beta"])
         self.assertEqual([i.id for i in grouped[1]["items"]], ["gamma"])
         self.assertEqual(meta["total"], 3)
-        self.assertEqual(meta["show_ids"], ["alpha", "beta", "gamma"])
+        # BY MARK KEY: this list is what the is-new diff compares between
+        # visits, so it may not be spelled in an id that moves when a viewer
+        # reorders their sources. See Item.mark_key.
+        self.assertEqual(meta["show_ids"],
+                         ["show:tmdb:11", "show:tmdb:22", "show:tmdb:33"])
         self.assertFalse(meta["partial"])
 
     async def test_the_same_month_regroups_for_a_viewer_further_west(self):

@@ -81,6 +81,7 @@ from . import enrich as calendar_enrich
 from . import entries
 from . import filter as calendar_filter
 from . import resolve as calendar_resolve
+from . import state as calendar_state
 from .. import db
 from .. import providers
 from ..media import artwork
@@ -1225,16 +1226,28 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
             for day, rows in groupby(items, key=lambda i: i.air_date)
         ]
 
-    nw = not_watching_ids or set()
-    not_watching_count = sum(1 for i in items if i.id in nw)
+    # THE ONE PLACE A VIEWER'S MARKS ARE TRANSLATED, and it is here because it is
+    # the one place that has both the marks and the items. A stored mark may name
+    # a title by whatever id the card carried when it was made; `marked_keys`
+    # turns that into mark keys, and everything downstream — this count, the
+    # grid, the day chips, the client's own bookkeeping — then asks the plain
+    # question. The expanded set travels in `meta` so the caller uses the same
+    # answer rather than expanding it a second time and possibly differently.
+    nw = calendar_state.marked_keys(not_watching_ids or set(), items)
+    not_watching_count = sum(1 for i in items if i.mark_key in nw)
     meta = {
         "total": len(items),
         "watching": len(items) - not_watching_count,
         "not_watching": not_watching_count,
+        "not_watching_keys": nw,
         # De-duped, first-airing order: one show airing a dozen times in a month
         # is one show as far as "which of these is new since last time" goes, and
         # this list is stored per user per view.
-        "show_ids": list(dict.fromkeys(i.id for i in items)),
+        # BY MARK KEY, not by the winning source's id: this list is what the
+        # is-new diff compares between visits, and an id that moves when a
+        # viewer reorders their sources would make every card on the month
+        # read as new. See Item.mark_key.
+        "show_ids": list(dict.fromkeys(i.mark_key for i in items)),
         "as_of": as_of,
         "partial": partial,
         # How many of THIS read's items survived only because of the

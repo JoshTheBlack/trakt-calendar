@@ -98,7 +98,7 @@ def registered() -> dict[Source, Provider]:
     return {source: _REGISTRY[source] for source in Source if source in _REGISTRY}
 
 
-def calendar_sources(*, prefs=None, settings=None, endpoint=None) -> list[Provider]:
+def calendar_sources(*, prefs=None, settings=None) -> list[Provider]:
     """Every source that could put something on this account's calendar, in
     declared order. THE SET THE CACHE FILL ASKS.
 
@@ -154,16 +154,11 @@ def calendar_sources(*, prefs=None, settings=None, endpoint=None) -> list[Provid
     exactly one source this is true of today; a second one earns its own question
     when it exists.
     """
-    endpoint_key = getattr(endpoint, "key", endpoint)
     out: list[Provider] = []
     for source, provider in registered().items():
         if not provider.capabilities.endpoints or provider.calendar_port is None:
             continue
-        # `endpoint` scopes the preference to ONE calendar, because a selection
-        # can be stated per calendar (app/sources/prefs.py's
-        # `calendar_selection`). None asks the account-wide question, which is
-        # what every caller that has no endpoint in hand gets.
-        if prefs is not None and not prefs.admits_calendar(source, endpoint_key):
+        if prefs is not None and not prefs.admits_calendar(source):
             continue
         if (settings is not None and source is Source.SIMKL
                 and not settings.simkl_public_calendar_enabled):
@@ -249,7 +244,11 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
     for source, provider in registered().items():
         if not provider.capabilities.private_user_data or provider.sync_port is None:
             continue
-        if not prefs.admits_tracker(source, linked):
+        # LINKED IS THE WHOLE OF IT NOW. There used to be an account
+        # preference here as well, asked alongside the links; reading somebody's
+        # history needs their token, so linking a service already IS the
+        # statement, and a second one could only agree with it or contradict it.
+        if str(source) not in (linked or ()):
             continue
         if not provider.is_configured(settings):
             continue

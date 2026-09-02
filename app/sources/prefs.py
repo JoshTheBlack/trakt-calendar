@@ -1,31 +1,39 @@
 """One account's source preferences, read and written.
 
-Backs the `source_prefs` table. Five facts live here:
+Backs the `source_prefs` table. Three facts live here:
 
-  - CALENDAR SOURCE and TRACKER SOURCE: which services each half of the app
-    asks. Separately, because they are separate decisions — somebody can
-    reasonably want every service's calendar and only one service's idea of what
-    they have watched. The two halves also read `auto` differently, and
-    `admits_calendar` below is where that is written down.
-  - PER-ENDPOINT CALENDAR SOURCE: the same choice again, narrowed to one
-    calendar. `endpoint_sources` below says why one account-wide value is not
-    enough.
-  - PRECEDENCE: when two services fill the same field with different values,
-    whose value the viewer sees. Resolved at READ over already-cached data, so
-    changing it is instant and invalidates nothing. `field_order` is the whole
-    of what this module decides about it; what the FIELDS are is
-    app/calendar/resolve.py's vocabulary, and deliberately not restated here.
-  - TRACKER PRIORITY: which LINKED tracker decides, when several answer for one
-    season. Separate from PRECEDENCE beside it because they settle different
-    arguments — precedence picks whose description of a title a viewer reads,
-    this one picks whose COUNT the bucket rule acts on and a frozen month keeps.
-    `tracker_order` is the whole of it, and it is a reordering of the services
-    that already answer rather than a selection among them.
+  - CALENDAR SOURCES: which services this account's calendar shows. Stated in
+    the 🔎 Filters panel beside the genre and certification narrowing, because
+    it is the same KIND of thing — a per-viewer narrowing applied at read over
+    rows every viewer shares, never a change to what is fetched or stored.
+  - METADATA ORDER: when two services describe the same title differently,
+    whose description this account reads. Resolved at READ over already-stored
+    data, so changing it is instant and invalidates nothing. `source_order` is
+    the whole of what this module decides about it.
+  - TRACKER PRIORITY and TRACKER RETIRED: which LINKED tracker decides when
+    several answer for one season, and whose stored numbers still count.
+    Separate from the metadata order beside them because they settle different
+    arguments — that one picks whose description of a title a viewer reads,
+    these pick whose COUNT the bucket rule acts on and a frozen month keeps.
+
+WHAT USED TO BE HERE AND IS NOT. A per-FIELD precedence map let an account name
+a different service for the overview than for the poster; a `tracker_source`
+selection asked which services the tracker read at all, alongside what it had
+LINKED; and a per-ENDPOINT calendar selection restated the calendar choice once
+per calendar. All three were stated on a screen of their own, all three were
+answers to questions almost nobody was asking, and the screen was the only place
+any of them could be seen. The two that people do ask are the two above, and
+they now live where the rest of their kind already do: the narrowing in the
+filters panel, the order on the account page beside the tracker's own.
+
+THE TRACKER'S SERVICES FOLLOW ITS LINKS AND NOTHING ELSE now. Reading somebody's
+history needs their token, so linking one IS the statement — which is what
+`tracker_source` mostly restated, and what it could contradict.
 
 AN ACCOUNT WITH NO ROW HAS NO OPINION, and `load` returns the defaults for one
 rather than creating anything. That is what keeps this free for the overwhelming
-majority of accounts, which have linked one service and will never open the
-screen: no row is written until somebody states something.
+majority of accounts, which have linked one service and will never state
+anything: no row is written until somebody does.
 
 I/O IS THE TWO VERBS AT THE BOTTOM. Everything above them is a pure function of
 values the caller already holds, so "does this preference admit Simkl?" can be
@@ -39,12 +47,14 @@ from dataclasses import dataclass, field, replace
 from .. import db
 from ..providers.base import Source
 
-# "Whatever there is to ask", stated by nobody. THE DEFAULT, and what it comes
-# out to differs by half: for the TRACKER it follows the links, so linking a
-# second service starts reading it without anybody being asked to state
-# anything and unlinking one quietly stops; for the CALENDAR it is every source
-# the instance can fill from, because no link is spent reading one. See
-# `admits` and `admits_calendar`.
+# "Whatever there is to show", stated by nobody. THE DEFAULT, and for the
+# calendar it means every source the instance can fill from — no link is spent
+# reading one, so there is nothing about an account that could narrow it. See
+# `admits_calendar`.
+#
+# THE TRACKER HAS NO SUCH VALUE ANY MORE. It had one, meaning "every service
+# this account has LINKED", which is what the links already say; the two could
+# only agree or contradict each other, so the links are now the whole of it.
 #
 # AUTO IS THE ONE SELECTION THAT GROWS. Registering a third service widens what
 # `auto` comes out to, and that is correct precisely because nobody stated it:
@@ -124,27 +134,6 @@ def canonical_selection(value: str) -> str:
     return SEPARATOR.join(str(s) for s in Source if str(s) in named)
 
 
-def admits(selection: str, source: Source | str, linked) -> bool:
-    """Whether `selection` says to ask `source`, given the services `linked`.
-
-    THE TRACKER'S PREDICATE. Reading one person's viewing history means asking a
-    service for THEIR data with THEIR token, so under `auto` — "follow the
-    links" — a service this account has no identity for has nothing to be asked
-    for and is not asked. `admits_tracker` is the only caller; the calendar
-    answers a different question, and `admits_calendar` below says why.
-
-    `linked` is the set of services this account actually has an identity for.
-    It is passed in rather than looked up because who is linked is auth's fact,
-    not this module's, and reading it here would put a query behind what is
-    otherwise a comparison.
-    """
-    name = str(source)
-    named = named_sources(selection)
-    if named is None:
-        return name in {str(s) for s in linked}
-    return name in named
-
-
 def _as_order(default) -> tuple:
     """An account's default preference as an ORDERED SEQUENCE of source names.
 
@@ -178,60 +167,25 @@ class SourcePrefs:
     """
     user_id: int
     calendar_source: str = DEFAULT_SELECTION
-    tracker_source: str = DEFAULT_SELECTION
-    precedence: dict = field(default_factory=dict)
-    # {endpoint key: selection}. See `calendar_selection`.
-    endpoint_sources: dict = field(default_factory=dict)
-    # Tracker service names, most trusted first. See `tracker_order`, which is
-    # the whole of what it does. Empty means "no opinion" and leaves the app's
+    # Source names, most preferred first — see `source_order`, which is the
+    # whole of what it does. Empty means "no opinion" and leaves the app's
     # declared order standing, which is what every account had before this
-    # existed — it is NOT a claim that no service decides.
+    # existed.
+    metadata_order: list = field(default_factory=list)
+    # Tracker service names, most trusted first. See `tracker_order`.
     tracker_priority: list = field(default_factory=list)
     # Tracker service names whose STORED numbers this account no longer counts.
     # See `counts_tracker`. Empty means "count everything", which is what every
     # account had before this existed.
     tracker_retired: list = field(default_factory=list)
 
-    def calendar_selection(self, endpoint=None) -> str:
-        """Which services answer for `endpoint`, falling back to the
-        account-wide `calendar_source` when this account has said nothing about
-        that particular calendar.
+    def admits_calendar(self, source: Source | str) -> bool:
+        """Whether this account's calendar shows `source`.
 
-        WHY ONE ACCOUNT-WIDE VALUE IS NOT ENOUGH, measured rather than supposed:
-        on one real August, Simkl contributed 1773 movie records against Trakt's
-        46, because Simkl's movie calendar is a global release calendar and
-        Trakt's is a curated one. The same account's SHOW calendar is where Simkl
-        adds coverage that is plainly worth having. Those are opposite answers
-        about one service, and a single selection can only give one of them â€” so
-        somebody would be choosing between an unreadable movies page and losing
-        Simkl's shows entirely.
-
-        THE OVERRIDE IS PER CALENDAR, NOT PER VIEW. It is keyed on the endpoint
-        key (`app/endpoints.py`), which is also what a stored window is keyed on,
-        so "which services answer for movies" is a question with one answer
-        wherever it is asked. `endpoint=None` means the question was asked
-        without one and gets the account-wide value, which is what every caller
-        that predates this got.
-
-        PRECEDENCE IS DELIBERATELY NOT PER ENDPOINT. The reason this one is comes
-        from two calendars having genuinely different shapes; whose spelling of a
-        title wins does not change between them, and an override nobody needs is
-        a screen control nobody can explain.
-        """
-        if endpoint is None:
-            return self.calendar_source
-        stated = (self.endpoint_sources or {}).get(str(endpoint))
-        if isinstance(stated, str) and is_selection(stated):
-            return stated
-        return self.calendar_source
-
-    def admits_calendar(self, source: Source | str, endpoint=None) -> bool:
-        """Whether this account's calendar reads `source`, on `endpoint`.
-
-        IT TAKES NO `linked`, AND THAT IS THE WHOLE DIVERGENCE FROM `admits`.
+        IT TAKES NO `linked`, AND THAT IS THE WHOLE DIVERGENCE FROM the tracker.
         A calendar is fetched with the INSTANCE's credentials or with none at
-        all â€” Trakt's windows go out under this instance's client id and secret,
-        and one source's calendar files are static public JSON needing nothing â€”
+        all — Trakt's windows go out under this instance's client id and secret,
+        and one source's calendar files are static public JSON needing nothing —
         so no viewer's identity is spent reading one, and there is no credential
         for a link to supply. Gating on links would make a signed-in account see
         LESS than an anonymous visitor to a share link on the same instance,
@@ -239,46 +193,48 @@ class SourcePrefs:
         whose only link happens to be to the other service.
 
         So `auto` here means "every source this INSTANCE can fill from", not
-        "every source this account has linked". A STATED selection â€” the services
-        named â€” is still exactly what it says and is honoured whatever is linked;
-        this only ever widens the default.
+        "every source this account has linked". A STATED selection — the services
+        named — is exactly what it says and is honoured whatever is linked; this
+        only ever widens the default.
+
+        IT IS NO LONGER ASKED PER CALENDAR. A per-endpoint override existed
+        because one service's movie listing is a global release calendar while
+        its show listing is coverage worth having — measured, on one real
+        August, at 1773 movie records against Trakt's 46. That problem is now
+        answered where it is actually felt: the filters panel narrows films by
+        release country and type, which is the axis that makes a movie calendar
+        readable, and does it for every service at once rather than by switching
+        one off.
         """
-        named = named_sources(self.calendar_selection(endpoint))
+        named = named_sources(self.calendar_source)
         return True if named is None else str(source) in named
 
-    def admits_tracker(self, source: Source | str, linked) -> bool:
-        return admits(self.tracker_source, source, linked)
-
-    def field_order(self, field_name: str, sources) -> list[str]:
-        """`sources` reordered so the one this account wants for `field_name`
-        comes first — THE WHOLE OF WHAT A PRECEDENCE PREFERENCE DOES.
+    def source_order(self, sources) -> list[str]:
+        """`sources` reordered so the service this account prefers comes first —
+        THE WHOLE OF WHAT A METADATA PREFERENCE DOES.
 
         It is a REORDERING and never a filter, so a preference can only decide
         which of several answers is shown, never remove the only one there is. A
         viewer who prefers a service that did not describe this title still sees
         the title.
 
-        The document is `{"default": <source>, "fields": {<field>: <source>}}`:
-        the per-field entry leads, then the account's default, then whatever
-        order the caller handed in, which is the app's declared source order.
-        Anything unrecognized — a field this version does not have, a service it
-        has never heard of, a document that is not shaped like this at all — is
-        simply not found in `sources` and falls out, leaving the declared order.
-        That is the same degrade-to-the-default rule `_stored_selection` follows
-        and for the same reason: a row written by a newer version of the app must
-        not stop an older one rendering a page.
+        ONE ORDER FOR EVERY FIELD, where this used to be answerable per field —
+        overview from one service, poster from another. Nobody was asking that
+        question; what people ask is "prefer this service", and a screen that
+        made them answer it eleven times was the reason the question had a screen
+        of its own. WHAT A FIELD IS remains app/calendar/resolve.py's vocabulary
+        and is still not restated here.
 
-        WHAT A FIELD IS is app/calendar/resolve.py's vocabulary, not this
-        module's, and it is not restated here — a second list of field names
-        would be a second thing to keep in step with `Record`.
+        Anything unrecognized — a service this version has never heard of, a
+        document that is not a list at all — is simply not found in `sources` and
+        falls out, leaving the declared order. That is the same degrade-to-the-
+        default rule the rest of this module follows: a row written by a newer
+        version of the app must not stop an older one rendering a page.
         """
         names = [str(s) for s in sources]
-        document = self.precedence if isinstance(self.precedence, dict) else {}
-        fields = document.get("fields")
         preferred: list[str] = []
-        stated = (fields or {}).get(field_name) if isinstance(fields, dict) else None
-        for candidate in (stated, *_as_order(document.get("default"))):
-            if isinstance(candidate, str) and candidate in names and candidate not in preferred:
+        for candidate in _as_order(self.metadata_order):
+            if candidate in names and candidate not in preferred:
                 preferred.append(candidate)
         return preferred + [name for name in names if name not in preferred]
 
@@ -451,39 +407,27 @@ def _stored_selection(value) -> str:
     return text if is_selection(text) else DEFAULT_SELECTION
 
 
-def _stored_endpoint_sources(document) -> dict:
-    """The per-endpoint overrides read back, with anything unusable dropped.
+def _stored_order(document) -> list[str]:
+    """A stored order read back, or an empty one.
 
-    Dropped rather than defaulted per entry: an endpoint whose override this
-    version cannot read falls back to the account-wide selection, which is what
-    an account that never stated one already gets.
-    """
-    parsed = _stored_precedence(document)
-    return {str(key): value for key, value in parsed.items()
-            if isinstance(value, str) and is_selection(value)}
-
-
-def _stored_precedence(document) -> dict:
-    """The precedence map read back, or an empty one.
-
-    Empty on anything unreadable rather than raising: with no map every field
-    falls to its seeded default, which is exactly what an account that has never
-    opened the screen already gets. There is nothing here that cannot be restated
-    by opening it again.
+    Empty on anything unreadable rather than raising: with no order the declared
+    one stands, which is exactly what an account that has never stated a
+    preference already gets, and there is nothing here that cannot be restated
+    by stating it again.
     """
     if not document:
-        return {}
+        return []
     try:
         parsed = json.loads(document)
     except (TypeError, ValueError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+        return []
+    return [name for name in _as_order(parsed) if name in SOURCE_NAMES]
 
 
 async def load(user_id: int) -> SourcePrefs:
     """This account's preferences, or the defaults if it has stated none."""
     row = await db.fetch_one(
-        "SELECT calendar_source, tracker_source, precedence_json, endpoint_sources_json, "
+        "SELECT calendar_source, metadata_order_json, "
         "tracker_order_json, tracker_retired_json FROM source_prefs WHERE user_id = ?",
         (user_id,),
     )
@@ -492,9 +436,7 @@ async def load(user_id: int) -> SourcePrefs:
     return SourcePrefs(
         user_id=user_id,
         calendar_source=_stored_selection(row["calendar_source"]),
-        tracker_source=_stored_selection(row["tracker_source"]),
-        precedence=_stored_precedence(row["precedence_json"]),
-        endpoint_sources=_stored_endpoint_sources(row["endpoint_sources_json"]),
+        metadata_order=_stored_order(row["metadata_order_json"]),
         tracker_priority=_stored_tracker_priority(row["tracker_order_json"]),
         # Same tolerant read as the order beside it: unreadable means "count
         # everything", which is the state an account that never opened the
@@ -510,38 +452,25 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
     does not have to re-read to know what it now holds.
     """
     calendar_source = _selection(prefs.calendar_source, "calendar_source")
-    tracker_source = _selection(prefs.tracker_source, "tracker_source")
-    precedence = prefs.precedence or {}
-    if not isinstance(precedence, dict):
-        raise ValueError("precedence must be an object")
-    endpoint_sources = prefs.endpoint_sources or {}
-    if not isinstance(endpoint_sources, dict):
-        raise ValueError("endpoint_sources must be an object")
-    # Refused rather than coerced, the same way a bad column value is: an
-    # override nobody can satisfy is a bug in the caller, and quietly dropping it
-    # would leave a screen showing a choice that was never stored.
-    endpoint_sources = {str(key): _selection(value, f"endpoint_sources[{key}]")
-                        for key, value in endpoint_sources.items()}
+    # THE SAME VALIDATION THE TRACKER'S ORDER GETS, and for the same reason: a
+    # service this app has never heard of is a bug in the caller, and storing it
+    # would leave a screen offering a choice nothing can act on.
+    metadata_order = _tracker_priority(prefs.metadata_order)
     tracker_priority = _tracker_priority(prefs.tracker_priority)
     tracker_retired = _tracker_retired(prefs.tracker_retired)
     await db.execute(
-        "INSERT INTO source_prefs (user_id, calendar_source, tracker_source, "
-        "precedence_json, endpoint_sources_json, tracker_order_json, "
-        "tracker_retired_json) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "INSERT INTO source_prefs (user_id, calendar_source, metadata_order_json, "
+        "tracker_order_json, tracker_retired_json) "
+        "VALUES (?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET "
         "calendar_source = excluded.calendar_source, "
-        "tracker_source = excluded.tracker_source, "
-        "precedence_json = excluded.precedence_json, "
-        "endpoint_sources_json = excluded.endpoint_sources_json, "
+        "metadata_order_json = excluded.metadata_order_json, "
         "tracker_order_json = excluded.tracker_order_json, "
         "tracker_retired_json = excluded.tracker_retired_json",
-        (prefs.user_id, calendar_source, tracker_source, json.dumps(precedence),
-         json.dumps(endpoint_sources), json.dumps(tracker_priority),
-         json.dumps(tracker_retired)),
+        (prefs.user_id, calendar_source, json.dumps(metadata_order),
+         json.dumps(tracker_priority), json.dumps(tracker_retired)),
     )
     return replace(prefs, calendar_source=calendar_source,
-                   tracker_source=tracker_source, precedence=precedence,
-                   endpoint_sources=endpoint_sources,
+                   metadata_order=metadata_order,
                    tracker_priority=tracker_priority,
                    tracker_retired=tracker_retired)

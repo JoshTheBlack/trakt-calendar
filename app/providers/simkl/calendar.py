@@ -362,7 +362,30 @@ def _simkl_ids(raw: dict) -> dict:
 
 
 def _record_id(ids_raw: dict) -> str:
-    return str(ids_raw.get("slug") or ids_raw.get("simkl_id") or "")
+    """The stable identity of one Simkl title.
+
+    THE SIMKL ID, NOT THE SLUG, AND THE SLUG IS NOT UNIQUE. This preferred the
+    slug because it reads well in a URL and in a log line, and it was wrong:
+    measured against the live CDN on 2026-09-02, `2026/8/tv.json` and
+    `2026/9/tv.json` between them carry TWO different shows whose slug is exactly
+    `brothers` — simkl 2976021, a Thai drama running 11 Aug to 14 Sep, and simkl
+    2415129, the Apple TV comedy premiering 23 Sep. One is not a rename of the
+    other; they have different tmdb ids and ran at the same time.
+
+    THE COLLISION IS SILENT AND IT COMPOUNDS. Storage is keyed on
+    (source, media, source_id), so both shows landed on one row and one set of
+    airings — a "season 1" with two different S01E01s in it. Then the rule that a
+    fill may not demote what enrichment learned finished the job: the drama
+    enriched first, the comedy's later fill overwrote the title, the ids and the
+    poster but was forbidden to touch the country, so the row ended up claiming
+    to be the comedy while carrying the drama's country, network and genres. A
+    viewer filtering out Thailand lost an American show.
+
+    A SLUG IS STILL KEPT IN `ids`, where it is a way to ADDRESS the title rather
+    than the thing storage is keyed on — see `_ids`, which records both.
+    """
+    return str(ids_raw.get("simkl_id") or ids_raw.get("simkl")
+               or ids_raw.get("slug") or "")
 
 
 def to_show_record(entry: dict) -> Record | None:

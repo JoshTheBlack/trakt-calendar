@@ -98,6 +98,24 @@ async def record_failure(media: str, tmdb: int, source: str) -> None:
     )
 
 
+async def urls_for(media: str, tmdb: int) -> dict[str, str]:
+    """{source: url} for every registry row worth trying for (media, tmdb).
+
+    THE CALLER SUPPLIES THE ORDER, which is why this returns the map rather than
+    a winner. `best_url` below answers with this module's own preference, and
+    that is the right answer for a caller who has no opinion; a caller resolving
+    artwork for one VIEWER has an opinion, and it is not this module's business
+    to hold it. Rows past MAX_FAIL_COUNT are left out here exactly as they are
+    there — a source that keeps not working is not a candidate for either.
+    """
+    rows = await db.fetch_all(
+        "SELECT source, url FROM show_posters "
+        "WHERE media = ? AND tmdb = ? AND fail_count < ?",
+        (media, tmdb, MAX_FAIL_COUNT),
+    )
+    return {str(row["source"]): str(row["url"]) for row in rows}
+
+
 async def best_url(media: str, tmdb: int) -> tuple[str, str] | None:
     """The best (source, url) registry row for (media, tmdb), or None if there
     isn't one worth trying. Prefers 'tmdb' over 'trakt' over any other source,

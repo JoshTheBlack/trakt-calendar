@@ -157,13 +157,6 @@ def admitted_order(group, prefs=None, endpoint=None, settings=None) -> list[str]
     `prefs=None` means no account is asking — a public share page — and admits
     every source the group holds.
 
-    `endpoint` IS THE CALENDAR THIS GROUP CAME OUT OF, and it is passed because a
-    selection can be stated per calendar: one service's movie listing can be a
-    global release calendar while its show listing is the coverage somebody
-    wanted (app/sources/prefs.py's `calendar_selection` has the measurement).
-    None asks the account-wide question, which is what a caller with no endpoint
-    in hand should get.
-
     WHAT SOMEBODY HAS LINKED DOES NOT ENTER INTO IT, and this function takes no
     `linked` so that it cannot start to. A calendar is fetched with the
     instance's own credentials or with none at all, so no viewer's identity is
@@ -188,7 +181,7 @@ def admitted_order(group, prefs=None, endpoint=None, settings=None) -> list[str]
         order = [name for name in order if name in instance]
     if prefs is None:
         return order
-    return [name for name in order if prefs.admits_calendar(name, endpoint)]
+    return [name for name in order if prefs.admits_calendar(name)]
 
 
 def admitted_records(group, prefs=None, endpoint=None, settings=None) -> list[Record]:
@@ -228,16 +221,23 @@ def _present(value) -> bool:
 
 
 def _order(prefs, field_name: str, names: list[str]) -> list[str]:
-    """`names` in the order this viewer wants for `field_name`.
+    """`names` in the order this viewer wants.
 
     `prefs=None` — nobody is asking — is the declared order, which is also what a
     viewer who has stated no preference gets. The two are the same answer and
-    deliberately share a code path: the default table is the declared order, so
-    there is nothing to seed and nothing that can drift out of step with it.
+    deliberately share a code path: there is nothing to seed and nothing that can
+    drift out of step with the declared order.
+
+    `field_name` IS STILL TAKEN AND IS DELIBERATELY NOT USED. One order now
+    answers for every field; the parameter stays because the CALLERS are per
+    field and each one names the field it is resolving, which is what makes the
+    call sites readable and what a future per-field rule would need back. It is
+    the one place in this module where an argument is accepted and ignored, and
+    this sentence is why.
     """
     if prefs is None:
         return names
-    return prefs.field_order(field_name, names)
+    return prefs.source_order(names)
 
 
 def _winner(records: list[Record], order: list[str], field_name: str,

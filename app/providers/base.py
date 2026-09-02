@@ -48,8 +48,29 @@ _IMAGE_PROXY = "https://wsrv.nl/"
 _IMAGE_PARAMS = "q=90&w=440&we"
 
 
-def proxied_image(url: str | None) -> str | None:
+# WHAT THE SERVER ASKS FOR WHEN IT IS FETCHING A POSTER TO KEEP, rather than
+# handing an address to a browser. Three differences from the card params above,
+# each forced by what the bytes are for:
+#   - AN EXACT SIZE. The picture is composited into a fixed grid by
+#     app/calendar/share_card.py, whose tiles are 2:3; a variable-sized source
+#     would have to be resized on this side, which is the work being moved.
+#   - `fit=contain` WITH A BLACK CANVAS, which is a pad rather than a crop or a
+#     stretch. A wrong-aspect poster from a fallback source must come out
+#     letterboxed, never visibly distorted and never with its title cropped off.
+#   - NO `we`. "Without enlargement" is right for a browser, which can scale a
+#     small image down to the card; here the caller needs the exact canvas, so a
+#     smaller origin is padded up to it.
+# `output=jpg` because the compositor reads these back with Pillow and a
+# predictable format is one less thing for it to negotiate.
+POSTER_PARAMS = "w=500&h=750&fit=contain&cbg=000000&output=jpg&q=88"
+
+
+def proxied_image(url: str | None, params: str | None = None) -> str | None:
     """A poster URL addressed through the shared image proxy.
+
+    `params` overrides what is asked of the proxy, for a caller whose picture is
+    not a card in a browser — see POSTER_PARAMS. The proxy HOST is not
+    overridable, which is the part this function exists to keep in one place.
 
     ONE IMPLEMENTATION FOR EVERY SOURCE, which is the point of it living here
     rather than in either provider package. The rule is about how this app treats
@@ -69,7 +90,7 @@ def proxied_image(url: str | None) -> str | None:
     text = str(url)
     if text.startswith(_IMAGE_PROXY):
         return text
-    return f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{_IMAGE_PARAMS}"
+    return f"{_IMAGE_PROXY}?url={quote(text, safe='')}&{params or _IMAGE_PARAMS}"
 
 
 class SourceNotModified(Exception):
@@ -509,6 +530,28 @@ class Item(Record):
     # matching the display form breaks every multi-word genre while leaving
     # single-word ones working.
     genre_slugs: list[str] = field(default_factory=list)
+
+    @property
+    def mark_key(self) -> str:
+        """This card's identity, said without naming who described it.
+
+        WHY IT IS NOT `id`. `Record.id` is the SOURCE's own id, and a card is a
+        merged group — so which id it carries depends on whose description won,
+        which depends on the viewer's own preference. Anything keyed on that
+        moves when the preference moves. Observed: a viewer with `the-game`
+        marked not-watching saw the show reappear on reordering their sources,
+        because the card's id became Trakt's `the-game-2025` and the mark was
+        filed under Simkl's spelling. One title, two ids, and a per-viewer
+        setting deciding which one a per-viewer mark had to match.
+
+        THE SAME WATERFALL THE GROUPING USES (`resolve_key`), so a card's
+        identity and the grouping's idea of "the same title" cannot disagree —
+        they are one answer. A title the waterfall cannot key falls back to its
+        source and id, which is safe precisely because such a title never merges
+        with anything: there is only one description of it to prefer.
+        """
+        identity = resolve_key(self.media, self.ids)
+        return str(identity) if identity is not None else f"{self.source}:{self.id}"
 
 
 def render(record: Record, tz: ZoneInfo) -> Item:

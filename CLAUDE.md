@@ -93,9 +93,16 @@ learned yet reads as "nothing matched" instead of "not known yet".
 resolve it through `resolve_view` and read the month through `_read_month`, both
 in `app/calendar/share_routes.py`, so a card can never advertise a count the page
 does not show — there is no override, and a title the page shows is a title the
-card counts. The card is also the one public path that may make an outbound call: it
-warms poster ARTWORK, bounded to what the grid draws and to a wall clock, for
-titles the calendar cache already holds. It never fetches the CALENDAR
+card counts. THE SAME PICTURES, TOO, and that half went unheld for a while
+because this paragraph was written about counts and read as being about the
+view: the page draws `Record.poster` — whatever service filled that calendar —
+while artwork resolved TMDB-first regardless, so a link could advertise a
+different picture of a different-looking show. Poster tiles are now keyed on
+`(media, tmdb, SOURCE)` and resolved in the OWNER's own `field_order("poster")`,
+which is the identical question the calendar asks (`app/media/posters.py`). The
+card is also the one public path that may make an outbound call: it warms poster
+ARTWORK, bounded to what the grid draws and to a wall clock, for titles the
+calendar cache already holds. It never fetches the CALENDAR
 (`allow_fetch=False`), so an empty cached month stays an empty card.
 
 **Migrations are append-only, and migration 19 is the one recorded exception.**

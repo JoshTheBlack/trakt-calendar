@@ -38,6 +38,64 @@ logger = logging.getLogger(__name__)
 # reads
 # ---------------------------------------------------------------------------
 
+# THE ID NAMESPACES A CARD'S OWN IDENTITY HAS EVER BEEN DRAWN FROM. A source's
+# record id is its slug where it has one, so these are the spellings a mark may
+# have been stored under before mark keys existed.
+#
+# SLUG-SHAPED NAMESPACES ONLY, AND NUMERIC SERVICE IDS DELIBERATELY EXCLUDED. A
+# card was never identified by a bare tmdb or tvdb number, and admitting them
+# would let a mark match the wrong title outright: one real account has a mark
+# literally spelled `1670` — the show's slug — and tmdb 1670 is a different
+# programme entirely. A false match here HIDES something the viewer never
+# marked, which is the one failure that leaves no trace on the page.
+_LEGACY_ID_NAMESPACES = ("slug", "simkl_slug", "trakt_slug", "traktslug",
+                         "tvdbslug", "mdlslug")
+
+
+def marked(marks, item) -> bool:
+    """Whether `item` is one of this viewer's not-watching marks.
+
+    TWO SPELLINGS ARE ACCEPTED AND THAT IS NOT SLOPPINESS. A mark is stored under
+    whatever the card sent when it was made, and cards used to send the WINNING
+    SOURCE's id — which moves when the viewer changes whose description they
+    read. One real account held 909 marks of which 800 named a title some
+    currently-stored row can identify, `1670` and `1670-2023` among them: the
+    same show, marked twice, under two services' spellings.
+
+    So new marks are stored under `Item.mark_key`, which no preference moves, and
+    the legacy id is still honoured. The remaining 109 name titles nothing
+    currently stores, so they cannot be rewritten in advance — they are matched
+    here, and re-saved under the stable key the next time somebody toggles one.
+
+    ONE IMPLEMENTATION, because this is a rule every surface has to agree on: the
+    calendar grid, the day fragment, the stats card, the share page and the
+    tracker's import all ask it, and a copy that asked only half the question
+    would make a show hidden on one screen and visible on the next.
+    """
+    if item.mark_key in marks or str(item.id) in marks:
+        return True
+    # EVERY SPELLING THIS CARD HAS EVER BEEN IDENTIFIED BY, not just the one it
+    # carries today. Simkl's own slugs are not unique, so records moved from
+    # being keyed by slug to being keyed by simkl id — and 118 marks on one real
+    # September stopped matching overnight, every one of them a Simkl title
+    # marked under the slug the card used to send. The stored mark is a fact
+    # about a title; which spelling it happens to be written in is not.
+    ids = item.ids or {}
+    return any(str(ids[name]) in marks for name in _LEGACY_ID_NAMESPACES
+               if ids.get(name) not in (None, ""))
+
+
+def marked_keys(marks, items) -> set[str]:
+    """The subset of `items` that is marked, as MARK KEYS.
+
+    THE EXPANSION POINT. Everything downstream — the grid, the chips, the stats,
+    the client's own bookkeeping — then asks the plain question `item.mark_key in
+    keys`, so the legacy-id tolerance above is paid for once per month rather
+    than restated at every membership test.
+    """
+    return {item.mark_key for item in items if marked(marks, item)}
+
+
 async def not_watching_list(user_id: int) -> list[str]:
     """Every show this user has marked not-watching, oldest mark first.
 

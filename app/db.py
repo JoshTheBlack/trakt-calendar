@@ -2801,6 +2801,50 @@ DELETE FROM api_cache WHERE cache_key LIKE 'calendar:%' OR cache_key LIKE 'simkl
 ALTER TABLE distrakt_user_seasons ADD COLUMN history_from TEXT NOT NULL DEFAULT '';
 """
 
+
+# ---------------------------------------------------------------------------
+# 36 — the source-preference screen's questions, reduced to the two people ask
+# ---------------------------------------------------------------------------
+#
+# THREE PREFERENCES GO AND ONE ARRIVES. What is dropped was answerable only on a
+# screen of its own, which is now gone:
+#
+#   - `precedence_json` held a per-FIELD map: this service for the overview,
+#     that one for the poster. Eleven questions where the one anybody asks is
+#     "prefer this service". Its `default` entry IS that question, so it is
+#     carried across rather than discarded.
+#   - `tracker_source` asked which services the tracker read, ALONGSIDE what the
+#     account had linked. Reading somebody's history needs their token, so
+#     linking one is already the statement; the column could only agree with the
+#     links or contradict them.
+#   - `endpoint_sources_json` restated the calendar choice once per calendar. It
+#     existed for the movie firehose, which the filters panel now answers on the
+#     axis that actually makes a movie calendar readable — release country and
+#     type — for every service at once.
+#
+# THE CARRY-ACROSS IS WHY THIS IS NOT A BARE DROP. `precedence_json`'s `default`
+# is a real preference somebody may have stated, and it means exactly what the
+# new column means. A bare string is a one-element order, which is how that
+# document was written before an order was possible.
+MIGRATION_36 = """
+ALTER TABLE source_prefs ADD COLUMN metadata_order_json TEXT NOT NULL DEFAULT '[]';
+
+UPDATE source_prefs
+   SET metadata_order_json = CASE
+       WHEN json_valid(precedence_json)
+            AND json_type(precedence_json, '$.default') = 'array'
+            THEN json_extract(precedence_json, '$.default')
+       WHEN json_valid(precedence_json)
+            AND json_type(precedence_json, '$.default') = 'text'
+            THEN json_array(json_extract(precedence_json, '$.default'))
+       ELSE '[]'
+   END;
+
+ALTER TABLE source_prefs DROP COLUMN precedence_json;
+ALTER TABLE source_prefs DROP COLUMN tracker_source;
+ALTER TABLE source_prefs DROP COLUMN endpoint_sources_json;
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2837,6 +2881,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (33, MIGRATION_33),
     (34, MIGRATION_34),
     (35, MIGRATION_35),
+    (36, MIGRATION_36),
 ]
 
 

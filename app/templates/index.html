@@ -84,8 +84,8 @@
            sets the same transient `?source=` override the coverage-gap banner's
            "show it anyway" link does, so it applies to this page and to the days
            it fetches in, and writes nothing. The account's own answer is stated
-           on /sources — one place, deliberately — and the first option here is
-           that answer, which is also the way to stop overriding.
+           in the 🔎 Filters panel — one place, deliberately — and the first
+           option here is that answer, which is also the way to stop overriding.
 
            A GET form for the same reason the calendar picker beside it is one:
            boosted it is a body swap with htmx keeping history, and with no
@@ -829,6 +829,34 @@
                         two different networks. Put a <code>-</code> in front of a name to exclude it
                         instead (<code>-Netflix</code>). Blank means every network.</span>
                 </div>
+                {# WHICH SERVICES SHOW AT ALL. Here rather than on a screen of its
+                   own because it is the same KIND of narrowing as everything
+                   above it: a per-viewer decision applied at read over rows every
+                   viewer shares, changing nothing about what is fetched or
+                   stored, and taking effect on the next page rather than after a
+                   cache expires.
+
+                   NOT DRAWN when there is nothing to choose between — one
+                   service showing is not a choice, and the same rule empties the
+                   toolbar's own control. #}
+                {% if source_toggles|length > 1 %}
+                <div class="field">
+                    <label>Services</label>
+                    <div class="source-toggles">
+                        {% for choice in source_toggles %}
+                        <label class="source-toggle">
+                            <input type="checkbox" name="calendar_sources" value="{{ choice.source }}"
+                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
+                            {{ choice.label }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    <span class="hint">Unticking one takes its listings off your calendar entirely.
+                        Which service's <em>description</em> wins when both list the same show — its
+                        poster, overview and network — is set on your
+                        <a href="/me">👤 Account</a> page. At least one has to stay ticked.</span>
+                </div>
+                {% endif %}
                 {# Genre and country filtering is a Trakt VIP feature only when
                    Trakt does it. This app filters the cached result itself, so
                    it works on any account — worth saying, because the Settings

@@ -50,16 +50,33 @@ def _item(item_id: str, title: str = "A Show") -> Item:
     )
 
 
+def _key(item_id: str) -> str:
+    """The mark key `_item(item_id)` carries.
+
+    These fixtures name no shared id space, so a card's identity falls back to
+    its source and id — see Item.mark_key, and note that the functions under test
+    now ask about that rather than about the source's own id, because the source
+    that wins a card moves with a per-viewer preference and a per-viewer mark
+    must not.
+    """
+    return f"trakt:{item_id}"
+
+
 def _day(date_iso: str, *item_ids: str) -> dict:
     return {"date": date_iso, "items": [_item(i) for i in item_ids]}
 
 
 def _meta(total: int, watching: int = 0, not_watching: int = 0,
           partial: bool = False, show_ids=(), unenriched: int = 0,
-          release_filtered: int = 0) -> dict:
+          release_filtered: int = 0, not_watching_keys=()) -> dict:
+    # `not_watching_keys` is the viewer's marks AS MARK KEYS, expanded once by
+    # the assembler — see cache.assemble_range. It is in the real meta, so it is
+    # in this one: a double that quietly omitted it would let the shell read a
+    # key that production always supplies.
     return {"total": total, "watching": watching, "not_watching": not_watching,
             "partial": partial, "show_ids": list(show_ids), "unenriched": unenriched,
-            "release_filtered": release_filtered}
+            "release_filtered": release_filtered,
+            "not_watching_keys": set(not_watching_keys)}
 
 
 class AssembleMonthTests(unittest.TestCase):
@@ -106,7 +123,7 @@ class AssembleMonthTests(unittest.TestCase):
         self.assertEqual(assembly.delta["kind"], "up")
         self.assertEqual(assembly.history, [{"when": "now"}])
         # Counted over the whole month, not per day: "a" airs twice.
-        self.assertEqual(dict(assembly.show_counts), {"a": 2, "b": 1})
+        self.assertEqual(dict(assembly.show_counts), {_key("a"): 2, _key("b"): 1})
 
     def test_how_many_cards_are_still_being_looked_up_reaches_the_page(self):
         """A title one source listed but nobody has looked up yet has no genres
@@ -242,7 +259,7 @@ class DayChipTests(unittest.TestCase):
 
     def test_without_hiding_shown_equals_count_even_for_marked_shows(self):
         assembly = calendar_routes.MonthAssembly(grouped=[_day("2026-07-01", "a", "b")])
-        chips = calendar_routes._day_chips(assembly, 2026, 7, 31, {"a"}, False)
+        chips = calendar_routes._day_chips(assembly, 2026, 7, 31, {_key("a")}, False)
         self.assertEqual((chips[0]["count"], chips[0]["shown"]), (2, 2))
 
     def test_with_hiding_a_fully_marked_day_reports_nothing_to_scroll_to(self):
@@ -250,7 +267,7 @@ class DayChipTests(unittest.TestCase):
         while `count` still says the day is not actually empty."""
         assembly = calendar_routes.MonthAssembly(
             grouped=[_day("2026-07-01", "a", "b"), _day("2026-07-02", "c")])
-        chips = calendar_routes._day_chips(assembly, 2026, 7, 31, {"a", "b"}, True)
+        chips = calendar_routes._day_chips(assembly, 2026, 7, 31, {_key("a"), _key("b")}, True)
         self.assertEqual((chips[0]["count"], chips[0]["shown"]), (2, 0))
         self.assertEqual((chips[1]["count"], chips[1]["shown"]), (1, 1))
 
@@ -294,7 +311,7 @@ class DayLayoutTests(unittest.TestCase):
     def test_a_day_collapses_only_when_hiding_and_nothing_is_visible(self):
         grouped = [_day("2026-07-01", "a"), _day("2026-07-02", "b")]
         calendar_routes._apply_day_layout(
-            grouped, not_watching={"a"}, hide_not_watching=True, card_style="vertical")
+            grouped, not_watching={_key("a")}, hide_not_watching=True, card_style="vertical")
         self.assertTrue(grouped[0]["collapsed"])
         self.assertEqual(grouped[0]["visible"], 0)
         self.assertFalse(grouped[1]["collapsed"])
@@ -302,7 +319,7 @@ class DayLayoutTests(unittest.TestCase):
     def test_marked_items_do_not_collapse_a_day_when_hiding_is_off(self):
         grouped = [_day("2026-07-01", "a")]
         calendar_routes._apply_day_layout(
-            grouped, not_watching={"a"}, hide_not_watching=False, card_style="vertical")
+            grouped, not_watching={_key("a")}, hide_not_watching=False, card_style="vertical")
         self.assertFalse(grouped[0]["collapsed"])
         # Still reported, because the client needs it to keep the tiles honest.
         self.assertEqual(grouped[0]["visible"], 0)

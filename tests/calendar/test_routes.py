@@ -685,7 +685,7 @@ class SourceSelectorTests(CalendarRouteTestCase):
     def test_an_account_that_did_state_a_preference_keeps_it_byte_for_byte(self):
         asyncio.run(source_prefs.save(source_prefs.SourcePrefs(
             user_id=self.user_id, calendar_source="simkl",
-            precedence={"default": "simkl"})))
+            metadata_order=["simkl"])))
         stored = asyncio.run(source_prefs.load(self.user_id))
         self._page("/calendar?year=2026&month=7&source=trakt")
         self.assertEqual(asyncio.run(source_prefs.load(self.user_id)), stored)
@@ -728,6 +728,22 @@ class SourceSelectorTests(CalendarRouteTestCase):
 # ---------------------------------------------------------------------------
 # the view logic the server now owns: counts, is-new, the committed baseline
 # ---------------------------------------------------------------------------
+
+def _mark_key(slug: str) -> str:
+    """The data-id a card built from `_entry(slug, ...)` carries.
+
+    NOT THE SLUG ANY MORE. A card's identity is its group's, not the winning
+    source's id, because the winner moves with a per-viewer preference and a
+    per-viewer MARK cannot be allowed to move with it — see Item.mark_key.
+
+    These fixtures carry a slug and a trakt id and NO SHARED id, so the
+    cross-source waterfall finds nothing to key on and the identity falls back to
+    source-and-id. That is the right answer for them: a title no shared id space
+    names can never merge with another source's record, so there is only ever one
+    description of it and nothing for a preference to move.
+    """
+    return f"trakt:{slug}"
+
 
 def _card_class(html: str, item_id: str) -> str:
     m = re.search(r'<div class="([^"]*)" data-id="%s"' % re.escape(item_id), html)
@@ -795,15 +811,20 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self.assertEqual(data["notWatchingCount"], 2)
         # And the per-show card counts the client needs to move those numbers
         # through a toggle without counting the cards it happens to hold.
-        self.assertEqual(data["showCounts"], {"show-a": 2, "show-b": 1, "show-c": 1})
+        self.assertEqual(data["showCounts"], {_mark_key("show-a"): 2,
+                                                  _mark_key("show-b"): 1,
+                                                  _mark_key("show-c"): 1})
 
     def test_a_marked_show_is_rendered_not_watching_rather_than_marked_after_paint(self):
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                          json={"item_id": "show-a", "not_watching": True})
         html = self.client.get(self.PAGE).text
-        self.assertIn("not-watching", _card_class(html, "show-a"))
-        self.assertNotIn("not-watching", _card_class(html, "show-b"))
-        self.assertEqual(_view_data(html)["notWatching"], ["show-a"])
+        self.assertIn("not-watching", _card_class(html, _mark_key("show-a")))
+        self.assertNotIn("not-watching", _card_class(html, _mark_key("show-b")))
+        # THE MARK WAS MADE UNDER A LEGACY ID and is still honoured — what the
+        # page hands the client is the mark KEY, which is what its own cards
+        # carry. See calendar/state.py's `marked`.
+        self.assertEqual(_view_data(html)["notWatching"], [_mark_key("show-a")])
 
     def test_a_first_look_at_a_month_marks_nothing_new(self):
         """No stored baseline means this view has never been seen — which is not
@@ -815,19 +836,21 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self.assertIn("(Initial Tracking)", html)
 
     def test_only_shows_missing_from_the_stored_baseline_come_back_new(self):
-        self._seed_baseline(last_show_ids=["show-a"], last_count=1)
+        self._seed_baseline(last_show_ids=[_mark_key("show-a")], last_count=1)
         html = self.client.get(self.PAGE).text
-        self.assertNotIn("is-new", _card_class(html, "show-a"))
-        self.assertIn("is-new", _card_class(html, "show-b"))
-        self.assertIn("is-new", _card_class(html, "show-c"))
-        self.assertEqual(_view_data(html)["newIds"], ["show-b", "show-c"])
+        self.assertNotIn("is-new", _card_class(html, _mark_key("show-a")))
+        self.assertIn("is-new", _card_class(html, _mark_key("show-b")))
+        self.assertIn("is-new", _card_class(html, _mark_key("show-c")))
+        self.assertEqual(_view_data(html)["newIds"],
+                         [_mark_key("show-b"), _mark_key("show-c")])
 
     def test_the_render_commits_the_servers_full_id_list_as_the_next_baseline(self):
         """The committed list has to be the month's, not a page's: anything it
         leaves out reads as new on the next visit."""
         self.client.get(self.PAGE)
         stored = self._stored_baseline()
-        self.assertEqual(stored["last_show_ids"], ["show-a", "show-b", "show-c"])
+        self.assertEqual(stored["last_show_ids"],
+                         [_mark_key("show-a"), _mark_key("show-b"), _mark_key("show-c")])
         self.assertEqual(stored["last_count"], 4)
         # Committed, so a second load of an unchanged month finds nothing new.
         second = self.client.get(self.PAGE).text
@@ -837,7 +860,7 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
     def test_a_month_that_could_not_be_loaded_leaves_the_baseline_alone(self):
         """Committing an empty month over a real baseline would make the whole
         month look new the next time it loads properly."""
-        self._seed_baseline(last_show_ids=["show-a", "show-b", "show-c"], last_count=4)
+        self._seed_baseline(last_show_ids=[_mark_key("show-a"), _mark_key("show-b"), _mark_key("show-c")], last_count=4)
 
         def boom(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
@@ -846,11 +869,12 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
             resp = self.client.get(self.PAGE)
         self.assertIn("error-banner", resp.text)
         stored = self._stored_baseline()
-        self.assertEqual(stored["last_show_ids"], ["show-a", "show-b", "show-c"])
+        self.assertEqual(stored["last_show_ids"],
+                         [_mark_key("show-a"), _mark_key("show-b"), _mark_key("show-c")])
         self.assertEqual(stored["last_count"], 4)
 
     def test_the_delta_line_reports_the_change_since_the_last_run(self):
-        self._seed_baseline(last_show_ids=["show-a"], last_count=1)
+        self._seed_baseline(last_show_ids=[_mark_key("show-a")], last_count=1)
         html = self.client.get(self.PAGE).text
         self.assertIn("(+3 since last run)", html)
         self.assertIn('class="delta-msg up"', html)
@@ -1165,8 +1189,9 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         arrived late indistinguishable from one that shipped with the page."""
         inline = self.client.get("/calendar?year=2026&month=7").text
         fragment = self.client.get(self.DAY).text
-        card = re.search(r'(<div class="card[^>]*data-id="the-drama".*?)</div>\s*</div>\s*</section>',
-                         fragment, re.S)
+        card = re.search(
+            r'(<div class="card[^>]*data-id="%s".*?)</div>\s*</div>\s*</section>'
+            % re.escape(_mark_key("the-drama")), fragment, re.S)
         self.assertIsNotNone(card)
         # The Drama is inline on the full-month shell above (only three days have
         # items), so the same card markup must appear in both responses.
@@ -1195,7 +1220,7 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
 
     def test_not_watching_is_rendered_by_the_server(self):
         asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
-        self.assertIn("not-watching", _card_class(self.client.get(self.DAY).text, "the-drama"))
+        self.assertIn("not-watching", _card_class(self.client.get(self.DAY).text, _mark_key("the-drama")))
 
     def test_it_never_marks_is_new_itself(self):
         """is-new is a whole-month diff the shell already made and committed. A
@@ -1207,10 +1232,10 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
             self.user_id, "shows", 2026, 7,
             last_count=1, last_show_ids=["something-else"], history=[]))
         shell = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
-        self.assertIn("the-drama", _view_data(shell)["newIds"])
+        self.assertIn(_mark_key("the-drama"), _view_data(shell)["newIds"])
         # The fragment is fetched after that commit and marks nothing.
         fragment = self.client.get(self.DAY).text
-        self.assertNotIn("is-new", _card_class(fragment, "the-drama"))
+        self.assertNotIn("is-new", _card_class(fragment, _mark_key("the-drama")))
 
     def test_a_bad_date_is_refused_before_it_reaches_the_cache(self):
         for bad in ("date=nope",

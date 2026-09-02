@@ -64,7 +64,7 @@
 {%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.mark(name) }}</span>{% endfor -%}
 </button>
 {%- endmacro -%}
-<div class="card{% if item.id in not_watching %} not-watching{% endif %}{% if item.id in new_ids %} is-new{% endif %}" data-id="{{ item.id }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
+<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}" data-id="{{ item.mark_key }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>

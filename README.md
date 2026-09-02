@@ -31,7 +31,7 @@ title for cast, an embedded trailer, and the full episode list.
 
 - 📅 Browse premieres for any month/year, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
-- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, and a **Sources** screen decides which services fill each calendar and whose answer you see when they describe a title differently. Simkl needs no credentials to fill a calendar
+- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, which services show is a tick-box in the calendar's **Filters** panel, and whose description you read when both list the same title is an order on your **Account** page. Simkl needs no credentials to fill a calendar
 - 🖼️ Rich poster tiles — rating, runtime, network, and episode (SxxEyy) badges, plus language, country, day-of-week, and a lazily-loaded current-season summary (episode count, latest / next air date)
 - 🔍 **Details modal** on click — full overview, an embedded trailer, cast (headshots + characters), and the season's episode list with air dates
 - ✅ Mark shows **watching / not watching** — saved server-side, so it follows you across devices — plus a one-click filter to hide the ones you're not watching
@@ -486,10 +486,10 @@ app/
     routes.py         Sonarr / Radarr / Seerr: status, options, add-to-library
     arr.py            Sonarr / Radarr
     seer.py           Overseerr / Jellyseerr
-  sources/          Whose answer you see: the per-account source preferences and
-                     the Sources screen that sets them
+  sources/          Whose answer you see: the per-account source preferences.
+                     No routes of its own — which services show is set in the
+                     calendar's Filters, and whose description wins on /me
     prefs.py          The stored preference and the vocabulary it is written in
-    routes.py         The Sources screen and its API
   providers/        The calendar-source seam: the Record, capabilities, the registry
     base.py           What a source produces and what every source must implement
     trakt/            transport, calendar, detail, sync, releases

@@ -287,7 +287,7 @@ def _narrowed_prefs(prefs, view: ShareView, settings):
     surviving = [
         str(source) for source in Source
         if str(source) in named
-        and prefs.admits_calendar(source, view.endpoint.key)
+        and prefs.admits_calendar(source)
         and (instance is None or str(source) in instance)
     ]
     if not surviving:
@@ -298,7 +298,6 @@ def _narrowed_prefs(prefs, view: ShareView, settings):
     # would quietly win over the thing the link asked for.
     return dataclasses.replace(
         prefs, calendar_source=source_prefs.SEPARATOR.join(surviving),
-        endpoint_sources={},
     )
 
 
@@ -352,8 +351,18 @@ def _visible_items(items: Sequence[Item], view: ShareView, not_watching: set[str
     The owner's marks are a SET alongside the items rather than a field copied
     onto each one — one answer to "is this marked" instead of two spellings of
     it, and no per-item copy of a dataclass that is deliberately awkward to copy.
+
+    THE SET IS EXPANDED HERE because this page does not go through
+    `assemble_range`'s meta: a stored mark may name a title by whichever id the
+    owner's card carried when they made it, and `marked_keys` is the one rule
+    that translates that. Both the page and its preview picture read through
+    this function, so they cannot come to different answers about what the owner
+    is not watching — which is the same guarantee `_read_month` gives them about
+    what the month contains.
     """
-    return [item for item in items if not (view.hide_not_watching and item.id in not_watching)]
+    marks = calendar_state.marked_keys(not_watching, items)
+    return [item for item in items
+            if not (view.hide_not_watching and item.mark_key in marks)]
 
 
 def _effective_params(request: Request) -> dict[str, str]:
@@ -456,7 +465,8 @@ async def _render(request: Request, share_row) -> Response:
     # not wait for it: a crawler fetches the page first and the picture second,
     # so by the time anyone asks for the card the posters are usually already on
     # disk.
-    _spawn_poster_warm(view, owner_id, visible, settings)
+    _spawn_poster_warm(view, owner_id, visible, settings,
+                       _poster_order(await source_prefs.load(owner_id)))
 
     grouped = [
         {"date": day, "label": datetime.strptime(day, "%Y-%m-%d").strftime("%A, %d %B"), "items": list(rows)}
@@ -499,7 +509,10 @@ async def _render(request: Request, share_row) -> Response:
         "month_label": view.month_label,
         "nav": route_params.adjacent_months(view.year, view.month),
         "grouped": grouped,
-        "not_watching": nw_ids,
+        # AS MARK KEYS, matching what the template asks — the raw stored set
+        # may spell a title by whichever id the owner's card carried when
+        # they marked it. Same translation `_visible_items` made above.
+        "not_watching": calendar_state.marked_keys(nw_ids, items),
         "total": len(visible),
         "view": {"card_style": view.card_style, "day_packing": view.day_packing},
         # Carried through this page's own controls rather than offered by one:
@@ -760,6 +773,30 @@ def select_tile_items(items: Sequence[Item], limit: int = MAX_CARD_TILES) -> lis
     return sorted(items, key=lambda item: (tile_tier(item), item.air_ts))[:max(0, limit)]
 
 
+def _item_order(item: Item, order: tuple[str, ...]) -> tuple[str, ...]:
+    """The artwork order for ONE item: the service actually describing it first,
+    then the owner's preference behind that.
+
+    THE OWNER'S ORDER IS NOT ENOUGH ON ITS OWN, and this is the bug that taught
+    it. That order is resolved against the `show_posters` REGISTRY, which
+    remembers every service that has ever mentioned a tmdb id — including
+    services that do not describe this title on this calendar at all. Halloween
+    Wars is Simkl-only in the stored calendar, so the page drew Simkl's picture;
+    the registry also held a Trakt row from some other read, the owner's order
+    put Trakt first, and the card advertised a different picture of a
+    different-looking show. Exactly the fault the source-keyed cache was built
+    to end, arrived at from the other side.
+
+    THE ITEM'S OWN SOURCE IS THE ANSWER because it IS what the page resolved:
+    `Item.source` is the service whose record won the card, so leading with it
+    makes the two agree by construction rather than by both happening to prefer
+    the same service. The owner's order still decides everything behind it —
+    which matters when that service has no artwork and something has to.
+    """
+    lead = str(item.source)
+    return (lead, *(name for name in order if name != lead))
+
+
 def _poster_refs(items: Sequence[Item]) -> list[tuple[Item, tuple[str, object]]]:
     """Each item paired with the (media, tmdb) ref its poster is filed under.
 
@@ -771,7 +808,27 @@ def _poster_refs(items: Sequence[Item]) -> list[tuple[Item, tuple[str, object]]]
     return [(item, (item.media, tmdb)) for item in items if (tmdb := item.ids.get("tmdb"))]
 
 
-async def _warm_posters(settings, refs, *, budget: float | None) -> None:
+def _poster_order(source_preferences) -> tuple[str, ...]:
+    """Whose artwork this owner's link should draw, most preferred first.
+
+    THE SAME ANSWER THE PAGE ITSELF USES. `poster` is one of the fields
+    app/calendar/resolve.py resolves per source, so asking `source_order` is
+    asking the identical question the calendar asks when it decides which
+    service's picture a card shows — which is what makes the preview and the
+    page agree instead of merely tending to. Resolving artwork TMDB-first was
+    how they came to disagree: the card advertised a picture of a show the page
+    was not showing a picture of.
+
+    TMDB IS APPENDED RATHER THAN ORDERED, because it is not a calendar source
+    and an account cannot have an opinion about it in these preferences. It is
+    the backstop for a title no calendar named — which on a share page is rare,
+    and on the ranker is most of them.
+    """
+    ordered = source_preferences.source_order([s for s in Source])
+    return tuple(ordered) + ("tmdb",)
+
+
+async def _warm_posters(settings, refs, order, *, budget: float | None) -> None:
     """Resolve poster artwork for `refs`, best-effort.
 
     Everything about the bound lives in the caller: `refs` is already capped, and
@@ -783,16 +840,16 @@ async def _warm_posters(settings, refs, *, budget: float | None) -> None:
     if not refs:
         return
     if budget is None:
-        await posters.ensure_posters(settings, refs)
+        await posters.ensure_posters(settings, refs, order)
         return
     # Whatever landed inside the budget stays landed: the tiles are read back off
     # disk afterwards, so cutting this short costs the card a tile, never the
     # work already done.
     with anyio.move_on_after(budget):
-        await posters.ensure_posters(settings, refs)
+        await posters.ensure_posters(settings, refs, order)
 
 
-async def _resolve_tiles(settings, visible: Sequence[Item], *,
+async def _resolve_tiles(settings, visible: Sequence[Item], order: tuple[str, ...], *,
                          budget: float | None) -> tuple[tuple[share_card.Tile, ...], bool]:
     """The card's poster tiles, and whether anything it wanted is still coming.
 
@@ -831,14 +888,21 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     # clock it is allowed — a span at or just under it means the budget FIRED and
     # the card that follows is a tile short on purpose, which is a very different
     # story from the same span reading 30ms.
+    # PER ITEM, because the order's first entry is the item's own source. Warmed
+    # one order at a time so a month whose titles come from two services asks
+    # each one for its own artwork rather than one of them for both.
     with span("share.warm_posters", refs=len(wanted), budget=budget):
-        await _warm_posters(settings, [ref for _item, ref in wanted], budget=budget)
+        by_order: dict[tuple[str, ...], list] = {}
+        for item, ref in wanted:
+            by_order.setdefault(_item_order(item, order), []).append(ref)
+        for item_order, refs in by_order.items():
+            await _warm_posters(settings, refs, item_order, budget=budget)
 
     drawn: list[tuple[share_card.Tile, float | None]] = []
     for item, ref in candidates:
         if len(drawn) >= MAX_CARD_TILES:
             break
-        path = posters.cached_poster(*ref)
+        path = posters.cached_poster(*ref, _item_order(item, order))
         if path is not None:
             drawn.append((share_card.Tile(
                 title=item.title, poster=path,
@@ -850,8 +914,10 @@ async def _resolve_tiles(settings, visible: Sequence[Item], *,
     # poster that would only displace an equally good tile would re-render it on
     # every crawl for nothing. Short of full, anything still on its way is a
     # reason to render again later — which is what makes a thin card heal.
-    pending = any(posters.cached_poster(*ref) is None and not posters.is_negative(*ref)
-                  for _item, ref in wanted)
+    pending = any(
+        posters.cached_poster(*ref, _item_order(item, order)) is None
+        and not posters.is_negative(*ref, _item_order(item, order))
+        for item, ref in wanted)
     return arrange_tiles(drawn), len(drawn) >= MAX_CARD_TILES or not pending
 
 
@@ -889,7 +955,9 @@ async def assemble_card(view: ShareView, share_row, settings, *,
     nw_ids = await calendar_state.not_watching_ids(owner_id)
     visible = _visible_items(items, view, nw_ids)
 
-    tiles, complete = await _resolve_tiles(settings, visible, budget=budget)
+    tiles, complete = await _resolve_tiles(
+        settings, visible, _poster_order(await source_prefs.load(owner_id)),
+        budget=budget)
     avatar = await anyio.to_thread.run_sync(_avatar_bytes, owner_id)
     card = share_card.Card(
         month_label=view.month_label, year=view.year, count=len(visible),
@@ -915,7 +983,8 @@ _warming: set[tuple] = set()
 _warm_tasks: set[asyncio.Task] = set()
 
 
-def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item], settings) -> None:
+def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item],
+                       settings, order: tuple[str, ...]) -> None:
     """Start resolving the artwork this month's card will want, and return
     immediately.
 
@@ -932,11 +1001,11 @@ def _spawn_poster_warm(view: ShareView, owner_id: int, visible: Sequence[Item], 
     key = (owner_id, view.endpoint.key, view.year, view.month)
     if key in _warming or len(_warming) >= _WARM_CEILING:
         return
-    refs = [ref for _item, ref in _poster_refs(select_tile_items(visible))]
+    refs = [(item, ref) for item, ref in _poster_refs(select_tile_items(visible))]
     if not refs:
         return
     _warming.add(key)
-    task = asyncio.create_task(_warm_job(key, refs, settings))
+    task = asyncio.create_task(_warm_job(key, refs, settings, order))
     _warm_tasks.add(task)
     task.add_done_callback(_warm_tasks.discard)
 
@@ -998,14 +1067,21 @@ async def render_card(view: ShareView, share_row, settings) -> bytes:
     return payload
 
 
-async def _warm_job(key: tuple, refs, settings) -> None:
+async def _warm_job(key: tuple, refs, settings, order: tuple[str, ...]) -> None:
     # This task inherited the spawning request's trace context, and it outlives
     # that request — without detaching, minutes of poster downloads would be
     # attributed to a page that finished long ago.
     perftrace.detach()
     try:
         with span("share.warm_job", refs=len(refs)):
-            await _warm_posters(settings, refs, budget=None)
+            # Grouped by the per-item order for the same reason the request path
+            # groups: the first entry is the item's own source, so a month drawn
+            # from two services asks each for its own artwork.
+            by_order: dict[tuple[str, ...], list] = {}
+            for item, ref in refs:
+                by_order.setdefault(_item_order(item, order), []).append(ref)
+            for item_order, batch in by_order.items():
+                await _warm_posters(settings, batch, item_order, budget=None)
     except Exception:
         # Nobody is waiting on this and there is nothing to tell them. A poster
         # that did not resolve leaves the card a tile short and tries again on
