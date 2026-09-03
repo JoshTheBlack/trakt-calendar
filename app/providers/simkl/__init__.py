@@ -134,6 +134,10 @@ class _SimklDetailPort:
         return await detail.fetch_details(settings, media, source_id, season,
                                           cache_only=cache_only)
 
+    async def fetch_season_summary(self, settings: Settings, source_id,
+                                   season: int, media: Media) -> dict:
+        return await detail.fetch_season_detail(settings, source_id, int(season), media)
+
     async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
         return await detail.fetch_seasons(settings, source_id, media)
 

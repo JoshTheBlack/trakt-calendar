@@ -75,6 +75,35 @@ def derive_season(air_dates, today: date) -> dict:
     }
 
 
+def tile_summary(detail: dict, today: date) -> dict:
+    """A season summary as the calendar card's own line reads it:
+    `episode_count`, `first_aired`, `last_aired`, `next_aired`.
+
+    DERIVED HERE RATHER THAN PER SOURCE, and that is the whole reason it exists.
+    Both services answer `derive_season`'s shape, so "how many episodes, what
+    aired last, what airs next" is one calculation over that shape — writing it
+    per provider would be two places for the card's own line to drift, and the
+    line was previously reachable from only one of them.
+
+    `last_aired` IS THE LATEST DATE NOT IN THE FUTURE and `next_aired` the
+    earliest that is; a season entirely unaired has no `last_aired` and one
+    entirely past has no `next_aired`. Both are absent rather than empty-stringed
+    for the reason the module keeps drawing: "nothing has aired yet" and "aired
+    on the epoch" must never look alike.
+    """
+    dates = sorted(str(day)[:10] for day in (detail.get("air_dates") or []) if day)
+    cutoff = today.isoformat()
+    past = [day for day in dates if day <= cutoff]
+    ahead = [day for day in dates if day > cutoff]
+    return {
+        "season": detail.get("season"),
+        "episode_count": detail.get("total") or None,
+        "first_aired": dates[0] if dates else None,
+        "last_aired": past[-1] if past else None,
+        "next_aired": ahead[0] if ahead else None,
+    }
+
+
 def empty_season(season: int) -> dict:
     """What a season nobody could tell us anything about looks like. Beside
     derive_season because a caller that got no episode list still has to hand its

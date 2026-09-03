@@ -56,6 +56,9 @@ class _TraktCalendarPort:
         return await calendar.fetch_window(endpoint, settings, start, days)
 
 
+from .. import season as season_rules  # noqa: E402
+
+
 class _TraktDetailPort:
     """Trakt's answer to "describe this one title" (app/providers/base.py's
     DetailPort).
@@ -77,6 +80,14 @@ class _TraktDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, str(media), source_id, season,
                                           cache_only=cache_only)
+
+    async def fetch_season_summary(self, settings: Settings, source_id,
+                                   season: int, media: Media) -> dict:
+        # Movies have no seasons, and answering an empty one is what lets the
+        # caller treat every media the same rather than branching first.
+        if media is Media.MOVIE or str(media) == "movie":
+            return season_rules.empty_season(int(season))
+        return await detail.fetch_season_detail(settings, source_id, int(season))
 
     async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
         """app/providers/base.py's DetailPort.fetch_seasons, over the existing

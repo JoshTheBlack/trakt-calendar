@@ -218,12 +218,26 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
     and whether a card then appears depends on whether any source lists that
     title on that calendar, which nothing here can promise."""
 
-    def _hit(self, title="Unseen Show", simkl_id="4242"):
-        from app.providers.base import SearchHit
+    def _hit(self, title="Unseen Show", simkl_id="4242", also=None):
+        """A REAL `MergedSearchHit`, and the reason that matters is a bug this
+        file did not catch.
 
-        return SearchHit(source=Source.SIMKL, source_id=simkl_id, media=Media.SHOW,
-                         ids={"simkl": simkl_id, "tmdb": 777}, title=title,
-                         year=2026, season=None, network="", runtime=None, overview="")
+        `search_catalogue` returns MERGED hits — one row per title, assembled
+        from every source that answered — and a merged hit has no single
+        `source` or `source_id`: it carries `source_ids`, a source-to-id map
+        ordered so its first entry is the leader. The double here used to return
+        a per-source `SearchHit` instead, which DOES have those two fields, so
+        every test passed while the live route raised AttributeError on the
+        first real search. A double that reports a different type than the
+        function it stands in for tests nothing about the caller.
+        """
+        from app.distrakt.search import MergedSearchHit
+
+        sources = {Source.SIMKL: simkl_id}
+        sources.update(also or {})
+        return MergedSearchHit(key=None, season=None, source_ids=sources,
+                               ids={"simkl": simkl_id, "tmdb": 777}, title=title,
+                               year=2026, network="", runtime=None, overview="")
 
     async def _catalogue(self, described, known=frozenset()):
         # ANSWERS FOR SHOWS AND NOT FOR FILMS, because the real thing asks
@@ -271,6 +285,51 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         again = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"},
                                       known=already)
         self.assertEqual(again.elsewhere, ())
+
+    async def test_the_leading_source_is_the_one_asked_to_describe_it(self):
+        """A title two services both found is described by ONE of them, and
+        which one is not a choice this module gets to make again: `source_ids`
+        is ordered by the registry, and its leader is the same source the
+        tracker's own pick calls a season lookup with. Asking a different one
+        here would draw a row from one service and resolve it against another.
+        """
+        seen = []
+
+        async def _search(asked, settings, media, query):
+            if media is not Media.SHOW:
+                return SimpleNamespace(hits=[], failed=frozenset())
+            return SimpleNamespace(
+                hits=[self._hit(also={Source.TRAKT: "trakt-one"})],
+                failed=frozenset())
+
+        async def _details(settings, media, source_id, _):
+            seen.append(source_id)
+            return {"first_aired": "2026-11-04T20:00:00Z", "title": "Unseen Show"}
+
+        with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
+                   return_value=[(Source.SIMKL, object())]),              patch("app.providers.get", return_value=SimpleNamespace(
+                 detail_port=SimpleNamespace(fetch_details=_details))):
+            await calendar_search.catalogue(
+                "unseen", settings=self.settings, tz=self.tz, known=frozenset())
+
+        self.assertEqual(seen, ["4242"], "the lookup did not use the leader's id")
+
+    async def test_a_hit_no_source_can_address_is_skipped_rather_than_raising(self):
+        """`source_ids` empty means nobody named this title in a way a lookup
+        can call back with. There is nothing to describe and nothing to link
+        to, so it is dropped — quietly, because it is not an error."""
+        async def _search(asked, settings, media, query):
+            from app.distrakt.search import MergedSearchHit
+            return SimpleNamespace(hits=[MergedSearchHit(
+                key=None, season=None, source_ids={}, ids={}, title="Nameless",
+                year=None, network="", runtime=None, overview="")],
+                failed=frozenset())
+
+        with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
+                   return_value=[(Source.SIMKL, object())]):
+            found = await calendar_search.catalogue(
+                "nameless", settings=self.settings, tz=self.tz, known=frozenset())
+        self.assertEqual(found.elsewhere, ())
 
     async def test_a_row_carries_what_the_lookup_described(self):
         """It renders through the same shape a stored row does, so a reader is

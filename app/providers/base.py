@@ -1121,6 +1121,31 @@ class DetailPort(Protocol):
         """
         ...
 
+    async def fetch_season_summary(self, settings: Settings, source_id,
+                                   season: int, media: Media) -> dict:
+        """ONE season reduced to the shape `app/providers/season.py` defines —
+        total, cadence, premiere, finale, the started/finished flags and
+        `air_dates` — in THIS SOURCE's own id space.
+
+        A PORT BECAUSE THE ANSWER WAS ONLY REACHABLE FROM ONE SOURCE. Both
+        packages have had this function with these exact keys for as long as the
+        tracker has had tiles, and every caller reached the Trakt one by name.
+        The calendar's own season line therefore appeared on a card only when the
+        title happened to carry a Trakt id: a Simkl-only card could never show
+        it, not because Simkl cannot answer but because nothing asked. Naming it
+        here is what makes "which source answers for this title" the same
+        question for a season summary as it already is for a description.
+
+        `source_id` is the id this source knows the title by, never another
+        service's, for the reason `fetch_details` gives above.
+
+        Raises this source's own `SourceUnavailable` subclass on a genuine
+        failure, and answers an EMPTY season (`season.empty_season`) for one that
+        does not exist. Those are different answers and callers act on the
+        difference — see the Trakt implementation for what conflating them cost.
+        """
+        ...
+
     async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
         """The season picker's answer for one title, in THIS SOURCE's own id
         space — see `SeasonsAnswer` for why the season list, a self-named

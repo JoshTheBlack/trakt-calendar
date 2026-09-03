@@ -268,9 +268,19 @@
         </div>
         <div class="modal-body">
             <p id="rewatchQuestion"></p>
+            {# THE DAY A FRESH RUN COUNTS FROM, offered and editable. The default
+               is the day after that old finish, which is what makes a new pass
+               start empty. Moving it earlier is the answer to "I watched two
+               episodes last week and then added the season" — those plays are
+               part of THIS run and should count. It applies only to the fresh
+               answer; the other one counts everything by definition. #}
+            <div class="field">
+                <label for="rewatchFrom">A fresh run counts episodes watched on or after</label>
+                <input type="date" id="rewatchFrom">
+            </div>
         </div>
         <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="answerRewatch(false)">Keep the old record</button>
+            <button type="button" class="btn-ghost" onclick="answerRewatch(false)">Count what I've watched</button>
             <button type="button" class="btn-primary" onclick="answerRewatch(true)">Start a fresh run</button>
         </div>
     </div>

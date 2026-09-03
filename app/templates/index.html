@@ -767,39 +767,53 @@
             <button type="button" class="modal-close" onclick="closeCalendarSearch()">&times;</button>
         </div>
         <div class="modal-body">
-            {# EVERY REQUEST THIS PANEL MAKES IS AN `hx-get`, and there is no
-               submit handler at all. The first version had one, and it was
-               wrong in a way worth recording: an async function returns a
-               PROMISE, which is truthy, so `onsubmit="return search()"` handed
-               the browser a go-ahead, the page reloaded mid-request, and the
-               cancelled fetch surfaced as "could not reach the server".
+            {# EVERY REQUEST THIS PANEL MAKES IS AN `hx-get`, and nothing here
+               has a submit handler. The first version did, and it was wrong in
+               a way worth recording: an async function returns a PROMISE, which
+               is truthy, so `onsubmit="return search()"` handed the browser a
+               go-ahead — the page reloaded mid-request and the cancelled fetch
+               surfaced as "could not reach the server".
 
-               TYPING AND ENTER ARE ONE TRIGGER LIST, NOT TWO CODE PATHS.
-               `keyup changed delay:180ms` is the as-you-type read, which costs
-               an index lookup and no outbound call; `search` fires on Enter and
-               on the input's own clear button. Enter adds nothing by itself —
-               widening to the services is a button, because spending somebody
-               else's rate limit should look like a decision. #}
-            <div class="search-bar">
+               TWO TRIGGERS BECAUSE THERE ARE TWO COSTS. Typing reads what this
+               instance already holds: an index lookup, no outbound call, so it
+               can run on a debounce. Enter and the button ask the SERVICES,
+               which spends requests against somebody else's rate limit, so it
+               takes a deliberate act. That is the only difference between them —
+               same route, same fragment, one extra value.
+
+               ENTER IS THE FORM'S OWN SUBMIT, handled by htmx rather than by
+               script. A form carrying `hx-get` intercepts its submit, which is
+               what makes Enter and the button one behaviour instead of two, and
+               is why neither can reload the page. #}
+            {# `hx-boost="false"` BECAUSE THIS FORM IS NOT A NAVIGATION. A
+               boosted form under a boosted body is turned into a page
+               navigation, which would replace the calendar with a fragment;
+               the app-wide rule and the reason are in
+               tests/kernel/test_page_head.py. #}
+            <form class="search-bar" hx-boost="false" hx-get="/calendar/search"
+                  hx-target="#searchResults" hx-vals='{"live": "1"}'
+                  {# ONE ANSWER AT A TIME, ACROSS BOTH TRIGGERS. Syncing on the
+                     TARGET rather than on each control is what makes that true
+                     between them: without it a debounced read for "sev" can
+                     land after the service answer for "severance" and overwrite
+                     the better result with the staler one. #}
+                  hx-sync="#searchResults:replace">
                 <input type="text" id="searchInput" name="q" autocomplete="off" spellcheck="false"
                        placeholder="Title…"
                        hx-get="/calendar/search"
                        hx-trigger="keyup changed delay:180ms, search"
                        hx-target="#searchResults"
                        hx-include="#searchEndpoint"
-                       {# ONE ANSWER AT A TIME, DECLARED. Without this a slow
-                          response for "sev" lands after a fast one for
-                          "severance" and the reader watches their results go
-                          backwards — likelier the faster somebody types. #}
-                       hx-sync="this:replace">
-            </div>
-            {# WHICH CALENDAR IS BEING SEARCHED, carried as a value rather than
-               read from the address bar: it is the same fact the toolbar's own
-               picker renders from, so the two cannot disagree. #}
-            <input type="hidden" id="searchEndpoint" name="endpoint" value="{{ endpoint.key }}">
+                       hx-sync="#searchResults:replace">
+                {# WHICH CALENDAR IS BEING SEARCHED, carried as a value rather
+                   than read back out of the address bar: it is the same fact the
+                   toolbar's picker renders from, so the two cannot disagree. #}
+                <input type="hidden" id="searchEndpoint" name="endpoint" value="{{ endpoint.key }}">
+                <button type="submit" class="btn-primary small">Search the services</button>
+            </form>
             <p class="hint">Results from {{ endpoint.label }} appear as you type and cost nothing —
-                they come from what your calendar already holds. Searching the services also finds
-                titles it hasn't loaded yet.</p>
+                they come from what your calendar already holds. Two letters is the shortest
+                search. Searching the services also finds titles your calendar hasn't loaded yet.</p>
             <div id="searchResults"></div>
         </div>
     </div>

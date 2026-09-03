@@ -389,6 +389,27 @@ class PageScriptTests(unittest.TestCase):
                 self.assertEqual(boots, [scripts[-1]],
                                  f"{page}: boot.js must be the last script")
 
+    def test_a_page_loading_one_of_a_pair_loads_the_other(self):
+        """A script calling a function another file declares needs that file on
+        every page it appears on, and nothing about a list of filenames says so.
+
+        `season-tiles.js` asks `detailsQuery` — declared in `details-modal.js` —
+        which ids a card carries, deliberately, because that is the same
+        question the modal asks and two answers to it would drift. The cost is
+        this dependency, which is invisible until a page ships one file without
+        the other and a card's season line quietly stops appearing.
+        """
+        pairs = (("season-tiles.js", "details-modal.js"),)
+        for page, scripts in assets.PAGE_SCRIPTS.items():
+            names = [s.rsplit("/", 1)[-1] for s in scripts]
+            for needs, needed in pairs:
+                if needs not in names:
+                    continue
+                with self.subTest(page=page, script=needs):
+                    self.assertIn(
+                        needed, names,
+                        f"{page} loads {needs}, which calls into {needed}")
+
     def test_no_two_scripts_anywhere_declare_the_same_name(self):
         """One name, one file — across every page, not just within one.
 

@@ -204,36 +204,45 @@ async function addPickedShow(season) {
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
-        const label = `${pickedShow.title} S${String(season).padStart(2, '0')}`;
-        toast(asFinished ? `Recorded ${label} as finished` : `Added ${label}`, true);
-        closeAddShow();
+        // NOTHING WAS ADDED YET. The season's own history says it has been
+        // finished before, and which record that should become depends on an
+        // answer only the viewer has — so the server wrote nothing and asked.
+        // Checked before the month is applied, because there is no month here.
+        if (d.needs_decision) { openRewatchPrompt(d.needs_decision, season); return; }
+        announceAdded(season, asFinished);
         applyMonthResponse(d);  // mutation returns the recomputed month (1d)
-        // ASKED AFTER THE ADD RATHER THAN BEFORE IT, deliberately: the season is
-        // already on the list either way, so a viewer who ignores the question
-        // gets exactly the behaviour they had before it existed. Asking first
-        // would make an add wait on an answer to a question about history the
-        // add itself is what discovered.
-        if (d.rewatch_prompt) { openRewatchPrompt(d.rewatch_prompt); }
     } catch (e) {
         toast(e.message || 'Could not add show', false);
     }
 }
 
+function announceAdded(season, asFinished) {
+    const label = `${pickedShow.title} S${String(season).padStart(2, '0')}`;
+    toast(asFinished ? `Recorded ${label} as finished` : `Added ${label}`, true);
+    closeAddShow();
+}
+
 // ---- Re-watching a season you already finished ----
-// The question the add could not answer for itself: is this a fresh run, or is
-// the tracker meeting an old completion for the first time? They produce the
-// identical signal, so it is asked.
+// THE ADD IS NOT DONE YET WHEN THIS OPENS. The server refused to guess and wrote
+// nothing, so answering is what performs the add — which is why both buttons
+// re-POST the original pick with the answer attached, and why closing this
+// leaves the season off the list rather than half on it.
 
 let pendingRewatch = null;
 
-function openRewatchPrompt(prompt) {
-    pendingRewatch = prompt;
+function openRewatchPrompt(prompt, season) {
+    pendingRewatch = { ...prompt, season: season };
     const when = prompt.completed_on
         ? new Date(prompt.completed_on + 'T00:00:00').toLocaleDateString(
             undefined, { day: 'numeric', month: 'long', year: 'numeric' })
         : 'some time ago';
     document.getElementById('rewatchQuestion').textContent =
         `Your history says you finished ${prompt.title} season ${prompt.season} on ${when}.`;
+    // WHERE A FRESH RUN STARTS, EDITABLE. The offered day is the one after that
+    // old finish, which is what makes a new pass start empty; moving it earlier
+    // is how somebody who watched an episode or two before adding the season
+    // gets those counted.
+    document.getElementById('rewatchFrom').value = prompt.suggested_from || '';
     document.getElementById('rewatchModal').classList.add('open');
 }
 
@@ -245,24 +254,33 @@ function closeRewatchPrompt() {
 async function answerRewatch(fresh) {
     if (!pendingRewatch) { return; }
     const asked = pendingRewatch;
+    const from = fresh ? (document.getElementById('rewatchFrom').value || asked.suggested_from) : '';
     closeRewatchPrompt();
     try {
-        const res = await fetch('/api/distrakt/rewatch', {
+        // THE SAME ROUTE AS THE ADD, because this IS the add: one place decides
+        // what a season becomes, and it now has the answer it was missing.
+        const res = await fetch('/api/distrakt/add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
-                key: asked.key, season: asked.season,
-                completed_on: asked.completed_on, fresh: !!fresh,
+                ids: pickedShow.ids, title: pickedShow.title,
+                network: pickedShow.network, season: asked.season,
+                decided: true, history_from: from,
             })
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
-        toast(fresh ? 'Starting fresh — earlier viewings no longer count'
-                    : 'Left as finished', true);
+        closeAddShow();
+        // ONE TOAST AND IT SAYS WHICH ANSWER LANDED. "Added" alone would be
+        // true of both and is the part the viewer already knows; what they
+        // cannot see from the row is whether their earlier viewing counts.
+        toast(fresh ? `Added ${asked.title} S${String(asked.season).padStart(2, '0')} — earlier viewings do not count`
+                    : `Added ${asked.title} S${String(asked.season).padStart(2, '0')}, counting what you have watched`,
+              true);
         applyMonthResponse(d);
     } catch (e) {
-        toast(e.message || 'Could not save that', false);
+        toast(e.message || 'Could not add show', false);
     }
 }
 

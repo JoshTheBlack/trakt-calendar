@@ -16,8 +16,6 @@
    calendar from the two inputs in the panel; the only JavaScript the feature has
    is the jump highlight, which waits for a day block to paint and is the one
    thing markup cannot express. #}
-{% set widen = {'hx-get': '/calendar/search', 'hx-target': '#searchResults',
-                'hx-include': '#searchInput, #searchEndpoint'} %}
 
 {% if not query %}
 <p class="search-hint">Type a title to find it on
@@ -88,21 +86,16 @@
     know about is missing from this list.</p>
 {% endif %}
 
-{# THE TWO WAYS TO WIDEN, BOTH EXPLICIT AND NEITHER AUTOMATIC. The first is more
-   work on this server; the second spends requests against somebody else's. They
-   are offered whether or not anything was found, because "nothing here" is
-   exactly when a reader wants to look further. #}
-{% if query %}
+{# WIDENING TO THE OTHER CALENDARS, offered whether or not anything was found —
+   "nothing here" is exactly when a reader wants to look further. Asking the
+   SERVICES is not offered here: it is the panel's own Search button, always
+   visible, because a second control doing the same thing is a second thing to
+   keep in step. #}
+{% if query and not everywhere %}
 <p class="search-hint search-widen">
-    {% if not everywhere %}
     <button type="button" class="btn-ghost small" hx-get="/calendar/search"
             hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
+            hx-sync="#searchResults:replace"
             hx-vals='{"all": "1"{% if live %}, "live": "1"{% endif %}}'>Search every calendar</button>
-    {% endif %}
-    {% if not live %}
-    <button type="button" class="btn-ghost small" hx-get="/calendar/search"
-            hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
-            hx-vals='{"live": "1"{% if everywhere %}, "all": "1"{% endif %}}'>Also search the services</button>
-    {% endif %}
 </p>
 {% endif %}

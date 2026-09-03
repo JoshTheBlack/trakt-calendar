@@ -277,14 +277,23 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> Elsewhere | No
     title nobody can date has no where. It is shown by the stored half if this
     instance holds it and not at all if it does not.
     """
-    provider = providers.get(hit.source)
+    # WHICH SOURCE ANSWERS FOR A TITLE TWO OF THEM FOUND is already decided:
+    # `source_ids` is ordered by the registry, so its first entry is the leader —
+    # the same one the tracker's own pick calls a season lookup with. A merged
+    # hit carries no single `source`, because being one row assembled from
+    # several answers is the whole point of the merge.
+    leader = next(iter(hit.source_ids.items()), None)
+    if leader is None:
+        return None
+    source, source_id = leader
+    provider = providers.get(source)
     if provider is None or provider.detail_port is None:
         return None
     try:
         described = await provider.detail_port.fetch_details(
-            settings, media, hit.source_id, None)
+            settings, media, source_id, None)
     except SourceUnavailable as exc:
-        logger.debug("search: %s could not describe %s: %s", hit.source, hit.source_id, exc)
+        logger.debug("search: %s could not describe %s: %s", source, source_id, exc)
         return None
     if not isinstance(described, dict):
         return None
@@ -292,7 +301,7 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> Elsewhere | No
     if moment is None:
         return None
     day = _local_day(moment.timestamp(), False, tz)
-    record = _as_record(hit, described, moment)
+    record = _as_record(hit, described, moment, source, source_id, media)
     endpoint_key = _endpoint_for(media)
     return Elsewhere(item=render(record, tz), endpoint_key=endpoint_key,
                      endpoint_label=get_endpoint(endpoint_key).label,
@@ -317,7 +326,7 @@ def _first_aired(described: dict) -> datetime | None:
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _as_record(hit, described: dict, moment: datetime):
+def _as_record(hit, described: dict, moment: datetime, source, source_id, media: Media):
     """A catalogue hit plus its description, as the Record a card draws from.
 
     IT IS A REAL `Record` AND NOT A LOOKALIKE, so the same template renders it
@@ -328,7 +337,7 @@ def _as_record(hit, described: dict, moment: datetime):
     from ..providers.base import Record
 
     return Record(
-        source=hit.source, media=hit.media, id=str(hit.source_id),
+        source=source, media=media, id=str(source_id),
         ids=dict(hit.ids or {}), detail_url=str(described.get("homepage") or ""),
         title=hit.title or str(described.get("title") or ""),
         air_ts=moment.timestamp(),

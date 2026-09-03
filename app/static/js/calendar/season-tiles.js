@@ -1,17 +1,25 @@
 // ---- Season info tile enrichment ----
 // Lazily fetch each show's current-season summary as its card scrolls into view,
 // so the initial page render stays fast. Results are cached server-side.
+//
+// IT SENDS EVERY ID THE CARD CARRIES, not a Trakt one, and `detailsQuery` is
+// what builds that — the same function the modal beside it uses, because "which
+// ids name this title" is one question and two answers to it would drift. This
+// used to read `card.dataset.traktId` and give up when it was empty, so the
+// line appeared only on titles that happened to be linked on Trakt and never on
+// a Simkl-only card. Simkl answers this as well as Trakt does; nothing asked.
 
 async function enrichSeasonInfo(card) {
     const el = card.querySelector('[data-role="season-info"]');
     if (!el || el.dataset.loaded) return;
     el.dataset.loaded = '1';
-    const id = card.dataset.traktId;
     const media = card.dataset.media;
     const season = card.dataset.season;
-    if (!id || media === 'movie' || season === '') return;
+    if (media === 'movie' || season === '') return;
+    const q = detailsQuery(card.dataset, media, season);
+    if (!q) return;  // no id at all: nothing can be looked up
     try {
-        const res = await fetch(`/api/tile?media=${encodeURIComponent(media)}&id=${encodeURIComponent(id)}&season=${encodeURIComponent(season)}`);
+        const res = await fetch(`/api/tile?${q}`);
         const d = await res.json();
         if (!d.ok) return;
         const parts = [];

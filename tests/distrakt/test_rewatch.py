@@ -182,161 +182,235 @@ class TheWatermarkIsStoredTests(unittest.IsolatedAsyncioTestCase):
                          {(str(KEY), 1): "2026-08-02"})
 
 
-class TheAddAsksRatherThanFilingSilentlyTests(DistraktTestCase):
-    """The route half: adding a season the history says is finished reports it,
-    and answering the question is what writes the floor.
+class TheAddAsksBeforeItWritesAnythingTests(DistraktTestCase):
+    """The route half: adding a season the viewer's history says they already
+    finished writes NOTHING and asks. The answer is what performs the add.
 
-    NOTHING IS DECIDED FOR THE VIEWER. The season goes on the list either way and
-    the history is untouched; ignoring the prompt leaves exactly the behaviour
-    that existed before it. What changes is that the old month no longer claims
-    the season without anybody being told.
+    THE ORDER IS THE FIX, AND THESE ARE THE FAILURES THAT PROVED IT. Asking
+    after the add looked equivalent — the season is on the list either way, so
+    ignoring the question would leave the old behaviour — and it was not, because
+    an add is followed by a recompute and the recompute settles a finished season
+    onto the month its history dates it to. A season watched in a month the
+    tracker HAD tracked was moved off the list before the question could be
+    answered, so answering it said "that season is not on your list". One watched
+    in an untracked month stayed and showed its whole episode count as this run's
+    progress. Writing nothing until the answer arrives makes both unreachable.
     """
 
     IDS = {"trakt": 1396, "tmdb": 1396, "slug": "breaking-bad"}
     SEASON = {"total": 13, "cadence": "Sun", "premiere": "2020-01-20",
               "finale": "2020-02-15", "started_airing": True,
               "finished_airing": True}
+    OLD_RUN = {str(n): "2020-02-%02d" % (n + 1) for n in range(1, 14)}
 
     def setUp(self):
         super().setUp()
         self.user_id = self.tracker_user("rewatcher")
         self.sign_in_as(self.user_id)
 
-    def _add(self, *, history: dict | None = None):
-        """Add the season, with the viewer's history saying whatever `history`
+    def _post(self, *, history=None, **extra):
+        """Post the add with the viewer's history saying whatever `history`
         says. The season lookup is stubbed because this is about the history,
-        not about the catalogue."""
+        not the catalogue."""
         state = _state(watched=history or {})
 
         async def _load(_user_id):
             return state
 
+        async def _sync(settings, user_id, roster, *a, **kw):
+            # THE SHARED SEAM, STOOD IN FOR FAITHFULLY: the real one applies the
+            # roster's floors to the state it returns, and a double that skipped
+            # that would exercise a pipeline this app does not have.
+            return watch_history.apply_history_floor(
+                state, watch_history.history_floors(roster))
+
         with patch("app.distrakt.live.season_detail",
                    AsyncMock(return_value=dict(self.SEASON))), \
              patch("app.distrakt.watch_history.baseline_show",
                    AsyncMock(return_value=None)), \
+             patch("app.distrakt.watch_history.sync_and_baseline", _sync), \
              patch("app.distrakt.watch_history.load_state", _load):
             return self.client.post("/api/distrakt/add", json={
                 "year": 2026, "month": 9, "ids": dict(self.IDS),
                 "title": "Breaking Bad", "network": "AMC", "season": 1,
+                **extra,
             })
 
-    def test_a_season_with_no_history_asks_nothing(self):
+    def _row(self):
+        return asyncio.run(store.find_user_record(self.user_id, KEY, 1))
+
+    # -- the ordinary add, which none of this may disturb --
+
+    def test_a_season_with_no_history_is_added_without_a_question(self):
         """Which is almost every add, so the question must not appear on one."""
-        resp = self._add()
+        resp = self._post()
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        self.assertNotIn("rewatch_prompt", resp.json())
+        self.assertNotIn("needs_decision", resp.json())
+        self.assertIsNotNone(self._row(), "an ordinary add did not land")
 
-    def test_a_season_the_history_says_is_finished_is_reported(self):
-        resp = self._add(history={"1": "2020-02-01", "2": "2020-02-15"})
-        self.assertEqual(resp.status_code, 200, resp.text[:300])
-        prompt = resp.json().get("rewatch_prompt")
-        self.assertIsNotNone(prompt, "a finished season was filed without asking")
-        self.assertEqual(prompt["completed_on"], "2020-02-15")
-        self.assertEqual(prompt["season"], 1)
-        self.assertEqual(prompt["key"], str(KEY))
+    def test_a_partly_watched_season_is_added_without_a_question(self):
+        """Somebody two episodes into a season is not re-watching it. The
+        question is about a FINISHED one, and those plays already count."""
+        resp = self._post(history={"1": "2026-08-30", "2": "2026-08-31"})
+        self.assertNotIn("needs_decision", resp.json())
+        self.assertIsNotNone(self._row())
 
-    def test_answering_fresh_floors_the_history_at_the_day_after(self):
-        """THE DAY AFTER, not the day itself: the last episode of the old run was
-        watched ON that day, and a floor including it would carry one episode of
-        the finished pass into the new one."""
-        self._add(history={"1": "2020-02-15"})
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
-            "completed_on": "2020-02-15", "fresh": True,
-        })
-        self.assertEqual(resp.status_code, 200, resp.text[:300])
-        row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
-        self.assertEqual(row["history_from"], "2020-02-16")
-
-    def test_answering_keep_leaves_the_history_alone(self):
-        self._add(history={"1": "2020-02-15"})
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
-            "completed_on": "2020-02-15", "fresh": False,
-        })
-        self.assertEqual(resp.status_code, 200, resp.text[:300])
-        row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
-        self.assertEqual(row["history_from"], "")
-
-    def test_a_second_add_does_not_ask_again_once_a_run_is_declared(self):
-        """The floor is honoured when the question is asked, so a viewer who has
-        already answered is not asked about the same old completion for ever."""
-        self._add(history={"1": "2020-02-15"})
-        self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
-            "completed_on": "2020-02-15", "fresh": True,
-        })
-        resp = self._add(history={"1": "2020-02-15"})
-        self.assertNotIn("rewatch_prompt", resp.json())
-
-    def test_a_fresh_run_with_no_date_is_refused_rather_than_guessed(self):
-        self._add(history={"1": "2020-02-15"})
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1, "fresh": True,
-        })
-        self.assertEqual(resp.status_code, 400, resp.text[:200])
-
-    def test_an_unreadable_date_is_refused(self):
-        self._add(history={"1": "2020-02-15"})
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
-            "completed_on": "last February", "fresh": True,
-        })
-        self.assertEqual(resp.status_code, 400, resp.text[:200])
-
-    def test_the_season_stays_on_the_list_instead_of_settling_away(self):
-        """THE BUG AS REPORTED, TWICE OVER.
-
-        Adding Supernatural S02 — watched earlier this year, in a month the
-        tracker HAD tracked — put it on the list and the recompute immediately
-        settled it onto that old month, so it vanished from the current one and
-        the answer to the prompt had no row to write to ("that season is not on
-        your list"). Adding Breaking Bad S03 — watched in a month never tracked —
-        stayed, and showed 13/13, because the previous run's plays counted as
-        this run's progress.
-
-        Both are the same cause: the recompute ran before anybody was asked. The
-        floor goes on first, which makes the season unfinished, which keeps it
-        where the viewer is standing and at zero.
+    def test_twelve_of_thirteen_episodes_is_not_finished(self):
+        """THE DEFECT THIS CLOSES. "Finished" was read off
+        `season_completed_map`, which dates the LAST episode watched and says so
+        in its own docstring — it answers "when", never "whether". A season with
+        one play was therefore reported as finished, so the re-watch question
+        appeared on a season somebody was in the middle of and offered to
+        discard their progress. The episode total has to be met first.
         """
-        resp = self._add(history={str(n): "2026-02-1%d" % (n % 10) for n in range(1, 14)})
-        self.assertEqual(resp.status_code, 200, resp.text[:300])
-        row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
-        self.assertIsNotNone(row, "the add settled the season away before asking")
-        self.assertNotEqual(row["history_from"], "",
-                            "nothing held the season while the question was open")
+        nearly = {str(n): "2026-08-%02d" % n for n in range(1, 13)}
+        resp = self._post(history=nearly)
+        self.assertNotIn("needs_decision", resp.json())
+        self.assertIsNotNone(self._row(), "a season in progress was not added")
 
-    def test_answering_the_prompt_finds_the_row_it_asked_about(self):
-        """The failure this closes: the prompt appeared, and answering it said
-        the season was not on the list — because it no longer was."""
-        self._add(history={"1": "2026-02-11", "2": "2026-02-12"})
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
-            "completed_on": "2026-02-12", "fresh": True,
-        })
-        self.assertEqual(resp.status_code, 200, resp.text[:300])
+    def test_all_thirteen_is_finished(self):
+        """The boundary from the other side, so the count is a threshold rather
+        than a strict inequality nobody checked."""
+        whole = {str(n): "2026-08-%02d" % n for n in range(1, 14)}
+        self.assertIn("needs_decision", self._post(history=whole).json())
 
-    def test_keeping_the_old_record_lets_it_settle_as_it_always_did(self):
-        """The default is unchanged and this is what says so: clearing the floor
-        hands the season back to the rule that files it under the month its
-        history names."""
-        self._add(history={"1": "2026-02-11"})
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
-            "completed_on": "2026-02-11", "fresh": False,
-        })
+    def test_two_services_reporting_the_same_run_is_still_one_run(self):
+        """PER SERVICE AND NOT SUMMED. Trakt and Simkl both listing the same
+        seven episodes have each seen seven, not fourteen; summing them would
+        call every co-tracked season finished at half way and ask a viewer to
+        throw away a run they are in the middle of."""
+        half = {str(n): "2026-08-%02d" % n for n in range(1, 8)}
+        state = {"shows": {str(KEY): {"seasons": {"1": {
+            "trakt": dict(half), "simkl": dict(half)}}}}}
+
+        async def _load(_user_id):
+            return state
+
+        async def _sync(settings, user_id, roster, *a, **kw):
+            return watch_history.apply_history_floor(
+                state, watch_history.history_floors(roster))
+
+        with patch("app.distrakt.live.season_detail",
+                   AsyncMock(return_value=dict(self.SEASON))), \
+             patch("app.distrakt.watch_history.baseline_show",
+                   AsyncMock(return_value=None)), \
+             patch("app.distrakt.watch_history.sync_and_baseline", _sync), \
+             patch("app.distrakt.watch_history.load_state", _load):
+            resp = self.client.post("/api/distrakt/add", json={
+                "year": 2026, "month": 9, "ids": dict(self.IDS),
+                "title": "Breaking Bad", "network": "AMC", "season": 1,
+            })
+        self.assertNotIn("needs_decision", resp.json())
+
+    def test_a_season_lookup_that_failed_asks_nothing(self):
+        """No total means nothing to compare a count against, and guessing would
+        ask about seasons at random. The add proceeds as an ordinary one."""
+        whole = {str(n): "2026-08-%02d" % n for n in range(1, 14)}
+
+        async def _load(_user_id):
+            return _state(watched=whole)
+
+        with patch("app.distrakt.live.season_detail", AsyncMock(return_value={})), \
+             patch("app.distrakt.watch_history.baseline_show",
+                   AsyncMock(return_value=None)), \
+             patch("app.distrakt.watch_history.sync_and_baseline",
+                   AsyncMock(return_value=_state(watched=whole))), \
+             patch("app.distrakt.watch_history.load_state", _load):
+            resp = self.client.post("/api/distrakt/add", json={
+                "year": 2026, "month": 9, "ids": dict(self.IDS),
+                "title": "Breaking Bad", "network": "AMC", "season": 1,
+            })
+        self.assertNotIn("needs_decision", resp.json())
+        self.assertIsNotNone(self._row())
+
+    # -- the question --
+
+    def test_a_finished_season_is_asked_about_and_nothing_is_written(self):
+        resp = self._post(history=self.OLD_RUN)
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
-        # Either it has settled off the list, or it is still there with no floor —
-        # both are the pre-existing behaviour, and which one depends on whether
-        # that month was ever tracked. What must NOT survive is the floor.
+        asked = resp.json().get("needs_decision")
+        self.assertIsNotNone(asked, "a finished season was filed without asking")
+        self.assertEqual(asked["completed_on"], "2020-02-14")
+        self.assertEqual(asked["season"], 1)
+        self.assertEqual(asked["title"], "Breaking Bad")
+        self.assertIsNone(self._row(),
+                          "the season was added before the question was answered")
+
+    def test_the_offered_start_is_the_day_after_the_old_finish(self):
+        """The last episode of that run was watched ON the finish day, so a
+        floor including it would show a fresh run starting at one."""
+        asked = self._post(history=self.OLD_RUN).json()["needs_decision"]
+        self.assertEqual(asked["suggested_from"], "2020-02-15")
+
+    def test_asking_writes_no_month_record_either(self):
+        """Not merely no roster row: nothing at all. A question is not a change."""
+        self._post(history=self.OLD_RUN)
+        self.assertEqual(
+            asyncio.run(store.month_records(self.user_id, "2026-09")), [])
+
+    # -- answering it --
+
+    def test_a_fresh_run_lands_at_zero_on_the_month_being_looked_at(self):
+        """THE REPORTED SYMPTOM, INVERTED. This came out as 13/13 on the current
+        month, or vanished onto February 2020. With the floor written as part of
+        the add, the previous run's plays are not this pass's progress."""
+        resp = self._post(history=self.OLD_RUN, decided=True,
+                          history_from="2020-02-15")
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        row = self._row()
+        self.assertIsNotNone(row, "the fresh run never made it onto the list")
+        self.assertEqual(row["history_from"], "2020-02-15")
+        floored = watch_history.apply_history_floor(
+            _state(watched=self.OLD_RUN), watch_history.history_floors([row]))
+        self.assertEqual(watch_history.watched_map(floored)[(str(KEY), 1)],
+                         {"trakt": 0})
+
+    def test_counting_what_was_already_watched_writes_no_floor(self):
+        """The other answer, and it needs no mechanism: no floor IS counting
+        everything. The season then settles as it always would have — the point
+        of asking was never to change that, only to stop it happening where
+        nobody could see it."""
+        resp = self._post(history=self.OLD_RUN, decided=True, history_from="")
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        row = self._row()
         self.assertTrue(row is None or row["history_from"] == "")
 
+    def test_a_viewer_chosen_day_is_honoured_over_the_offered_one(self):
+        """WHY THE DAY IS EDITABLE. Somebody who watched two episodes last week
+        and then added the season wants those counted: they are part of THIS
+        pass, and only the viewer knows where it began."""
+        recent = {**self.OLD_RUN, "1": "2026-08-25", "2": "2026-08-26"}
+        resp = self._post(history=recent, decided=True, history_from="2026-08-20")
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        row = self._row()
+        self.assertEqual(row["history_from"], "2026-08-20")
+        floored = watch_history.apply_history_floor(
+            _state(watched=recent), watch_history.history_floors([row]))
+        self.assertEqual(watch_history.watched_map(floored)[(str(KEY), 1)],
+                         {"trakt": 2}, "the two recent plays did not count")
+
+    def test_an_unreadable_day_counts_everything_rather_than_guessing(self):
+        """A date this cannot read is a date nobody meant. Falling back to "no
+        floor" counts everything, which is the answer that changes nothing and
+        is therefore the safe one to be wrong about."""
+        resp = self._post(history=self.OLD_RUN, decided=True,
+                          history_from="last February")
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        row = self._row()
+        self.assertTrue(row is None or row["history_from"] == "")
+
+    def test_a_second_add_does_not_ask_again_once_a_run_is_declared(self):
+        """The floor is honoured when the question is asked, so a season
+        somebody already declared a fresh run on is not interrogated about the
+        run they are in the middle of."""
+        self._post(history=self.OLD_RUN, decided=True, history_from="2020-02-15")
+        again = self._post(history=self.OLD_RUN)
+        self.assertNotIn("needs_decision", again.json())
+
     def test_a_settled_month_record_is_left_where_it_is(self):
-        """A re-watch is a SECOND thing, not a move. The old viewing stays on the
-        month it settled on, and the current run exists beside it — the add
-        writes a roster row and touches no month record."""
+        """A re-watch is a SECOND thing, not a move. The old viewing keeps the
+        month it settled on and the current run exists beside it — the add writes
+        a roster row and touches no month record."""
         month = "2026-02"
         asyncio.run(store.add_month_record(self.user_id, month, {
             "media": "show", "match_source": "tmdb", "match_id": "1396",
@@ -344,18 +418,7 @@ class TheAddAsksRatherThanFilingSilentlyTests(DistraktTestCase):
             "ids": {"tmdb": 1396}, "network": "AMC",
             "kind": str(store.RecordKind.COMPLETED),
         }))
-        self._add(history={"1": "2026-02-11"})
+        self._post(history=self.OLD_RUN, decided=True, history_from="2020-02-15")
         kept = asyncio.run(store.find_month_record(
             self.user_id, month, store.RecordKind.COMPLETED, KEY, 1))
         self.assertIsNotNone(kept, "adding a re-watch removed the settled record")
-
-    def test_a_season_not_on_the_list_is_refused(self):
-        resp = self.client.post("/api/distrakt/rewatch", json={
-            "year": 2026, "month": 9, "key": str(OTHER), "season": 1,
-            "completed_on": "2020-02-15", "fresh": True,
-        })
-        self.assertEqual(resp.status_code, 400, resp.text[:200])
-
-
-if __name__ == "__main__":
-    unittest.main()

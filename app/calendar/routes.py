@@ -42,9 +42,8 @@ from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpo
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
-from ..providers.base import SourceUnavailable
+from ..providers.base import Media, SourceUnavailable
 from ..providers.trakt import TraktError
-from ..providers.trakt.detail import fetch_tile_info
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
@@ -970,28 +969,52 @@ async def calendar_day(request: Request):
 
 @guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)
 async def api_tile(request: Request):
-    """Compact season info for a tile.
+    """Compact season info for a card's own line — how many episodes, what aired
+    last, what airs next.
 
-    Gated on the CATALOGUE credential, not on the instance's access token: a
-    season's episode list is public, globally cached and the same for everybody
-    (app/providers/trakt/detail.py), so it must not stop working because a token
-    lapsed.
+    THE CALLER HANDS OVER IDS, NOT A SERVICE, exactly as /api/details below
+    does, and this route did not used to. It took a bare `id`, read it as a
+    TRAKT id and refused outright unless the instance held Trakt catalogue
+    credentials — so the line appeared on a card only when the title happened to
+    carry a Trakt id, and a Simkl-only card could never show it. That read as
+    missing source data and was not: Simkl answers this perfectly well, and
+    `DetailPort.fetch_season_summary` is what makes asking it the same act. One
+    question, one source-picking rule, whichever services an instance has.
+
+    Gated on the CATALOGUE credential per source, never on an access token: a
+    season's episode list is public, globally cached and the same for everybody,
+    so it must not stop working because one person's token lapsed.
     """
+    from .. import providers  # deferred: see _coverage_gap, same reason
+    from ..providers import season as season_rules
+
     settings = load_settings()
-    if not settings.trakt_catalogue_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
     media = request.query_params.get("media", "show")
-    trakt_id = request.query_params.get("id")
-    if not trakt_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
+    season = route_params.season(request.query_params.get("season"))
+    chosen = detail_source.choose(
+        settings, detail_source.ids_from_query(request.query_params))
+    if chosen is None or season is None:
+        # 404 rather than 400: the request is well formed and there is simply
+        # nobody who can answer it, or nothing seasonal to answer about. The
+        # card leaves its line blank, which is what it does before this returns
+        # anyway.
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
+    provider = providers.get(chosen.source)
+    if provider is None or provider.detail_port is None:
+        return JSONResponse({"ok": False, "error": "No source can describe this title"},
+                            status_code=404)
     try:
-        info = await fetch_tile_info(
-            settings, media, trakt_id, route_params.season(request.query_params.get("season")))
-    except TraktError as exc:
-        # A transport failure (rate-limit or unreachable) now raises rather than
-        # returning a benign empty tile, so a 429 can't render as "no episodes".
+        detail = await provider.detail_port.fetch_season_summary(
+            settings, chosen.source_id, season, Media(media))
+    except SourceUnavailable as exc:
+        # THE SHARED DEGRADATION CONTRACT, not one service's error type. A
+        # transport failure raises rather than answering an empty season, so a
+        # rate-limit cannot render as "no episodes"; catching only Trakt's would
+        # now let Simkl's escape as a 500.
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, **info})
+    return JSONResponse({"ok": True, "source": str(chosen.source),
+                         **season_rules.tile_summary(detail, clock.today())})
 
 
 @guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)

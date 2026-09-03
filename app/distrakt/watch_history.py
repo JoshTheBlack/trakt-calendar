@@ -2071,4 +2071,22 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     # rather than with a library read. See naming.py for both gaps. Costs one
     # indexed count when there is nothing owed, and no network ever.
     await naming.fill_from_calendar(user_id)
-    return state
+    # THE VIEWER'S OWN FLOOR, APPLIED HERE AND NOWHERE ELSE. A season somebody
+    # is watching AGAIN has a history full of plays about the previous run;
+    # counting those reports the new pass as finished before it began, and
+    # settles it onto the month the ORIGINAL viewing ended in.
+    #
+    # WHY THIS FUNCTION AND NOT EACH CALLER. Three passes read a synced state and
+    # ask whether a season is complete — the live month pass, the payload's own
+    # history sync, and the unsettled drain — and only the first applied the
+    # floor. The other two therefore saw the whole history and could settle a
+    # season the open month showed as in progress, which is a disagreement about
+    # one fact. This function already takes the ROSTER, which is where the floors
+    # are stored, so it is the one place that can apply them for everybody: a
+    # reader added later inherits the rule without having to know it exists.
+    #
+    # AFTER `_save`, NEVER BEFORE. The floor is a VIEW of the history, not an
+    # edit to it: the state written back is the whole truth, and only what is
+    # handed to callers is filtered. Saving a floored state would delete the
+    # earlier run for good.
+    return apply_history_floor(state, history_floors(roster))

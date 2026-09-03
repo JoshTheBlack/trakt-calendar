@@ -1205,9 +1205,10 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         # IT NAMES THE CALENDAR IT SEARCHED, because "nothing matches" is a
         # different claim depending on which one was asked.
         self.assertIn("Nothing on All Episodes", resp.text)
-        # ...and offers both ways to look further.
+        # ...and offers the widening this fragment is the right place for.
+        # Asking the SERVICES is the panel's own always-visible Search button,
+        # not a control the results repeat.
         self.assertIn("Search every calendar", resp.text)
-        self.assertIn("Also search the services", resp.text)
 
     def test_an_empty_query_asks_for_one_rather_than_listing_everything(self):
         resp = self.client.get(f"{self.URL}&q=")
