@@ -136,6 +136,14 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "year": info.get("year") or "",
         "overview": (info.get("overview") or "").strip(),
         "status": (info.get("status") or "").replace("_", " ").title(),
+        # THE COUNTRY, UPPERCASED, "" when the service does not say. It has
+        # always been in this response and this projection dropped it, which
+        # made the calendar search's country filter a no-op: a record with no
+        # country cannot be excluded BY country, so every viewer's exclusions
+        # passed everything through. The calendar's own path reads the same
+        # field from the same payload — see this package's calendar.py — so the
+        # two now agree about what a title's country is.
+        "country": (info.get("country") or "").upper(),
         "network": info.get("network") or "",
         "runtime": info.get("runtime"),
         "genres": [g.replace("-", " ").title() for g in (info.get("genres") or [])],

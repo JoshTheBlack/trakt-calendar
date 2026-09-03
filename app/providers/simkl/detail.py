@@ -404,6 +404,14 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         "overview": str(fields.get("overview") or "").strip(),
         "status": str(fields.get("status") or "").replace("_", " ").title(),
         "network": str(fields.get("network") or ""),
+        # THE COUNTRY, UPPERCASED, "" when the service does not say. `_extract`
+        # has always kept it and this projection dropped it, which made the
+        # calendar search's country filter a no-op: a record carrying no country
+        # cannot be excluded BY country, so a viewer excluding a dozen of them
+        # was still offered every one — and the month such a row linked to could
+        # never draw the title. Costs nothing: it is already in the row this
+        # reads.
+        "country": str(fields.get("country") or "").upper(),
         "runtime": runtime,
         # SLUGS BACK INTO WORDS, exactly as the Trakt package does to its own.
         # `_extract` slugs a genre so a viewer's filter spec matches one spelling

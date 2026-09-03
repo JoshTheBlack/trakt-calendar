@@ -498,6 +498,13 @@ def _as_record(hit, described: dict, moment: datetime, source, source_id,
         air_ts=moment.timestamp(),
         year=hit.year or described.get("year") or "",
         network=str(described.get("network") or hit.network or ""),
+        # WITHOUT THIS THE COUNTRY FILTER CANNOT ACT ON THESE ROWS AT ALL. A
+        # record carrying no country is not excluded BY country, so a viewer
+        # excluding a dozen of them was still offered every one — and the month
+        # the row linked to could never draw the title. It is also what the row
+        # names on screen, which is how one franchise's many national versions
+        # are told apart.
+        country=str(described.get("country") or ""),
         runtime=described.get("runtime") or hit.runtime,
         status=str(described.get("status") or ""),
         rating=described.get("rating"),

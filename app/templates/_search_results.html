@@ -79,6 +79,12 @@
                 {% if hit.item.season is not none %}Season {{ hit.item.season }} · {% endif %}
                 {{ hit.item.air_display }} · {{ hit.endpoint_label }}
                 {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
+                {# THE COUNTRY, BECAUSE ONE FORMAT IS MANY SHOWS. A franchise
+                   like The Traitors returns a row per national version, all
+                   sharing a title and several sharing a network, and the
+                   country is the only thing on the row that tells them
+                   apart. #}
+                {% if hit.item.country %} · {{ hit.item.country }}{% endif %}
             </span>
         </span>
         <span class="search-go">Go to the month →</span>

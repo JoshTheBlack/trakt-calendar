@@ -367,6 +367,38 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         self.assertEqual(len(found.elsewhere), 1)
         self.assertEqual(asked, [], "a film was asked for its seasons")
 
+    async def test_a_country_this_viewer_excludes_is_not_offered(self):
+        """THE FILTER THAT LOOKED APPLIED AND WAS NOT.
+
+        Adding `filter_records` to this half was not enough on its own: the
+        record it filtered carried no `country`, because both packages' detail
+        projections dropped the field their own payloads return. A record with
+        no country cannot be excluded BY country, so a viewer excluding a dozen
+        of them was still offered every one — and the month such a row linked to
+        could never draw the title, which is exactly the report: "The Traitors
+        S02, Prime Video, and it isn't on that page".
+        """
+        self.prefs = {**self.prefs, "countries": "-in"}
+        found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
+                                       "country": "IN"})
+        self.assertEqual(found.elsewhere, ())
+
+    async def test_a_country_this_viewer_keeps_is_still_offered(self):
+        self.prefs = {**self.prefs, "countries": "-in"}
+        found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
+                                       "country": "US"})
+        self.assertEqual(len(found.elsewhere), 1)
+
+    async def test_the_row_carries_the_country_it_was_filtered_on(self):
+        """One format is many shows: a franchise returns a row per national
+        version, all sharing a title and several sharing a network, so the
+        country is the only thing on the row that tells them apart. It is also
+        the field the filter reads — one value, so a reader cannot be shown a
+        country the filter did not use."""
+        found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
+                                       "country": "IN"})
+        self.assertEqual(found.elsewhere[0].item.country, "IN")
+
     async def test_a_title_this_viewer_filters_out_is_not_offered(self):
         """THE ONE SURFACE THAT USED TO OFFER SOMEWHERE YOU CANNOT GET TO. A
         title excluded by genre was listed here, and the month it linked to
