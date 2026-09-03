@@ -205,6 +205,10 @@ async def _episodes_holding(settings: Settings, simkl_id, season: int,
 _AIR_DISPLAY = "%d %b %Y"
 
 
+# Deferred for the reason the Trakt package gives for the same import: the
+# poster reading belongs beside the feed that parses it.
+from . import calendar as simkl_calendar  # noqa: E402
+
 def _modal_episodes(episodes: list[dict], season: int) -> list[dict]:
     """Simkl's episode list reduced to the modal's rows, for `season` alone.
 
@@ -412,6 +416,13 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # never draw the title. Costs nothing: it is already in the row this
         # reads.
         "country": str(fields.get("country") or "").upper(),
+        # THE POSTER, AS A FULL URL. `_extract` keeps Simkl's partial path and
+        # this projection dropped it, so a card the calendar SEARCH wrote had no
+        # picture. Built by this package's own one reading of that path -- the
+        # same one the calendar feed uses -- because Simkl states a poster as a
+        # fragment and two places turning it into a URL would be two chances to
+        # get the size suffix wrong.
+        "poster": simkl_calendar.poster_url(fields.get("poster")) or "",
         "runtime": runtime,
         # SLUGS BACK INTO WORDS, exactly as the Trakt package does to its own.
         # `_extract` slugs a genre so a viewer's filter spec matches one spelling

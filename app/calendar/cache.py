@@ -88,8 +88,8 @@ from ..media import artwork
 from ..perftrace import activity, job, span
 from ..endpoints import ENDPOINTS, Endpoint
 from ..providers.base import (
-    Item, Provider, Record, SourceNotModified, SourceUnavailable, render,
-    resolve_key)
+    Item, Provider, Record, SourceNotModified, SourceUnavailable, epoch_moment,
+    render, resolve_key)
 
 logger = logging.getLogger(__name__)
 # Same "app.perf" logger the Trakt transport's cached_get already uses for its own
@@ -127,7 +127,7 @@ def record_utc_date(record: Record) -> date:
     """The UTC calendar day a record airs on. The windows are UTC-aligned, so
     this is the only date that decides which window owns it — a viewer's local
     day is a read-time question and is asked much later."""
-    return datetime.fromtimestamp(record.air_ts, tz=timezone.utc).date()
+    return epoch_moment(record.air_ts).date()
 
 
 def in_window(record: Record, start: date) -> bool:

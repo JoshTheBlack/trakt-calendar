@@ -64,7 +64,13 @@
 {%- for name, value in values.items() %}<span class="swap-logo" data-source="{{ name }}" data-label="{{ src.label(name) }}"{% if value != item|attr(field) %} hidden{% endif %}>{{ src.mark(name) }}</span>{% endfor -%}
 </button>
 {%- endmacro -%}
-<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}" data-id="{{ item.mark_key }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
+{# THE ANCHOR A SEARCH RESULT LANDS ON, put here by the SERVER because the
+   server is the only thing that knows which card was asked for before the page
+   exists. `id` rather than a class: a browser scrolls to a fragment on its own,
+   with no script, provided the element is in the document when it parses — and
+   the route ships this card's whole day inline for exactly that reason. The
+   `scroll-margin` that centres it lives in style.css. #}
+<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if highlight is defined and highlight and item.mark_key == highlight %} jump-target{% endif %}"{% if highlight is defined and highlight and item.mark_key == highlight %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>

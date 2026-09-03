@@ -49,10 +49,11 @@ from zoneinfo import ZoneInfo
 from . import cache as calendar_cache
 from . import entries
 from . import filter as calendar_filter
-from .. import providers
+from .. import db, providers
 from ..endpoints import get_endpoint
 from ..perftrace import span
-from ..providers.base import Item, Media, SourceUnavailable, render
+from ..providers.base import (Item, Media, SourceUnavailable, epoch_moment,
+                              render)
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,12 @@ CATALOGUE_LIMIT = 8
 # airing, the one before it, and the one being announced.
 SEASONS_PER_SHOW = 3
 
+# How long a title written by this path stays fresh. THE SAME DAY-SCALE THE FILL
+# USES, because it is the same kind of row: a title's genres and certification
+# change about as often as the fill assumes, and picking a different number here
+# would mean two answers to "when is a stored title stale".
+TITLE_STALE_SECONDS = 24 * 60 * 60
+
 
 @dataclass(frozen=True)
 class Airing:
@@ -95,17 +102,24 @@ class Airing:
 
     @property
     def url(self) -> str:
-        """The calendar, at the month, scrolled to the day, with this card
-        named so the page can pick it out.
+        """The calendar, at the month, anchored on THIS CARD.
 
-        `#day-YYYY-MM-DD` IS A REAL ANCHOR ALREADY -- both the day block and the
-        day fragment emit it, and the jump-to strip links to exactly this. It
-        works for a day that has not been rendered yet, because the skeleton
-        placeholder carries the same id and fetches itself when reached.
+        `#jump-target` AND NOT `#day-...`, because the card is what was asked
+        for and the day is only where it happens to sit. `highlight=` names the
+        card to the route, which does two things with it: it marks that card
+        `id="jump-target"`, and it ships that card's whole day with the shell
+        even when the day falls past the inline window. Both are needed for the
+        anchor to work, because a browser only scrolls to an element that exists
+        when it parses the page — and a card inside an unfetched placeholder
+        does not.
+
+        THE DAY ANCHOR WAS NOT WRONG, IT WAS TOO COARSE. It landed at the top of
+        the right day, which on a day holding thirty titles is not the same as
+        landing on the one somebody searched for.
         """
         return (f"/calendar?year={self.year}&month={self.month}"
                 f"&endpoint={quote(self.endpoint_key, safe='')}"
-                f"&highlight={quote(self.item.mark_key)}#day-{self.day}")
+                f"&highlight={quote(self.item.mark_key)}#jump-target")
 
 
 @dataclass(frozen=True)
@@ -175,7 +189,11 @@ def _local_day(air_ts: float, date_only: bool, tz: ZoneInfo) -> date:
     into a timezone moves it a day for viewers west of the source. The same rule
     the read path applies when it groups a month.
     """
-    moment = datetime.fromtimestamp(float(air_ts), timezone.utc)
+    # `epoch_moment` and not `datetime.fromtimestamp`: this is the path a
+    # CATALOGUE answer travels, and a service will happily name a season that
+    # premiered before 1970 — which fromtimestamp refuses outright on Windows.
+    # See providers/base.epoch_moment.
+    moment = epoch_moment(float(air_ts))
     return moment.date() if date_only else moment.astimezone(tz).date()
 
 
@@ -342,8 +360,58 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
                         continue
                     out.append(row)
         sp.set(found=len(out))
+
+    # WHAT WAS FOUND IS WRITTEN INTO THE CALENDAR, which is what turns this half
+    # from a signpost into a repair.
+    #
+    # THE CALENDARS HAVE HOLES AND THIS IS THE ONLY THING THAT CAN FILL THEM. A
+    # service answers two datasets about one show and they disagree: Trakt's show
+    # record dates Half Man's first season to 2026-04-28T20:00Z, and Trakt's
+    # premieres CALENDAR for that week does not list it at all. Linking to the
+    # month was honest and useless — the month filled correctly and still had no
+    # such card, because the feed it is built from never mentioned the title.
+    # Everything needed to write that airing was already in hand to draw the row.
+    #
+    # ON THE DELIBERATE PATH ONLY, because this is the deliberate path: the
+    # catalogue half runs on Enter or the button, never on a keystroke, so
+    # nothing is written by somebody typing.
+    #
+    # AND IT IS NOT PER-VIEWER, which is what makes writing to a shared cache
+    # legitimate here. A premiere date is a public fact from a public lookup —
+    # the same kind of row the fill stores — so it is right for every viewer of
+    # this instance, not just the one who searched. The rows are stored
+    # UNFILTERED like every other, and each viewer's own filters still decide at
+    # read whether a card is drawn.
+    await _fill_the_gaps(out, now=db.now())
     return Results(elsewhere=tuple(out[:RESULT_LIMIT]),
                    failed=frozenset(failed))
+
+
+async def _fill_the_gaps(rows: list[Elsewhere], *, now: int) -> None:
+    """Write the offered rows into the calendar they were missing from.
+
+    GROUPED BY ENDPOINT because that is how airings are keyed, and a search can
+    offer both a show and a film — which live on different calendars.
+
+    A FAILURE HERE LOSES A REPAIR, NEVER THE SEARCH. The rows have already been
+    described and are already drawable; a database that would not take them is a
+    reason to answer the reader anyway and try again next time, not a reason to
+    turn a working search into an error.
+    """
+    if not rows:
+        return
+    by_endpoint: dict[str, list] = {}
+    for row in rows:
+        by_endpoint.setdefault(row.endpoint_key, []).append(row.record)
+    try:
+        for endpoint_key, records in by_endpoint.items():
+            await entries.store_loose_airings(
+                endpoint_key, records, now=now,
+                stale_after=now + TITLE_STALE_SECONDS)
+    # Deliberately broad: see this function's own second paragraph.
+    except Exception:
+        logger.warning("calendar search could not store what it found",
+                       exc_info=True)
 
 
 async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere]:
@@ -390,15 +458,17 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere
         moments = await _season_premieres(settings, provider, source, source_id, media)
     if not moments:
         # The show's own first-air date, which is what a film always uses and
-        # what a show falls back to when its seasons could not be listed.
+        # what a show falls back to when its seasons could not be listed. Always
+        # an instant on both sources — a title's `first_aired` carries a time
+        # where a season list may not.
         whole = _first_aired(described)
-        moments = [(None, whole)] if whole is not None else []
+        moments = [(None, whole, False)] if whole is not None else []
 
     rows = []
-    for season, moment in moments[:SEASONS_PER_SHOW]:
-        day = _local_day(moment.timestamp(), False, tz)
+    for season, moment, date_only in moments[:SEASONS_PER_SHOW]:
+        day = _local_day(moment.timestamp(), date_only, tz)
         record = _as_record(hit, described, moment, source, source_id, media,
-                            season=season)
+                            season=season, date_only=date_only)
         endpoint_key = _endpoint_for(media)
         rows.append(Elsewhere(
             item=render(record, tz), endpoint_key=endpoint_key,
@@ -408,8 +478,9 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere
 
 
 async def _season_premieres(settings, provider, source, source_id,
-                            media: Media) -> list[tuple[int, datetime]]:
-    """`(season, premiere)` for every season this source can date, NEWEST FIRST.
+                            media: Media) -> list[tuple[int, datetime, bool]]:
+    """`(season, premiere, date_only)` for every season this source can date,
+    NEWEST FIRST — see `_as_moment` for what the third element decides.
 
     NEWEST FIRST BECAUSE THAT IS WHAT A SEARCH IS USUALLY ABOUT. Somebody typing
     a title they have just heard of wants the season now airing far more often
@@ -429,21 +500,30 @@ async def _season_premieres(settings, provider, source, source_id,
     out = []
     for entry in getattr(answer, "seasons", None) or []:
         number = entry.get("season")
-        moment = _as_moment(entry.get("first_aired"))
-        if number is None or moment is None:
+        dated = _as_moment(entry.get("first_aired"))
+        if number is None or dated is None:
             continue
-        out.append((int(number), moment))
-    out.sort(key=lambda pair: pair[1], reverse=True)
+        out.append((int(number), dated[0], dated[1]))
+    out.sort(key=lambda row: row[1], reverse=True)
     return out
 
 
-def _as_moment(raw) -> datetime | None:
-    """A season's premiere day as an instant, or None when it has none.
+def _as_moment(raw) -> tuple[datetime, bool] | None:
+    """A season's premiere as `(instant, date_only)`, or None when it has none.
 
-    MIDNIGHT UTC FOR A BARE DAY, deliberately and only to pick a MONTH. A season
-    list carries a calendar day rather than an air time, and the row it becomes
-    names a month to visit — so an hour that is off by one cannot move anything
-    a reader sees, while refusing the date outright would lose the season.
+    `date_only` IS THE DIFFERENCE BETWEEN THE TWO SOURCES AND IT DECIDES A DAY.
+    Trakt dates a premiere to the moment it airs — `2026-04-28T20:00:00.000Z` —
+    which is a real instant and converts into a viewer's zone like any other.
+    Simkl's season list carries a bare calendar day, because its own episode
+    reader deliberately drops the time (see that package: Simkl expresses a whole
+    file in one fixed offset, so the day is reliable and the instant is not).
+
+    A BARE DAY MUST NOT BE CONVERTED, which is the rule `_local_day` already
+    states: read as UTC midnight and pushed into a zone behind it, the 28th
+    becomes the 27th. That is not hypothetical — it is the reported bug, and it
+    came from truncating Trakt's instant to a day and then converting it anyway.
+    So the shape of the value decides: a time means an instant, no time means a
+    day, and a day is the same day everywhere.
     """
     text = str(raw or "").strip()
     if not text:
@@ -452,7 +532,8 @@ def _as_moment(raw) -> datetime | None:
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    date_only = len(text) <= 10 or ("T" not in text and " " not in text)
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)), date_only
 
 
 def _first_aired(described: dict) -> datetime | None:
@@ -474,7 +555,8 @@ def _first_aired(described: dict) -> datetime | None:
 
 
 def _as_record(hit, described: dict, moment: datetime, source, source_id,
-               media: Media, *, season: int | None = None):
+               media: Media, *, season: int | None = None,
+               date_only: bool = False):
     """A catalogue hit plus its description, as the Record a card draws from.
 
     IT IS A REAL `Record` AND NOT A LOOKALIKE, so the same template renders it
@@ -493,6 +575,10 @@ def _as_record(hit, described: dict, moment: datetime, source, source_id,
 
     return Record(
         source=source, media=media, id=str(source_id), season=season,
+        # A PREMIERE GIVEN AS A BARE DAY IS THE SAME DAY EVERYWHERE, and saying
+        # so here is what stops the card's own rendering shifting it back into a
+        # zone — the identical rule the calendar applies to a film's release.
+        date_only=date_only,
         ids=dict(hit.ids or {}), detail_url=str(described.get("homepage") or ""),
         title=hit.title or str(described.get("title") or ""),
         air_ts=moment.timestamp(),

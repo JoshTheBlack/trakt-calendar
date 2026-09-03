@@ -289,7 +289,7 @@ def _months_covering(start: date, days: int) -> list[tuple[int, int]]:
 # normalizing raw entries into Records
 # ---------------------------------------------------------------------------
 
-def _poster_url(path) -> str | None:
+def poster_url(path) -> str | None:
     """The full poster URL from Simkl's partial path ("19/198912937a2b29daaf"),
     or None. The path is NOT a URL on its own; the `_m` suffix asks Simkl's
     image host for the medium size, matched to what the calendar cards
@@ -421,7 +421,7 @@ def to_show_record(entry: dict) -> Record | None:
         detail_url=_detail_url(Media.SHOW, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
         air_ts=dt.timestamp(),
-        poster=_poster_url(entry.get("poster")),
+        poster=poster_url(entry.get("poster")),
         episode_label=ep_label,
         episode_title="",
         season=int(ep_season) if ep_season is not None else None,
@@ -466,7 +466,7 @@ def to_movie_record(entry: dict) -> Record | None:
         title=entry.get("title") or "Untitled",
         air_ts=dt.timestamp(),
         date_only=True,
-        poster=_poster_url(entry.get("poster")),
+        poster=poster_url(entry.get("poster")),
         # See to_show_record's identical note just above.
         enriched=False,
     )
@@ -515,7 +515,7 @@ def to_anime_film_record(entry: dict) -> Record | None:
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
         air_ts=dt.timestamp(),
-        poster=_poster_url(entry.get("poster")),
+        poster=poster_url(entry.get("poster")),
         # NO EPISODE COORDINATE, even where the anime entry carried one. The
         # `episode` object on a film entry is Simkl's calendar shape rather
         # than a statement about the title — measured, films appear with

@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from datetime import date
+import unittest
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -33,6 +34,7 @@ from app.providers.base import (
     Media,
     Source,
     collect_ids,
+    epoch_moment,
     parse_item_key,
     resolve_identity,
     resolve_key,
@@ -502,3 +504,41 @@ class TestCatalogueSearch:
         for provider in no_search:
             assert provider.source not in offered
 
+
+
+class TheEpochConversionIsPortableTests(unittest.TestCase):
+    """`epoch_moment` — a record's air time as an instant, for ANY value.
+
+    IT EXISTS BECAUSE `datetime.fromtimestamp` IS NOT PORTABLE. On Windows it
+    hands the value to the platform C library, which refuses anything before
+    1970 with OSError [Errno 22]. That reached production through the calendar
+    search: a catalogue lookup answers for whatever a service knows, services
+    know about television older than the epoch, and one 1969 premiere took the
+    whole request down.
+    """
+
+    def test_a_time_before_the_epoch_converts_instead_of_raising(self):
+        ts = datetime(1969, 6, 1, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(epoch_moment(ts).date(), date(1969, 6, 1))
+
+    def test_it_reaches_well_back_past_the_platform_limit(self):
+        ts = datetime(1930, 1, 1, tzinfo=timezone.utc).timestamp()
+        self.assertEqual(epoch_moment(ts).date(), date(1930, 1, 1))
+
+    def test_it_agrees_with_the_platform_wherever_the_platform_answers(self):
+        """A WIDENING, NOT A CHANGE. Every date this app already displayed has
+        to keep converting identically, or swapping the call everywhere would
+        have moved dates nobody asked to move."""
+        for moment in (datetime(1971, 1, 1, tzinfo=timezone.utc),
+                       datetime(2000, 2, 29, 12, 30, tzinfo=timezone.utc),
+                       datetime(2026, 9, 3, 23, 59, 59, tzinfo=timezone.utc)):
+            with self.subTest(moment=moment):
+                ts = moment.timestamp()
+                self.assertEqual(epoch_moment(ts),
+                                 datetime.fromtimestamp(ts, timezone.utc))
+
+    def test_it_answers_in_utc(self):
+        """The callers all go on to ask for a UTC date or convert to a viewer's
+        zone themselves; a naive answer would silently be read as local."""
+        self.assertEqual(epoch_moment(0).tzinfo, timezone.utc)
+        self.assertEqual(epoch_moment(0).date(), date(1970, 1, 1))

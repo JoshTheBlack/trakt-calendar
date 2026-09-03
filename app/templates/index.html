@@ -10,7 +10,13 @@
    (month/year/endpoint/total) DOES change per nav, so it lives on #pageData
    below — inside the swapped region — where the new page's values replace it. #}
 {%- set body_class %}pack-{{ view.day_packing }} card-{{ view.card_style }}{% if view.hide_not_watching %} hide-not-watching{% endif %}{% endset %}
-<body class="{{ body_class }}" hx-boost="true">
+{# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
+   whole reason it is declared here and nowhere else: a boosted navigation, a
+   day block arriving and a search all mark the same bar for as long as they are
+   in flight, with no script registering anything and nothing to clean up after
+   a swap. The bar itself is drawn by the site header — see _nav.html for what
+   it is for, and style.css for why it waits a moment before appearing. #}
+<body class="{{ body_class }}" hx-boost="true" hx-indicator="#pageProgress">
 {# What a boosted arrival cannot work out for itself. A swap replaces the body's
    CHILDREN, so the <body> element keeps the previous page's classes and the <head>
    keeps its scripts — see static/js/boost.js, which reads this and applies both.

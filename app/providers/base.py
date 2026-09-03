@@ -561,6 +561,28 @@ class Item(Record):
         identity = resolve_key(self.media, self.ids)
         return str(identity) if identity is not None else f"{self.source}:{self.id}"
 
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def epoch_moment(air_ts) -> datetime:
+    """A record's air time as a UTC instant, for ANY value it can hold.
+
+    NOT `datetime.fromtimestamp`, AND THAT IS THE WHOLE POINT. On Windows that
+    function hands the value to the platform C library, which REFUSES anything
+    before 1970 with OSError [Errno 22] — so a title that first aired in 1969
+    crashed the request rather than rendering. It reached production through the
+    calendar search: a catalogue lookup answers for whatever a service knows,
+    and services know about television older than the epoch.
+
+    ARITHMETIC ON A FIXED EPOCH IS PURE PYTHON and has no such range. It agrees
+    with `fromtimestamp` exactly wherever `fromtimestamp` works, so this is a
+    widening rather than a change: every caller converting a record's air time
+    should use it, because "which years can this app display" must not depend on
+    which operating system it is running on.
+    """
+    return _EPOCH + timedelta(seconds=float(air_ts))
+
+
 
 def render(record: Record, tz: ZoneInfo) -> Item:
     """The Item one viewer sees for `record`.
@@ -590,7 +612,7 @@ def render(record: Record, tz: ZoneInfo) -> Item:
     longer say where a picture came from. Proxying here reaches the browser and
     nothing else.
     """
-    moment = datetime.fromtimestamp(record.air_ts, tz=timezone.utc)
+    moment = epoch_moment(record.air_ts)
     if not record.date_only:
         moment = moment.astimezone(tz)
     values = {f.name: getattr(record, f.name) for f in fields(Record)}

@@ -131,6 +131,11 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
 
     info = results.get("info") or {}
 
+    # Deferred so this module stays importable from calendar.py's side of the
+    # package: the poster reading lives there because that is where the feed's
+    # own images are parsed, and a module-level import would close a cycle.
+    from . import calendar as trakt_calendar
+
     return {
         "title": info.get("title") or "",
         "year": info.get("year") or "",
@@ -144,6 +149,13 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # field from the same payload — see this package's calendar.py — so the
         # two now agree about what a title's country is.
         "country": (info.get("country") or "").upper(),
+        # THE POSTER, THROUGH THIS PACKAGE'S OWN ONE READING OF IT. A per-title
+        # lookup returns the same images the calendar feed does and this
+        # projection dropped them, so a card the calendar SEARCH wrote had no
+        # picture -- reported as "Half Man is missing the poster". Reusing the
+        # calendar module's reading rather than re-reading the field is what
+        # keeps its documented rule about these addresses in one place.
+        "poster": trakt_calendar.poster(info) or "",
         "network": info.get("network") or "",
         "runtime": info.get("runtime"),
         "genres": [g.replace("-", " ").title() for g in (info.get("genres") or [])],
@@ -318,13 +330,20 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     the picker, which is exactly a season 1 that has not started airing yet.
     Fixed once manual add-show on an unaired season turned out to be broken.
 
-    `first_aired` IS THE SEASON'S PREMIERE DAY, "" when Trakt has not dated the
-    season. `extended=full` has always returned it and this projection used to
-    drop it, which cost the calendar search the only thing it needed to offer a
-    SEASON rather than a show: without a per-season date every season of a
-    long-running title resolves to the month the show first aired, years before
-    the season somebody was looking for. It arrives in the same response as the
-    episode counts, so carrying it costs nothing.
+    `first_aired` IS THE SEASON'S PREMIERE, AS A FULL INSTANT, "" when Trakt has
+    not dated the season. `extended=full` has always returned it and this
+    projection used to drop it, which cost the calendar search the only thing it
+    needed to offer a SEASON rather than a show: without a per-season date every
+    season of a long-running title resolves to the month the show first aired,
+    years before the season somebody was looking for. It arrives in the same
+    response as the episode counts, so carrying it costs nothing.
+
+    THE TIME IS KEPT AND THAT IS NOT A DETAIL. Trakt dates a premiere to the
+    moment it airs — `2026-04-28T20:00:00.000Z` for a British show — and
+    truncating that to a bare day and re-reading it as UTC midnight moves it
+    BACKWARDS for every viewer west of Greenwich. Measured: a search offered
+    27 April for a season the calendar draws on the 28th, so the link landed a
+    day early on a day that had nothing on it.
     """
     results = await transport.cached_get(
         transport.shared_client(), settings, f"shows/{trakt_id}/seasons", {"extended": "full"}, raise_errors=True,
@@ -336,7 +355,7 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
         if num is None or num == 0 or episode_count <= 0:
             continue
         out.append({"season": int(num), "episode_count": int(episode_count),
-                    "first_aired": str(entry.get("first_aired") or "")[:10]})
+                    "first_aired": str(entry.get("first_aired") or "")})
     out.sort(key=lambda s: s["season"])
     logger.info("fetch_show_seasons(%s) -> %d usable season(s)", trakt_id, len(out))
     return out

@@ -90,16 +90,22 @@ class StoredResultsTests(SearchTestCase):
         self.assertEqual((hit.year, hit.month, hit.day), (2026, 7, "2026-07-08"))
         self.assertEqual(hit.endpoint_key, SHOWS)
 
-    async def test_the_jump_url_carries_the_month_the_day_and_the_card(self):
-        """All three, because all three are needed: the month is what the
-        calendar route reads, the anchor is what scrolls, and the card id is what
-        the page highlights once the day has painted."""
+    async def test_the_jump_url_anchors_on_the_card_and_not_on_the_day(self):
+        """The month is what the calendar route reads, `highlight=` is what the
+        route marks and ships the day for, and `#jump-target` is what the
+        BROWSER scrolls to with no script involved.
+
+        ANCHORED ON THE CARD BECAUSE THE DAY IS TOO COARSE. `#day-` was not
+        wrong, it just landed at the top of the right day — which on a day
+        holding thirty titles is not where the one somebody searched for is.
+        """
         await self.store(_record("Severance"))
         url = (await self.find("severance")).airings[0].url
         self.assertIn("year=2026", url)
         self.assertIn("month=7", url)
         self.assertIn("endpoint=shows%2Fpremieres", url)
-        self.assertIn("#day-2026-07-08", url)
+        self.assertIn("highlight=", url)
+        self.assertTrue(url.endswith("#jump-target"), url)
         self.assertIn("highlight=", url)
 
     async def test_it_matches_on_a_fold_rather_than_on_the_exact_spelling(self):
@@ -275,6 +281,120 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             return await calendar_search.catalogue(
                 "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
                 known=known)
+
+    async def test_a_season_older_than_the_epoch_does_not_crash_the_search(self):
+        """THE CRASH, EXACTLY. A catalogue answers for whatever a service knows,
+        and services know about television older than 1970 — so a season list
+        came back with a premiere in 1969, and converting it with
+        `datetime.fromtimestamp` raised OSError [Errno 22] on Windows, where
+        that call is handed to the platform C library. The whole search 500'd
+        because one row was old.
+
+        WHICH YEARS THIS APP CAN DISPLAY MUST NOT DEPEND ON ITS OPERATING
+        SYSTEM, which is what `providers.base.epoch_moment` is for.
+        """
+        found = await self._catalogue(
+            {"first_aired": "1969-06-01T00:00:00Z", "title": "Old Show"},
+            seasons=[{"season": 1, "first_aired": "1969-06-01"},
+                     {"season": 2, "first_aired": "1970-06-01"}])
+        self.assertEqual(len(found.elsewhere), 2)
+        self.assertEqual(sorted(row.year for row in found.elsewhere), [1969, 1970])
+
+    async def test_a_show_older_than_the_epoch_is_placed_in_its_real_month(self):
+        """Not merely "does not crash": the row has to land where the title
+        actually aired, or refusing would have been the better answer."""
+        found = await self._catalogue({"first_aired": "1963-11-23T17:16:00Z"})
+        self.assertEqual(len(found.elsewhere), 1)
+        row = found.elsewhere[0]
+        self.assertEqual((row.year, row.month), (1963, 11))
+        self.assertEqual(row.day, "1963-11-23")
+
+    async def test_a_premiere_with_a_time_keeps_the_day_that_time_falls_on(self):
+        """THE OFF-BY-ONE, EXACTLY. Trakt dates a premiere to the moment it airs
+        — Half Man season 1 came back as `2026-04-28T20:00:00.000Z` — and this
+        used to truncate that to a bare day and re-read it as UTC MIDNIGHT.
+        Pushed into a zone behind Greenwich, midnight on the 28th is the 27th,
+        so the row offered 27 April for a season airing on the 28th and the link
+        landed a day early.
+        """
+        self.tz = ZoneInfo("America/New_York")
+        found = await self._catalogue(
+            {"first_aired": "2026-04-28T20:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2026-04-28T20:00:00.000Z"}])
+        self.assertEqual(found.elsewhere[0].day, "2026-04-28")
+
+    async def test_a_premiere_given_as_a_bare_day_is_not_moved_by_a_zone(self):
+        """The other source's shape, and the opposite rule. Simkl's season list
+        carries a calendar DAY — its episode reader drops the time deliberately,
+        because Simkl states a whole file in one fixed offset — and a day is the
+        same day everywhere. Converting it would move it for exactly the viewers
+        the fix above was for."""
+        self.tz = ZoneInfo("America/New_York")
+        found = await self._catalogue(
+            {"first_aired": "2026-04-28T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2026-04-28"}])
+        self.assertEqual(found.elsewhere[0].day, "2026-04-28")
+
+    async def test_a_bare_day_is_not_moved_for_a_viewer_ahead_of_utc_either(self):
+        """East as well as west: a day that is the same everywhere has to be the
+        same in both directions, or this is half a rule."""
+        self.tz = ZoneInfo("Asia/Tokyo")
+        found = await self._catalogue(
+            {"first_aired": "2026-04-28T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2026-04-28"}])
+        self.assertEqual(found.elsewhere[0].day, "2026-04-28")
+
+    async def test_what_it_finds_is_written_into_the_calendar(self):
+        """THE POINT OF THE CATALOGUE HALF, AFTER THE REPORT THAT BROKE IT.
+        Linking to a month was honest and useless: Half Man's premiere is in
+        Trakt's SHOW record and absent from Trakt's premieres CALENDAR, so the
+        month filled correctly and still had no such card. Everything needed to
+        write that airing was already in hand to draw the row, so it is written
+        — which is also the only way this app can show a premiere both services'
+        calendars have missed.
+        """
+        stored = []
+
+        async def _store(endpoint_key, records, *, now, stale_after):
+            stored.append((endpoint_key, [r.title for r in records]))
+            return len(records)
+
+        with patch("app.calendar.entries.store_loose_airings", _store):
+            await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
+                                   "title": "Unseen Show"})
+        self.assertEqual(stored, [("shows/premieres", ["Unseen Show"])])
+
+    async def test_a_store_that_fails_still_answers_the_reader(self):
+        """A REPAIR IS A BONUS, NEVER THE ANSWER. The rows are already described
+        and already drawable; a database that would not take them is a reason to
+        try again next time, not a reason to turn a working search into an
+        error."""
+        async def _boom(endpoint_key, records, *, now, stale_after):
+            raise RuntimeError("disk is unhappy")
+
+        with patch("app.calendar.entries.store_loose_airings", _boom):
+            found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"})
+        self.assertEqual(len(found.elsewhere), 1)
+
+    async def test_shows_and_films_are_written_to_their_own_calendars(self):
+        """Airings are keyed by endpoint, and one search can offer both — so
+        grouping by endpoint is not tidiness, it is the key."""
+        seen = []
+
+        async def _store(endpoint_key, records, *, now, stale_after):
+            seen.append(endpoint_key)
+            return len(records)
+
+        async def _search(asked, settings, media, query):
+            return SimpleNamespace(hits=[self._hit()], failed=frozenset())
+
+        with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.calendar.entries.store_loose_airings", _store),              patch("app.providers.for_catalogue_search",
+                   return_value=[(Source.SIMKL, object())]),              patch("app.providers.get", return_value=SimpleNamespace(
+                 detail_port=self._port({"first_aired": "2026-11-04T20:00:00Z"}))):
+            await calendar_search.catalogue(
+                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
+                known=frozenset())
+        self.assertEqual(sorted(seen), ["movies", "shows/premieres"])
 
     async def test_a_show_is_offered_once_per_season_premiere(self):
         """WHAT THE SHOW-SHAPED ROW COULD NOT DO. A long-running title has one

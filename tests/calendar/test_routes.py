@@ -1153,6 +1153,63 @@ class CalendarShellTests(CalendarRouteTestCase):
 
 
 
+class TheJumpAnchorIsRenderedByTheServerTests(CalendarRouteTestCase):
+    """Landing on a searched card needs no script, and this is what makes that
+    true.
+
+    THE SHAPE OF THE OLD BUG. A card lives in a day block, and every day past
+    the first few ships as a placeholder that fetches itself when scrolled to.
+    A browser scrolls to a fragment only if the element is in the document when
+    it parses the page — so the card was not there, script had to wait for its
+    day to arrive, and then keep correcting as the days ABOVE it swapped short
+    placeholders for tall blocks. It landed at the top of the right day, or
+    several days early, depending on how much grew above it.
+
+    THE FIX IS A SERVER DECISION: mark the card the link named, so the browser's
+    own fragment scrolling has something to reach.
+    """
+
+    MONTH = "/calendar?year=2026&month=7&endpoint=shows"
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("jumper"))
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([_entry("the-drama", "The Drama",
+                                             "2026-07-15T20:00:00Z")]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _mark(self):
+        """The card's own identity, asked of the search rather than spelled out
+        here — the two must agree or the anchor names nothing."""
+        found = self.client.get("/calendar/search?endpoint=shows&q=drama")
+        match = re.search(r"highlight=([^\"&#]+)", found.text)
+        self.assertIsNotNone(match, found.text[:300])
+        return match.group(1)
+
+    def test_the_named_card_carries_the_anchor(self):
+        self.client.get(self.MONTH)
+        resp = self.client.get(f"{self.MONTH}&highlight={self._mark()}")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('id="jump-target"', resp.text)
+
+    def test_no_card_is_marked_when_nothing_was_asked_for(self):
+        """Which is every ordinary load, so the anchor must not appear on one —
+        an `id` on a page nobody jumped to would move the scroll position of a
+        plain visit."""
+        resp = self.client.get(self.MONTH)
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn('id="jump-target"', resp.text)
+
+    def test_an_unknown_card_marks_nothing_rather_than_guessing(self):
+        """A stale link names a card this month no longer holds. Marking the
+        nearest thing would send a reader somewhere confidently wrong."""
+        resp = self.client.get(f"{self.MONTH}&highlight=trakt%3Ano-such-title")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn('id="jump-target"', resp.text)
+
+
 class CalendarSearchRouteTests(CalendarRouteTestCase):
     """The search route: a fragment, and one that spends nothing unless asked.
 
@@ -1182,7 +1239,11 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         resp = self.client.get(f"{self.URL}&q=drama")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("The Drama", resp.text)
-        self.assertIn("#day-2026-07-15", resp.text)
+        # ANCHORED ON THE CARD, not the day: `highlight=` is what the calendar
+        # route marks and ships the day for, and `#jump-target` is what the
+        # browser scrolls to on its own.
+        self.assertIn("highlight=", resp.text)
+        self.assertIn("#jump-target", resp.text)
         self.assertIn("On All Episodes", resp.text)
 
     def test_it_is_a_fragment_and_not_a_page(self):

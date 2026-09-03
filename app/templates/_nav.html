@@ -35,6 +35,25 @@
                 settings_button=false, calendar_href='/calendar', distrakt_href='/distrakt',
                 calendar_available=false, ranker_available=false, is_admin=false,
                 distrakt_available=None) %}
+{# WORK IS HAPPENING, SAID WITHOUT A LINE OF JAVASCRIPT.
+
+   THE PROBLEM IT ANSWERS: following a search result into a month this instance
+   has never held takes five or six seconds, because arriving is what FILLS that
+   month — every source is asked, the window is stored, and only then does a page
+   come back. Nothing on screen changed in the meantime, so a reader cannot tell
+   a slow answer from a click that missed.
+
+   `htmx-request` IS PUT HERE BY htmx ITSELF. `hx-indicator` on <body> is
+   inherited by every element under it, so any request htmx makes — a boosted
+   navigation, a day block arriving, a search — marks this one element for as
+   long as it is in flight. There is nothing to register, nothing to clean up,
+   and no event listener that can miss a swap.
+
+   AND IT ONLY APPEARS IF THE WAIT IS REAL. The CSS delays the fade-in by a
+   quarter second, so the many requests that finish quickly never draw anything
+   and the bar is not a flicker on every keystroke. A delay costs nothing to be
+   wrong about: the work is under way either way. #}
+<div id="pageProgress" aria-hidden="true"><span></span></div>
 <header class="hero">
     <div class="hero-lead">
         {% if brand == 'distrakt' %}

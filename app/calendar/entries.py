@@ -31,7 +31,7 @@ import unicodedata
 from datetime import date, datetime, timezone
 
 from .. import db
-from ..providers.base import Media, Record, Source
+from ..providers.base import Media, Record, Source, epoch_moment
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,10 @@ def _as_year(stored) -> int | str:
 
 
 def _utc_date(air_ts: float) -> str:
-    return datetime.fromtimestamp(float(air_ts), timezone.utc).strftime("%Y-%m-%d")
+    # Through the shared conversion so this agrees with every other reading of a
+    # record's air time, including on a platform whose C library refuses dates
+    # before 1970 — see providers/base.epoch_moment.
+    return epoch_moment(air_ts).strftime("%Y-%m-%d")
 
 
 def fold_title(title: str) -> str:
@@ -357,6 +360,68 @@ ORDER BY a.air_ts, a.title_key
 # whatever order they arrive. Sorting by source name instead would put Simkl
 # ahead of Trakt and quietly reverse both.
 _SOURCE_ORDER = {str(s): i for i, s in enumerate(Source)}
+
+
+async def store_loose_airings(endpoint_key: str, records, *, now: int,
+                              stale_after: int) -> int:
+    """Store airings that no CALENDAR FEED offered, filling a gap in one.
+
+    WHY A SOURCE CAN BE MISSING ITS OWN TITLE. A service answers two different
+    datasets about one show, and they disagree. Trakt's show record dates Half
+    Man's first season to 2026-04-28T20:00Z; Trakt's premieres CALENDAR for that
+    week does not list it, and its all-episodes calendar carries episode two and
+    no episode one. The title is real, the date is the service's own, and the
+    calendar this app is built from simply has a hole in it.
+
+    SO THE SEARCH REPAIRS IT. A catalogue lookup already had to describe the
+    title and date its seasons to draw a result row at all; writing that as an
+    airing costs nothing more and turns "go to the month and hope" into a card
+    that is actually there. It is also the only way this app can show a premiere
+    both services' calendars have missed.
+
+    WRITTEN AS THE FEED WOULD HAVE WRITTEN IT, deliberately. Same source, same
+    ids, same natural key, same shaping as `store_span` — so a row here is not a
+    special kind of row anybody has to know about downstream, it resolves and
+    filters and renders like every other, and a later fill of its span REPLACES
+    it rather than duplicating it. The feed stays authoritative: when the source
+    is asked about that window again its answer wins outright, and if the hole is
+    still there the next search fills it again.
+
+    NO COVERAGE ROW IS WRITTEN, and that is the important restraint. Coverage
+    records which sources were ASKED about a window and which ANSWERED — this
+    asked nobody about a window, so claiming coverage would tell the fill path a
+    span had been fetched when it has not, and a month would go permanently
+    half-empty. These rows sit inside whatever coverage the span already has.
+
+    Returns how many airings were written.
+    """
+    rows = []
+    titles = []
+    for record in records or ():
+        name = str(record.source)
+        key = title_key_of(record)
+        season = record.season if record.season is not None else UNSTATED
+        number = record.episode_number if record.episode_number is not None else UNSTATED
+        rows.append((
+            name, str(record.media), str(record.id), endpoint_key, key,
+            float(record.air_ts), _utc_date(record.air_ts),
+            1 if record.date_only else 0,
+            int(season), int(number), str(record.episode_label or ""), now,
+        ))
+        titles.append((name, str(record.media), str(record.id), key,
+                       *_title_values(record), now, stale_after))
+    if not rows:
+        return 0
+
+    def _write(conn):
+        for row in titles:
+            conn.execute(_UPSERT_TITLE, row)
+        conn.executemany(_INSERT_AIRING, rows)
+
+    await db.transaction(_write)
+    logger.info("calendar search filled %d airing(s) on %s that no feed listed.",
+                len(rows), endpoint_key)
+    return len(rows)
 
 
 def _record_from_row(row) -> Record:

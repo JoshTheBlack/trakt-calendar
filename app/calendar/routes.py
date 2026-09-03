@@ -640,6 +640,19 @@ async def calendar_page(request: Request):
     # a run of empty days and "the first five dates" would then ship nothing.
     inline_groups = month_view.grouped[:INITIAL_DAY_BLOCKS]
     skeleton_groups = month_view.grouped[INITIAL_DAY_BLOCKS:]
+    # THE DAY A JUMP IS AIMED AT SHIPS WITH THE SHELL, wherever in the month it
+    # falls. A search result links to one card, and a browser can only scroll to
+    # an element that EXISTS when the page is parsed — a card still inside an
+    # unfetched placeholder is not one. That is what made landing on a result
+    # need script: something had to wait for the day to arrive, and then keep
+    # correcting as the days above it grew. Shipping one extra day costs a
+    # handful of cards and lets an anchor behave like an anchor.
+    highlight = request.query_params.get("highlight") or ""
+    if highlight:
+        for index, group in enumerate(skeleton_groups):
+            if any(item.mark_key == highlight for item in group["items"]):
+                inline_groups = inline_groups + [skeleton_groups.pop(index)]
+                break
     for group in skeleton_groups:
         group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]),
                                 source=request.query_params.get("source"))
@@ -688,6 +701,9 @@ async def calendar_page(request: Request):
         "nav": route_params.adjacent_months(year, month),
         # The days rendered INLINE. The whole month is what every number on the
         # page is computed from; this is only what is painted now.
+        # WHICH CARD A JUMP IS AIMED AT, so the card itself can carry the anchor
+        # rather than a script hunting for it after the fact.
+        "highlight": highlight,
         "grouped": inline_groups,
         # The days that are announced but not yet fetched: header, chip target and
         # reserved height now, cards when the viewer reaches them.

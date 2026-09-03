@@ -536,3 +536,79 @@ class BacklogCountTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             await calendar_entries.owed_season_count("trakt", "trakt", now), 1)
+
+
+class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
+    """`store_loose_airings` — a title the CALENDAR feed never mentioned.
+
+    THE CASE IT EXISTS FOR. A service answers two datasets about one show and
+    they disagree: Trakt's show record dates Half Man's first season to
+    2026-04-28T20:00Z, and Trakt's premieres calendar for that week does not
+    list it at all — its all-episodes calendar carries episode two and no
+    episode one. The title is real and the date is the service's own; the feed
+    this app is built from simply has a hole. A catalogue lookup already had to
+    describe and date the title to draw a search result, so writing that as an
+    airing fills the hole for nothing extra.
+    """
+
+    async def asyncSetUp(self):
+        migrated_db("calloose")
+
+    async def asyncTearDown(self):
+        db.close_thread_connection()
+
+    async def _write(self, records, *, endpoint=SHOWS, now=1_000_000):
+        return await calendar_entries.store_loose_airings(
+            endpoint, records, now=now, stale_after=now + 86400)
+
+    async def test_the_airing_reads_back_like_any_other(self):
+        """WRITTEN AS THE FEED WOULD HAVE WRITTEN IT is the whole design: a row
+        from this path must not be a special kind of row anybody downstream has
+        to know about, or it would resolve, filter and render differently from
+        the rows beside it."""
+        written = await self._write([_record("halfman", 1, 1, AIR)])
+        self.assertEqual(written, 1)
+        back, _asked, _answered, _at = await calendar_entries.read_span(
+            SHOWS, date(2026, 7, 6), date(2026, 7, 13))
+        self.assertEqual([r.title for r in back], ["Halfman"])
+        self.assertEqual(back[0].air_ts, AIR)
+
+    async def test_it_claims_no_coverage(self):
+        """THE IMPORTANT RESTRAINT. Coverage records which sources were ASKED
+        about a window and which ANSWERED. This asked nobody about a window, so
+        writing coverage would tell the fill path a span had been fetched when
+        it has not — and the month would stay permanently half empty because
+        nothing would ever go and get the rest.
+        """
+        await self._write([_record("halfman", 1, 1, AIR)])
+        self.assertEqual(
+            await db.fetch_value("SELECT COUNT(*) FROM calendar_coverage"), 0)
+
+    async def test_writing_the_same_airing_twice_is_one_row(self):
+        """A viewer searching the same title twice must not double the card.
+        The natural key is the feed's own, so the second write replaces."""
+        await self._write([_record("halfman", 1, 1, AIR)])
+        await self._write([_record("halfman", 1, 1, AIR)])
+        self.assertEqual(
+            await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 1)
+
+    async def test_the_feed_wins_when_it_is_next_asked(self):
+        """DELIBERATE, AND THE HONEST ORDER OF AUTHORITY. A fill replaces what a
+        source holds for a span, so a source that STILL omits the title removes
+        this row — and the next search puts it back. Anything else would mean a
+        row nobody can ever retract, resurrecting titles a service has
+        deliberately dropped.
+        """
+        await self._write([_record("halfman", 1, 1, AIR)])
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record("somethingelse", 1, 1, AIR)], 600, 2_000_000,
+            sources=["trakt"], asked=["trakt"])
+        back, _asked, _answered, _at = await calendar_entries.read_span(
+            SHOWS, date(2026, 7, 6), date(2026, 7, 13))
+        self.assertEqual([r.title for r in back], ["Somethingelse"])
+
+    async def test_nothing_to_write_touches_nothing(self):
+        self.assertEqual(await self._write([]), 0)
+        self.assertEqual(
+            await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 0)
