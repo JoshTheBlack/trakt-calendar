@@ -178,8 +178,13 @@
                             {% for g in item.genres %}<span class="chip">{{ g }}</span>{% endfor %}
                         </div>
                         {% if item.overview %}<div class="overview">{{ item.overview }}</div>{% endif %}
+                        {# The same row the signed-in card draws, IMDb's score
+                           included: a share link renders the view its owner's
+                           page does, and a number missing from one of them would
+                           be a difference nobody chose. #}
                         <div class="premiere-info">
                             <span class="date">{{ item.air_display }}</span>
+                            {% if item.imdb_rating %}<span class="imdb-rating" title="IMDb score"><span class="imdb-mark">IMDb</span>{{ item.imdb_rating }}</span>{% endif %}
                             <span class="time">{{ item.air_time }}</span>
                         </div>
                         <div class="links-row">

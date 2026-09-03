@@ -483,6 +483,7 @@ def _apply(record: Record, fields: dict[str, Any]) -> None:
     record.language = value["language"]
     record.year = value["year"]
     record.rating = value["rating"]
+    record.imdb_rating = value["imdb_rating"]
     # Missing on a row written by the older, narrower extraction — reads as ""
     # exactly like an unenriched record, which is the honest answer until the
     # drain re-fetches it under the wider shape (app/calendar/filter.py's

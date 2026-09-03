@@ -85,6 +85,10 @@ _TITLE_FIELDS = ("title", "title_fold", "ids_json", "detail_url", "year", "netwo
 
 def _title_values(record: Record) -> tuple:
     ratings = {}
+    if record.imdb_rating is not None:
+        # A THIRD PARTY'S SCORE, UNDER ITS OWN NAME. It is not this source's
+        # answer and must not be filed as one — see Record.imdb_rating.
+        ratings["imdb"] = record.imdb_rating
     if record.rating is not None:
         # UNDER THE SOURCE'S OWN NAME, never a bare number. The card draws two
         # services' ratings side by side and never averages them; a map keyed by
@@ -393,6 +397,11 @@ def _record_from_row(row) -> Record:
         # one number shown under one service's mark, so a row that holds three
         # services' scores still hands this source only its own.
         rating=ratings.get(source),
+        # IMDb IS IN THE SAME MAP AND IS NOT THIS SOURCE'S OWN SCORE, which is
+        # exactly why the map is keyed by who said it rather than being one
+        # number. It is read out by name for every source, because it is a fact
+        # about the TITLE that arrived through whichever source could report it.
+        imdb_rating=ratings.get("imdb"),
         genres=json.loads(row["genres_json"] or "[]") if row["genres_json"] else [],
         certification=row["certification"] or "", overview=row["overview"] or "",
         poster=row["poster"] or "",
@@ -448,6 +457,57 @@ def _in_fetch_order(rows) -> list[Record]:
 
 _ALL_SQL = _READ_SQL.replace(
     "WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?", "")
+
+
+# WHERE A TITLE THIS INSTANCE HOLDS ACTUALLY AIRS, by folded title. It answers
+# COORDINATES ONLY -- endpoint, air time, and enough to name the title -- and
+# never a card, because whether a viewer's own calendar would DRAW that airing
+# is a question about their filters and their sources, which this table has no
+# opinion about. app/calendar/search.py asks the real read path that second
+# question; this one exists so it can ask about a handful of months instead of
+# every month on the instance.
+# A RAW STRING, because the escape character this states IS a backslash. In
+# an ordinary literal the backslash pairs with the quote after it and the
+# clause collapses to an empty ESCAPE, which SQLite refuses at prepare time.
+_SEARCH_SQL = r"""
+SELECT DISTINCT a.endpoint, a.air_ts, a.date_only, t.title_fold
+FROM calendar_airings a
+JOIN calendar_titles t
+  ON t.source = a.source AND t.media = a.media AND t.source_id = a.source_id
+WHERE t.title_fold LIKE ? ESCAPE '\'
+ORDER BY a.air_ts DESC
+LIMIT ?
+"""
+
+
+def like_needle(query: str) -> str:
+    """`query` folded and wrapped for a LIKE, with the wildcards it may contain
+    itself neutralised.
+
+    A SEARCH BOX IS UNTRUSTED INPUT AND `%` IS A CHARACTER IN TITLES. Left
+    unescaped, a query of `%` matches the whole table and one of `100%` silently
+    matches far more than it should; both are ordinary things to type rather
+    than attacks. The backslash is escaped first so it cannot smuggle the escape
+    character itself.
+    """
+    folded = fold_title(query)
+    for char in ("\\", "%", "_"):
+        folded = folded.replace(char, "\\" + char)
+    return f"%{folded}%"
+
+
+async def airings_matching(query: str, limit: int) -> list[dict]:
+    """[{endpoint, air_ts, date_only}] for stored airings whose title matches.
+
+    MATCHED ON `title_fold`, which is the same folding a stored title was
+    written with -- case-folded and accent-stripped, so "pokemon" finds
+    "Pokemon" (fold_title says why that is stored rather than computed per
+    query). The index on that column is what makes this a lookup rather than a
+    scan of every airing on the instance.
+    """
+    rows = await db.fetch_all(_SEARCH_SQL, (like_needle(query), limit))
+    return [{"endpoint": str(r["endpoint"]), "air_ts": float(r["air_ts"]),
+             "date_only": bool(r["date_only"])} for r in rows]
 
 
 async def all_records() -> list[Record]:
@@ -616,6 +676,7 @@ def enrichment_values(fields: dict) -> dict:
     """
     year = fields.get("year")
     rating = fields.get("rating")
+    imdb = fields.get("imdb_rating")
     releases = fields.get("release_types_by_country")
     return {
         "genres": [str(g) for g in (fields.get("genres") or [])],
@@ -631,6 +692,7 @@ def enrichment_values(fields: dict) -> dict:
         # not the same as a number.
         "year": year if isinstance(year, int) else "",
         "rating": float(rating) if isinstance(rating, (int, float)) else None,
+        "imdb_rating": (float(imdb) if isinstance(imdb, (int, float)) else None),
         "anime_type": str(fields.get("anime_type") or ""),
         "release_types_by_country": dict(releases) if isinstance(releases, dict) else {},
         "ids": {k: v for k, v in (fields.get("ids") or {}).items()
@@ -644,6 +706,8 @@ def _enrichment_params(source: str, service_id: int, media: str, fields: dict,
     # UNDER THE SOURCE'S OWN NAME, exactly as `_title_values` does it for a
     # record — one number shown under one service's mark, never a bare figure.
     ratings = {} if value["rating"] is None else {source: value["rating"]}
+    if value["imdb_rating"] is not None:
+        ratings["imdb"] = value["imdb_rating"]
     return (*(value[name] for name in _ENRICHED_FIELDS),
             json.dumps(value["genres"]),
             json.dumps(ratings),

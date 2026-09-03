@@ -142,6 +142,12 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "rating": round(float(info["rating"]), 1) if info.get("rating") else None,
         "certification": (info.get("certification") or "").upper(),
         "trailer": info.get("trailer") or "",
+        # WHEN THE TITLE ITSELF FIRST AIRED, which `extended=full` already
+        # returns and which nothing used to keep. Its reader is the calendar
+        # search: a catalogue hit carries no date on either source, so the month
+        # a title should be looked for in has to come from somewhere, and this
+        # is the lookup that already had it.
+        "first_aired": info.get("first_aired") or "",
         "homepage": info.get("homepage") or "",
         "season": season,
         "cast": _cast_from(results.get("people") or {}),

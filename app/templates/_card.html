@@ -132,8 +132,22 @@
             {% if 'overview' in item.alternatives %}{{ swap('overview') }}{% endif %}
         </div>
         {% endif %}
+        {# THE DATE, THE TIME IT AIRS, AND A THIRD PARTY'S SCORE.
+
+           IMDb'S NUMBER IS HERE RATHER THAN IN THE RATINGS CHIP ABOVE, and that
+           is the whole point of it having a place of its own. That chip exists
+           for two services DISAGREEING about one field — Trakt says 8.4, Simkl
+           says 8.1, both are real and averaging them reports a number nobody
+           gave. IMDb is not a third answer to that question; it is a third
+           party's score, reaching this app through whichever source could report
+           it. Sitting it among the others would say the services disagree three
+           ways, which is not what happened. #}
         <div class="premiere-info">
             <span class="date">{{ item.air_display }}</span>
+            {# BETWEEN THE TWO, which costs no layout rule: the row is
+               space-between, so a third child lands in the middle and the date
+               and time stay exactly where they have always been. #}
+            {% if item.imdb_rating %}<span class="imdb-rating" title="IMDb score"><span class="imdb-mark">IMDb</span>{{ item.imdb_rating }}</span>{% endif %}
             <span class="time">{{ item.air_time }}</span>
         </div>
         {% if item.media != 'movie' and item.season is not none %}

@@ -240,6 +240,15 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "which services fill a viewer's calendar is that account's stated "
         "preference, so the route reads it before asking the registry which "
         "sources may fill a window — the same reason the tracker reaches SOURCES"),
+    (CALENDAR, DISTRAKT): Edge(
+        "the calendar's search asks a catalogue the same way the tracker's add "
+        "flow does, through distrakt/search.py's merge — whose dedupe rules "
+        "carry three separate measured findings (anime season-titles collapsing "
+        "onto one ItemKey, the (key, season) unit, whole-show-absorbs-seasons) "
+        "that a second implementation would get wrong from memory. Deferred "
+        "because distrakt reads the calendar back, and naming it at module "
+        "level would close that loop at import time",
+        deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
         "links a Discord post at the viewer's own calendar. It also asks "

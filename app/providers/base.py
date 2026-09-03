@@ -360,6 +360,14 @@ class Record:
     runtime: int | None = None
     status: str = ""
     rating: float | None = None
+    # A THIRD PARTY'S SCORE, WHICH IS NOT A THIRD SPELLING OF `rating`. Trakt's
+    # number and Simkl's are two audiences answering the same question, and the
+    # card draws them side by side under each service's mark rather than
+    # averaging them. IMDb's arrives THROUGH a source rather than from one this
+    # app reads calendars from, so it competes with neither and is resolved as
+    # its own field. Only Simkl reports it today; a record from a source that
+    # does not carry it leaves this None, which is an absence like any other.
+    imdb_rating: float | None = None
     genres: list[str] = field(default_factory=list)
     certification: str = ""
     overview: str = ""

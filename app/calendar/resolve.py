@@ -62,8 +62,8 @@ from ..providers.base import Record, Source
 # One value each, one source each, and the ordinary case: the winner is the first
 # admitted source in this viewer's order that actually filled the field in.
 SCALAR_FIELDS = (
-    "title", "overview", "poster", "rating", "network", "country", "language",
-    "runtime", "status", "certification", "year", "episode_title",
+    "title", "overview", "poster", "rating", "imdb_rating", "network", "country",
+    "language", "runtime", "status", "certification", "year", "episode_title",
 )
 
 # WHICH SERVICE THE CARD IS ATTRIBUTED TO, and it carries the three fields that

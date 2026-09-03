@@ -411,8 +411,17 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # sources' chips have to look alike.
         "genres": [str(g).replace("-", " ").title() for g in (fields.get("genres") or [])],
         "rating": round(float(fields["rating"]), 1) if fields.get("rating") else None,
+        # A THIRD PARTY'S SCORE, UNDER ITS OWN KEY. It reaches the modal beside
+        # Simkl's rather than instead of it — see titles._imdb_rating for why the
+        # two are separate facts and not two spellings of one.
+        "imdb_rating": (round(float(fields["imdb_rating"]), 1)
+                        if fields.get("imdb_rating") else None),
         "certification": str(fields.get("certification") or "").upper(),
         "trailer": _trailer_url(fields.get("trailers")),
+        # Kept by `_extract` already; passed through for the calendar search,
+        # which needs a month to point a catalogue hit at — see the same key on
+        # the Trakt package's own payload.
+        "first_aired": str(fields.get("first_aired") or ""),
         # Simkl's catalogue record carries no homepage field; the card's own
         # outbound button already offers this title's Simkl page.
         "homepage": "",

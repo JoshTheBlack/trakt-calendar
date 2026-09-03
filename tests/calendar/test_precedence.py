@@ -634,3 +634,44 @@ class AMarkSticksToTheTitleNotToWhoDescribesItTests(unittest.TestCase):
         item = providers_base.render(record, ZoneInfo("UTC"))
         self.assertFalse(calendar_state.marked({"1670"}, item))
         self.assertTrue(calendar_state.marked({"some-show"}, item))
+
+
+class TheImdbScoreIsResolvedAsItsOwnFieldTests(unittest.TestCase):
+    """It is not a third answer to the question the ratings chip asks.
+
+    Trakt's number and Simkl's are two audiences answering the same question, so
+    a viewer's preference decides which leads and the card can draw both. IMDb's
+    reaches this app THROUGH whichever source could report it — only Simkl does
+    today — so on a merged group there is exactly one of them however the
+    preference is set, and it must survive a preference that puts the other
+    source first.
+    """
+
+    def test_it_survives_a_preference_for_the_source_that_does_not_carry_it(self):
+        """THE CASE THAT WOULD LOSE IT. Trakt reports no IMDb score, so a
+        Trakt-first viewer resolves `source`, `title` and `rating` to Trakt — and
+        would see no IMDb number at all if this were resolved as part of the
+        rating rather than beside it. `_present` treats None as an absence, so
+        the source that HAS something to say wins the field."""
+        group = _group(_record(Source.TRAKT),
+                       _record(Source.SIMKL, imdb_rating=7.9))
+        trakt_first = calendar_resolve.resolve(group, _prefs("trakt", "simkl"))
+        self.assertEqual(str(trakt_first.source), "trakt")
+        self.assertEqual(trakt_first.rating, 8.1)
+        self.assertEqual(trakt_first.imdb_rating, 7.9)
+
+    def test_it_is_absent_when_nobody_reported_one(self):
+        group = _group(_record(Source.TRAKT), _record(Source.SIMKL))
+        self.assertIsNone(calendar_resolve.resolve(group, _prefs()).imdb_rating)
+
+    def test_it_does_not_join_the_ratings_the_card_draws_side_by_side(self):
+        """`alternatives['rating']` is the control for two services disagreeing
+        about one field. A third party's score in there would say the services
+        disagree three ways, which is not what happened."""
+        # The two services have to DISAGREE for the control to be drawn at all —
+        # agreement is not a disagreement, and `alternatives` records the second.
+        group = _group(_record(Source.TRAKT),
+                       _record(Source.SIMKL, rating=7.4, imdb_rating=7.9))
+        record = calendar_resolve.resolve(group, _prefs())
+        self.assertEqual(set(record.alternatives.get("rating", {})), {"trakt", "simkl"})
+        self.assertNotIn("imdb", record.alternatives.get("rating", {}))

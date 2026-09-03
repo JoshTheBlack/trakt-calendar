@@ -21,6 +21,7 @@ from __future__ import annotations
 # not calendar — but standing in app/calendar/ it reads as though it might not.
 import calendar as _calendar
 import dataclasses
+import logging
 import re
 from collections import Counter
 from datetime import date, datetime
@@ -33,7 +34,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 
 from . import (cache as calendar_cache, detail_source, enrich as calendar_enrich,
                filter as calendar_filter, resolve as calendar_resolve,
-               share_links, state as calendar_state)
+               search as calendar_search, share_links, state as calendar_state)
 from .. import auth, authz, chrome, clock, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
@@ -47,6 +48,8 @@ from ..providers.trakt.detail import fetch_tile_info
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
@@ -802,6 +805,60 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None) -> str:
     if source:
         url += f"&source={quote(source)}"
     return url
+
+
+@guard.get("/calendar/search", AuthLevel.CALENDAR_APPROVED)
+async def search_the_calendar(request: Request):
+    """Where a title is on this viewer's calendar, and where it should be if it
+    is not on it yet.
+
+    TWO ANSWERS, TWO PROMISES, AND THE ROUTE KEEPS THEM APART — see
+    app/calendar/search.py, which is where the whole argument lives. The stored
+    half is confirmed by the real read path so a jump lands on a card that is
+    actually there; the catalogue half links to a MONTH, which fills on arrival.
+
+    `live=1` IS THE ONLY THING THAT SPENDS A REQUEST, and the client sends it on
+    Enter or the button rather than on every keystroke. Typing therefore costs an
+    index read and nothing else, which is what makes it safe to run as somebody
+    types.
+
+    A FRAGMENT, NOT A PAGE. It renders the same results partial the shell embeds,
+    so the typing path and a full submit produce identical markup.
+    """
+    user = await auth.current_user(request)
+    settings = load_settings()
+    query = (request.query_params.get("q") or "").strip()
+    live = request.query_params.get("live") in ("1", "true", "yes")
+    prefs = await auth.get_user_prefs(user.user_id)
+    tz = _resolve_viewer_tz(user, settings)
+    source_selection = await _viewer_source_selection(request, user)
+    marks = await calendar_state.not_watching_ids(user.user_id)
+
+    found = await calendar_search.stored(
+        query, settings=settings, prefs=prefs, tz=tz,
+        source_selection=source_selection, marks=marks)
+    elsewhere = calendar_search.Results()
+    if live and query:
+        # THE STORED ANSWERS ARE HANDED OVER so the catalogue half does not offer
+        # a title the calendar already draws: naming the day beats naming the
+        # month, and offering both would be two rows for one answer.
+        known = frozenset(a.item.mark_key for a in found.airings)
+        try:
+            elsewhere = await calendar_search.catalogue(
+                query, settings=settings, tz=tz, known=known)
+        except SourceUnavailable as exc:
+            # The stored half already has an answer worth drawing; a catalogue
+            # that could not be reached is a missing addition to it, not a failed
+            # search.
+            logger.warning("Catalogue search failed: %s", exc)
+
+    return templates.TemplateResponse(request, "_search_results.html", {
+        "request": request, "query": query, "live": live,
+        "airings": found.airings, "elsewhere": elsewhere.elsewhere,
+        "truncated": found.truncated, "failed": sorted(str(s) for s in elsewhere.failed),
+        "not_watching": set(), "new_ids": set(), "can_filter": False,
+        "settings": settings, "is_admin": bool(user and user.is_admin),
+    })
 
 
 @guard.get("/calendar/day", AuthLevel.CALENDAR_APPROVED)

@@ -99,6 +99,12 @@ function renderDetails(d, poster, media, title, season) {
     if (d.network) chips.push(`<span class="chip network">📡 ${esc(d.network)}</span>`);
     if (d.runtime) chips.push(`<span class="chip">⏱️ ${esc(d.runtime)}m</span>`);
     if (d.rating) chips.push(`<span class="chip country">⭐ ${esc(d.rating)}</span>`);
+    // MARKED AS IMDb's RATHER THAN GIVEN A STAR LIKE THE ONE ABOVE. The star is
+    // the describing service's own score; this one arrived from a third party
+    // through that service, and an unlabelled second star would read as the same
+    // service reporting twice.
+    if (d.imdb_rating) chips.push(
+        `<span class="chip imdb"><span class="imdb-mark">IMDb</span> ${esc(d.imdb_rating)}</span>`);
     if (d.certification) chips.push(`<span class="chip cert" data-cert="${esc(d.certification)}">${esc(d.certification)}</span>`);
     (d.genres || []).forEach(g => chips.push(`<span class="chip">${esc(g)}</span>`));
 

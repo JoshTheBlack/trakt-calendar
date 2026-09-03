@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import re
 from io import BytesIO
 from pathlib import Path
@@ -264,3 +265,38 @@ async def ensure_logos(settings, roster) -> int:
         elif result is not None:
             generated += 1
     return generated
+
+
+def sweep(now: float | None = None) -> int:
+    """Reclaim network-logo tiles past their age ceiling. Returns how many went.
+
+    AGE ONLY, WITH NO SIZE CAP, and the asymmetry with the poster cache beside
+    it is deliberate rather than an omission. These are TMDB-sourced, so
+    tmdb.MAX_CACHE_SECONDS applies to them exactly as it applies to posters —
+    but there are as many of them as there are networks, measured at a few
+    megabytes in total, so a byte budget would be a setting nobody could ever
+    have a reason to change.
+
+    NEGATIVE MARKERS AGE OUT TOO. A marker records that TMDB had no logo for a
+    network at the time; keeping it past the ceiling would make one absent
+    answer permanent, which is the same thing the ceiling exists to prevent for
+    a picture that IS there.
+
+    Pure filesystem walking, so the caller runs it through a worker thread — see
+    app/main.py, and posters.sweep beside it for the same reason.
+    """
+    if not LOGO_DIR.exists():
+        return 0
+    cutoff = (time.time() if now is None else now) - tmdb.MAX_CACHE_SECONDS
+    removed = 0
+    for path in LOGO_DIR.rglob("*"):
+        if not path.is_file():
+            continue
+        try:
+            if path.stat().st_mtime > cutoff:
+                continue
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed

@@ -53,7 +53,7 @@ from .calendar import share_card_cache
 from .calendar import share_routes
 from .distrakt import routes as distrakt_routes
 from .integrations import routes as integrations_routes
-from .media import artwork, posters
+from .media import artwork, logos, posters
 from .ranker import routes as ranker_routes
 from .auth import AuthLevel
 from .config import load_settings
@@ -149,6 +149,10 @@ async def _sweep_auth_rows() -> None:
     # worker thread rather than the event loop.
     await artwork.sweep(now)
     await anyio.to_thread.run_sync(posters.sweep, settings.poster_cache_max_bytes)
+    # And the network logos, which have no size budget of their own — there are
+    # as many as there are networks — but ARE TMDB-sourced, so the same six-month
+    # ceiling applies to them. Nothing swept them at all before this.
+    await anyio.to_thread.run_sync(logos.sweep)
     # And the rendered share cards, which age out at 90 days and are held under
     # their own byte budget behind that. Same worker-thread reason as the posters
     # above: it is a directory walk, and it is deliberately here rather than on

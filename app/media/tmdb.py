@@ -27,6 +27,19 @@ IMG = "https://image.tmdb.org/t/p"
 # internally, so api.themoviedb.org and image.tmdb.org already get their own
 # connections out of it, and splitting them here would buy a second set of
 # knobs for the same behaviour.
+# HOW LONG ANYTHING OBTAINED FROM TMDB MAY BE KEPT. Their terms cap it: an app
+# may not "cache, for longer than 6 months, any information obtained through or
+# from TMDB or the TMDB APIs". It is a CEILING rather than a preference, so it
+# is stated here beside the client that does the obtaining and read by every
+# cache downstream of it — the poster tiles and the network logos both.
+#
+# THE SAME NUMBER THE CALENDAR'S OWN RETENTION USES, and for the same reason
+# (app/calendar/entries.py's RETAIN_SECONDS says so at length). It is repeated
+# rather than imported because a feature package importing this one for a
+# constant would be a dependency bought for six characters, and because the two
+# would still have to agree if TMDB ever changed only one of them.
+MAX_CACHE_SECONDS = 180 * 24 * 60 * 60
+
 POOL = http_pool.Pool("tmdb", max_connections=8, timeout=20)
 
 

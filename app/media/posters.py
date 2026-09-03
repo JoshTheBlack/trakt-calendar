@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from io import BytesIO
 from pathlib import Path
 
@@ -372,16 +373,31 @@ async def ensure_posters(settings, refs, order: tuple[str, ...] = DEFAULT_ORDER)
     return generated
 
 
-def sweep(max_bytes: int) -> int:
-    """LRU-evict cached poster tiles (oldest file mtime first) until the total
-    is back under max_bytes. Pure filesystem walking, so it runs on the same
-    heartbeat as app/cache.py's sweep but through a worker thread (the caller's
-    job — see app/main.py) rather than the event loop.
+def sweep(max_bytes: int, now: float | None = None) -> int:
+    """Reclaim cached poster tiles: anything past its age ceiling first, then
+    LRU by file mtime until the total is back under max_bytes.
+
+    TWO RULES, AND THE AGE ONE IS NOT NEGOTIABLE. TMDB's terms cap how long
+    anything obtained from them may be kept (tmdb.MAX_CACHE_SECONDS), and a
+    size cap does not satisfy that: an instance under its budget would keep a
+    tile for ever, which is exactly the case the terms are about. The byte cap
+    is this app's own housekeeping and runs after.
+
+    THE AGE IS THE FILE's, and a tile is written once and never touched again,
+    so its mtime is when it was obtained. Ageing one out is not a loss — the
+    next request for it resolves it again, which is also how a poster that has
+    changed upstream is eventually noticed.
+
+    Pure filesystem walking, so it runs on the same heartbeat as app/cache.py's
+    sweep but through a worker thread (the caller's job — see app/main.py)
+    rather than the event loop.
     """
     if not POSTER_DIR.exists() or max_bytes < 0:
         return 0
+    cutoff = (time.time() if now is None else now) - tmdb_client.MAX_CACHE_SECONDS
     entries: list[tuple[float, int, Path]] = []
     total = 0
+    removed = 0
     for path in POSTER_DIR.rglob("*"):
         if not path.is_file():
             continue
@@ -389,12 +405,18 @@ def sweep(max_bytes: int) -> int:
             stat = path.stat()
         except OSError:
             continue
+        if stat.st_mtime <= cutoff:
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+            continue
         entries.append((stat.st_mtime, stat.st_size, path))
         total += stat.st_size
     if total <= max_bytes:
-        return 0
+        return removed
     entries.sort(key=lambda e: e[0])
-    removed = 0
     for _mtime, size, path in entries:
         if total <= max_bytes:
             break

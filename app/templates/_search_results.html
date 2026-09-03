@@ -1,0 +1,85 @@
+{# The calendar search's results, as a fragment.
+
+   ONE PARTIAL FOR BOTH PATHS — the typing path swaps this in, and a full submit
+   renders the same thing — so a result cannot look different depending on how it
+   was asked for.
+
+   TWO SECTIONS, TWO PROMISES, AND THE SECOND SAYS SO IN WORDS. A stored result
+   names the day and jumps to it, because the calendar's own read path confirmed
+   it would draw that card. A catalogue result names the MONTH and says "go to
+   where this should be": arriving fills the month, and the title appears if any
+   source lists it there. Promising a card for the second kind is the one thing
+   this surface must never do — see app/calendar/search.py. #}
+
+{% if not query %}
+<p class="search-hint">Type a title to find it on your calendar.</p>
+{% elif not airings and not elsewhere %}
+<p class="search-hint">
+    {% if live %}Nothing on your calendar matches “{{ query }}”, and no service knows it either.
+    {% else %}Nothing on your calendar matches “{{ query }}”.
+        <button type="button" class="btn-ghost small" onclick="runCalendarSearch(true)">Search the services</button>
+    {% endif %}
+</p>
+{% endif %}
+
+{% if airings %}
+<div class="search-section">
+    <h3 class="search-heading">On your calendar</h3>
+    {% for hit in airings %}
+    <a class="search-row" href="{{ hit.url }}">
+        <img class="search-poster" src="{{ hit.item.poster or '/static/images/nopostertv.png' }}"
+             alt="" loading="lazy" width="46" height="69">
+        <span class="search-main">
+            <span class="search-title">{{ hit.item.title }}{% if hit.item.year %} <span class="search-year">{{ hit.item.year }}</span>{% endif %}</span>
+            <span class="search-meta">
+                {% if hit.item.episode_label %}{{ hit.item.episode_label }} · {% endif %}
+                {{ hit.item.air_display }}{% if hit.item.air_time %} · {{ hit.item.air_time }}{% endif %}
+                · {{ hit.endpoint_label }}
+            </span>
+        </span>
+        <span class="search-go">Jump →</span>
+    </a>
+    {% endfor %}
+    {% if truncated %}
+    <p class="search-hint">More than these matched — narrow the title to see the rest.</p>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if elsewhere %}
+<div class="search-section">
+    <h3 class="search-heading">Not on your calendar</h3>
+    {# THE HONEST LABEL. Every one of these is a title a service knows about and
+       this calendar does not currently draw, and following the link fills the
+       month it belongs to. Whether a card then appears depends on whether any
+       source lists it on that calendar, which nothing here can promise. #}
+    <p class="search-hint">Opening one of these loads that month, which is what teaches
+        your calendar about it. If no service lists it on that calendar, it still won't
+        appear there.</p>
+    {% for hit in elsewhere %}
+    <a class="search-row" href="{{ hit.url }}">
+        <img class="search-poster" src="{{ hit.item.poster or '/static/images/nopostertv.png' }}"
+             alt="" loading="lazy" width="46" height="69">
+        <span class="search-main">
+            <span class="search-title">{{ hit.item.title }}{% if hit.item.year %} <span class="search-year">{{ hit.item.year }}</span>{% endif %}</span>
+            <span class="search-meta">
+                {{ hit.item.air_display }} · {{ hit.endpoint_label }}
+                {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
+            </span>
+        </span>
+        <span class="search-go">Go to {{ hit.item.air_display[3:] }} →</span>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if failed %}
+<p class="search-hint search-failed">Couldn't reach {{ failed | join(', ') }} — anything only they
+    know about is missing from this list.</p>
+{% endif %}
+
+{% if query and not live and airings %}
+<p class="search-hint">
+    <button type="button" class="btn-ghost small" onclick="runCalendarSearch(true)">Also search the services</button>
+</p>
+{% endif %}

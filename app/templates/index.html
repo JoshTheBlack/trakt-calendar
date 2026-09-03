@@ -187,6 +187,12 @@
                    calendar_available=calendar_available,
                    ranker_available=ranker_available, is_admin=is_admin) %}
         <span class="hero-meta" title="{{ endpoint.description }}">📊 {{ total }} · 🕒 {{ generated }}</span>
+        {# BESIDE THE FILTER RATHER THAN BEHIND THE MENU, because the two answer
+           opposite halves of one question: the filter decides what a month
+           shows, and this finds where a title is when the month on screen is not
+           the one it is on. #}
+        <button type="button" id="searchBtn" class="pill-btn" onclick="openCalendarSearch()"
+                title="Find a title on your calendar">🔍 Search</button>
         {# In the bar rather than behind the ☰ menu, and lit up while a filter is
            set. A filter REMOVES shows, so a calendar quietly missing something
            has to carry the reason on its face — buried one click away, the only
@@ -753,6 +759,32 @@
    block. The filters are applied per viewer at read time against one shared
    cache (app/calendar/filter.py), which is what lets two people filter the same
    cached month differently — the UI was the only piece missing. #}
+<!-- Calendar search: where a title is, and where it should be if it is not here. -->
+<div id="searchModal" class="modal-overlay" onclick="if(event.target===this) closeCalendarSearch()">
+    <div class="modal">
+        <div class="modal-head">
+            <h2>🔍 Find a title</h2>
+            <button type="button" class="modal-close" onclick="closeCalendarSearch()">&times;</button>
+        </div>
+        <div class="modal-body">
+            {# A FORM SO ENTER MEANS SOMETHING. Submitting is the deliberate act
+               that spends a request against the services; typing only ever reads
+               what is already stored, which is why the two are different events
+               rather than one debounced one. #}
+            <form id="searchForm" onsubmit="return runCalendarSearch(true)" hx-boost="false">
+                <div class="search-bar">
+                    <input type="text" id="searchInput" autocomplete="off" spellcheck="false"
+                           placeholder="Title…" oninput="onCalendarSearchInput()">
+                    <button type="submit" class="btn-primary">Search services</button>
+                </div>
+                <p class="hint">Results from your own calendar appear as you type and cost nothing.
+                    Searching the services also finds titles your calendar hasn't loaded yet.</p>
+            </form>
+            <div id="searchResults"></div>
+        </div>
+    </div>
+</div>
+
 <div id="filtersModal" class="modal-overlay" onclick="if(event.target===this) closeFilters()">
     <div class="modal">
         <div class="modal-head">

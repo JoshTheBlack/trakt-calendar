@@ -82,7 +82,7 @@ _DETAIL_PATHS = {Media.SHOW: "tv", Media.MOVIE: "movies"}
 # app has written so far predates all of them, so bumping this is what makes
 # the existing table refresh itself into the wider shape rather than sitting on
 # the narrower one until its 30-day retention window expires.
-EXTRACT_VERSION = 3
+EXTRACT_VERSION = 4
 
 # MEASURED ACROSS 300 REAL TITLES, THREE DISJOINT SAMPLES (2026-08-06): Simkl's
 # `ids` map is not a fixed namespace set. Besides the three this app used to
@@ -201,13 +201,47 @@ def _simkl_rating(ratings: Any) -> float | None:
     MEASURED, MOST MOVIES HAVE NONE — 84 of 1314 in a live August, because a
     global release calendar is mostly small and unreleased titles nobody has
     voted on. That is Simkl not having the data, not this app discarding it.
+
+    IMDb'S SCORE IS NOW KEPT, BY `_imdb_rating` BELOW AND NOT BY THIS FUNCTION.
+    The paragraph above still holds and is the reason for the split: it has its
+    own field and its own place on the card, rather than a seat in the one
+    labelled Simkl.
+    """
+    return _score(ratings, "simkl")
+
+
+def _imdb_rating(ratings: Any) -> float | None:
+    """IMDb's score out of `ratings`, or None.
+
+    A DIFFERENT FACT FROM THE TWO BESIDE IT, WHICH IS WHY IT IS A SEPARATE FIELD
+    AND A SEPARATE CHIP. Trakt's number and Simkl's are two audiences answering
+    the same question, and the card shows them side by side under each service's
+    mark because averaging them would report a number nobody gave. IMDb's is not
+    a third spelling of that question — it is a third party's score, arriving
+    through Simkl rather than from a service this app reads calendars from — so
+    it neither competes for `rating` nor belongs in the control built for that
+    disagreement.
+
+    PRESENT ON 39 OF 45 TITLES sampled live, against Simkl's own score which is
+    much sparser on movies. It costs no extra call: the payload this reads is
+    the one already fetched for genres and network.
+    """
+    return _score(ratings, "imdb")
+
+
+def _score(ratings: Any, service: str) -> float | None:
+    """One service's `rating` out of Simkl's ratings block, or None.
+
+    Written once because the two readers above differ only in which key they
+    ask for, and the shape-checking — a block that is not a dict, a rating that
+    is not a number — is the same care in both.
     """
     if not isinstance(ratings, dict):
         return None
-    simkl = ratings.get("simkl")
-    if not isinstance(simkl, dict):
+    block = ratings.get(service)
+    if not isinstance(block, dict):
         return None
-    value = simkl.get("rating")
+    value = block.get("rating")
     return float(value) if isinstance(value, (int, float)) else None
 
 
@@ -313,6 +347,7 @@ def _extract(payload: dict) -> dict[str, Any]:
         "language": str(payload.get("language") or ""),
         "year": int(year) if isinstance(year, (int, float)) else "",
         "rating": _simkl_rating(payload.get("ratings")),
+        "imdb_rating": _imdb_rating(payload.get("ratings")),
         # Which markets have a release and in what formats — the only thing a
         # viewer can narrow a global release calendar by. See
         # _release_types_by_country for why the dates themselves are dropped.

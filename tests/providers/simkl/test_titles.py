@@ -192,8 +192,8 @@ class FetchTitleTests(unittest.IsolatedAsyncioTestCase):
             "extract_version", "genres", "network", "country", "certification",
             "runtime", "status", "overview", "ids", "type", "anime_type",
             "total_episodes", "poster", "first_aired", "trailers",
-            "language", "year", "rating", "release_types_by_country",
-            "released", "director", "budget",
+            "language", "year", "rating", "imdb_rating",
+            "release_types_by_country", "released", "director", "budget",
         })
         self.assertEqual(
             (fields["genres"], fields["runtime"], fields["ids"], fields["trailers"]),
@@ -363,3 +363,47 @@ class AnimeRedirectTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TheImdbScoreIsItsOwnFactTests(unittest.IsolatedAsyncioTestCase):
+    """Simkl's payload carries IMDb's score beside its own, and the two are not
+    two spellings of one answer.
+
+    Trakt's number and Simkl's are two audiences answering the same question —
+    which is why the card draws them side by side under each service's mark and
+    never averages them. IMDb's arrives THROUGH Simkl rather than from a service
+    this app reads calendars from, so it competes with neither and is kept in a
+    field of its own. Putting it in `rating` would be the same untruth in a
+    quieter place.
+    """
+
+    RATINGS = {"simkl": {"rating": 8.1, "votes": 400},
+               "imdb": {"rating": 7.9, "votes": 90000}}
+
+    async def _fields(self, ratings):
+        payload = {"title": "X", "ids": {"simkl": 1}, "ratings": ratings}
+        with patch("app.providers.simkl.transport.cached_get", new=_cached_get(payload)):
+            return await titles.fetch_title(SETTINGS, 1, Media.SHOW)
+
+    async def test_both_scores_are_kept_and_kept_apart(self):
+        fields = await self._fields(self.RATINGS)
+        self.assertEqual(fields["rating"], 8.1)
+        self.assertEqual(fields["imdb_rating"], 7.9)
+
+    async def test_a_title_imdb_has_no_score_for_answers_none(self):
+        """Rather than falling back to Simkl's, which would render one service's
+        number under another's name."""
+        fields = await self._fields({"simkl": {"rating": 8.1}})
+        self.assertEqual(fields["rating"], 8.1)
+        self.assertIsNone(fields["imdb_rating"])
+
+    async def test_a_title_only_imdb_has_scored_still_reports_it(self):
+        fields = await self._fields({"imdb": {"rating": 7.9}})
+        self.assertIsNone(fields["rating"])
+        self.assertEqual(fields["imdb_rating"], 7.9)
+
+    async def test_a_ratings_block_that_is_not_shaped_like_one_is_not_an_error(self):
+        for ratings in (None, [], "8.1", {"imdb": "7.9"}, {"imdb": {"rating": "x"}}):
+            with self.subTest(ratings=ratings):
+                fields = await self._fields(ratings)
+                self.assertIsNone(fields["imdb_rating"])

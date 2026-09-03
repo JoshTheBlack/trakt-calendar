@@ -1152,6 +1152,68 @@ class CalendarShellTests(CalendarRouteTestCase):
         self.assertEqual(_day_urls(html), [])
 
 
+
+class CalendarSearchRouteTests(CalendarRouteTestCase):
+    """The search route: a fragment, and one that spends nothing unless asked.
+
+    THE TYPING PATH IS THE ONE THAT MATTERS HERE. It runs while somebody is still
+    typing, so it may not reach a service — and the autouse network guard in
+    tests/conftest.py is what would catch it if it did.
+    """
+
+    URL = "/calendar/search"
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("search_viewer")
+        self.sign_in_as(self.user_id)
+        self.drama = _entry("the-drama", "The Drama", "2026-07-15T20:00:00Z")
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([self.drama]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # One page load, so the month is stored for the search to find.
+        self.client.get("/calendar?year=2026&month=7&endpoint=shows")
+
+    def test_it_finds_a_stored_title_and_offers_a_jump(self):
+        resp = self.client.get(f"{self.URL}?q=drama")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("The Drama", resp.text)
+        self.assertIn("#day-2026-07-15", resp.text)
+        self.assertIn("On your calendar", resp.text)
+
+    def test_it_is_a_fragment_and_not_a_page(self):
+        """The shell embeds this partial and the typing path swaps it in, so a
+        result cannot look different depending on how it was asked for."""
+        resp = self.client.get(f"{self.URL}?q=drama")
+        for chrome in ("<html", "<header", 'id="statsBar"', "calendarViewData"):
+            self.assertNotIn(chrome, resp.text)
+
+    def test_typing_never_asks_a_service(self):
+        """`live` is absent, so the catalogue half must not run at all — not even
+        to discover there is nothing to add."""
+        with patch("app.calendar.search.catalogue",
+                   side_effect=AssertionError("typing reached a service")):
+            resp = self.client.get(f"{self.URL}?q=drama")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_a_query_matching_nothing_says_so_and_offers_the_services(self):
+        resp = self.client.get(f"{self.URL}?q=nothingmatchesthis")
+        self.assertIn("Nothing on your calendar matches", resp.text)
+        self.assertIn("Search the services", resp.text)
+
+    def test_an_empty_query_asks_for_one_rather_than_listing_everything(self):
+        resp = self.client.get(f"{self.URL}?q=")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("The Drama", resp.text)
+
+    def test_it_needs_a_signed_in_viewer(self):
+        """The results are one viewer's own calendar, filtered by their own
+        preferences, so this is gated exactly as the calendar is."""
+        self.client.cookies.clear()
+        self.assertIn(self.client.get(f"{self.URL}?q=drama").status_code,
+                      (302, 303, 401, 403))
+
 class CalendarDayRouteTests(CalendarRouteTestCase):
     """The content route: ONE day's block, and nothing else."""
 

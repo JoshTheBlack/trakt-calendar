@@ -19,7 +19,8 @@ from unittest.mock import AsyncMock, patch
 from PIL import Image
 
 from app import db
-from app.media import artwork, posters
+from app.media import artwork, logos, posters
+from app.media import tmdb as tmdb_client
 from tests.support import TMP, migrated_db
 
 NOT_CONFIGURED = SimpleNamespace(tmdb_configured=False, tmdb_api_key="")
@@ -443,12 +444,18 @@ class SweepTests(unittest.TestCase):
         os.utime(p, (mtime, mtime))
         return p
 
+    # A CLOCK JUST AFTER THE FILES, so these stay about the SIZE rule. Left at
+    # the real one, every fixture below is decades past the age ceiling and would
+    # be reclaimed before the LRU pass ever ran — which is the age rule working,
+    # but it is not what this class is for.
+    NOW = 4000
+
     def test_evicts_oldest_first_until_under_the_cap(self):
         oldest = self._write("a.jpg", 100, mtime=1000)
         middle = self._write("b.jpg", 100, mtime=2000)
         newest = self._write("c.jpg", 100, mtime=3000)
 
-        removed = posters.sweep(max_bytes=150)
+        removed = posters.sweep(max_bytes=150, now=self.NOW)
 
         self.assertEqual(removed, 2)
         self.assertFalse(oldest.exists())
@@ -457,11 +464,110 @@ class SweepTests(unittest.TestCase):
 
     def test_under_the_cap_is_a_noop(self):
         self._write("a.jpg", 100, mtime=1000)
-        self.assertEqual(posters.sweep(max_bytes=1_000_000), 0)
+        self.assertEqual(posters.sweep(max_bytes=1_000_000, now=self.NOW), 0)
 
     def test_missing_directory_is_a_noop(self):
         posters.POSTER_DIR = TMP / "does-not-exist"
-        self.assertEqual(posters.sweep(max_bytes=0), 0)
+        self.assertEqual(posters.sweep(max_bytes=0, now=self.NOW), 0)
+
+
+
+class TheAgeCeilingTests(unittest.TestCase):
+    """TMDB's terms cap how long anything obtained from them may be kept, and a
+    SIZE cap does not satisfy that.
+
+    An instance comfortably under its byte budget would keep a tile for ever,
+    which is exactly the case the terms are about. So the age rule runs first and
+    unconditionally, and the byte cap is this app's own housekeeping behind it.
+    """
+
+    def setUp(self):
+        posters.POSTER_DIR = TMP / f"posters-age-{id(self)}"
+        posters.POSTER_DIR.mkdir(parents=True)
+        self.now = 2_000_000_000.0
+
+    def _write(self, name: str, *, age_days: float, size: int = 100) -> Path:
+        path = posters.POSTER_DIR / name
+        path.write_bytes(b"x" * size)
+        when = self.now - age_days * 86400
+        os.utime(path, (when, when))
+        return path
+
+    def test_a_tile_past_the_ceiling_goes_even_when_nothing_is_full(self):
+        old = self._write("old.jpg", age_days=200)
+        fresh = self._write("fresh.jpg", age_days=10)
+        removed = posters.sweep(max_bytes=1_000_000, now=self.now)
+        self.assertEqual(removed, 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
+
+    def test_a_negative_marker_ages_out_too(self):
+        """A marker records that nothing could be resolved AT THE TIME. Keeping
+        it past the ceiling would make one absent answer permanent, which is the
+        same thing the ceiling exists to prevent for a picture that IS there."""
+        marker = self._write("1396.trakt.none", age_days=200, size=0)
+        posters.sweep(max_bytes=1_000_000, now=self.now)
+        self.assertFalse(marker.exists())
+
+    def test_the_size_cap_still_runs_after_the_age_rule(self):
+        old = self._write("old.jpg", age_days=200)
+        a = self._write("a.jpg", age_days=30)
+        b = self._write("b.jpg", age_days=20)
+        c = self._write("c.jpg", age_days=10)
+        removed = posters.sweep(max_bytes=150, now=self.now)
+        # One aged out, then two more evicted oldest-first to get under the cap.
+        self.assertEqual(removed, 3)
+        self.assertFalse(old.exists())
+        self.assertFalse(a.exists())
+        self.assertFalse(b.exists())
+        self.assertTrue(c.exists())
+
+    def test_nothing_old_and_nothing_over_budget_is_a_noop(self):
+        self._write("fresh.jpg", age_days=1)
+        self.assertEqual(posters.sweep(max_bytes=1_000_000, now=self.now), 0)
+
+
+class LogoAgeCeilingTests(unittest.TestCase):
+    """The logo cache had NO sweep at all, and its tiles are TMDB-sourced.
+
+    AGE ONLY AND NO SIZE CAP, which is the deliberate asymmetry with the poster
+    cache: there are as many logos as there are networks, measured at a few
+    megabytes, so a byte budget would be a setting nobody could have a reason to
+    change.
+    """
+
+    def setUp(self):
+        logos.LOGO_DIR = TMP / f"logos-age-{id(self)}"
+        logos.LOGO_DIR.mkdir(parents=True)
+        self.now = 2_000_000_000.0
+
+    def _write(self, name: str, *, age_days: float) -> Path:
+        path = logos.LOGO_DIR / name
+        path.write_bytes(b"x" * 50)
+        when = self.now - age_days * 86400
+        os.utime(path, (when, when))
+        return path
+
+    def test_a_logo_past_the_ceiling_goes(self):
+        old = self._write("hbo.png", age_days=200)
+        fresh = self._write("netflix.png", age_days=5)
+        self.assertEqual(logos.sweep(now=self.now), 1)
+        self.assertFalse(old.exists())
+        self.assertTrue(fresh.exists())
+
+    def test_a_negative_marker_ages_out_too(self):
+        marker = self._write("obscure.none", age_days=200)
+        logos.sweep(now=self.now)
+        self.assertFalse(marker.exists())
+
+    def test_a_missing_directory_is_a_noop(self):
+        logos.LOGO_DIR = TMP / "logos-that-do-not-exist"
+        self.assertEqual(logos.sweep(now=self.now), 0)
+
+    def test_the_ceiling_is_the_one_tmdb_states(self):
+        """Read from the client that does the obtaining rather than restated, so
+        the two caches cannot come to different answers about the same rule."""
+        self.assertEqual(tmdb_client.MAX_CACHE_SECONDS, 180 * 24 * 60 * 60)
 
 
 if __name__ == "__main__":
