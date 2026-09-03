@@ -743,6 +743,14 @@ async def compute_live_shows(user_id: int, records: list[dict], settings, fresh:
                 fetch_season_details(settings, records, fresh=fresh,
                                      allow_degrade=allow_degrade, sources=sources),
             )
+        # THE VIEWER'S OWN FLOOR, APPLIED ONCE BEFORE ANY LOOKUP IS BUILT. A
+        # season somebody is watching AGAIN has a history full of plays about the
+        # previous run, and counting those reports the new pass as finished
+        # before it began — settling it onto the month the ORIGINAL viewing ended
+        # in. Filtering here rather than in each of the three lookups below is
+        # what stops them disagreeing about whether one season is complete.
+        state = watch_history.apply_history_floor(
+            state, watch_history.history_floors(records))
         watched_lookup = watch_history.watched_map(state)
         completed_lookup = watch_history.season_completed_map(state)
         # PER SERVICE, unlike completed_lookup beside it, because the tooltip

@@ -208,8 +208,61 @@ async function addPickedShow(season) {
         toast(asFinished ? `Recorded ${label} as finished` : `Added ${label}`, true);
         closeAddShow();
         applyMonthResponse(d);  // mutation returns the recomputed month (1d)
+        // ASKED AFTER THE ADD RATHER THAN BEFORE IT, deliberately: the season is
+        // already on the list either way, so a viewer who ignores the question
+        // gets exactly the behaviour they had before it existed. Asking first
+        // would make an add wait on an answer to a question about history the
+        // add itself is what discovered.
+        if (d.rewatch_prompt) { openRewatchPrompt(d.rewatch_prompt); }
     } catch (e) {
         toast(e.message || 'Could not add show', false);
+    }
+}
+
+// ---- Re-watching a season you already finished ----
+// The question the add could not answer for itself: is this a fresh run, or is
+// the tracker meeting an old completion for the first time? They produce the
+// identical signal, so it is asked.
+
+let pendingRewatch = null;
+
+function openRewatchPrompt(prompt) {
+    pendingRewatch = prompt;
+    const when = prompt.completed_on
+        ? new Date(prompt.completed_on + 'T00:00:00').toLocaleDateString(
+            undefined, { day: 'numeric', month: 'long', year: 'numeric' })
+        : 'some time ago';
+    document.getElementById('rewatchQuestion').textContent =
+        `Your history says you finished ${prompt.title} season ${prompt.season} on ${when}.`;
+    document.getElementById('rewatchModal').classList.add('open');
+}
+
+function closeRewatchPrompt() {
+    pendingRewatch = null;
+    document.getElementById('rewatchModal').classList.remove('open');
+}
+
+async function answerRewatch(fresh) {
+    if (!pendingRewatch) { return; }
+    const asked = pendingRewatch;
+    closeRewatchPrompt();
+    try {
+        const res = await fetch('/api/distrakt/rewatch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+                key: asked.key, season: asked.season,
+                completed_on: asked.completed_on, fresh: !!fresh,
+            })
+        });
+        const d = await res.json();
+        if (!d.ok) throw new Error(d.error || 'failed');
+        toast(fresh ? 'Starting fresh — earlier viewings no longer count'
+                    : 'Left as finished', true);
+        applyMonthResponse(d);
+    } catch (e) {
+        toast(e.message || 'Could not save that', false);
     }
 }
 

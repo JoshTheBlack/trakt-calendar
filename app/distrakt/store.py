@@ -638,6 +638,13 @@ def row_to_record(row) -> dict:
     if "missing_sources_json" in columns:
         rec["missing_sources"] = [
             str(name) for name in _stored_list(row["missing_sources_json"])]
+    # WHERE THIS VIEWER'S CURRENT PASS THROUGH THE SEASON BEGINS, carried onto
+    # the record because the live pass builds its history floors out of the rows
+    # it is already holding rather than querying for them again
+    # (watch_history.history_floors). "" is "no pass has been declared", which is
+    # what every row starts as and is not the same as a floor at the epoch.
+    if "history_from" in columns:
+        rec["history_from"] = row["history_from"] or ""
     return rec
 
 
@@ -1047,6 +1054,33 @@ async def set_came_back(user_id: int, key: ItemKey, season: int, came_back: bool
     result = await db.execute(
         f"UPDATE distrakt_user_seasons SET came_back = ? {_SEASON_WHERE}",
         (1 if came_back else 0,
+         user_id, key.media, key.match_source, key.match_id, int(season)),
+    )
+    return result.rowcount > 0
+
+
+async def set_history_from(user_id: int, key: ItemKey, season: int,
+                           history_from: str) -> bool:
+    """Say where this viewer's CURRENT pass through the season begins. True if
+    the season was on their list.
+
+    A DECISION, NOT A DERIVED VALUE, which is why it has a verb of its own and
+    why nothing recomputes it. Somebody adding a season they finished years ago
+    is asked whether this is a fresh run; answering yes is the only thing that
+    writes this, and it stays written until they say otherwise.
+
+    EMPTY CLEARS IT, and empty is what every row starts with — "no pass has been
+    declared" rather than "a pass beginning at the epoch". The two must not be
+    confused: a floor of "" would drop nothing, but storing one would make a row
+    that had been asked about indistinguishable from one that never had.
+
+    THE FLOOR IS A DAY, NOT AN INSTANT. Watch history dates a play to a day, the
+    completion map compares days, and a viewer choosing "start fresh" is making a
+    statement about a day rather than about a moment.
+    """
+    result = await db.execute(
+        f"UPDATE distrakt_user_seasons SET history_from = ? {_SEASON_WHERE}",
+        (str(history_from or "")[:10],
          user_id, key.media, key.match_source, key.match_id, int(season)),
     )
     return result.rowcount > 0

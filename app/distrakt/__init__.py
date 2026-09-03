@@ -116,6 +116,7 @@ from .store import (
     row_to_record,
     save_month,
     set_came_back,
+    set_history_from,
     set_month_movies,
     set_user_kind,
     stamp_refreshed,
@@ -147,6 +148,7 @@ __all__ = [
     "premiere_kind", "record_key", "register_networks", "remove_month_record",
     "remove_season_everywhere", "remove_user_record", "restore_user_data",
     "row_to_record", "save_month", "set_came_back", "set_emoji_prefs",
+    "set_history_from",
     "set_month_movies", "set_user_kind", "stamp_refreshed", "user_records",
     "walk_settled",
 ]

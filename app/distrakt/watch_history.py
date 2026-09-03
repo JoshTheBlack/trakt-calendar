@@ -868,6 +868,95 @@ def unreadable_sources(state: dict) -> list[str]:
     return list(state.get(_UNREADABLE) or [])
 
 
+def apply_history_floor(state: dict, floors: dict) -> dict:
+    """`state` with every episode watched BEFORE its season's floor dropped.
+
+    WHAT A FLOOR IS. `distrakt_user_seasons.history_from` records where THIS
+    viewer's current pass through a season begins. Somebody who finished a show
+    years ago and is now watching it again has a history full of plays that are
+    about the old run, and counting them would report the new pass as finished
+    before it started — the season would settle onto the month the ORIGINAL
+    viewing ended in, which is exactly the complaint this exists to answer.
+
+    ONE FILTER OVER THE STATE, NOT A PARAMETER ON EVERY READER. `watched_map`,
+    `season_completed_map` and `season_dates_by_source` all read the same episode
+    maps, and threading a floor through each would be three chances to apply it
+    inconsistently — a season could come out "finished" by one reader and
+    "in progress" by another, which is not a state the page can render. Filtering
+    once, before any of them is built, means a reader added later inherits the
+    rule without knowing it exists.
+
+    A SECOND STORED PASS WOULD BE A COPY OF SOMETHING DERIVABLE, which is why
+    this is a date rather than a second episode map: `distrakt_show_progress` has
+    held {episode: watched_at} since it was written, so filtering that map by a
+    start date IS "progress through the current pass". Storing the old run
+    separately would mean two things to keep in step for one fact.
+
+    AN EPISODE WITH NO DATE IS KEPT. "Watched, day unknown" is an ordinary state
+    in both services' history, and dropping it would silently shrink a count over
+    a fact nobody stated; a floor is a claim about WHEN, and it can only act on
+    plays that say when.
+
+    A SERVICE CLAIMING THE WHOLE TITLE WATCHED IS ALSO KEPT, and this is the
+    honest limit of the mechanism rather than an oversight: that claim carries no
+    dates at all, so there is nothing here to compare against a floor. Such a
+    season reads as complete however the floor is set, and the page says so.
+
+    RETURNS A NEW STATE and never mutates the one handed in, because the cache
+    object is shared with whatever saved it and a filtered view must not be
+    written back as though it were the whole history.
+    """
+    if not floors:
+        return state
+    shows = state.get("shows") or {}
+    if not shows:
+        return state
+
+    filtered_shows = {}
+    for key, entry in shows.items():
+        seasons = entry.get("seasons") or {}
+        rewritten = {}
+        touched = False
+        for season, stored in seasons.items():
+            floor = floors.get((str(key), int(season)))
+            if not floor:
+                rewritten[season] = stored
+                continue
+            slots = _season_slots(stored)
+            kept = {
+                source: {episode: when for episode, when in (eps or {}).items()
+                         # An undated play is kept -- see the docstring.
+                         if not when or str(when)[:10] >= floor}
+                for source, eps in slots.items()
+            }
+            rewritten[season] = kept
+            touched = True
+        filtered_shows[key] = {**entry, "seasons": rewritten} if touched else entry
+    return {**state, "shows": filtered_shows}
+
+
+def history_floors(records) -> dict:
+    """{(item key, season): 'YYYY-MM-DD'} from roster rows that state one.
+
+    BUILT FROM THE ROWS THE CALLER ALREADY HAS rather than from a query of its
+    own: `history_from` is a column on the roster, so a pass that is about to
+    compute a month's standing is holding every floor it needs. A row that states
+    none is absent rather than dated "", which keeps "this pass starts here" and
+    "no pass has been declared" apart.
+    """
+    out: dict[tuple[str, int], str] = {}
+    for record in records or ():
+        floor = str(record.get("history_from") or "").strip()
+        if not floor:
+            continue
+        key = record.get("key") or record.get("item_key")
+        season = record.get("season")
+        if key is None or season is None:
+            continue
+        out[(str(key), int(season))] = floor[:10]
+    return out
+
+
 def watched_map(state: dict) -> dict[tuple[str, int], dict[str, int]]:
     """{(item key, season): {source: watched_episode_count}} from the cache.
 

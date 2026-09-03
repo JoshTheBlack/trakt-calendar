@@ -4,6 +4,11 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## 🏷️ [1.2.1] - Unreleased
 
+### Added
+- 🔍 **Search your calendar for a title, and jump to the day it airs.** Results from your own calendar appear as you type and cost nothing — they come from what's already stored. Pressing Enter also asks the services, which finds titles your calendar hasn't loaded yet; those link to the month they belong to, and opening it is what teaches your calendar about them. A result is only ever offered with a jump if your own calendar would actually draw that card, so the button can't land you on an empty day.
+- 🎬 **IMDb's score on the card and in the details.** It sits between the date and the air time, marked as IMDb's, and deliberately apart from the Trakt and Simkl ratings beside it: those two are audiences disagreeing about the same question, and a third party's score isn't a third answer to it.
+- 🔁 **Adding a season you've already finished now asks what you meant.** Starting a re-watch and the tracker meeting an old completion for the first time look identical from your history, so instead of quietly filing the season under the month you originally finished it — where you'd never see it — it says when you finished it and offers to start a fresh run. A fresh run counts only what you watch from now on.
+
 ### Changed
 - 🔀 **The Sources screen is gone, and its two useful questions moved to where you already answer that kind of thing.** Which services show on your calendar is a tick-box in 🔎 **Filters**, beside the genre and certification narrowing it works exactly like. Which service's description you read — its poster, overview, network and rating — is an order on your 👤 **Account** page, beside the one that already says which tracker decides a season. Everything else that screen asked has been dropped: naming a different service per FIELD, restating the choice per calendar, and telling the tracker which services to read when the ones you have linked already said it. Any preference you had stated for a service overall is carried across.
 - 🖼️ **A shared link's preview picture now shows the same artwork the page does.** It resolved posters from TMDB whichever service your calendar was actually drawing, so a link could advertise a picture of a show that looked nothing like the one on the page behind it. Posters are now filed per service and picked in your own order.
@@ -20,6 +25,7 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### 🥚
 - It can go looking somewhere it hadn't thought to before, when the first place comes up empty-handed.
+- It will ask before assuming you're picking up where you left off, rather than after.
 - It knows which of the two you'd rather hear from, and asks in that order without being reminded.
 - Where the two of them number differently, it's learned to tell which one means what — and to fill in what one left blank from what the other already knew.
 - Looking ahead at a month that hadn't started yet used to quietly add everything to it. Looking is just looking, now.

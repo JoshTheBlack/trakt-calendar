@@ -22,7 +22,7 @@ import calendar as _calendar
 import dataclasses
 import json
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -1783,6 +1783,90 @@ async def api_distrakt_add(request: Request):
     except Exception:
         logger.warning("baseline_show failed for %s", key, exc_info=True)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
+    # ALREADY FINISHED, ACCORDING TO THE VIEWER'S OWN HISTORY. Left alone, the
+    # next load settles this season onto the month that history dates it to —
+    # correct for a tracker meeting an old completion for the first time, and
+    # wrong for somebody starting a re-watch, and the two are indistinguishable
+    # from the data. So it is ASKED rather than inferred, which is the same
+    # answer the untracked-season prompts already give to an identical pair.
+    #
+    # REPORTED RATHER THAN ACTED ON. Nothing is changed here: the season is on
+    # the list, the history says what it says, and the page puts the question.
+    # A viewer who ignores it gets exactly today's behaviour.
+    finished = await _completed_before_add(user_id, key, int(show["season"]))
+    if finished:
+        payload["rewatch_prompt"] = {
+            "key": str(key), "season": int(show["season"]),
+            "title": show["title"], "completed_on": finished,
+        }
+    return JSONResponse(payload, status_code=status)
+
+
+async def _completed_before_add(user_id: int, key, season: int) -> str:
+    """The day this viewer's history says they finished `season`, or "".
+
+    ASKED OF THE HISTORY AND NOT OF THE ROSTER, because the roster row was
+    created a moment ago by the add and says nothing about the past. The history
+    is the thing that knows, and `season_completed_map` is the one reading of it
+    every other caller uses — a second one here could disagree about the date the
+    page is about to show.
+
+    THE FLOOR IS HONOURED, so a season somebody has ALREADY declared a fresh run
+    on does not ask again on a later add: the plays before that floor are not
+    part of this pass and cannot complete it.
+    """
+    row = await distrakt_store.find_user_record(user_id, key, season)
+    state = await watch_history.load_state(user_id)
+    if row:
+        state = watch_history.apply_history_floor(
+            state, watch_history.history_floors([row]))
+    return watch_history.season_completed_map(state).get((str(key), season), "")
+
+
+@guard.post("/api/distrakt/rewatch", AuthLevel.DISTRAKT_APPROVED)
+async def api_distrakt_rewatch(request: Request):
+    """Answer the question the add asked: is this a fresh run, or is the tracker
+    just meeting an old completion?
+
+    `fresh` TRUE SETS THE FLOOR TO THE DAY AFTER THE OLD COMPLETION, so the
+    previous run's plays stop counting and the season starts empty. The day AFTER
+    rather than the day itself: the last episode of the old run was watched ON
+    that day, and a floor that included it would carry one episode of the
+    finished pass into the new one.
+
+    `fresh` FALSE CLEARS THE FLOOR AND CHANGES NOTHING ELSE. The season settles
+    onto the month its history names, which is what it would have done without
+    the question — the point of asking was never to change the default, only to
+    stop it happening silently.
+
+    IT IS SAFE TO CALL TWICE. Setting a floor is idempotent, and a viewer who
+    answers, reloads and answers again gets the same row either way.
+    """
+    user_id = await _distrakt_user_id(request)
+    settings = await _distrakt_settings(user_id)
+    data = await authz.json_body(request)
+    today = clock.today()
+    year = route_params.valid_year(data.get("year"), today.year)
+    month = route_params.valid_month(data.get("month"), today.month)
+    try:
+        key = parse_item_key(data.get("key"))
+        season = int(data["season"])
+    except (KeyError, TypeError, ValueError) as exc:
+        return authz.error(f"A season has to be named: {exc}")
+
+    floor = ""
+    if data.get("fresh"):
+        completed_on = str(data.get("completed_on") or "")[:10]
+        if not completed_on:
+            return authz.error("A fresh run needs the day the last one finished.")
+        try:
+            floor = (date.fromisoformat(completed_on) + timedelta(days=1)).isoformat()
+        except ValueError:
+            return authz.error("That is not a day this app can read.")
+    if not await distrakt_store.set_history_from(user_id, key, season, floor):
+        return authz.error("That season is not on your list.")
+
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
     return JSONResponse(payload, status_code=status)
 
 

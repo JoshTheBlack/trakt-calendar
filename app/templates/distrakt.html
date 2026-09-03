@@ -246,6 +246,39 @@
 </div>
 
 <!-- Add-show modal -->
+{# ADDING A SEASON YOUR HISTORY SAYS YOU ALREADY FINISHED.
+
+   IT ASKS RATHER THAN GUESSING, because the two cases are indistinguishable
+   from the data: somebody starting a re-watch and a tracker meeting an old
+   completion for the first time produce the identical signal — a finished
+   season being added. Left to infer, it files the season onto the month that
+   history dates it to, which is right for the second and reads as broken for
+   the first, and there is no definition of "recent" that tells them apart
+   without being a guess somebody has to defend.
+
+   NO DEFAULT AND NO DISMISS-BY-CLICKING-AWAY. Both answers are real, and the
+   one that happens if the question is ignored is the old silent behaviour —
+   which is the thing being fixed. Closing it is still allowed and still means
+   "leave it as it was"; it just says so. #}
+<div id="rewatchModal" class="modal-overlay">
+    <div class="modal narrow">
+        <div class="modal-head">
+            <h2>🔁 Watched this before</h2>
+            <button type="button" class="modal-close" onclick="closeRewatchPrompt()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p id="rewatchQuestion"></p>
+            <p class="hint">A fresh run counts only what you watch from now on, and the season
+                stays on this month's list. Keeping the old record files it under the month you
+                finished it in, which is where it has always gone.</p>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" onclick="answerRewatch(false)">Keep the old record</button>
+            <button type="button" class="btn-primary" onclick="answerRewatch(true)">Start a fresh run</button>
+        </div>
+    </div>
+</div>
+
 <div id="addShowModal" class="modal-overlay" onclick="if(event.target===this) closeAddShow()">
     <div class="modal">
         <div class="modal-head">
