@@ -849,12 +849,19 @@ async def search_the_calendar(request: Request):
     elsewhere = calendar_search.Results()
     if live and query:
         # THE STORED ANSWERS ARE HANDED OVER so the catalogue half does not offer
-        # a title the calendar already draws: naming the day beats naming the
+        # somewhere the calendar already draws: naming the day beats naming the
         # month, and offering both would be two rows for one answer.
-        known = frozenset(a.item.mark_key for a in found.airings)
+        #
+        # KEYED ON THE SEASON AS WELL AS THE TITLE, because a catalogue row is a
+        # season premiere rather than a show. `mark_key` is deliberately the
+        # TITLE's identity and carries no season (see Item.mark_key), so keying
+        # the skip on it alone would drop every season of a title the calendar
+        # happens to hold one airing of — hiding exactly the season somebody is
+        # searching for because a different one is on screen.
+        known = frozenset((a.item.mark_key, a.item.season) for a in found.airings)
         try:
             elsewhere = await calendar_search.catalogue(
-                query, settings=settings, tz=tz, known=known)
+                query, settings=settings, prefs=prefs, tz=tz, known=known)
         except SourceUnavailable as exc:
             # The stored half already has an answer worth drawing; a catalogue
             # that could not be reached is a missing addition to it, not a failed

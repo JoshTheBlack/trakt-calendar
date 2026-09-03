@@ -70,7 +70,13 @@
              alt="" loading="lazy" width="46" height="69">
         <span class="search-main">
             <span class="search-title">{{ hit.item.title }}{% if hit.item.year %} <span class="search-year">{{ hit.item.year }}</span>{% endif %}</span>
+            {# THE SEASON IS NAMED FIRST because it is what distinguishes these
+               rows from each other: one show's premieres share a title, a
+               poster and a description, and the number plus the date is the
+               only thing saying which month a row goes to. A film has no
+               season and shows its release date alone. #}
             <span class="search-meta">
+                {% if hit.item.season is not none %}Season {{ hit.item.season }} · {% endif %}
                 {{ hit.item.air_display }} · {{ hit.endpoint_label }}
                 {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
             </span>

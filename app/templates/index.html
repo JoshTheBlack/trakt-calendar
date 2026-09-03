@@ -791,7 +791,7 @@
                the app-wide rule and the reason are in
                tests/kernel/test_page_head.py. #}
             <form class="search-bar" hx-boost="false" hx-get="/calendar/search"
-                  hx-target="#searchResults" hx-vals='{"live": "1"}'
+                  hx-target="#searchResults"
                   {# ONE ANSWER AT A TIME, ACROSS BOTH TRIGGERS. Syncing on the
                      TARGET rather than on each control is what makes that true
                      between them: without it a debounced read for "sev" can
@@ -809,6 +809,15 @@
                    than read back out of the address bar: it is the same fact the
                    toolbar's picker renders from, so the two cannot disagree. #}
                 <input type="hidden" id="searchEndpoint" name="endpoint" value="{{ endpoint.key }}">
+                {# ASKING THE SERVICES IS A FIELD OF THIS FORM, AND THAT IS WHY.
+                   It was an `hx-vals` on the form, which htmx INHERITS down to
+                   descendants — so the box's own as-you-type request picked it
+                   up and every keystroke went out to the services. A hidden
+                   field is submitted with the FORM and with nothing else: the
+                   box's request carries only itself and what its `hx-include`
+                   names, so typing stays a local read by construction rather
+                   than by remembering to override an inherited value. #}
+                <input type="hidden" name="live" value="1">
                 <button type="submit" class="btn-primary small">Search the services</button>
             </form>
             <p class="hint">Results from {{ endpoint.label }} appear as you type and cost nothing —

@@ -458,14 +458,22 @@ def seasons_known(episodes: list[dict]) -> list[int]:
 
 
 def _season_counts(episodes: list[dict]) -> list[dict]:
-    """[{season, episode_count}] over `episodes`, one entry per season the
-    episode list actually contains, in order — the picker's candidate list.
+    """[{season, episode_count, first_aired}] over `episodes`, one entry per
+    season the episode list actually contains, in order — the picker's
+    candidate list.
 
     GROUPED THE SAME WAY `seasons_known` GROUPS SEASON NUMBERS: an episode with
     no season number counts as season 1, which is how anime arrives (Simkl
     omits the field for a title it maps to one canonical season).
+
+    `first_aired` IS THE EARLIEST DATED EPISODE IN THE SEASON, "" when none of
+    them carries a date, and it is the same field Trakt's own season list
+    returns — the calendar search reads one shape whichever service answered.
+    Derived rather than fetched: the episode list being grouped here already
+    carries every date, so a season's premiere costs no extra call.
     """
     counts: dict[int, int] = {}
+    earliest: dict[int, date] = {}
     for entry in episodes or []:
         if str(entry.get("type") or _REGULAR_EPISODE) != _REGULAR_EPISODE:
             continue
@@ -473,7 +481,12 @@ def _season_counts(episodes: list[dict]) -> list[dict]:
             continue
         season = int(entry.get("season") if entry.get("season") is not None else 1)
         counts[season] = counts.get(season, 0) + 1
-    return [{"season": season, "episode_count": count} for season, count in sorted(counts.items())]
+        when = _episode_date(entry)
+        if when is not None and (season not in earliest or when < earliest[season]):
+            earliest[season] = when
+    return [{"season": season, "episode_count": count,
+             "first_aired": earliest[season].isoformat() if season in earliest else ""}
+            for season, count in sorted(counts.items())]
 
 
 async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media.SHOW) -> SeasonsAnswer:

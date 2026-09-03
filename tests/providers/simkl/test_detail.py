@@ -194,8 +194,12 @@ class SeasonPickerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_the_season_list_counts_episodes_per_season_excluding_specials(self):
         got, _calls = await self._seasons({"ids": {"simkl": 55}})
-        self.assertEqual(got.seasons, [{"season": 1, "episode_count": 3},
-                                       {"season": 2, "episode_count": 1}])
+        # `first_aired` rides along: the episode list being grouped here already
+        # carries every date, so a season's premiere day costs no extra call and
+        # is the same field Trakt's own season list returns.
+        self.assertEqual(got.seasons,
+                         [{"season": 1, "episode_count": 3, "first_aired": "2026-07-07"},
+                          {"season": 2, "episode_count": 1, "first_aired": "2026-09-01"}])
 
     async def test_both_lookups_run_and_stay_on_the_catalog_pool(self):
         _got, calls = await self._seasons({"ids": {"simkl": 55}})

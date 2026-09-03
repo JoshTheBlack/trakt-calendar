@@ -410,6 +410,37 @@ class PageScriptTests(unittest.TestCase):
                         needed, names,
                         f"{page} loads {needs}, which calls into {needed}")
 
+    def test_typing_in_the_calendar_search_cannot_reach_a_service(self):
+        """WHAT SPENDS A REQUEST MUST BE A DELIBERATE ACT, and this is the
+        markup rule that keeps it one.
+
+        The search box reads what this instance already holds on every
+        keystroke, which costs an index lookup. Asking the SERVICES spends
+        requests against somebody else's rate limit, so it belongs to Enter and
+        the button — the form's own submit.
+
+        THE BUG THIS CLOSES: the live flag was an `hx-vals` on the FORM, and
+        htmx inherits attributes down to descendants. The box's own as-you-type
+        request picked it up, so every keystroke went out to the services. As a
+        hidden FIELD it is submitted with the form and with nothing else — the
+        box's request carries only itself and what its `hx-include` names — so
+        the separation holds by construction rather than by an override
+        somebody has to remember.
+        """
+        page = markup("index.html")
+        box = re.search(r'<input[^>]*id="searchInput"[^>]*>', page, re.S)
+        self.assertIsNotNone(box, "the calendar search box is gone")
+        box = box.group(0)
+        self.assertNotIn("live", box,
+                         "the search box itself names the live flag")
+        self.assertIn('name="live"', page,
+                      "nothing carries the live flag to the services")
+        # The flag must not sit on any ANCESTOR as an hx-vals either, which is
+        # the exact shape that leaked. A hidden field is the only form allowed.
+        self.assertNotRegex(
+            page, r"hx-vals=[^>]*live",
+            "the live flag is an inherited hx-vals again — it must be a field")
+
     def test_no_two_scripts_anywhere_declare_the_same_name(self):
         """One name, one file — across every page, not just within one.
 

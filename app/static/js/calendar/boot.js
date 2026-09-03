@@ -34,6 +34,12 @@ function initCalendarPage() {
     readViewData();
     updateEmptyDays();
     initDayChips();
+    // LAST, AND FROM HERE RATHER THAN FROM DOMContentLoaded. Following a search
+    // result is a BOOSTED navigation: the body is swapped and that event never
+    // fires, so a jump aimed at a card highlighted nothing on the one path the
+    // feature exists for. Every arrival runs this init — cold load, boosted
+    // navigation and Back alike — which is the whole reason it exists.
+    scrollToJumpTarget();
 }
 
 // ---- Day blocks that arrive after the page has painted ----

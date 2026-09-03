@@ -298,7 +298,7 @@ async def fetch_season_episodes(settings: Settings, trakt_id, season: int,
 
 
 async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
-    """/shows/{id}/seasons?extended=full -> [{season, episode_count}] for
+    """/shows/{id}/seasons?extended=full -> [{season, episode_count, first_aired}] for
     seasons Trakt has actually populated with episodes (skips season 0/
     specials and any season with zero KNOWN episodes at all). Powers the
     add-show flow's season picker.
@@ -308,7 +308,16 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     aired_episodes=0 but a real episode_count once Trakt has announced it —
     filtering on aired_episodes wrongly hid every not-yet-aired season from
     the picker, which is exactly a season 1 that has not started airing yet.
-    Fixed once manual add-show on an unaired season turned out to be broken."""
+    Fixed once manual add-show on an unaired season turned out to be broken.
+
+    `first_aired` IS THE SEASON'S PREMIERE DAY, "" when Trakt has not dated the
+    season. `extended=full` has always returned it and this projection used to
+    drop it, which cost the calendar search the only thing it needed to offer a
+    SEASON rather than a show: without a per-season date every season of a
+    long-running title resolves to the month the show first aired, years before
+    the season somebody was looking for. It arrives in the same response as the
+    episode counts, so carrying it costs nothing.
+    """
     results = await transport.cached_get(
         transport.shared_client(), settings, f"shows/{trakt_id}/seasons", {"extended": "full"}, raise_errors=True,
     )
@@ -318,7 +327,8 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
         episode_count = entry.get("episode_count") or 0
         if num is None or num == 0 or episode_count <= 0:
             continue
-        out.append({"season": int(num), "episode_count": int(episode_count)})
+        out.append({"season": int(num), "episode_count": int(episode_count),
+                    "first_aired": str(entry.get("first_aired") or "")[:10]})
     out.sort(key=lambda s: s["season"])
     logger.info("fetch_show_seasons(%s) -> %d usable season(s)", trakt_id, len(out))
     return out

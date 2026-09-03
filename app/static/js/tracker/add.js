@@ -208,7 +208,18 @@ async function addPickedShow(season) {
         // finished before, and which record that should become depends on an
         // answer only the viewer has — so the server wrote nothing and asked.
         // Checked before the month is applied, because there is no month here.
-        if (d.needs_decision) { openRewatchPrompt(d.needs_decision, season); return; }
+        if (d.needs_decision) {
+            // THE PICKER GOES AWAY FIRST. Two overlays were open at once and the
+            // question drew UNDER the one that raised it, so it could not be
+            // reached without dismissing the picker on top of it. Closing is
+            // right on its own terms too: the pick is made, and the question is
+            // the next step rather than a second thing to look at beside it.
+            // `pickedShow` survives this — closing hides the modal and does not
+            // reset the pick — which is what lets the answer perform the add.
+            closeAddShow();
+            openRewatchPrompt(d.needs_decision, season);
+            return;
+        }
         announceAdded(season, asFinished);
         applyMonthResponse(d);  // mutation returns the recomputed month (1d)
     } catch (e) {
@@ -271,7 +282,6 @@ async function answerRewatch(fresh) {
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
-        closeAddShow();
         // ONE TOAST AND IT SAYS WHICH ANSWER LANDED. "Added" alone would be
         // true of both and is the part the viewer already knows; what they
         // cannot see from the row is whether their earlier viewing counts.

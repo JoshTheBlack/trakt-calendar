@@ -28,7 +28,7 @@ from app.calendar import cache as calendar_cache, entries as calendar_entries
 from app.calendar import search as calendar_search
 from app.config import Settings
 from app.endpoints import get_endpoint
-from app.providers.base import Media, Record, Source
+from app.providers.base import SourceUnavailable, Media, Record, Source
 from app.sources import prefs as source_prefs
 from tests.support import migrated_db
 
@@ -58,6 +58,9 @@ class SearchTestCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         migrated_db(f"calsearch-{id(self)}")
         self.settings = Settings(simkl_public_calendar_enabled=False)
+        # The viewer whose filters apply. Both halves of a search read these,
+        # which is the point -- the catalogue half used to read none of them.
+        self.prefs = dict(NO_FILTERS)
         self.tz = ZoneInfo("UTC")
 
     async def asyncTearDown(self):
@@ -239,7 +242,23 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
                                ids={"simkl": simkl_id, "tmdb": 777}, title=title,
                                year=2026, network="", runtime=None, overview="")
 
-    async def _catalogue(self, described, known=frozenset()):
+    def _port(self, described, seasons=None):
+        """A detail port that answers both halves of what a catalogue row needs.
+
+        `seasons=None` MEANS "THIS SOURCE WILL NOT LIST THEM", which is a real
+        state and the one most of these tests want: it makes the hit fall back
+        to the show's own first-air date, so the assertions about placement stay
+        about placement.
+        """
+        async def _seasons(settings, source_id, media):
+            if seasons is None:
+                raise SourceUnavailable("no season list")
+            return SimpleNamespace(seasons=list(seasons))
+
+        return SimpleNamespace(fetch_details=AsyncMock(return_value=described),
+                               fetch_seasons=_seasons)
+
+    async def _catalogue(self, described, known=frozenset(), seasons=None):
         # ANSWERS FOR SHOWS AND NOT FOR FILMS, because the real thing asks
         # both and gets different titles back. A double that returned the
         # same hit to each would report one title twice and hide that.
@@ -252,10 +271,145 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]), \
              patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=SimpleNamespace(
-                     fetch_details=AsyncMock(return_value=described)))):
+                 detail_port=self._port(described, seasons))):
             return await calendar_search.catalogue(
-                "unseen", settings=self.settings, tz=self.tz, known=known)
+                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
+                known=known)
+
+    async def test_a_show_is_offered_once_per_season_premiere(self):
+        """WHAT THE SHOW-SHAPED ROW COULD NOT DO. A long-running title has one
+        first-air date and many premieres, so keying the link on the show sent
+        every search for a recent season to the month the show began — years
+        before the season anybody was looking for."""
+        found = await self._catalogue(
+            {"first_aired": "2020-01-01T00:00:00Z", "title": "Long Runner"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"},
+                     {"season": 2, "first_aired": "2021-03-04"},
+                     {"season": 3, "first_aired": "2022-06-07"}])
+        self.assertEqual(len(found.elsewhere), 3)
+        months = sorted((row.year, row.month) for row in found.elsewhere)
+        self.assertEqual(months, [(2020, 1), (2021, 3), (2022, 6)])
+
+    async def test_the_newest_seasons_are_the_ones_kept(self):
+        """The bound cuts from the far end, because a search is far more often
+        about the season now airing than the one from years ago."""
+        found = await self._catalogue(
+            {"first_aired": "2010-01-01T00:00:00Z"},
+            seasons=[{"season": n, "first_aired": f"20{10 + n:02d}-05-01"}
+                     for n in range(1, 9)])
+        self.assertEqual(len(found.elsewhere), 3)
+        self.assertEqual(sorted(row.year for row in found.elsewhere),
+                         [2016, 2017, 2018])
+
+    async def test_a_season_with_no_date_is_not_offered(self):
+        """Same refusal as a title with no date, for the same reason: the offer
+        is "go to where this should be", and an undated season has no where."""
+        found = await self._catalogue(
+            {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"},
+                     {"season": 2, "first_aired": ""},
+                     {"season": 3, "first_aired": None}])
+        self.assertEqual(len(found.elsewhere), 1)
+
+    async def test_a_source_that_will_not_list_seasons_still_offers_the_show(self):
+        """Losing the season list costs precision, not the result. A reader who
+        searched a title by name should not get nothing because one lookup of
+        two was refused."""
+        found = await self._catalogue(
+            {"first_aired": "2026-11-04T20:00:00Z"}, seasons=None)
+        self.assertEqual(len(found.elsewhere), 1)
+        self.assertEqual((found.elsewhere[0].year, found.elsewhere[0].month),
+                         (2026, 11))
+
+    async def test_a_season_already_on_the_calendar_is_skipped_alone(self):
+        """THE TRAP IN KEYING THIS ON THE TITLE. `mark_key` is the title's
+        identity and carries no season, so matching on it alone would hide every
+        season of a show the calendar happens to hold one airing of — which is
+        precisely the search where the other seasons are the useful answer."""
+        first = await self._catalogue(
+            {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"},
+                     {"season": 2, "first_aired": "2021-03-04"}])
+        one = first.elsewhere[0]
+        again = await self._catalogue(
+            {"first_aired": "2020-01-01T00:00:00Z"},
+            seasons=[{"season": 1, "first_aired": "2020-01-01"},
+                     {"season": 2, "first_aired": "2021-03-04"}],
+            known=frozenset({(one.item.mark_key, one.item.season)}))
+        self.assertEqual(len(again.elsewhere), 1)
+        self.assertNotEqual(again.elsewhere[0].item.season, one.item.season)
+
+    async def test_a_film_is_never_asked_for_seasons(self):
+        """Films have none, and asking would spend a call to be told so."""
+        asked = []
+
+        async def _search(_asked, settings, media, query):
+            if media is Media.MOVIE:
+                return SimpleNamespace(hits=[self._hit(title="A Film")],
+                                       failed=frozenset())
+            return SimpleNamespace(hits=[], failed=frozenset())
+
+        async def _seasons(settings, source_id, media):
+            asked.append(source_id)
+            return SimpleNamespace(seasons=[])
+
+        with patch("app.distrakt.search.search_catalogue", new=_search), \
+             patch("app.providers.for_catalogue_search",
+                   return_value=[(Source.SIMKL, object())]), \
+             patch("app.providers.get", return_value=SimpleNamespace(
+                 detail_port=SimpleNamespace(
+                     fetch_details=AsyncMock(return_value={
+                         "first_aired": "2026-11-04T20:00:00Z"}),
+                     fetch_seasons=_seasons))):
+            found = await calendar_search.catalogue(
+                "a film", settings=self.settings, prefs=self.prefs, tz=self.tz,
+                known=frozenset())
+        self.assertEqual(len(found.elsewhere), 1)
+        self.assertEqual(asked, [], "a film was asked for its seasons")
+
+    async def test_a_title_this_viewer_filters_out_is_not_offered(self):
+        """THE ONE SURFACE THAT USED TO OFFER SOMEWHERE YOU CANNOT GET TO. A
+        title excluded by genre was listed here, and the month it linked to
+        could never draw it — so "not on your calendar" quietly covered both
+        "not there yet" and "not there, ever", with no way to tell which.
+        """
+        self.prefs = {**self.prefs, "genres": "-reality"}
+        found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
+                                       "genres": ["Reality"]})
+        self.assertEqual(found.elsewhere, ())
+
+    async def test_a_title_that_passes_the_filters_is_still_offered(self):
+        """The other side of the same rule, so the filter cannot pass by
+        rejecting everything."""
+        self.prefs = {**self.prefs, "genres": "-reality"}
+        found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
+                                       "genres": ["Drama"]})
+        self.assertEqual(len(found.elsewhere), 1)
+
+    async def test_a_film_is_asked_about_the_film_vocabulary(self):
+        """Certifications are two different vocabularies — TV Parental
+        Guidelines against MPA ratings — so a film checked against the SHOW
+        spec passes anything. Which one applies follows the media, as it does
+        everywhere else that asks."""
+        self.prefs = {**self.prefs, "movie_certifications": "-r",
+                      "show_certifications": "-tv-ma"}
+
+        async def _search(asked, settings, media, query):
+            if media is Media.MOVIE:
+                return SimpleNamespace(hits=[self._hit(title="Unseen Film")],
+                                       failed=frozenset())
+            return SimpleNamespace(hits=[], failed=frozenset())
+
+        with patch("app.distrakt.search.search_catalogue", new=_search), \
+             patch("app.providers.for_catalogue_search",
+                   return_value=[(Source.SIMKL, object())]), \
+             patch("app.providers.get", return_value=SimpleNamespace(
+                 detail_port=self._port({"first_aired": "2026-11-04T20:00:00Z",
+                                         "certification": "R"}))):
+            found = await calendar_search.catalogue(
+                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
+                known=frozenset())
+        self.assertEqual(found.elsewhere, ())
 
     async def test_it_links_to_the_month_and_not_to_a_day(self):
         found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
@@ -264,7 +418,13 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         url = found.elsewhere[0].url
         self.assertIn("year=2026", url)
         self.assertIn("month=11", url)
-        self.assertNotIn("#day-", url)
+        # ANCHORED AT THE DAY, BUT NOT HIGHLIGHTED, and the difference is what
+        # this row is allowed to claim. `#day-` is resolved by the browser: it
+        # scrolls there when that day is drawn and does nothing when it is not,
+        # so pointing costs nothing to be wrong about. `highlight=` names a
+        # specific CARD, and the identity a catalogue lookup builds need not be
+        # the one the calendar draws for the same title.
+        self.assertIn("#day-2026-11-04", url)
         self.assertNotIn("highlight=", url)
 
     async def test_a_title_with_no_date_is_not_offered_at_all(self):
@@ -281,7 +441,10 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         """The stored answer names the day, which is strictly better than naming
         the month; offering both would be two rows for one answer."""
         first = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"})
-        already = frozenset({first.elsewhere[0].item.mark_key})
+        # THE SEASON TRAVELS WITH THE TITLE, because a row is a season premiere
+        # and `mark_key` is deliberately the title's identity alone.
+        one = first.elsewhere[0].item
+        already = frozenset({(one.mark_key, one.season)})
         again = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"},
                                       known=already)
         self.assertEqual(again.elsewhere, ())
@@ -308,9 +471,13 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
 
         with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]),              patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=SimpleNamespace(fetch_details=_details))):
+                 detail_port=SimpleNamespace(
+                     fetch_details=_details,
+                     fetch_seasons=AsyncMock(
+                         side_effect=SourceUnavailable("no season list"))))):
             await calendar_search.catalogue(
-                "unseen", settings=self.settings, tz=self.tz, known=frozenset())
+                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
+                known=frozenset())
 
         self.assertEqual(seen, ["4242"], "the lookup did not use the leader's id")
 
@@ -328,7 +495,8 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.providers.for_catalogue_search",
                    return_value=[(Source.SIMKL, object())]):
             found = await calendar_search.catalogue(
-                "nameless", settings=self.settings, tz=self.tz, known=frozenset())
+                "nameless", settings=self.settings, prefs=self.prefs, tz=self.tz,
+                known=frozenset())
         self.assertEqual(found.elsewhere, ())
 
     async def test_a_row_carries_what_the_lookup_described(self):
