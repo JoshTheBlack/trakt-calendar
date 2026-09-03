@@ -994,6 +994,92 @@ def dedupe_groups(groups: list[dict]) -> list[dict]:
     return out
 
 
+async def visible_records(groups, endpoint, *, genres="", countries="",
+                          show_certifications="", movie_certifications="",
+                          movie_release_countries="", movie_release_types="",
+                          prefs=None, settings=None) -> tuple[list, int]:
+    """`groups` reduced to the records THIS viewer's calendar would draw, and
+    how many films the release narrowing removed on the way.
+
+    EXTRACTED SO THE SEARCH RUNS THE SAME PIPELINE RATHER THAN A SECOND ONE.
+    A search has to answer "would this viewer's calendar actually draw this
+    card", and six independent reasons a title is absent live in these lines;
+    a second implementation of them would be wrong the first time any one
+    changed. What a search does NOT want is a whole month — it knows which
+    groups matched, so it hands over those and pays for those. Measured
+    before the split: one `shows` month held 12,880 airings and a search of
+    five months took eleven seconds, nearly all of it in here.
+
+    NOTHING BELOW WAS REWRITTEN. It is the block that sat inline in
+    `assemble_range`, with the values it read from that function's scope made
+    into arguments. The order of the steps is the substance and each comment
+    says why it is where it is.
+    """
+    with span("calcache.filter", entries=len(groups)) as sp:
+        # RESOLUTION IN TWO HALVES WITH THE ENRICHMENT OVERLAY BETWEEN THEM, and
+        # the order is the point. The overlay fills in the fields one source's
+        # calendar files do not carry, and it has to act on that source's OWN
+        # record — before anything picks between the sources — or a merged group
+        # whose other source supplies the card would never have its enrichment
+        # considered, and a genre only that source knows could not win however
+        # the viewer set their preference.
+        # `settings` GOES IN BESIDE `prefs` AND ANSWERS A DIFFERENT QUESTION.
+        # `prefs` is this viewer's; `settings` is the operator's — a source this
+        # instance has switched off its calendar is off for everybody, and a
+        # window filled while it was still in play is still sitting in the cache
+        # holding its records. Reading it here is what makes that switch take
+        # effect immediately instead of one TTL from now.
+        parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key, settings))
+                  for group in dedupe_groups(groups)]
+        # THE SIMKL OVERLAY IS GONE FROM HERE, AND ITS ABSENCE IS THE POINT.
+        # What used to happen on this line was a batched read of `simkl_titles`
+        # to paint genres, network, country and certification onto this read's
+        # Simkl records, because the stored window could not hold them: a fill
+        # replaced the whole blob with a fresh, unenriched payload, so anything
+        # written into it was erased on the next refill. Rows do not have that
+        # problem — the drain writes `calendar_titles` and a refill is forbidden
+        # to demote it (see entries._UPSERT_TITLE) — so the fields are already on
+        # the records read_span handed back, and `enriched` is a statement about
+        # what the row CONTAINS rather than about what a reader must look up.
+        flat = [r for _, rs in parsed for r in rs]
+        # AND THE OTHER SERVICE'S HALF OF THE SAME QUESTION. Trakt's calendar
+        # payload carries no release schedule either, so without this a film
+        # Trakt listed reached the release rule below with nothing to be judged
+        # on — and a record that cannot answer is kept, which meant the filter
+        # could never drop a film Trakt also listed. Same promise as the overlay
+        # above: it reads what is stored and fetches nothing.
+        await calendar_enrich.overlay_releases(flat)
+        # THE RELEASE NARROWING RUNS HERE, BEFORE THE PICK, AND ON THE GROUP.
+        # A films calendar that lists every release in every market needs a way
+        # to say "the ones out here, in the formats I watch"; the per-country
+        # release schedule only exists on the records of whichever source
+        # published one, so asking after resolution would ask the winner alone
+        # and asking per record would strip a service off a merged card to
+        # enforce a rule about release formats. Counted rather than silently
+        # applied, so a month this empties can say so — see meta below.
+        narrowed = calendar_filter.filter_release_groups(
+            parsed, endpoint.media, movie_release_countries, movie_release_types)
+        release_filtered = len(parsed) - len(narrowed)
+        records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
+                               for group, rs in narrowed) if r is not None]
+        # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
+        # "movie"`) does not belong on a series endpoint — see
+        # filter.prune_disguised_films for the measured rule and why this is
+        # a read-time exclusion rather than something fetch_window_records can
+        # do at fill. Same reasoning as the exemption below: it can only act
+        # on what enrichment has already found, so it runs right beside it.
+        records = calendar_filter.prune_disguised_films(records, endpoint.media)
+        certifications = show_certifications if endpoint.media == "show" else movie_certifications
+        # exempt_unenriched=True ONLY here, never at the floor in
+        # fetch_window_records — see filter.keep_record for why the two reads
+        # must not share that setting.
+        kept = calendar_filter.filter_records(records, genres, countries, certifications,
+                                              exempt_unenriched=True)
+        sp.set(kept=len(kept))
+
+    return kept, release_filtered
+
+
 async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
                          start_date: date, end_date: date,
                          genres: str = "", countries: str = "",
@@ -1140,65 +1226,13 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # render is per-entry object building and timezone arithmetic, and is the one
     # that grows with a busy month; the grouping is a sort plus a walk.
     with span("calcache.filter", entries=len(groups)) as sp:
-        # RESOLUTION IN TWO HALVES WITH THE ENRICHMENT OVERLAY BETWEEN THEM, and
-        # the order is the point. The overlay fills in the fields one source's
-        # calendar files do not carry, and it has to act on that source's OWN
-        # record — before anything picks between the sources — or a merged group
-        # whose other source supplies the card would never have its enrichment
-        # considered, and a genre only that source knows could not win however
-        # the viewer set their preference.
-        # `settings` GOES IN BESIDE `prefs` AND ANSWERS A DIFFERENT QUESTION.
-        # `prefs` is this viewer's; `settings` is the operator's — a source this
-        # instance has switched off its calendar is off for everybody, and a
-        # window filled while it was still in play is still sitting in the cache
-        # holding its records. Reading it here is what makes that switch take
-        # effect immediately instead of one TTL from now.
-        parsed = [(group, calendar_resolve.admitted_records(group, prefs, endpoint.key, settings))
-                  for group in dedupe_groups(groups)]
-        # THE SIMKL OVERLAY IS GONE FROM HERE, AND ITS ABSENCE IS THE POINT.
-        # What used to happen on this line was a batched read of `simkl_titles`
-        # to paint genres, network, country and certification onto this read's
-        # Simkl records, because the stored window could not hold them: a fill
-        # replaced the whole blob with a fresh, unenriched payload, so anything
-        # written into it was erased on the next refill. Rows do not have that
-        # problem — the drain writes `calendar_titles` and a refill is forbidden
-        # to demote it (see entries._UPSERT_TITLE) — so the fields are already on
-        # the records read_span handed back, and `enriched` is a statement about
-        # what the row CONTAINS rather than about what a reader must look up.
-        flat = [r for _, rs in parsed for r in rs]
-        # AND THE OTHER SERVICE'S HALF OF THE SAME QUESTION. Trakt's calendar
-        # payload carries no release schedule either, so without this a film
-        # Trakt listed reached the release rule below with nothing to be judged
-        # on — and a record that cannot answer is kept, which meant the filter
-        # could never drop a film Trakt also listed. Same promise as the overlay
-        # above: it reads what is stored and fetches nothing.
-        await calendar_enrich.overlay_releases(flat)
-        # THE RELEASE NARROWING RUNS HERE, BEFORE THE PICK, AND ON THE GROUP.
-        # A films calendar that lists every release in every market needs a way
-        # to say "the ones out here, in the formats I watch"; the per-country
-        # release schedule only exists on the records of whichever source
-        # published one, so asking after resolution would ask the winner alone
-        # and asking per record would strip a service off a merged card to
-        # enforce a rule about release formats. Counted rather than silently
-        # applied, so a month this empties can say so — see meta below.
-        narrowed = calendar_filter.filter_release_groups(
-            parsed, endpoint.media, movie_release_countries, movie_release_types)
-        release_filtered = len(parsed) - len(narrowed)
-        records = [r for r in (calendar_resolve.resolve_records(group, rs, prefs)
-                               for group, rs in narrowed) if r is not None]
-        # A Simkl entry Simkl's OWN enrichment marks as a film (`anime_type ==
-        # "movie"`) does not belong on a series endpoint — see
-        # filter.prune_disguised_films for the measured rule and why this is
-        # a read-time exclusion rather than something fetch_window_records can
-        # do at fill. Same reasoning as the exemption below: it can only act
-        # on what enrichment has already found, so it runs right beside it.
-        records = calendar_filter.prune_disguised_films(records, endpoint.media)
-        certifications = show_certifications if endpoint.media == "show" else movie_certifications
-        # exempt_unenriched=True ONLY here, never at the floor in
-        # fetch_window_records — see filter.keep_record for why the two reads
-        # must not share that setting.
-        kept = calendar_filter.filter_records(records, genres, countries, certifications,
-                                              exempt_unenriched=True)
+        kept, release_filtered = await visible_records(
+            groups, endpoint, genres=genres, countries=countries,
+            show_certifications=show_certifications,
+            movie_certifications=movie_certifications,
+            movie_release_countries=movie_release_countries,
+            movie_release_types=movie_release_types,
+            prefs=prefs, settings=settings)
         sp.set(kept=len(kept))
 
     with span("calcache.normalize", entries=len(kept)) as sp:

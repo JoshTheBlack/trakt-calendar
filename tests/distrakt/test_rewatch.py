@@ -285,6 +285,70 @@ class TheAddAsksRatherThanFilingSilentlyTests(DistraktTestCase):
         })
         self.assertEqual(resp.status_code, 400, resp.text[:200])
 
+    def test_the_season_stays_on_the_list_instead_of_settling_away(self):
+        """THE BUG AS REPORTED, TWICE OVER.
+
+        Adding Supernatural S02 — watched earlier this year, in a month the
+        tracker HAD tracked — put it on the list and the recompute immediately
+        settled it onto that old month, so it vanished from the current one and
+        the answer to the prompt had no row to write to ("that season is not on
+        your list"). Adding Breaking Bad S03 — watched in a month never tracked —
+        stayed, and showed 13/13, because the previous run's plays counted as
+        this run's progress.
+
+        Both are the same cause: the recompute ran before anybody was asked. The
+        floor goes on first, which makes the season unfinished, which keeps it
+        where the viewer is standing and at zero.
+        """
+        resp = self._add(history={str(n): "2026-02-1%d" % (n % 10) for n in range(1, 14)})
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
+        self.assertIsNotNone(row, "the add settled the season away before asking")
+        self.assertNotEqual(row["history_from"], "",
+                            "nothing held the season while the question was open")
+
+    def test_answering_the_prompt_finds_the_row_it_asked_about(self):
+        """The failure this closes: the prompt appeared, and answering it said
+        the season was not on the list — because it no longer was."""
+        self._add(history={"1": "2026-02-11", "2": "2026-02-12"})
+        resp = self.client.post("/api/distrakt/rewatch", json={
+            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
+            "completed_on": "2026-02-12", "fresh": True,
+        })
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+
+    def test_keeping_the_old_record_lets_it_settle_as_it_always_did(self):
+        """The default is unchanged and this is what says so: clearing the floor
+        hands the season back to the rule that files it under the month its
+        history names."""
+        self._add(history={"1": "2026-02-11"})
+        resp = self.client.post("/api/distrakt/rewatch", json={
+            "year": 2026, "month": 9, "key": str(KEY), "season": 1,
+            "completed_on": "2026-02-11", "fresh": False,
+        })
+        self.assertEqual(resp.status_code, 200, resp.text[:300])
+        row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
+        # Either it has settled off the list, or it is still there with no floor —
+        # both are the pre-existing behaviour, and which one depends on whether
+        # that month was ever tracked. What must NOT survive is the floor.
+        self.assertTrue(row is None or row["history_from"] == "")
+
+    def test_a_settled_month_record_is_left_where_it_is(self):
+        """A re-watch is a SECOND thing, not a move. The old viewing stays on the
+        month it settled on, and the current run exists beside it — the add
+        writes a roster row and touches no month record."""
+        month = "2026-02"
+        asyncio.run(store.add_month_record(self.user_id, month, {
+            "media": "show", "match_source": "tmdb", "match_id": "1396",
+            "key": str(KEY), "season": 1, "title": "Breaking Bad",
+            "ids": {"tmdb": 1396}, "network": "AMC",
+            "kind": str(store.RecordKind.COMPLETED),
+        }))
+        self._add(history={"1": "2026-02-11"})
+        kept = asyncio.run(store.find_month_record(
+            self.user_id, month, store.RecordKind.COMPLETED, KEY, 1))
+        self.assertIsNotNone(kept, "adding a re-watch removed the settled record")
+
     def test_a_season_not_on_the_list_is_refused(self):
         resp = self.client.post("/api/distrakt/rewatch", json={
             "year": 2026, "month": 9, "key": str(OTHER), "season": 1,

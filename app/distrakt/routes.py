@@ -1782,24 +1782,50 @@ async def api_distrakt_add(request: Request):
     # user's add over it would be the worse outcome.
     except Exception:
         logger.warning("baseline_show failed for %s", key, exc_info=True)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
-    # ALREADY FINISHED, ACCORDING TO THE VIEWER'S OWN HISTORY. Left alone, the
-    # next load settles this season onto the month that history dates it to —
-    # correct for a tracker meeting an old completion for the first time, and
-    # wrong for somebody starting a re-watch, and the two are indistinguishable
-    # from the data. So it is ASKED rather than inferred, which is the same
-    # answer the untracked-season prompts already give to an identical pair.
+    # ALREADY FINISHED, ACCORDING TO THE VIEWER'S OWN HISTORY — asked BEFORE the
+    # month is recomputed, and that order is the whole fix.
     #
-    # REPORTED RATHER THAN ACTED ON. Nothing is changed here: the season is on
-    # the list, the history says what it says, and the page puts the question.
-    # A viewer who ignores it gets exactly today's behaviour.
+    # THE RECOMPUTE IS WHAT USED TO TAKE THE SEASON AWAY. It runs the live pass,
+    # which settles any season the history dates as finished onto the month it
+    # names (lifecycle.finish_if_done) — so adding a season watched in a month
+    # the tracker HAD tracked moved it straight off the list before anybody could
+    # be asked about it, and the answer then had nothing to write to. Adding one
+    # watched in an untracked month stayed, and showed 13/13: the previous run's
+    # plays counted as this one's progress.
+    #
+    # SO THE FLOOR GOES ON FIRST, PROVISIONALLY. It says "this pass starts after
+    # the last one ended", which makes the season unfinished, which is what keeps
+    # it on the list and at zero while the question is open. Answering "keep the
+    # old record" clears it and lets the settle happen exactly as it did.
+    #
+    # AND IT TOUCHES NO MONTH RECORD. A season already settled on an earlier
+    # month keeps that record — `lifecycle.follow` writes the roster row and
+    # nothing else — so the old viewing stays where it settled and the re-watch
+    # exists beside it, which is what a re-watch is.
     finished = await _completed_before_add(user_id, key, int(show["season"]))
+    if finished:
+        await distrakt_store.set_history_from(
+            user_id, key, int(show["season"]), _day_after(finished))
+    payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
     if finished:
         payload["rewatch_prompt"] = {
             "key": str(key), "season": int(show["season"]),
             "title": show["title"], "completed_on": finished,
         }
     return JSONResponse(payload, status_code=status)
+
+
+def _day_after(day: str) -> str:
+    """The day after `day`, or "" if it cannot be read.
+
+    THE DAY AFTER AND NOT THE DAY: the last episode of the previous run was
+    watched ON that day, so a floor including it would carry one episode of the
+    finished pass into the new one and show a fresh run starting at 1.
+    """
+    try:
+        return (date.fromisoformat(str(day)[:10]) + timedelta(days=1)).isoformat()
+    except ValueError:
+        return ""
 
 
 async def _completed_before_add(user_id: int, key, season: int) -> str:
@@ -1828,19 +1854,20 @@ async def api_distrakt_rewatch(request: Request):
     """Answer the question the add asked: is this a fresh run, or is the tracker
     just meeting an old completion?
 
-    `fresh` TRUE SETS THE FLOOR TO THE DAY AFTER THE OLD COMPLETION, so the
-    previous run's plays stop counting and the season starts empty. The day AFTER
-    rather than the day itself: the last episode of the old run was watched ON
-    that day, and a floor that included it would carry one episode of the
-    finished pass into the new one.
+    THE ADD ALREADY PUT A FLOOR ON, so `fresh` TRUE mostly CONFIRMS it — it is
+    written again from the date the page was shown, which makes this safe to call
+    twice and safe to call on a row somebody has since re-added. The day AFTER
+    the old completion, because the last episode of that run was watched ON it.
 
-    `fresh` FALSE CLEARS THE FLOOR AND CHANGES NOTHING ELSE. The season settles
-    onto the month its history names, which is what it would have done without
-    the question — the point of asking was never to change the default, only to
-    stop it happening silently.
+    `fresh` FALSE CLEARS THE FLOOR, and the recompute below is what then settles
+    the season onto the month its history names — exactly what would have happened
+    without the question. The point of asking was never to change the default; it
+    was to stop the default happening where nobody could see it.
 
-    IT IS SAFE TO CALL TWICE. Setting a floor is idempotent, and a viewer who
-    answers, reloads and answers again gets the same row either way.
+    A SEASON ALREADY SETTLED ON AN EARLIER MONTH KEEPS THAT RECORD either way.
+    Nothing here writes a month record, and the add did not move one: the old
+    viewing stays where it settled, and a fresh run is a second, current thing
+    beside it.
     """
     user_id = await _distrakt_user_id(request)
     settings = await _distrakt_settings(user_id)

@@ -39,7 +39,6 @@ not make, and nobody waits on one to see what their own calendar already holds.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -49,7 +48,7 @@ from zoneinfo import ZoneInfo
 from . import cache as calendar_cache
 from . import entries
 from .. import providers
-from ..endpoints import ENDPOINTS, get_endpoint
+from ..endpoints import get_endpoint
 from ..perftrace import span
 from ..providers.base import Item, Media, SourceUnavailable, render
 
@@ -61,17 +60,10 @@ logger = logging.getLogger(__name__)
 # and the Enter path cannot disagree about it.
 MIN_QUERY = 2
 
-# HOW MANY STORED AIRINGS THE COORDINATE LOOKUP MAY NAME. It exists to find
-# which MONTHS to ask about, and a title airing weekly for a year is 52 rows
-# naming twelve months -- so this is generous on purpose and is not the number
-# of results anybody sees.
-AIRING_SCAN = 400
-
-# HOW MANY (endpoint, month) PAIRS ARE ACTUALLY ASSEMBLED. Each one is a real
-# read of that month through the viewer's own filters, which is what makes a
-# jump honest; it is also the expensive part, so it is bounded. Ordered newest
-# first, so a broad query answers about what is coming rather than about 2019.
-MONTH_LIMIT = 12
+# HOW MANY MATCHING GROUPS ONE ENDPOINT MAY CONTRIBUTE. A group is a title, so
+# this is a ceiling on titles rather than on airings — one title airing weekly
+# for a year is one group and fifty rows.
+GROUP_LIMIT = 40
 
 # HOW MANY ROWS A VIEWER IS SHOWN. Beyond this a search is not answering the
 # question they asked, and the honest response is to say the query was broad.
@@ -103,7 +95,7 @@ class Airing:
         placeholder carries the same id and fetches itself when reached.
         """
         return (f"/calendar?year={self.year}&month={self.month}"
-                f"&endpoint={quote(self.endpoint_key, safe="")}"
+                f"&endpoint={quote(self.endpoint_key, safe='')}"
                 f"&highlight={quote(self.item.mark_key)}#day-{self.day}")
 
 
@@ -129,7 +121,7 @@ class Elsewhere:
         Arriving fills the month, which is the point: the calendar learns about
         the title, and if a source lists it there a card appears."""
         return (f"/calendar?year={self.year}&month={self.month}"
-                f"&endpoint={quote(self.endpoint_key, safe="")}")
+                f"&endpoint={quote(self.endpoint_key, safe='')}")
 
 
 @dataclass(frozen=True)
@@ -141,6 +133,7 @@ class Results:
     elsewhere: tuple[Elsewhere, ...] = ()
     truncated: bool = False
     failed: frozenset = frozenset()
+    searched: tuple[str, ...] = ()
 
 
 def _local_day(air_ts: float, date_only: bool, tz: ZoneInfo) -> date:
@@ -155,80 +148,69 @@ def _local_day(air_ts: float, date_only: bool, tz: ZoneInfo) -> date:
     return moment.date() if date_only else moment.astimezone(tz).date()
 
 
-async def _months_to_ask(query: str, tz: ZoneInfo) -> list[tuple[str, int, int]]:
-    """The (endpoint, year, month) triples a stored match could be in, newest
-    first.
-
-    THE COORDINATE LOOKUP ANSWERS NOTHING ABOUT VISIBILITY and is not allowed
-    to: it names months so the real read path can be asked about a handful of
-    them instead of about every month on the instance.
-    """
-    rows = await entries.airings_matching(query, AIRING_SCAN)
-    seen: dict[tuple[str, int, int], None] = {}
-    for row in rows:
-        day = _local_day(row["air_ts"], row["date_only"], tz)
-        seen.setdefault((row["endpoint"], day.year, day.month), None)
-    return list(seen)[:MONTH_LIMIT]
-
-
 async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
-                 source_selection, marks) -> Results:
-    """Every airing of a matching title that THIS viewer's calendar would draw.
+                 source_selection, marks, endpoints) -> Results:
+    """Every airing of a matching title that THIS viewer's calendar would draw,
+    across `endpoints`.
 
-    CONFIRMED BY THE READ PATH, NEVER BY THIS MODULE'S OWN OPINION. Each
-    candidate month is assembled exactly as the calendar page assembles it —
-    same filters, same source selection, same timezone — and a row is offered
-    only if it comes back out of that. Deciding here what a filter would have
-    done would be a second implementation of the six reasons a title is absent,
-    and it would be wrong the first time any of them changed.
+    CONFIRMED BY THE READ PATH, NEVER BY THIS MODULE'S OWN OPINION. The matching
+    groups are run through `cache.visible_records` — the very pipeline
+    `assemble_range` runs, with this viewer's own filters and source selection —
+    and a row is offered only if it comes back out. Deciding here what a filter
+    would have done would be a second implementation of the six reasons a title
+    is absent, and it would be wrong the first time any of them changed.
 
-    NO NETWORK. `allow_fetch=False` on every read: a search may look at what is
-    stored, and a month nobody has opened is a job for the catalogue half, which
-    the viewer has to ask for.
+    BY GROUP, NOT BY MONTH, AND THAT IS THE DIFFERENCE BETWEEN A SECOND AND TEN.
+    An earlier version assembled every candidate MONTH; measured on a real
+    instance, one `shows` month held 12,880 airings and a five-month search took
+    eleven seconds, almost all of it filtering titles nobody had asked about.
+    The groups a query matches are a handful, and `title_key` — the identity the
+    read path groups by — is what lets exactly those be loaded whole.
+
+    NO NETWORK. Nothing here fetches: a search may look at what is stored, and a
+    month nobody has opened is a job for the catalogue half, which the viewer has
+    to ask for.
     """
     needle = entries.fold_title(query)
     if len(needle) < MIN_QUERY:
         return Results()
 
-    with span("search.stored", query_len=len(needle)) as sp:
-        months = await _months_to_ask(query, tz)
-        sp.set(months=len(months))
-        found: list[Airing] = []
-        for endpoint_key, year, month in months:
-            try:
-                endpoint = get_endpoint(endpoint_key)
-            except Exception:  # an endpoint this version no longer has
+    found: list[Airing] = []
+    with span("search.stored", query_len=len(needle),
+              endpoints=len(endpoints)) as sp:
+        for endpoint in endpoints:
+            keys = await entries.groups_matching(endpoint.key, query, GROUP_LIMIT)
+            if not keys:
                 continue
-            days = _days_in(year, month)
-            grouped, _meta = await calendar_cache.assemble_range(
-                endpoint, settings, tz=tz,
-                start_date=date(year, month, 1), end_date=date(year, month, days),
+            records = await entries.read_groups(endpoint.key, keys)
+            groups = calendar_cache.group_records(records)
+            kept, _narrowed = await calendar_cache.visible_records(
+                groups, endpoint,
                 genres=prefs["genres"], countries=prefs["countries"],
                 show_certifications=prefs["show_certifications"],
                 movie_certifications=prefs["movie_certifications"],
                 movie_release_countries=prefs["movie_release_countries"],
                 movie_release_types=prefs["movie_release_types"],
-                network_filter=prefs["network_filter"] or None,
-                not_watching_ids=marks, allow_fetch=False, prefs=source_selection)
-            for group in grouped:
-                for item in group["items"]:
-                    if needle not in entries.fold_title(item.title):
-                        continue
-                    found.append(Airing(
-                        item=item, endpoint_key=endpoint.key,
-                        endpoint_label=endpoint.label,
-                        year=year, month=month, day=group["date"]))
+                prefs=source_selection, settings=settings)
+            for record in kept:
+                item = render(record, tz)
+                # THE TITLE IS CHECKED AGAIN AFTER RESOLUTION, because a group is
+                # loaded whole and the card may end up carrying the OTHER
+                # source's spelling — which is the right card, and may not be
+                # the string that matched.
+                if needle not in entries.fold_title(item.title):
+                    continue
+                day = date.fromisoformat(item.air_date)
+                found.append(Airing(
+                    item=item, endpoint_key=endpoint.key,
+                    endpoint_label=endpoint.label,
+                    year=day.year, month=day.month, day=item.air_date))
         sp.set(found=len(found))
 
     found.sort(key=lambda a: a.item.air_ts, reverse=True)
     return Results(airings=tuple(found[:RESULT_LIMIT]),
-                   truncated=len(found) > RESULT_LIMIT)
-
-
-def _days_in(year: int, month: int) -> int:
-    import calendar as _calendar
-
-    return _calendar.monthrange(year, month)[1]
+                   truncated=len(found) > RESULT_LIMIT,
+                   searched=tuple(e.key for e in endpoints))
 
 
 def _endpoint_for(media: Media) -> str:

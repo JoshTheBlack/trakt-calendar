@@ -27,6 +27,7 @@ from app import db
 from app.calendar import cache as calendar_cache, entries as calendar_entries
 from app.calendar import search as calendar_search
 from app.config import Settings
+from app.endpoints import get_endpoint
 from app.providers.base import Media, Record, Source
 from app.sources import prefs as source_prefs
 from tests.support import migrated_db
@@ -67,11 +68,14 @@ class SearchTestCase(unittest.IsolatedAsyncioTestCase):
             endpoint, calendar_cache.window_start(start), list(records), 600, 1000,
             sources=["trakt"], asked=["trakt"])
 
-    async def find(self, query, *, prefs=None, marks=frozenset()):
+    async def find(self, query, *, prefs=None, marks=frozenset(), endpoints=None):
+        """Searched on ONE endpoint by default, which is what the route does: a
+        search is nearly always about the calendar in front of somebody, and the
+        five are five different questions."""
         return await calendar_search.stored(
             query, settings=self.settings, prefs=prefs or dict(NO_FILTERS),
             tz=self.tz, source_selection=source_prefs.SourcePrefs(user_id=1),
-            marks=marks)
+            marks=marks, endpoints=endpoints or [get_endpoint(SHOWS)])
 
 
 class StoredResultsTests(SearchTestCase):
@@ -154,7 +158,8 @@ class AJumpIsOnlyOfferedForACardThatWouldBeDrawnTests(SearchTestCase):
         narrowed = source_prefs.SourcePrefs(user_id=1, calendar_source="trakt")
         found = await calendar_search.stored(
             "severance", settings=self.settings, prefs=dict(NO_FILTERS),
-            tz=self.tz, source_selection=narrowed, marks=frozenset())
+            tz=self.tz, source_selection=narrowed, marks=frozenset(),
+            endpoints=[get_endpoint(SHOWS)])
         self.assertEqual(found.airings, ())
 
     async def test_nothing_stored_for_a_month_is_simply_no_answer(self):

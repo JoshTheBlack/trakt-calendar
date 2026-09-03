@@ -1,30 +1,44 @@
 {# The calendar search's results, as a fragment.
 
-   ONE PARTIAL FOR BOTH PATHS — the typing path swaps this in, and a full submit
-   renders the same thing — so a result cannot look different depending on how it
-   was asked for.
+   ONE PARTIAL FOR EVERY PATH — typing, Enter, and either of the widening
+   buttons all swap this in — so a result cannot look different depending on how
+   it was asked for.
 
    TWO SECTIONS, TWO PROMISES, AND THE SECOND SAYS SO IN WORDS. A stored result
    names the day and jumps to it, because the calendar's own read path confirmed
    it would draw that card. A catalogue result names the MONTH and says "go to
    where this should be": arriving fills the month, and the title appears if any
    source lists it there. Promising a card for the second kind is the one thing
-   this surface must never do — see app/calendar/search.py. #}
+   this surface must never do — see app/calendar/search.py.
+
+   NO SCRIPT IN HERE AND NONE NEEDED. Every control is an `hx-get` that swaps
+   this same fragment back into the same target, carrying the query and the
+   calendar from the two inputs in the panel; the only JavaScript the feature has
+   is the jump highlight, which waits for a day block to paint and is the one
+   thing markup cannot express. #}
+{% set widen = {'hx-get': '/calendar/search', 'hx-target': '#searchResults',
+                'hx-include': '#searchInput, #searchEndpoint'} %}
 
 {% if not query %}
-<p class="search-hint">Type a title to find it on your calendar.</p>
+<p class="search-hint">Type a title to find it on
+    {% if everywhere %}any of your calendars{% else %}{{ endpoint.label }}{% endif %}.
+    Two letters is the shortest search.</p>
 {% elif not airings and not elsewhere %}
+{# WHAT IS BEING SEARCHED IS SAID OUT LOUD, because "nothing matches" is a
+   different claim depending on it — a title on the all-episodes calendar
+   genuinely is not on the premieres one, and a reader who was not told which
+   calendar was asked would read the first answer as the second. #}
 <p class="search-hint">
-    {% if live %}Nothing on your calendar matches “{{ query }}”, and no service knows it either.
-    {% else %}Nothing on your calendar matches “{{ query }}”.
-        <button type="button" class="btn-ghost small" onclick="runCalendarSearch(true)">Search the services</button>
-    {% endif %}
+    Nothing on {% if everywhere %}any of your calendars{% else %}{{ endpoint.label }}{% endif %}
+    matches “{{ query }}”.
 </p>
 {% endif %}
 
 {% if airings %}
 <div class="search-section">
-    <h3 class="search-heading">On your calendar</h3>
+    <h3 class="search-heading">
+        {% if everywhere %}On your calendars{% else %}On {{ endpoint.label }}{% endif %}
+    </h3>
     {% for hit in airings %}
     <a class="search-row" href="{{ hit.url }}">
         <img class="search-poster" src="{{ hit.item.poster or '/static/images/nopostertv.png' }}"
@@ -34,7 +48,7 @@
             <span class="search-meta">
                 {% if hit.item.episode_label %}{{ hit.item.episode_label }} · {% endif %}
                 {{ hit.item.air_display }}{% if hit.item.air_time %} · {{ hit.item.air_time }}{% endif %}
-                · {{ hit.endpoint_label }}
+                {% if everywhere %} · {{ hit.endpoint_label }}{% endif %}
             </span>
         </span>
         <span class="search-go">Jump →</span>
@@ -49,10 +63,6 @@
 {% if elsewhere %}
 <div class="search-section">
     <h3 class="search-heading">Not on your calendar</h3>
-    {# THE HONEST LABEL. Every one of these is a title a service knows about and
-       this calendar does not currently draw, and following the link fills the
-       month it belongs to. Whether a card then appears depends on whether any
-       source lists it on that calendar, which nothing here can promise. #}
     <p class="search-hint">Opening one of these loads that month, which is what teaches
         your calendar about it. If no service lists it on that calendar, it still won't
         appear there.</p>
@@ -67,7 +77,7 @@
                 {% if hit.item.network %} · {{ hit.item.network }}{% endif %}
             </span>
         </span>
-        <span class="search-go">Go to {{ hit.item.air_display[3:] }} →</span>
+        <span class="search-go">Go to the month →</span>
     </a>
     {% endfor %}
 </div>
@@ -78,8 +88,21 @@
     know about is missing from this list.</p>
 {% endif %}
 
-{% if query and not live and airings %}
-<p class="search-hint">
-    <button type="button" class="btn-ghost small" onclick="runCalendarSearch(true)">Also search the services</button>
+{# THE TWO WAYS TO WIDEN, BOTH EXPLICIT AND NEITHER AUTOMATIC. The first is more
+   work on this server; the second spends requests against somebody else's. They
+   are offered whether or not anything was found, because "nothing here" is
+   exactly when a reader wants to look further. #}
+{% if query %}
+<p class="search-hint search-widen">
+    {% if not everywhere %}
+    <button type="button" class="btn-ghost small" hx-get="/calendar/search"
+            hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
+            hx-vals='{"all": "1"{% if live %}, "live": "1"{% endif %}}'>Search every calendar</button>
+    {% endif %}
+    {% if not live %}
+    <button type="button" class="btn-ghost small" hx-get="/calendar/search"
+            hx-target="#searchResults" hx-include="#searchInput, #searchEndpoint"
+            hx-vals='{"live": "1"{% if everywhere %}, "all": "1"{% endif %}}'>Also search the services</button>
+    {% endif %}
 </p>
 {% endif %}

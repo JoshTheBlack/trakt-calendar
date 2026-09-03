@@ -1161,7 +1161,10 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
     tests/conftest.py is what would catch it if it did.
     """
 
-    URL = "/calendar/search"
+    # THE ENDPOINT IS NAMED, because the search is scoped to one calendar now:
+    # a search is nearly always about the page in front of somebody, and the
+    # five endpoints are five different questions.
+    URL = "/calendar/search?endpoint=shows"
 
     def setUp(self):
         super().setUp()
@@ -1176,16 +1179,16 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         self.client.get("/calendar?year=2026&month=7&endpoint=shows")
 
     def test_it_finds_a_stored_title_and_offers_a_jump(self):
-        resp = self.client.get(f"{self.URL}?q=drama")
+        resp = self.client.get(f"{self.URL}&q=drama")
         self.assertEqual(resp.status_code, 200)
         self.assertIn("The Drama", resp.text)
         self.assertIn("#day-2026-07-15", resp.text)
-        self.assertIn("On your calendar", resp.text)
+        self.assertIn("On All Episodes", resp.text)
 
     def test_it_is_a_fragment_and_not_a_page(self):
         """The shell embeds this partial and the typing path swaps it in, so a
         result cannot look different depending on how it was asked for."""
-        resp = self.client.get(f"{self.URL}?q=drama")
+        resp = self.client.get(f"{self.URL}&q=drama")
         for chrome in ("<html", "<header", 'id="statsBar"', "calendarViewData"):
             self.assertNotIn(chrome, resp.text)
 
@@ -1194,16 +1197,20 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         to discover there is nothing to add."""
         with patch("app.calendar.search.catalogue",
                    side_effect=AssertionError("typing reached a service")):
-            resp = self.client.get(f"{self.URL}?q=drama")
+            resp = self.client.get(f"{self.URL}&q=drama")
         self.assertEqual(resp.status_code, 200)
 
     def test_a_query_matching_nothing_says_so_and_offers_the_services(self):
-        resp = self.client.get(f"{self.URL}?q=nothingmatchesthis")
-        self.assertIn("Nothing on your calendar matches", resp.text)
-        self.assertIn("Search the services", resp.text)
+        resp = self.client.get(f"{self.URL}&q=nothingmatchesthis")
+        # IT NAMES THE CALENDAR IT SEARCHED, because "nothing matches" is a
+        # different claim depending on which one was asked.
+        self.assertIn("Nothing on All Episodes", resp.text)
+        # ...and offers both ways to look further.
+        self.assertIn("Search every calendar", resp.text)
+        self.assertIn("Also search the services", resp.text)
 
     def test_an_empty_query_asks_for_one_rather_than_listing_everything(self):
-        resp = self.client.get(f"{self.URL}?q=")
+        resp = self.client.get(f"{self.URL}&q=")
         self.assertEqual(resp.status_code, 200)
         self.assertNotIn("The Drama", resp.text)
 
@@ -1211,7 +1218,7 @@ class CalendarSearchRouteTests(CalendarRouteTestCase):
         """The results are one viewer's own calendar, filtered by their own
         preferences, so this is gated exactly as the calendar is."""
         self.client.cookies.clear()
-        self.assertIn(self.client.get(f"{self.URL}?q=drama").status_code,
+        self.assertIn(self.client.get(f"{self.URL}&q=drama").status_code,
                       (302, 303, 401, 403))
 
 class CalendarDayRouteTests(CalendarRouteTestCase):

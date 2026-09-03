@@ -767,19 +767,39 @@
             <button type="button" class="modal-close" onclick="closeCalendarSearch()">&times;</button>
         </div>
         <div class="modal-body">
-            {# A FORM SO ENTER MEANS SOMETHING. Submitting is the deliberate act
-               that spends a request against the services; typing only ever reads
-               what is already stored, which is why the two are different events
-               rather than one debounced one. #}
-            <form id="searchForm" onsubmit="return runCalendarSearch(true)" hx-boost="false">
-                <div class="search-bar">
-                    <input type="text" id="searchInput" autocomplete="off" spellcheck="false"
-                           placeholder="Title…" oninput="onCalendarSearchInput()">
-                    <button type="submit" class="btn-primary">Search services</button>
-                </div>
-                <p class="hint">Results from your own calendar appear as you type and cost nothing.
-                    Searching the services also finds titles your calendar hasn't loaded yet.</p>
-            </form>
+            {# EVERY REQUEST THIS PANEL MAKES IS AN `hx-get`, and there is no
+               submit handler at all. The first version had one, and it was
+               wrong in a way worth recording: an async function returns a
+               PROMISE, which is truthy, so `onsubmit="return search()"` handed
+               the browser a go-ahead, the page reloaded mid-request, and the
+               cancelled fetch surfaced as "could not reach the server".
+
+               TYPING AND ENTER ARE ONE TRIGGER LIST, NOT TWO CODE PATHS.
+               `keyup changed delay:180ms` is the as-you-type read, which costs
+               an index lookup and no outbound call; `search` fires on Enter and
+               on the input's own clear button. Enter adds nothing by itself —
+               widening to the services is a button, because spending somebody
+               else's rate limit should look like a decision. #}
+            <div class="search-bar">
+                <input type="text" id="searchInput" name="q" autocomplete="off" spellcheck="false"
+                       placeholder="Title…"
+                       hx-get="/calendar/search"
+                       hx-trigger="keyup changed delay:180ms, search"
+                       hx-target="#searchResults"
+                       hx-include="#searchEndpoint"
+                       {# ONE ANSWER AT A TIME, DECLARED. Without this a slow
+                          response for "sev" lands after a fast one for
+                          "severance" and the reader watches their results go
+                          backwards — likelier the faster somebody types. #}
+                       hx-sync="this:replace">
+            </div>
+            {# WHICH CALENDAR IS BEING SEARCHED, carried as a value rather than
+               read from the address bar: it is the same fact the toolbar's own
+               picker renders from, so the two cannot disagree. #}
+            <input type="hidden" id="searchEndpoint" name="endpoint" value="{{ endpoint.key }}">
+            <p class="hint">Results from {{ endpoint.label }} appear as you type and cost nothing —
+                they come from what your calendar already holds. Searching the services also finds
+                titles it hasn't loaded yet.</p>
             <div id="searchResults"></div>
         </div>
     </div>

@@ -829,14 +829,24 @@ async def search_the_calendar(request: Request):
     settings = load_settings()
     query = (request.query_params.get("q") or "").strip()
     live = request.query_params.get("live") in ("1", "true", "yes")
+    everywhere = request.query_params.get("all") in ("1", "true", "yes")
+    endpoint = get_endpoint(request.query_params.get("endpoint"))
     prefs = await auth.get_user_prefs(user.user_id)
     tz = _resolve_viewer_tz(user, settings)
     source_selection = await _viewer_source_selection(request, user)
     marks = await calendar_state.not_watching_ids(user.user_id)
 
+    # THE CALENDAR THE VIEWER IS STANDING ON, unless they ask for all of them.
+    # A search is nearly always about the page in front of somebody — "when is
+    # this on" asked of the premieres calendar means the premieres calendar —
+    # and the five endpoints are five different questions, so answering all of
+    # them by default buries the one that was asked. It is also five times the
+    # work: `shows` alone held 12,880 airings in one real month.
+    scope = list(ENDPOINTS.values()) if everywhere else [endpoint]
+
     found = await calendar_search.stored(
         query, settings=settings, prefs=prefs, tz=tz,
-        source_selection=source_selection, marks=marks)
+        source_selection=source_selection, marks=marks, endpoints=scope)
     elsewhere = calendar_search.Results()
     if live and query:
         # THE STORED ANSWERS ARE HANDED OVER so the catalogue half does not offer
@@ -856,6 +866,7 @@ async def search_the_calendar(request: Request):
         "request": request, "query": query, "live": live,
         "airings": found.airings, "elsewhere": elsewhere.elsewhere,
         "truncated": found.truncated, "failed": sorted(str(s) for s in elsewhere.failed),
+        "everywhere": everywhere, "endpoint": endpoint,
         "not_watching": set(), "new_ids": set(), "can_filter": False,
         "settings": settings, "is_admin": bool(user and user.is_admin),
     })

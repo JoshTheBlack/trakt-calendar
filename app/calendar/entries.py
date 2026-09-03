@@ -469,15 +469,26 @@ _ALL_SQL = _READ_SQL.replace(
 # A RAW STRING, because the escape character this states IS a backslash. In
 # an ordinary literal the backslash pairs with the quote after it and the
 # clause collapses to an empty ESCAPE, which SQLite refuses at prepare time.
+# WHICH GROUPS A QUERY MATCHES, on one endpoint. It answers `title_key` — the
+# cross-source identity the read path groups by — rather than airings, because a
+# group is what has to be loaded WHOLE: two services describing one title may
+# spell it differently, so matching on the title alone can find one source's
+# record and miss the other's, and a group missing a source resolves to a
+# different card than the calendar draws.
 _SEARCH_SQL = r"""
-SELECT DISTINCT a.endpoint, a.air_ts, a.date_only, t.title_fold
+SELECT DISTINCT a.title_key
 FROM calendar_airings a
 JOIN calendar_titles t
   ON t.source = a.source AND t.media = a.media AND t.source_id = a.source_id
-WHERE t.title_fold LIKE ? ESCAPE '\'
-ORDER BY a.air_ts DESC
+WHERE a.endpoint = ? AND t.title_fold LIKE ? ESCAPE '\'
 LIMIT ?
 """
+
+# The same three-level read the span path uses, addressed by group instead of by
+# date range. One placeholder per key, which is why the caller's limit matters.
+_BY_KEY_SQL = _READ_SQL.replace(
+    "WHERE a.endpoint = ? AND a.air_date >= ? AND a.air_date < ?",
+    "WHERE a.endpoint = ? AND a.title_key IN (__KEYS__)")
 
 
 def like_needle(query: str) -> str:
@@ -487,8 +498,8 @@ def like_needle(query: str) -> str:
     A SEARCH BOX IS UNTRUSTED INPUT AND `%` IS A CHARACTER IN TITLES. Left
     unescaped, a query of `%` matches the whole table and one of `100%` silently
     matches far more than it should; both are ordinary things to type rather
-    than attacks. The backslash is escaped first so it cannot smuggle the escape
-    character itself.
+    than attacks — this instance holds `100% Footy` and `The 1% Club (US)`. The
+    backslash is escaped first so it cannot smuggle the escape character itself.
     """
     folded = fold_title(query)
     for char in ("\\", "%", "_"):
@@ -496,18 +507,32 @@ def like_needle(query: str) -> str:
     return f"%{folded}%"
 
 
-async def airings_matching(query: str, limit: int) -> list[dict]:
-    """[{endpoint, air_ts, date_only}] for stored airings whose title matches.
+async def groups_matching(endpoint_key: str, query: str, limit: int) -> list[str]:
+    """The `title_key`s on `endpoint_key` whose title matches `query`.
 
-    MATCHED ON `title_fold`, which is the same folding a stored title was
-    written with -- case-folded and accent-stripped, so "pokemon" finds
-    "Pokemon" (fold_title says why that is stored rather than computed per
-    query). The index on that column is what makes this a lookup rather than a
-    scan of every airing on the instance.
+    MATCHED ON `title_fold`, the same folding a stored title was written with —
+    case-folded and accent-stripped, so "pokemon" finds "Pokemon". The index on
+    that column is what makes this a lookup rather than a scan.
     """
-    rows = await db.fetch_all(_SEARCH_SQL, (like_needle(query), limit))
-    return [{"endpoint": str(r["endpoint"]), "air_ts": float(r["air_ts"]),
-             "date_only": bool(r["date_only"])} for r in rows]
+    rows = await db.fetch_all(
+        _SEARCH_SQL, (endpoint_key, like_needle(query), limit))
+    return [str(r["title_key"]) for r in rows]
+
+
+async def read_groups(endpoint_key: str, title_keys) -> list[Record]:
+    """Every stored airing of `title_keys` on one endpoint, whole.
+
+    WHOLE IS THE POINT — every source's record for each group, so the read path
+    resolves the same card a month read would. Loading by group rather than by
+    month is what makes a search cheap: one real `shows` month held 12,880
+    airings, and the titles a query matches are a handful of them.
+    """
+    keys = [str(k) for k in title_keys]
+    if not keys:
+        return []
+    sql = _BY_KEY_SQL.replace("__KEYS__", ", ".join("?" * len(keys)))
+    rows = await db.fetch_all(sql, (endpoint_key, *keys))
+    return _in_fetch_order(rows)
 
 
 async def all_records() -> list[Record]:
