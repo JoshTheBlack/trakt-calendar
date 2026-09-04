@@ -18,7 +18,7 @@ from ...config import Settings
 from ...endpoints import Endpoint
 from .. import register
 from ..base import Capabilities, Media, Record, SearchHit, SeasonsAnswer, Source
-from . import calendar, detail, search, sync
+from . import calendar, detail, search, sync, titles
 from .transport import SimklBlockedError, SimklError, SimklRateLimitError
 
 __all__ = ["SimklError", "SimklRateLimitError", "SimklBlockedError"]
@@ -133,6 +133,39 @@ class _SimklDetailPort:
                             season: int | None, *, cache_only: bool = False) -> dict:
         return await detail.fetch_details(settings, media, source_id, season,
                                           cache_only=cache_only)
+
+    async def records_for(self, settings: Settings, source_id, media: Media,
+                          moments) -> list[Record]:
+        """app/providers/base.py's DetailPort.records_for.
+
+        SPARSE ON PURPOSE, AND THE CALLER FINISHES IT. Simkl's calendar files
+        carry a title, an id, a date and a poster and nothing else — no genres,
+        no country, no certification — so `calendar.to_show_record` returns a
+        record with `enriched=False` and the ordinary enrichment pass fills the
+        rest. Building a fuller record here would make a searched row differ from
+        a filled one, which is the exact drift this port exists to stop.
+
+        THE ENVELOPE IS A CDN ENTRY because that is what that builder reads. The
+        per-title lookup's `ids` map is already this package's own normalised
+        shape, and its poster is the same raw path a calendar file states, so
+        both go in untouched.
+        """
+        fields = await titles.fetch_title(settings, source_id, media) or {}
+        ids = dict(fields.get("ids") or {})
+        if not ids:
+            return []
+        out = []
+        for season, when in moments:
+            entry = {"ids": ids, "date": when,
+                     "title": fields.get("title") or "",
+                     "poster": fields.get("poster") or ""}
+            if season is not None and media is not Media.MOVIE:
+                entry["episode"] = {"season": int(season), "episode": 1}
+            record = (calendar.to_movie_record(entry) if media is Media.MOVIE
+                      else calendar.to_show_record(entry))
+            if record is not None:
+                out.append(record)
+        return out
 
     async def fetch_season_summary(self, settings: Settings, source_id,
                                    season: int, media: Media) -> dict:

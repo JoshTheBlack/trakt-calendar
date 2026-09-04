@@ -10,12 +10,13 @@ alone.
 from __future__ import annotations
 
 import unittest
-from datetime import date, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from app import cache, db
 from app.endpoints import get_endpoint
-from app.providers.base import Media, Source, SourceNotModified, SourceUnavailable
+from app.providers.base import (Media, Source, SourceNotModified, SourceUnavailable,
+                                epoch_moment)
 from app.providers.simkl import calendar as simkl_calendar
 from app.providers.simkl.transport import SimklError
 from tests.support import migrated_db
@@ -581,3 +582,39 @@ class FetchWindowTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class ADateOlderThanTheEpochStillBuildsARecordTests(unittest.TestCase):
+    """A title from before 1970, which the calendar search reaches and the
+    calendar files themselves do not.
+
+    THE CRASH: `datetime.timestamp()` is pure arithmetic on an AWARE datetime
+    and a call into the platform's C library on a NAIVE one, and Windows refuses
+    anything before 1970 there with OSError [Errno 22]. Simkl states some dates
+    with no zone, so this worked for everything modern and took the whole
+    request down for an old one. Found by searching "picard", which reaches
+    `L'homme du Picardie` — first aired 15 December 1968.
+    """
+
+    def test_a_naive_pre_epoch_date_does_not_raise(self):
+        record = simkl_calendar.to_show_record(
+            _tv_entry(when="1968-12-15T00:00:00"))
+        self.assertIsNotNone(record)
+        # Read back through the app's own conversion, because
+        # `datetime.fromtimestamp` is the very call that cannot do this here.
+        self.assertEqual(epoch_moment(record.air_ts).date(), date(1968, 12, 15))
+
+    def test_a_zoned_pre_epoch_date_agrees_with_the_naive_one(self):
+        """A NAIVE MOMENT IS READ AS UTC, so the two spellings of the same
+        instant have to land on the same second — otherwise which one a feed
+        happened to use would move a card by a day."""
+        naive = simkl_calendar.to_show_record(_tv_entry(when="1968-12-15T00:00:00"))
+        zoned = simkl_calendar.to_show_record(_tv_entry(when="1968-12-15T00:00:00+00:00"))
+        self.assertEqual(naive.air_ts, zoned.air_ts)
+
+    def test_a_modern_date_is_unchanged_by_the_new_conversion(self):
+        """A WIDENING, NOT A CHANGE: every date this app already placed has to
+        keep landing on the same instant."""
+        when = "2026-07-06T20:00:00-04:00"
+        record = simkl_calendar.to_show_record(_tv_entry(when=when))
+        self.assertEqual(record.air_ts, datetime.fromisoformat(when).timestamp())

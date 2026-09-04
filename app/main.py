@@ -173,21 +173,33 @@ async def _heartbeat_tick() -> None:
     job is idempotent and runs again in a minute, so skipping one tick of it
     costs nothing.
     """
+    # BRACKETED IN THE LOG, because the work below runs on a timer and its lines
+    # land interleaved with whatever requests are being served — so "is this the
+    # heartbeat or something I just clicked" was not answerable from the log at
+    # all. The markers cost nothing and make one tick readable as one thing.
+    logger.info("----- heartbeat start -----")
+    # READ ONCE FOR THE WHOLE TICK. `load_settings` is deliberately uncached —
+    # it reads settings.json, runs two queries and decrypts every stored secret,
+    # all synchronously on the loop — because a setting somebody just saved has
+    # to take effect at once. That argument is about REQUESTS; one pass of
+    # background work is a single moment and has no reason to ask twice.
+    settings = load_settings()
     for job in (
         integrations_routes.refresh_integration_health,
         settings_routes.maybe_refresh_trakt_token,
         _sweep_auth_rows,
-        lambda: calendar_cache.refresh_months(load_settings()),
+        lambda: calendar_cache.refresh_months(settings),
         # run_drain, not drain directly — the same coalescing latch a fill
         # uses (app/calendar/enrich.py's schedule_drain), so a heartbeat tick
         # landing while a fill-triggered pass is already running folds into
         # it rather than starting a second, concurrent pass of its own.
-        lambda: calendar_enrich.run_drain(load_settings()),
+        lambda: calendar_enrich.run_drain(settings),
     ):
         try:
             await job()
         except Exception:
             pass
+    logger.info("----- heartbeat end -----")
 
 
 async def _heartbeat_loop() -> None:

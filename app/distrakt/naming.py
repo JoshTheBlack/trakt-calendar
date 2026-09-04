@@ -42,7 +42,8 @@ import logging
 
 from .. import cache
 from ..calendar import cache as calendar_cache
-from ..providers.base import ItemKey, Media, resolve_key
+from ..calendar import entries as calendar_entries
+from ..providers.base import ItemKey
 from . import store
 
 logger = logging.getLogger(__name__)
@@ -75,58 +76,6 @@ def _owed_signature(wanted: list[tuple[ItemKey, tuple[str, ...]]]) -> str:
     owed = sorted(f"{key}={'|'.join(names)}" for key, names in wanted)
     return hashlib.sha256("\n".join(owed).encode()).hexdigest()[:16]
 
-
-def _index(groups: list[dict]) -> dict[str, dict]:
-    """{identity key: {name: value}} for every title the stored calendar names.
-
-    READ PER SOURCE, NOT OFF THE GROUP'S HOISTED `ids`, and that is the whole
-    reason this works on windows already stored. The hoisted ids are a MERGE:
-    first writer wins per namespace, so for a title both services listed, the
-    bare `slug` is whichever source the declared order visited first, with
-    nothing left to say which. `by_source` keeps each service's record WHOLE —
-    so a record filed under `simkl` says Simkl's slug and one filed under `trakt`
-    says Trakt's, by construction and with no ambiguity to resolve.
-
-    That distinction is not academic. Every window stored before the two slugs
-    were told apart carries only the shared key, and reading the merge would find
-    nothing in any of them until each expired and refilled. Reading provenance
-    finds all of it now, because provenance was always recorded.
-
-    THE NAMESPACED NAME IS PREFERRED WHERE A NEWER WINDOW HAS ONE. Both spellings
-    mean the same thing; taking the explicit one first means this does not depend
-    on the per-source reading staying correct forever.
-
-    KEYED THE WAY THE TRACKER KEYS ITS ROWS — `resolve_key`, the same waterfall —
-    so a title the calendar filed from Simkl and the tracker filed from Trakt land
-    on one entry. Matching on a service's own id would only ever reach rows that
-    came from that service, which is precisely the half already holding the name.
-    """
-    out: dict[str, dict] = {}
-    for group in groups:
-        hoisted = group.get("ids") or {}
-        for source, record in (group.get("by_source") or {}).items():
-            if not isinstance(record, dict):
-                continue
-            name = f"{source}_slug"
-            if name not in LEARNABLE:
-                continue
-            ids = record.get("ids") or {}
-            value = ids.get(name) or ids.get("slug")
-            if value in (None, ""):
-                continue
-            # THE MEDIA THE RECORD ITSELF DECLARES. Shows and movies are keyed
-            # apart, and guessing here would file a film's name under a series.
-            media = record.get("media") or hoisted.get("media")
-            try:
-                key = resolve_key(Media(media), hoisted or ids)
-            except ValueError:
-                continue
-            if key is None:
-                continue
-            # First writer wins, so two windows naming one title give a stable
-            # answer rather than one that depends on the order rows came back.
-            out.setdefault(str(key), {}).setdefault(name, value)
-    return out
 
 
 async def fill_from_calendar(user_id: int) -> int:
@@ -161,7 +110,12 @@ async def fill_from_calendar(user_id: int) -> int:
     settled_key = _SETTLED_KEY.format(user_id=int(user_id))
     if await cache.get(settled_key, _SETTLED_TTL_SECONDS) == signature:
         return 0
-    index = _index(await calendar_cache.cached_calendar_groups())
+    # ONLY THE TITLES OWED SOMETHING. This used to build an index of the whole
+    # stored calendar to answer for a handful of them — measured at 3.8 seconds
+    # to learn two names, most of it blocking the event loop. `title_key` is the
+    # same identity the tracker keys its rows by and it is indexed, so the
+    # question is a keyed read.
+    index = await calendar_entries.slugs_for(str(key) for key, _owed in wanted)
     if not index:
         await cache.set(settled_key, signature)
         return 0

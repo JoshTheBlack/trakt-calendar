@@ -422,3 +422,126 @@ class TheAddAsksBeforeItWritesAnythingTests(DistraktTestCase):
         kept = asyncio.run(store.find_month_record(
             self.user_id, month, store.RecordKind.COMPLETED, KEY, 1))
         self.assertIsNotNone(kept, "adding a re-watch removed the settled record")
+
+
+class TheOfferedStartFindsARestartTests(unittest.TestCase):
+    """`watch_history.restart_day` — where a second pass through a season began.
+
+    THE ANSWER IT REPLACES WAS THE WORST ONE FOR THIS SHAPE. The day offered was
+    the day AFTER the last play, which is right for somebody who has not begun
+    again and wrong for everybody who has: their most recent play is INSIDE the
+    new run, so the offer landed after it and reported the run as empty. A viewer
+    three episodes into a re-watch was shown zero.
+
+    ORDER IS THE SIGNAL AND NOT ELAPSED TIME. Episodes are watched forwards, so
+    the sequence going BACKWARDS is somebody returning to the start. That is a
+    fact about the plays rather than a threshold on a gap — and no threshold is
+    defensible, which is why this feature refused to define one.
+    """
+
+    def _state(self, plays, key=KEY, season=1, source="trakt"):
+        return {"shows": {str(key): {"seasons": {str(season): {source: dict(plays)}}}}}
+
+    def test_it_finds_where_the_sequence_turned_back(self):
+        """THE REPORTED SHAPE, from a real library: fifteen episodes watched
+        across two years, then episodes one to three on a single later day."""
+        plays = {str(n): "2021-1%d-01" % (n % 10) for n in range(4, 10)}
+        plays.update({str(n): "2022-0%d-01" % (n % 9 + 1) for n in range(10, 19)})
+        plays.update({"1": "2023-04-30", "2": "2023-04-30", "3": "2023-04-30"})
+        self.assertEqual(
+            watch_history.restart_day(self._state(plays), KEY, 1), "2023-04-30")
+
+    def test_a_season_watched_forwards_reports_no_restart(self):
+        """The ordinary case, and the one that must not be disturbed: a viewer
+        who has watched a season once still gets the day after their last play.
+        """
+        plays = {str(n): "2026-08-%02d" % n for n in range(1, 9)}
+        self.assertEqual(watch_history.restart_day(self._state(plays), KEY, 1), "")
+
+    def test_a_season_finished_over_two_sittings_is_not_a_restart(self):
+        """MEASURED AGAINST A REAL LIBRARY, where this was the near miss:
+        episodes 1-11 one autumn and 12-20 the next. The gap is long and the
+        order never turns back, so nothing restarted — which is exactly why the
+        rule reads the order rather than the gap."""
+        plays = {str(n): "2018-11-%02d" % n for n in range(1, 12)}
+        plays.update({str(n): "2019-09-%02d" % (n - 11) for n in range(12, 21)})
+        self.assertEqual(watch_history.restart_day(self._state(plays), KEY, 1), "")
+
+    def test_the_most_recent_turn_back_wins(self):
+        """Somebody may have gone round more than once, and the pass they are in
+        now is the last one."""
+        plays = {"1": "2020-01-01", "2": "2020-01-02", "3": "2020-01-03"}
+        state = self._state(plays)
+        state["shows"][str(KEY)]["seasons"]["1"]["trakt"].update(
+            {"1": "2024-06-01", "2": "2024-06-02"})
+        # The map holds one date per episode, so a re-watch moves the date; what
+        # survives is the later pass, and the turn-back is where it starts.
+        self.assertEqual(watch_history.restart_day(state, KEY, 1), "2024-06-01")
+
+    def test_a_season_with_no_dated_plays_answers_nothing(self):
+        self.assertEqual(
+            watch_history.restart_day(self._state({"1": "", "2": None}), KEY, 1), "")
+
+    def test_each_service_is_read_on_its_own(self):
+        """TWO SERVICES CAN DATE THE SAME EPISODES QUITE DIFFERENTLY — one may
+        carry a bulk import stamped a single day — so mixing their dates into one
+        sequence would invent an order neither reported."""
+        state = {"shows": {str(KEY): {"seasons": {"1": {
+            "simkl": {str(n): "2011-11-29" for n in range(1, 9)},
+            "trakt": {**{str(n): "2026-02-%02d" % n for n in range(4, 9)},
+                      "1": "2026-03-01", "2": "2026-03-01"},
+        }}}}}
+        self.assertEqual(watch_history.restart_day(state, KEY, 1), "2026-03-01")
+
+
+class TheQuestionShowsWhatWasWatchedSinceTests(unittest.TestCase):
+    """`watch_history.restart_details` — the modal's own content.
+
+    THE QUESTION USED TO BE A DATE AND NOTHING ELSE, so answering it meant
+    dating your own viewing from memory. The episodes are already known; naming
+    them lets the choice be made by looking.
+    """
+
+    def _state(self, plays, key=KEY, season=1, source="trakt"):
+        return {"shows": {str(key): {"seasons": {str(season): {source: dict(plays)}}}}}
+
+    def test_it_names_the_episodes_watched_since_the_turn_back(self):
+        plays = {str(n): "2022-04-%02d" % n for n in range(4, 19)}
+        plays.update({"1": "2023-04-30", "2": "2023-04-30", "3": "2023-05-02"})
+        got = watch_history.restart_details(self._state(plays), KEY, 1)
+        self.assertEqual(got["began"], "2023-04-30")
+        self.assertEqual([e["episode"] for e in got["episodes"]], [1, 2, 3])
+        self.assertEqual(got["episodes"][2]["day"], "2023-05-02")
+
+    def test_the_previous_run_ends_before_the_restart_and_not_at_the_last_play(self):
+        """THE BUG THIS FIXES IN PASSING. `season_completed_map` answers "when
+        was the last episode of this season watched", and for anybody mid-restart
+        that is a play from the NEW run — so the page said "you finished this on
+        30 April 2023" about the day they watched episode one. The old run ended
+        at the last play BEFORE the turn-back.
+        """
+        plays = {str(n): "2022-04-%02d" % n for n in range(4, 19)}
+        plays.update({"1": "2023-04-30", "2": "2023-04-30"})
+        got = watch_history.restart_details(self._state(plays), KEY, 1)
+        self.assertEqual(got["finished_on"], "2022-04-18")
+        self.assertNotEqual(got["finished_on"], got["began"])
+
+    def test_a_season_watched_once_has_nothing_to_show(self):
+        """Which is the ordinary case, and the page then asks the plainer
+        version of the question rather than an empty list."""
+        plays = {str(n): "2026-08-%02d" % n for n in range(1, 9)}
+        self.assertEqual(watch_history.restart_details(self._state(plays), KEY, 1), {})
+
+    def test_the_episodes_come_from_the_service_that_saw_the_restart(self):
+        """Two services can date the same episodes differently, so the list has
+        to come from the same sequence the day came from — otherwise it names
+        plays that service never placed there."""
+        state = {"shows": {str(KEY): {"seasons": {"1": {
+            "simkl": {str(n): "2011-11-29" for n in range(1, 9)},
+            "trakt": {**{str(n): "2026-02-%02d" % n for n in range(4, 9)},
+                      "1": "2026-03-01"},
+        }}}}}
+        got = watch_history.restart_details(state, KEY, 1)
+        self.assertEqual(got["began"], "2026-03-01")
+        self.assertEqual([e["episode"] for e in got["episodes"]], [1])
+        self.assertEqual(got["finished_on"], "2026-02-08")

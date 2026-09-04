@@ -60,7 +60,7 @@ def calendar_records(entries, endpoint):
     turned into what the cache actually sees.
     """
     from app.providers.trakt import calendar as trakt_calendar
-    return [r for r in (trakt_calendar.to_record(e, endpoint) for e in entries)
+    return [r for r in (trakt_calendar.to_record(e, endpoint.media) for e in entries)
             if r is not None]
 
 

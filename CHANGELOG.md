@@ -2,36 +2,56 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
-## 🏷️ [1.2.1] - Unreleased
+## 🏷️ [1.2.1] - 2026-09-04
 
 ### Added
-- 🔍 **Search your calendar for a title, and jump to the day it airs.** Results from your own calendar appear as you type and cost nothing — they come from what's already stored. Pressing Enter also asks the services, which finds titles your calendar hasn't loaded yet; those link to the month they belong to, and opening it is what teaches your calendar about them. A result is only ever offered with a jump if your own calendar would actually draw that card, so the button can't land you on an empty day.
+- 🔍 **Search your calendar for a title, and jump to the day it airs.** Results from the calendar you are looking at appear as you type and cost nothing — they come from what is already stored — with a button to widen the search to your other calendars. Pressing Enter, or the search button, also asks the services, which finds titles your calendar has not loaded yet. Either kind of result takes you to the card itself rather than the top of a month, and a result is only offered at all if your own filters would let that card be drawn.
+- 📅 **A search result is a season, not a show.** A long-running title has one first-air date and many premieres, so a result names the season and the day it started, and each goes to its own month — rather than sending every search for a returning show to the month it began, sometimes years earlier. The three most recent seasons of each title are offered, with the country and network beside them, which is what tells five national versions of the same format apart.
+- 🩹 **Opening a search result adds the title to your calendar, even when no service listed it.** A service can describe a show perfectly and still leave it off its own calendar; the month then loads correctly and simply has no card for it. Following a result writes that airing, so it appears on the day it belongs to — the only way a premiere both services have missed can show up at all. It survives an ordinary refresh of that month too, since a service that never listed a title cannot be said to have dropped it, and if a service does start listing it, its own answer quietly takes the card back over.
+- 🏷️ **Click a badge on a card to filter by it.** The genre, network, certification and country a card is already showing are the quickest way to narrow the calendar to more like it — or hide it — without opening the filters panel and typing the name in.
+- ⏳ **A progress bar while the page is working.** Moving between months, opening a month this app has never held, and adding a show or film all take a few seconds — fetching a month, or asking a service about a season and then working the month out again. The bar appears only if the wait is long enough to notice.
 - 🎬 **IMDb's score on the card and in the details.** It sits between the date and the air time, marked as IMDb's, and deliberately apart from the Trakt and Simkl ratings beside it: those two are audiences disagreeing about the same question, and a third party's score isn't a third answer to it.
-- 🔁 **Adding a season you've already finished now asks what you meant.** Starting a re-watch and the tracker meeting an old completion for the first time look identical from your history, so instead of quietly filing the season under the month you originally finished it — where you'd never see it — it says when you finished it and offers to start a fresh run. A fresh run counts only what you watch from now on.
 
 ### Changed
 - 🔀 **The Sources screen is gone, and its two useful questions moved to where you already answer that kind of thing.** Which services show on your calendar is a tick-box in 🔎 **Filters**, beside the genre and certification narrowing it works exactly like. Which service's description you read — its poster, overview, network and rating — is an order on your 👤 **Account** page, beside the one that already says which tracker decides a season. Everything else that screen asked has been dropped: naming a different service per FIELD, restating the choice per calendar, and telling the tracker which services to read when the ones you have linked already said it. Any preference you had stated for a service overall is carried across.
-- 🖼️ **A shared link's preview picture now shows the same artwork the page does.** It resolved posters from TMDB whichever service your calendar was actually drawing, so a link could advertise a picture of a show that looked nothing like the one on the page behind it. Posters are now filed per service and picked in your own order.
+- 🖼️ **A shared link's preview picture now matches the page it opens.** The preview always took its poster from TMDB, no matter which service your calendar had drawn the card from — so a link could advertise one picture and lead to a page showing another. Both now pick the poster the same way: per service, in the order you set.
+- 📺 **The episode summary under a card now works for Simkl titles too.** It only ever asked Trakt, and gave up on any card Trakt had no id for — so the line appeared on some cards and not others, with nothing on screen to explain why. Simkl could always answer; it was simply never asked.
 
 ### Fixed
 - 🖼️ **A calendar card whose describing service can no longer be reached now shows what was last known about it, instead of going blank.** Pulling a credential used to erase a row's details the moment the cached answer expired, even though the app had perfectly good information from before. It now draws what it has and says which service it can no longer ask.
 - 🔗 **A card's link to Trakt no longer opens Trakt's front page instead of the title.** When there was no slug on hand to build a proper link, it now falls back to the numeric id, which Trakt resolves just as well.
+- 🔗 **A Simkl card links to its own page rather than to Simkl's front page**, for entries that arrived without one of their own.
 - 💾 **Restoring a backup made on an older version of the app no longer fails over a column that version didn't have.** Anything a backup file doesn't mention is left at its ordinary default instead of blocking the whole restore.
+- 🔇 **Closing a details modal now stops the trailer.** It only hid the panel, so a video kept playing — audible, over a calendar with nothing on screen to pause it — until another modal replaced it or the video ended on its own.
 
 ### Under the hood
-- 🔍 **Simkl search now reads every page of results instead of stopping at the first**, and correcting a bad client id takes effect immediately rather than needing a restart.
+- 🗃️ **The calendar stores each airing as its own row instead of whole compressed windows.** Reading a month no longer means inflating everything around it, and the work enrichment still owes is a question the database can answer directly rather than something derived by unpacking every stored window on every pass.
+- 🧩 **Each service builds its own calendar rows, one way, wherever they come from.** Rows shown by search and rows written by an ordinary calendar load are assembled by the same code, so a card cannot describe a title differently depending on which path found it.
+- 🕰️ **Dates before 1970 are handled without asking the operating system**, which on Windows refuses them outright — so a title from the sixties is placed on the calendar like any other rather than failing.
+- 🔍 **Simkl search reads every page of results instead of stopping at the first**, and correcting a bad client id takes effect immediately rather than needing a restart.
 - 🚦 **Requests to Simkl follow the service's own documented caching and rate-limit rules more closely** — fewer needless calls to sources that were already answerable from the edge, and a blocked or rejected credential is now reported plainly instead of quietly reading as a real zero.
 - 🗂️ **Cached answers from Simkl are filed by the question asked, not by the credential that asked it**, so correcting or rotating a client id no longer strands perfectly good cached answers under an address nothing looks at again.
+- 🎞️ **Episode details are fetched at a pace set by the requests they cost**, rather than by how many seasons happen to be waiting, and a title nothing can answer for is eventually left alone instead of being asked about for ever.
+- ♻️ **A title a service has stopped describing is no longer asked about for ever.** Simkl lists some titles on its calendar and then answers nothing at all when asked to describe them. Those were being retried on every heartbeat — several hundred times each on a real instance — because the limit that should have stopped them only applied to titles with no stored answer, and these had an old one that could no longer be read. Both the limit and the waiting period between attempts now apply whatever the title holds, and the log counts the remaining attempts down so a stuck one is visible while it is happening rather than after.
+- 🖼️ **Every service's artwork goes through one image proxy**, decided where a card is drawn rather than where a record is stored — so what is kept on disk is still the service's own address.
+- 🏛️ **One footer across every page**, and the attribution TMDB asks for.
 
 ### 🥚
+- Adding or removing something used to take about four seconds, nearly all of it spent reading the whole wall calendar end to end to look up a couple of names it was missing. It asks about the names it wants now. Well under a second.
 - It can go looking somewhere it hadn't thought to before, when the first place comes up empty-handed.
-- It will ask before assuming you're picking up where you left off, rather than after.
-- It knows which of the two you'd rather hear from, and asks in that order without being reminded.
-- Where the two of them number differently, it's learned to tell which one means what — and to fill in what one left blank from what the other already knew.
-- Looking ahead at a month that hadn't started yet used to quietly add everything to it. Looking is just looking, now.
+- It will ask before assuming you're picking up where you left off — and it asks *first*, writing nothing down until you've answered. 
+- Starting over, you can say where "over" begins. It reads the order to work out where you began again, offers that, and takes a different day if you'd rather.
+- Most of the way through is not the same as done.
+- It knows who you'd rather hear from, and asks in order without being reminded.
+- Where they report differently, it's learned to tell which one means what — and to fill in what one left blank from what the other already knew.
+- Looking ahead used to quietly add everything. Looking is just looking, now.
+- Reading about one month no longer conjures up another one beside it.
+- Deciding something is over is its business and nobody else's; the calendar has stopped reaching across to do it.
+- Something added from one of its questions now arrives knowing where it came from, rather than turning up unnamed.
+- A question you haven't answered yet is still there when you come back to it, and a "no" it took as final has learned to be a "not yet".
 - It doesn't need to read everything again just to notice what changed since it last asked.
 - Something finished appeared barely begun, going by only one telling of it. It counts properly either way now.
-- Asked whose count decides when the two of them disagree, it can be told — and remembers.
+- Asked who decides when they disagree, it can be told — and remembers.
 - Told it's moved on from one of them, it stops adding that one in, without pretending its old numbers changed.
 - Noticing one of them has quietly stopped naming something it used to, it says so rather than acting on it — and takes the note back the moment that changes.
 - It used to lose track of who told it what, once the two of them started describing the same thing. It doesn't any more.

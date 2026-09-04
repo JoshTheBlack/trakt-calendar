@@ -416,6 +416,26 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # never draw the title. Costs nothing: it is already in the row this
         # reads.
         "country": str(fields.get("country") or "").upper(),
+        # UPPERCASED to match what the calendar feed stores, for the reason the
+        # Trakt package gives for the same field.
+        "language": str(fields.get("language") or "").upper(),
+        # THE TWO FIELDS READ-TIME FILTERS ACT ON, and the reason they are worth
+        # carrying even though their absence is survivable. `anime_type` is what
+        # `filter.prune_disguised_films` keys on to keep a film off a series
+        # calendar; `release_types_by_country` is what the movie release
+        # narrowing judges. A record missing them is SHOWN rather than hidden —
+        # the rule that a filter must not hide what it has not learned yet — so
+        # nothing breaks without them, and a title the calendar would have
+        # narrowed away is instead drawn. `_extract` has held both since it was
+        # written; only this projection dropped them.
+        "anime_type": str(fields.get("anime_type") or ""),
+        "release_types_by_country": dict(fields.get("release_types_by_country") or {}),
+        # THE SHARED IDS, for the reason the Trakt package gives for the same
+        # field: the calendar search's jump route knows only a source and that
+        # source's id, and asking the SERVICE who a title is keeps a hand-made
+        # URL from deciding what a shared calendar row is about. `_extract` has
+        # always kept these.
+        "ids": dict(fields.get("ids") or {}),
         # THE POSTER, AS A FULL URL. `_extract` keeps Simkl's partial path and
         # this projection dropped it, so a card the calendar SEARCH wrote had no
         # picture. Built by this package's own one reading of that path -- the
@@ -429,6 +449,15 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # across both services; the modal draws chips a person reads, and the two
         # sources' chips have to look alike.
         "genres": [str(g).replace("-", " ").title() for g in (fields.get("genres") or [])],
+        # THE GENRES AS THE SOURCE SPELLS THEM, beside the display form above.
+        # TWO CONSUMERS WANT TWO DIFFERENT THINGS and only one of them was being
+        # served: the modal draws chips a person reads ("Science Fiction"), and a
+        # RECORD stores slugs, because `render` derives the display form from
+        # them and every genre FILTER matches against them. `keep_values`
+        # lowercases but does not slugify, so a record holding "Science Fiction"
+        # is never matched by a `science-fiction` spec -- a filter that silently
+        # stops acting, which is the same defect the country field had.
+        "genre_slugs": [str(g) for g in (fields.get("genres") or [])],
         "rating": round(float(fields["rating"]), 1) if fields.get("rating") else None,
         # A THIRD PARTY'S SCORE, UNDER ITS OWN KEY. It reaches the modal beside
         # Simkl's rather than instead of it — see titles._imdb_rating for why the

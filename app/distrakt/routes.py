@@ -1791,7 +1791,7 @@ async def api_distrakt_add(request: Request):
     # its full episode count as this run's progress. Writing nothing until the
     # question is answered makes both unreachable rather than compensated for.
     if not data.get("decided"):
-        finished = await _completed_before_add(
+        finished, offered, restart = await _completed_before_add(
             user_id, key, int(show["season"]), detail.get("total"))
         if finished:
             return JSONResponse({
@@ -1799,13 +1799,19 @@ async def api_distrakt_add(request: Request):
                 "needs_decision": {
                     "key": str(key), "season": int(show["season"]),
                     "title": show["title"], "completed_on": finished,
-                    # WHERE A FRESH RUN WOULD START, offered rather than imposed:
-                    # the day AFTER the old completion, because the last episode
-                    # of that run was watched ON it and a floor including it
-                    # would show a new pass starting at one. The viewer can move
-                    # it earlier, which is what makes "I watched two episodes
-                    # last week and then added the season" expressible.
-                    "suggested_from": _day_after(finished),
+                    # WHERE A FRESH RUN WOULD START, offered rather than
+                    # imposed, and worked out rather than assumed — see
+                    # `_completed_before_add`. The viewer can still move it,
+                    # which is what keeps this an offer.
+                    "suggested_from": offered,
+                    # WHAT THE VIEWER NEEDS TO SEE TO ANSWER, when the play
+                    # order shows they have already begun again: the day the
+                    # previous run ended, and the episodes watched since. The
+                    # question was a date and nothing else, which meant
+                    # answering it from memory; naming the episodes lets it be
+                    # answered by looking. Absent when nothing restarted, and
+                    # the page then asks the plainer version.
+                    "restart": restart,
                 },
             })
 
@@ -1880,9 +1886,20 @@ def _day_after(day: str) -> str:
         return ""
 
 
-async def _completed_before_add(user_id: int, key, season: int, total) -> str:
-    """The day this viewer's history says they finished `season`, or "" — where
-    "finished" means every episode of it, not merely some.
+async def _completed_before_add(user_id: int, key, season: int,
+                                total) -> tuple[str, str, dict]:
+    """`(the day this season was finished, the day to offer a fresh run from,
+    what the restart looks like)` — or `("", "", {})`, where "finished" means
+    every episode of it and not merely some.
+
+    THE TWO ARE NOT THE SAME DAY WHENEVER SOMEBODY HAS ALREADY RESTARTED, and
+    getting that wrong was the worst answer for exactly the case the question
+    exists to serve. The offer used to be the day AFTER the last play, which is
+    right for a viewer who has not begun again — but a viewer three episodes into
+    a second run has their most recent play INSIDE that run, so the offer landed
+    after it and reported the new pass as empty. `watch_history.restart_day`
+    finds where the run began by reading the play ORDER rather than by deciding
+    how long a gap has to be, and that is what is offered when it finds one.
 
     THE TOTAL IS REQUIRED AND THAT IS THE POINT OF THE ARGUMENT.
     `season_completed_map` answers "when was the last episode of this season
@@ -1912,7 +1929,7 @@ async def _completed_before_add(user_id: int, key, season: int, total) -> str:
     except (TypeError, ValueError):
         needed = 0
     if needed <= 0:
-        return ""
+        return "", "", {}
     row = await distrakt_store.find_user_record(user_id, key, season)
     state = await watch_history.load_state(user_id)
     if row:
@@ -1920,8 +1937,22 @@ async def _completed_before_add(user_id: int, key, season: int, total) -> str:
             state, watch_history.history_floors([row]))
     counts = watch_history.watched_map(state).get((str(key), season)) or {}
     if max(counts.values(), default=0) < needed:
-        return ""
-    return watch_history.season_completed_map(state).get((str(key), season), "")
+        return "", "", {}
+    finished = watch_history.season_completed_map(state).get((str(key), season), "")
+    if not finished:
+        return "", "", {}
+    # THE RESTART ITSELF WHEN THE ORDER SHOWS ONE, and the day after the last
+    # play when it does not. A restart day is offered AS IT IS rather than the
+    # day after it, because the episodes watched on that day are the first of
+    # the new pass and belong to it.
+    restart = watch_history.restart_details(state, key, season)
+    if not restart:
+        return finished, _day_after(finished), {}
+    # THE DAY THE PREVIOUS RUN ENDED, WHERE IT IS KNOWN, because `finished` is
+    # the LATEST play and for a viewer mid-restart that is an episode of the new
+    # run — so the page would tell them they finished the season on a day they
+    # watched episode one.
+    return (restart.get("finished_on") or finished), restart["began"], restart
 
 
 @guard.post("/api/distrakt/add-completed", AuthLevel.DISTRAKT_APPROVED)

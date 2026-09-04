@@ -4,12 +4,15 @@
    buttons all swap this in — so a result cannot look different depending on how
    it was asked for.
 
-   TWO SECTIONS, TWO PROMISES, AND THE SECOND SAYS SO IN WORDS. A stored result
-   names the day and jumps to it, because the calendar's own read path confirmed
-   it would draw that card. A catalogue result names the MONTH and says "go to
-   where this should be": arriving fills the month, and the title appears if any
-   source lists it there. Promising a card for the second kind is the one thing
-   this surface must never do — see app/calendar/search.py.
+   TWO SECTIONS, ONE PROMISE NOW, AND THE HISTORY IS WORTH KEEPING. A stored
+   result jumps to a card the calendar's own read path confirmed it would draw. A
+   catalogue result used to name only the MONTH, because arriving merely FILLED
+   that month and whether the title appeared depended on a service listing it
+   there — which is exactly what Half Man showed it might not. Following one now
+   WRITES the airing (see calendar/search.py's `fill_one_gap`), so both kinds
+   land on a card and both say "Jump". What the second still cannot promise is
+   the write succeeding: a service that cannot be reached leaves the reader on
+   the month, which is why the route redirects either way.
 
    NO SCRIPT IN HERE AND NONE NEEDED. Every control is an `hx-get` that swaps
    this same fragment back into the same target, carrying the query and the
@@ -61,9 +64,9 @@
 {% if elsewhere %}
 <div class="search-section">
     <h3 class="search-heading">Not on your calendar</h3>
-    <p class="search-hint">Opening one of these loads that month, which is what teaches
-        your calendar about it. If no service lists it on that calendar, it still won't
-        appear there.</p>
+    <p class="search-hint">Opening one of these adds it to your calendar on the day it
+        airs — including titles the services describe but leave off their own calendars,
+        which is the only way those ever show up here.</p>
     {% for hit in elsewhere %}
     <a class="search-row" href="{{ hit.url }}">
         <img class="search-poster" src="{{ hit.item.poster or '/static/images/nopostertv.png' }}"
@@ -87,7 +90,7 @@
                 {% if hit.item.country %} · {{ hit.item.country }}{% endif %}
             </span>
         </span>
-        <span class="search-go">Go to the month →</span>
+        <span class="search-go">Jump →</span>
     </a>
     {% endfor %}
 </div>

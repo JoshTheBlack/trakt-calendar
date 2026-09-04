@@ -2845,6 +2845,30 @@ ALTER TABLE source_prefs DROP COLUMN tracker_source;
 ALTER TABLE source_prefs DROP COLUMN endpoint_sources_json;
 """
 
+# AN AIRING NO CALENDAR FEED LISTED, AND WHY IT NEEDS SAYING SO.
+#
+# A service can describe a show perfectly and leave it off its own calendar --
+# measured: Trakt dates Half Man's first season to 2026-04-28T20:00Z and its
+# premieres calendar for that week does not carry the title at all. The calendar
+# search writes such an airing when a viewer follows the result, which is the
+# only way this app can show a premiere both services have missed.
+#
+# WITHOUT THIS FLAG THAT REPAIR LASTS UNTIL THE WINDOW REFETCHES. A fill REPLACES
+# what a source holds for a span -- delete, then insert what came back -- because
+# a title a source has stopped listing must stop being drawn. A repaired row is
+# in the delete's path and not in the insert's, so it lasted days rather than
+# indefinitely, and the viewer would have had to search for it again with nothing
+# telling them why it went.
+#
+# IT CLEARS ITSELF, WHICH IS THE PART THAT MAKES IT SAFE. A feed row for the same
+# airing has the same natural key and is written with `from_search = 0`, so the
+# moment a service starts listing the title its own answer takes the row back and
+# the exemption ends. Retention still reclaims these like any other airing, so a
+# title genuinely dropped by everybody ages out rather than living for ever.
+MIGRATION_37 = """
+ALTER TABLE calendar_airings ADD COLUMN from_search INTEGER NOT NULL DEFAULT 0;
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2882,6 +2906,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (34, MIGRATION_34),
     (35, MIGRATION_35),
     (36, MIGRATION_36),
+    (37, MIGRATION_37),
 ]
 
 

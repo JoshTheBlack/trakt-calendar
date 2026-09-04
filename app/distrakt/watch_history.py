@@ -1072,6 +1072,114 @@ def season_dates_by_source(state: dict) -> dict[tuple[str, int], dict[str, str]]
     return out
 
 
+def restart_day(state: dict, key, season: int) -> str:
+    """The day this viewer appears to have STARTED THE SEASON AGAIN, or "".
+
+    WHY THIS EXISTS. Adding a season the history calls finished asks where the
+    current pass begins, and the day offered was the day AFTER the last play.
+    For somebody who has already restarted and watched a few episodes that is the
+    worst possible answer: their new run reads as empty, and the number they were
+    shown was zero when it should have been three.
+
+    ORDER IS THE SIGNAL, NOT ELAPSED TIME. A run of episodes is watched forwards,
+    so the moment the sequence goes BACKWARDS — a lower episode number watched
+    later than a higher one — is a viewer going back to the start. That is a fact
+    about the play order rather than a judgement about how long a gap has to be
+    before it counts as a restart, which is the thing this feature deliberately
+    refuses to define: no threshold is defensible, and a four-month gap is a
+    hiatus for one person and an abandonment for another.
+
+    THE LAST STEP BACKWARDS WINS, because somebody may have gone round more than
+    once and the pass they are in now is the most recent one.
+
+    PER SOURCE, THEN THE LATEST. Two services can date the same episodes quite
+    differently — one carries a bulk import stamped a single day, the other the
+    real plays — so mixing their dates into one sequence invents an order neither
+    reported. Each is read on its own and the latest restart any of them can see
+    is the answer, for the same reason `season_completed_map` takes the latest
+    day: which service noticed does not change when it happened.
+
+    "" WHEN NOTHING WENT BACKWARDS, which is the ordinary case of a season
+    watched once, forwards. The caller then falls back to the day after the last
+    play, which is right for a viewer who has not restarted yet.
+    """
+    entry = (state.get("shows") or {}).get(str(key)) or {}
+    slots = _season_slots((entry.get("seasons") or {}).get(str(season))
+                          or (entry.get("seasons") or {}).get(season))
+    found = []
+    for episodes in slots.values():
+        plays = sorted(
+            (str(when)[:10], int(number))
+            for number, when in (episodes or {}).items() if when
+        )
+        # AGAINST THE PLAY BEFORE IT, NOT AGAINST THE HIGHEST SO FAR. Every
+        # episode of a new run is lower than the old run's finale, so comparing
+        # with the maximum marks the whole run as "backwards" and the last of
+        # them wins — which dates the pass to its most recent episode instead of
+        # its first. The DROP is the event: one play lower than the one before it.
+        previous = None
+        restart = ""
+        for day, number in plays:
+            if previous is not None and number < previous:
+                restart = day
+            previous = number
+        if restart:
+            found.append(restart)
+    return max(found) if found else ""
+
+
+def restart_details(state: dict, key, season: int) -> dict:
+    """What a viewer needs to SEE to answer "where does this pass begin".
+
+    `{"began": day, "finished_on": day, "episodes": [{"episode": n, "day": d}]}`,
+    or `{}` when the order shows no restart.
+
+    THE QUESTION USED TO OFFER A DATE AND NOTHING ELSE, so answering it meant
+    remembering your own viewing. Naming the episodes already watched since the
+    turn-back lets the choice be made by looking rather than by recall — and it
+    is the same reading `restart_day` already does, so nothing new is inferred.
+
+    `finished_on` IS THE END OF THE PREVIOUS RUN, NOT THE LATEST PLAY, and that
+    distinction is the bug this fixes on the way past. `season_completed_map`
+    answers "when was the last episode of this season watched", which for anybody
+    mid-restart is a play from the NEW run — so the modal said "you finished this
+    on 30 April 2023" about a day the viewer had watched episode one. The last
+    play BEFORE the turn-back is the day the old run actually ended.
+
+    READ FROM THE SERVICE THAT SAW THE RESTART. Two services can date the same
+    episodes differently, and the episode list has to come from the same sequence
+    the day came from or it would name plays that service never placed there.
+    """
+    began = restart_day(state, key, season)
+    if not began:
+        return {}
+    entry = (state.get("shows") or {}).get(str(key)) or {}
+    slots = _season_slots((entry.get("seasons") or {}).get(str(season))
+                          or (entry.get("seasons") or {}).get(season))
+    for episodes in slots.values():
+        plays = sorted(
+            (str(when)[:10], int(number))
+            for number, when in (episodes or {}).items() if when
+        )
+        previous = None
+        turned = ""
+        for day, number in plays:
+            if previous is not None and number < previous:
+                turned = day
+            previous = number
+        if turned != began:
+            continue
+        since = [{"episode": number, "day": day}
+                 for day, number in plays if day >= began]
+        before = [day for day, _number in plays if day < began]
+        return {
+            "began": began,
+            "finished_on": before[-1] if before else "",
+            "episodes": sorted(since, key=lambda e: (e["day"], e["episode"])),
+        }
+    return {}
+
+
 def season_completed_map(state: dict) -> dict[tuple[str, int], str]:
     """{(item key, season): 'YYYY-MM-DD'} — the day the season's LAST episode was
     watched, which is the day it was finished.
@@ -1995,8 +2103,16 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
     lets the per-title paths keep asking that service about the title (see
     _learn_source_ids)."""
     from ..perftrace import span
-    state = await sync(settings, user_id, force=force, today=today,
-                       since_month=since_month)
+    # THE STAGES OF A SYNC, NAMED SEPARATELY, because the span around the whole
+    # of this reported four seconds on a live instance and the nested spans
+    # accounted for under three hundred milliseconds of it. A measurement that
+    # cannot say WHICH part is slow is one nobody can act on. What is left after
+    # these four is the baselining loop below, which is the one part whose work
+    # is unbounded — a request per roster title a service has not been asked
+    # about yet, paced against that service's ceiling.
+    with span("wh.sync"):
+        state = await sync(settings, user_id, force=force, today=today,
+                           since_month=since_month)
     ports = await tracker_ports(settings, user_id)
     # WHO HAS BEEN ASKED, PER (title, source) — never per title alone. A title is
     # baselined once per SERVICE, because a baseline is one service's complete
@@ -2061,16 +2177,19 @@ async def sync_and_baseline(settings, user_id: int, roster: list[dict], force: b
                                details[source_id], str(source))
         saved = True
     if saved:
-        await _save(user_id, state)
+        with span("wh.save_state"):
+            await _save(user_id, state)
     # THE ID GOES BACK TO THE ROSTER as well as into the state, because the state
     # answers "what has been watched" and the record answers "who can be asked".
-    await _learn_source_ids(user_id, state, roster)
+    with span("wh.learn_source_ids", roster=len(roster or ())):
+        await _learn_source_ids(user_id, state, roster)
     # AND THE NAMES THE ROSTER CANNOT REACH come off the stored calendar. The pass
     # above can only teach a title something is currently listing; a settled
     # verdict is deliberately outside it, and Trakt's slug arrives with a play
     # rather than with a library read. See naming.py for both gaps. Costs one
     # indexed count when there is nothing owed, and no network ever.
-    await naming.fill_from_calendar(user_id)
+    with span("wh.fill_names"):
+        await naming.fill_from_calendar(user_id)
     # THE VIEWER'S OWN FLOOR, APPLIED HERE AND NOWHERE ELSE. A season somebody
     # is watching AGAIN has a history full of plays about the previous run;
     # counting those reports the new pass as finished before it began, and

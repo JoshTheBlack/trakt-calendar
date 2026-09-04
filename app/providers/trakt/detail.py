@@ -106,6 +106,26 @@ def _episodes_from(episodes_raw, tz: ZoneInfo) -> list[dict]:
     return episodes
 
 
+async def fetch_title_payload(settings: Settings, media: str, trakt_id: str,
+                              *, cache_only: bool = False) -> dict | None:
+    """One title's raw `extended=full` object, exactly as Trakt returns it.
+
+    RAW, AND THAT IS THE POINT. `fetch_details` beside this projects the same
+    payload down to the fields a detail MODAL draws; a caller building a calendar
+    RECORD needs the object itself, because this package's own `calendar.to_record`
+    already knows how to read it — a Trakt calendar entry's `show` is this very
+    shape. Handing the projection to a record builder instead is what produced a
+    second builder, and then a slow drip of fields the projection had quietly
+    dropped: first_aired, country, poster, ids, language, and the genre slugs a
+    filter matches on.
+    """
+    path = f"{'movies' if media == 'movie' else 'shows'}/{trakt_id}"
+    payload = await transport.cached_get(
+        transport.shared_client(), settings, path, {"extended": "full"},
+        cache_only=cache_only)
+    return payload if isinstance(payload, dict) else None
+
+
 async def fetch_details(settings: Settings, media: str, trakt_id: str, season: int | None,
                         cache_only: bool = False) -> dict:
     """Full detail payload for the modal: overview, cast, episode list.
@@ -135,6 +155,7 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     # package: the poster reading lives there because that is where the feed's
     # own images are parsed, and a module-level import would close a cycle.
     from . import calendar as trakt_calendar
+    from . import _ids
 
     return {
         "title": info.get("title") or "",
@@ -149,6 +170,22 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # field from the same payload — see this package's calendar.py — so the
         # two now agree about what a title's country is.
         "country": (info.get("country") or "").upper(),
+        # THE LANGUAGE, which this package's own calendar.py has always set on a
+        # Record and this projection dropped. A record built from a per-title
+        # lookup should be able to say everything a record built from the feed
+        # says about the same title, or the two disagree about what is known
+        # depending only on which path produced the row.
+        # UPPERCASED, because that is what this package's calendar.py stores and
+        # a record must not depend on which path produced it.
+        "language": (info.get("language") or "").upper(),
+        # THE SHARED IDS, SO A CALLER NEED NOT BE TOLD THEM. Everything that
+        # reached this function used to arrive holding a search hit that already
+        # carried them, so the projection dropped them; the calendar search's
+        # jump route has only a source and that source's own id, and the ids are
+        # what decide a title's cross-source identity. Taking them from the
+        # SERVICE rather than from the request is also what stops a hand-made
+        # URL deciding what a shared calendar row is about.
+        "ids": _ids.normalize(info.get("ids") or {}),
         # THE POSTER, THROUGH THIS PACKAGE'S OWN ONE READING OF IT. A per-title
         # lookup returns the same images the calendar feed does and this
         # projection dropped them, so a card the calendar SEARCH wrote had no
@@ -159,6 +196,15 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "network": info.get("network") or "",
         "runtime": info.get("runtime"),
         "genres": [g.replace("-", " ").title() for g in (info.get("genres") or [])],
+        # THE GENRES AS THE SOURCE SPELLS THEM, beside the display form above.
+        # TWO CONSUMERS WANT TWO DIFFERENT THINGS and only one of them was being
+        # served: the modal draws chips a person reads ("Science Fiction"), and a
+        # RECORD stores slugs, because `render` derives the display form from
+        # them and every genre FILTER matches against them. `keep_values`
+        # lowercases but does not slugify, so a record holding "Science Fiction"
+        # is never matched by a `science-fiction` spec -- a filter that silently
+        # stops acting, which is the same defect the country field had.
+        "genre_slugs": [str(g) for g in (info.get("genres") or [])],
         "rating": round(float(info["rating"]), 1) if info.get("rating") else None,
         "certification": (info.get("certification") or "").upper(),
         "trailer": info.get("trailer") or "",

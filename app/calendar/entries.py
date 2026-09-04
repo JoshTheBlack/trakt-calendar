@@ -170,11 +170,17 @@ ON CONFLICT(source, media, source_id) DO UPDATE SET
     fetched_at = excluded.fetched_at
 """
 
+# `from_search` IS THE LAST COLUMN AND THE CALLER STATES IT. A fill writes 0 and
+# the calendar search writes 1, which is what lets the fill's delete spare rows
+# it would never put back — see store_loose_airings and MIGRATION_37. Because
+# this is INSERT OR REPLACE on the airing's natural key, a feed row for the same
+# airing overwrites a searched one and returns it to 0, so the exemption ends the
+# moment the service starts listing the title itself.
 _INSERT_AIRING = """
 INSERT OR REPLACE INTO calendar_airings
     (source, media, source_id, endpoint, title_key, air_ts, air_date, date_only,
-     season, episode_number, episode_label, stored_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     season, episode_number, episode_label, stored_at, from_search)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 # THE FEED'S HALF OF A LEVEL-2 ROW. A calendar entry names the episode's title
@@ -279,7 +285,7 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
             name, str(record.media), str(record.id), endpoint_key, key,
             float(record.air_ts), _utc_date(record.air_ts),
             1 if record.date_only else 0,
-            int(season), int(number), str(record.episode_label or ""), now,
+            int(season), int(number), str(record.episode_label or ""), now, 0,
         ))
         titles.append((name, str(record.media), str(record.id), key,
                        *_title_values(record), now, stale_after))
@@ -301,7 +307,14 @@ async def store_span(endpoint_key: str, span_start: date, span_end: date,
     def _work(conn):
         for name in answered:
             conn.execute(
-                "DELETE FROM calendar_airings WHERE source = ? AND endpoint = ? "
+                # `from_search = 0` SPARES WHAT NO FEED EVER LISTED. This
+                # delete exists so a title a source has STOPPED listing stops
+                # being drawn, and a searched row was never in that source's
+                # answer to begin with — it is in the delete's path and not in
+                # the insert's, so without this it lasted only until the window
+                # refetched. MIGRATION_37 has the measured case.
+                "DELETE FROM calendar_airings WHERE from_search = 0 "
+                "  AND source = ? AND endpoint = ? "
                 "AND air_date >= ? AND air_date < ?",
                 (name, endpoint_key, first, last))
         for batch in rows_by_source.values():
@@ -406,7 +419,7 @@ async def store_loose_airings(endpoint_key: str, records, *, now: int,
             name, str(record.media), str(record.id), endpoint_key, key,
             float(record.air_ts), _utc_date(record.air_ts),
             1 if record.date_only else 0,
-            int(season), int(number), str(record.episode_label or ""), now,
+            int(season), int(number), str(record.episode_label or ""), now, 1,
         ))
         titles.append((name, str(record.media), str(record.id), key,
                        *_title_values(record), now, stale_after))
@@ -600,17 +613,56 @@ async def read_groups(endpoint_key: str, title_keys) -> list[Record]:
     return _in_fetch_order(rows)
 
 
-async def all_records() -> list[Record]:
-    """Every stored airing, from every endpoint and every span.
+async def slugs_for(title_keys) -> dict[str, dict[str, str]]:
+    """`{title key: {"<source>_slug": name}}` for the titles named, and only
+    those.
 
-    FOR THE CALLER THAT GENUINELY NEEDS ALL OF THEM — the tracker's name
-    resolution builds an index over the whole stored calendar and pairs it with
-    `signature()` so it only rebuilds when the calendar has moved. A caller
-    asking "what does enrichment still owe" wants `owed_titles` instead: that is
-    a WHERE clause, and this is a table scan.
+    A KEYED READ WHERE THERE USED TO BE A WALK, and the difference is the whole
+    reason this exists. The tracker fills in the names it is missing from what
+    the calendar already knows, and it did that by materialising EVERY stored
+    airing and grouping them in memory to build an index of the lot. Measured on
+    a live instance: 3.8 seconds to learn two names, 2.7 of them blocking the
+    event loop, on every add and every remove — because a roster edit changes
+    what is owed, which is half of the signature that guards the walk.
+
+    `title_key` IS ALREADY THE ANSWER TO "WHICH TITLE IS THIS". It is
+    `resolve_key` stringified, written onto every row at store time and indexed,
+    which is exactly the identity the tracker keys its own rows by — so the
+    question "what does the calendar call these few titles" is an indexed lookup
+    on a handful of keys rather than a reduction over the whole table.
+
+    READ PER SOURCE, NOT OFF A MERGE. A title both services list has two names
+    and a merged id map can only carry one; each row here is one service's own
+    record, so `simkl_slug` comes from Simkl's row and `trakt_slug` from Trakt's,
+    with nothing to disambiguate.
+
+    THE NAMESPACED SPELLING IS PREFERRED where a row has one, falling back to the
+    bare `slug` that older rows carry — both mean the same thing, and taking the
+    explicit one first keeps this from depending on the per-source reading
+    staying correct for ever.
     """
-    rows = await db.fetch_all(_ALL_SQL)
-    return _in_fetch_order(rows)
+    keys = [str(k) for k in dict.fromkeys(title_keys or ()) if k]
+    if not keys:
+        return {}
+    # Chunked because SQLite has a bound-parameter ceiling (999 by default) and
+    # the caller's list is however many names an account happens to owe.
+    out: dict[str, dict[str, str]] = {}
+    for start in range(0, len(keys), 400):
+        chunk = keys[start:start + 400]
+        rows = await db.fetch_all(
+            "SELECT title_key, source, ids_json FROM calendar_titles "
+            f"WHERE title_key IN ({', '.join('?' * len(chunk))})", tuple(chunk))
+        for row in rows:
+            ids = json.loads(row["ids_json"] or "{}") if row["ids_json"] else {}
+            source = str(row["source"])
+            value = ids.get(f"{source}_slug") or ids.get("slug")
+            if value in (None, ""):
+                continue
+            # First writer wins, so two rows naming one title give a stable
+            # answer rather than one that depends on the order they came back.
+            out.setdefault(str(row["title_key"]), {}).setdefault(
+                f"{source}_slug", str(value))
+    return out
 
 
 async def unenriched(source: str, id_namespace: str) -> set[tuple[int, str]]:

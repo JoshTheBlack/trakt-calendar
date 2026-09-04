@@ -564,6 +564,27 @@ class Item(Record):
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
+def epoch_seconds(moment: datetime) -> float:
+    """A moment as POSIX seconds, for ANY date, and treating a naive one as UTC.
+
+    THE INVERSE OF `epoch_moment` AND IT EXISTS FOR THE SAME REASON. Python's
+    `datetime.timestamp()` is pure arithmetic on an AWARE datetime and a call
+    into the platform's C library on a NAIVE one — where Windows refuses
+    anything before 1970 with OSError [Errno 22]. A feed that states a date with
+    no zone therefore worked for everything modern and took the request down for
+    a title from the sixties, which is exactly how this surfaced: a search for
+    "picard" reached Star Trek's 1966 seasons.
+
+    A NAIVE MOMENT IS READ AS UTC, which is what every caller here means by one:
+    these are calendar files whose instants are already UTC-stated, and the one
+    source that expresses times in a fixed offset deliberately keeps only the
+    day (see the Simkl package's own episode reader).
+    """
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return (moment - _EPOCH).total_seconds()
+
+
 def epoch_moment(air_ts) -> datetime:
     """A record's air time as a UTC instant, for ANY value it can hold.
 
@@ -1140,6 +1161,36 @@ class DetailPort(Protocol):
         call, which is what the public share pages use so a visitor's click can
         never spend the owner's rate limit. Fields with nothing cached behind them
         come back empty and the modal renders around them.
+        """
+        ...
+
+    async def records_for(self, settings: Settings, source_id, media: Media,
+                          moments) -> list[Record]:
+        """Calendar Records for one title at the given air times, built by THIS
+        SOURCE'S OWN calendar record builder.
+
+        `moments` is `[(season, when)]`, where `when` is an ISO instant for a
+        dated airing or a bare `YYYY-MM-DD` for one the source states as a
+        calendar day; `season` is None for a film or for a title being placed by
+        its own first-air date.
+
+        WHY A PORT AND NOT A HELPER IN THE CALLER. The calendar search has to
+        produce records for titles no calendar FEED listed, and it built them by
+        hand from the detail projection — a second record builder. What followed
+        was a slow drip of one-field bugs, every one the same shape: the payload
+        carried it, the projection dropped it, and a row built here disagreed
+        with a row built by the fill. first_aired, country, poster, ids,
+        language, anime_type, release_types_by_country, and the genre SLUGS that
+        every genre filter matches on, which had been silently storing display
+        text. Asking the source to build its own record makes the whole class
+        impossible rather than fixed one field at a time.
+
+        A SOURCE WHOSE CALENDAR ROWS ARE SPARSE ANSWERS SPARSELY, honestly. Simkl's
+        calendar files carry no genres, country or certification at all, so a
+        record built from one comes back `enriched=False` exactly as a filled one
+        does, and the caller runs it through the same enrichment the fill relies
+        on. Returning a richer record here than the fill produces would be the
+        same drift in the other direction.
         """
         ...
 

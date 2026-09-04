@@ -274,20 +274,50 @@
         </div>
         <div class="modal-body">
             <p id="rewatchQuestion"></p>
-            {# THE DAY A FRESH RUN COUNTS FROM, offered and editable. The default
-               is the day after that old finish, which is what makes a new pass
-               start empty. Moving it earlier is the answer to "I watched two
-               episodes last week and then added the season" — those plays are
-               part of THIS run and should count. It applies only to the fresh
-               answer; the other one counts everything by definition. #}
+            {# WHAT WAS WATCHED SINCE THE RUN TURNED BACK, listed rather than
+               summarised. The question used to be a date and nothing else, so
+               answering it meant remembering your own viewing; the episodes are
+               already known, and naming them lets the choice be made by looking.
+               Hidden when the play order shows no restart, which is the ordinary
+               case of a season watched once. #}
+            <div id="rewatchSince" hidden>
+                <p class="distrakt-note" id="rewatchSinceLead"></p>
+                <ul class="rewatch-episodes" id="rewatchEpisodes"></ul>
+            </div>
+            <p id="rewatchAsk"><strong>When should this run begin?</strong></p>
+            {# THE DAY A FRESH RUN COUNTS FROM, and the ONE thing the answer is
+               made of. Everything else here writes into this field rather than
+               answering around it — which is what stops a typed date being an
+               option with no way to submit it. #}
             <div class="field">
-                <label for="rewatchFrom">A fresh run counts episodes watched on or after</label>
-                <input type="date" id="rewatchFrom">
+                <label for="rewatchFrom">Count episodes watched on or after</label>
+                {# `oninput` KEEPS THE BUTTON HONEST. The button names the date
+                   it will use, so a date typed here and a button saying
+                   something else would be two answers on screen at once. #}
+                <input type="date" id="rewatchFrom" oninput="syncRewatchButton()">
+            </div>
+            {# THE TWO ANSWERS ANYBODY ACTUALLY MEANS, as presets on the field
+               rather than as buttons of their own. "Count those" and "do not
+               count those" is how a person thinks about it; a date is how the
+               app stores it, and filling the field visibly is what shows the
+               reader those are the same statement. Hidden when nothing
+               restarted, because then there are no episodes to be either side
+               of. #}
+            <div class="rewatch-presets" id="rewatchPresets" hidden>
+                <button type="button" class="btn-ghost small"
+                        onclick="setRewatchFrom('before')">Include those episodes</button>
+                <button type="button" class="btn-ghost small"
+                        onclick="setRewatchFrom('after')">Start after them</button>
             </div>
         </div>
-        <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="answerRewatch(false)">Count what I've watched</button>
-            <button type="button" class="btn-primary" onclick="answerRewatch(true)">Start a fresh run</button>
+        <div class="modal-foot rewatch-foot">
+            <button type="button" class="btn-ghost" onclick="answerRewatch(false)">Count everything I've watched</button>
+            {# THE LABEL IS WRITTEN BY syncRewatchButton, because "start a fresh
+               run" does not say WHICH run: after filling the date above, the
+               reader was left to assume this button used it. It names the day
+               instead. #}
+            <button type="button" class="btn-primary" id="rewatchSubmit"
+                    onclick="answerRewatch(true)">Start a fresh run</button>
         </div>
     </div>
 </div>

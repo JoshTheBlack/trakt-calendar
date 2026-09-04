@@ -39,7 +39,7 @@ from datetime import date, datetime, timedelta
 from ... import perftrace
 from ...config import Settings
 from ...endpoints import Endpoint
-from ..base import Media, Record, Source, SourceNotModified
+from ..base import epoch_seconds, Media, Record, Source, SourceNotModified
 from . import _ids, transport
 from .transport import SimklError
 
@@ -420,7 +420,7 @@ def to_show_record(entry: dict) -> Record | None:
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.SHOW, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
-        air_ts=dt.timestamp(),
+        air_ts=epoch_seconds(dt),
         poster=poster_url(entry.get("poster")),
         episode_label=ep_label,
         episode_title="",
@@ -464,7 +464,7 @@ def to_movie_record(entry: dict) -> Record | None:
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
-        air_ts=dt.timestamp(),
+        air_ts=epoch_seconds(dt),
         date_only=True,
         poster=poster_url(entry.get("poster")),
         # See to_show_record's identical note just above.
@@ -514,7 +514,7 @@ def to_anime_film_record(entry: dict) -> Record | None:
         ids=_simkl_ids(ids_raw),
         detail_url=_detail_url(Media.MOVIE, entry.get("url"), ids_raw),
         title=entry.get("title") or "Untitled",
-        air_ts=dt.timestamp(),
+        air_ts=epoch_seconds(dt),
         poster=poster_url(entry.get("poster")),
         # NO EPISODE COORDINATE, even where the anime entry carried one. The
         # `episode` object on a film entry is Simkl's calendar shape rather

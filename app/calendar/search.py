@@ -47,6 +47,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from . import cache as calendar_cache
+from . import enrich as calendar_enrich
 from . import entries
 from . import filter as calendar_filter
 from .. import db, providers
@@ -144,10 +145,23 @@ class Elsewhere:
     # mean teaching the filter a second shape.
     record: object = None
 
+    source: str = ""
+    source_id: str = ""
+    media: str = "show"
+
     @property
     def url(self) -> str:
-        """The month, anchored at the day the lookup dated the title to, and
-        with NO highlight.
+        """The jump route, which writes this one airing and then sends the
+        reader to the month it lands on.
+
+        NOT STRAIGHT TO THE MONTH, because the month may not draw this title
+        however correctly it fills — see `fill_one_gap` for the two datasets that
+        disagree. And NOT WRITTEN AT SEARCH TIME, because a search returns
+        everything that matched and a reader asked for one of them.
+
+        IT CARRIES A SOURCE AND AN ID AND NOTHING ELSE THAT MATTERS. The service
+        is asked for the rest, so this link cannot be edited into a calendar row
+        of somebody's choosing.
 
         THE DISTINCTION IS BETWEEN POINTING AND PROMISING. Arriving fills the
         month, which is the point: the calendar learns about the title, and a
@@ -164,9 +178,12 @@ class Elsewhere:
         since which source describes it differs. Highlighting the wrong thing
         or nothing is worse than not offering to.
         """
-        anchor = f"#day-{self.day}" if self.day else ""
-        return (f"/calendar?year={self.year}&month={self.month}"
-                f"&endpoint={quote(self.endpoint_key, safe='')}{anchor}")
+        season = f"&season={self.item.season}" if self.item.season is not None else ""
+        return (f"/calendar/jump?source={quote(str(self.source), safe='')}"
+                f"&id={quote(str(self.source_id), safe='')}"
+                f"&media={quote(str(self.media), safe='')}{season}"
+                f"&endpoint={quote(self.endpoint_key, safe='')}"
+                f"&year={self.year}&month={self.month}")
 
 
 @dataclass(frozen=True)
@@ -361,57 +378,64 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
                     out.append(row)
         sp.set(found=len(out))
 
-    # WHAT WAS FOUND IS WRITTEN INTO THE CALENDAR, which is what turns this half
-    # from a signpost into a repair.
-    #
-    # THE CALENDARS HAVE HOLES AND THIS IS THE ONLY THING THAT CAN FILL THEM. A
-    # service answers two datasets about one show and they disagree: Trakt's show
-    # record dates Half Man's first season to 2026-04-28T20:00Z, and Trakt's
-    # premieres CALENDAR for that week does not list it at all. Linking to the
-    # month was honest and useless — the month filled correctly and still had no
-    # such card, because the feed it is built from never mentioned the title.
-    # Everything needed to write that airing was already in hand to draw the row.
-    #
-    # ON THE DELIBERATE PATH ONLY, because this is the deliberate path: the
-    # catalogue half runs on Enter or the button, never on a keystroke, so
-    # nothing is written by somebody typing.
-    #
-    # AND IT IS NOT PER-VIEWER, which is what makes writing to a shared cache
-    # legitimate here. A premiere date is a public fact from a public lookup —
-    # the same kind of row the fill stores — so it is right for every viewer of
-    # this instance, not just the one who searched. The rows are stored
-    # UNFILTERED like every other, and each viewer's own filters still decide at
-    # read whether a card is drawn.
-    await _fill_the_gaps(out, now=db.now())
     return Results(elsewhere=tuple(out[:RESULT_LIMIT]),
                    failed=frozenset(failed))
 
 
-async def _fill_the_gaps(rows: list[Elsewhere], *, now: int) -> None:
-    """Write the offered rows into the calendar they were missing from.
+async def fill_one_gap(settings, *, source, source_id: str, media: Media,
+                      season: int | None, endpoint_key: str, tz: ZoneInfo,
+                      now: int) -> str:
+    """Write ONE title's airing into the calendar and answer its mark key.
 
-    GROUPED BY ENDPOINT because that is how airings are keyed, and a search can
-    offer both a show and a film — which live on different calendars.
+    WHAT THIS IS FOR. A service can be missing its own title: Trakt's show record
+    dates Half Man's first season to 2026-04-28T20:00Z and Trakt's premieres
+    CALENDAR for that week does not list it at all. So a search result could name
+    a month, the month would fill correctly, and there would still be no such
+    card — because the row's destination came from one dataset and the page is
+    built from another. Writing the airing is what closes that, and it is the
+    only way this app can show a premiere both services' calendars have missed.
 
-    A FAILURE HERE LOSES A REPAIR, NEVER THE SEARCH. The rows have already been
-    described and are already drawable; a database that would not take them is a
-    reason to answer the reader anyway and try again next time, not a reason to
-    turn a working search into an error.
+    ONE TITLE, ON A CLICK, AND THAT IS THE WHOLE DIFFERENCE FROM WHERE THIS
+    STARTED. It first ran over every row a search returned, which meant typing
+    "traitors" and pressing Enter wrote sixteen season premieres into a calendar
+    shared by everyone on the instance — sixteen decisions from one act of
+    curiosity. A viewer following a result has asked for exactly one thing, and
+    exactly one thing is written.
+
+    THE SOURCE IS ASKED WHO THE TITLE IS; THE REQUEST IS NOT BELIEVED. The caller
+    supplies only which service and that service's own id — enough to address a
+    lookup and nothing more. Title, date, network, poster and the shared ids all
+    come back from the service, so a hand-made URL cannot invent a calendar row.
+
+    Returns the mark key to highlight, or "" when nothing could be written —
+    which is not an error: the month is still worth opening.
     """
-    if not rows:
-        return
-    by_endpoint: dict[str, list] = {}
-    for row in rows:
-        by_endpoint.setdefault(row.endpoint_key, []).append(row.record)
-    try:
-        for endpoint_key, records in by_endpoint.items():
-            await entries.store_loose_airings(
-                endpoint_key, records, now=now,
-                stale_after=now + TITLE_STALE_SECONDS)
-    # Deliberately broad: see this function's own second paragraph.
-    except Exception:
-        logger.warning("calendar search could not store what it found",
-                       exc_info=True)
+    provider = providers.get(source)
+    if provider is None or provider.detail_port is None:
+        return ""
+
+    when = ""
+    if season is not None and media is not Media.MOVIE:
+        for number, premiere in await _season_premieres(
+                settings, provider, source, source_id, media):
+            if number == season:
+                when = premiere
+                break
+    if not when:
+        # The title's own first-air date: what a film always uses, and what a
+        # show falls back to when the season could not be dated.
+        when = await _first_aired_of(settings, provider, media, source_id)
+        season = None
+    if not when:
+        return ""
+
+    records = await _records_for(provider, settings, source_id, media,
+                                 [(season, when)])
+    if not records:
+        return ""
+    await entries.store_loose_airings(
+        endpoint_key, records, now=now, stale_after=now + TITLE_STALE_SECONDS)
+    return render(records[0], tz).mark_key
 
 
 async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere]:
@@ -420,23 +444,18 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere
 
     NO DATE MEANS NO ROW, and that is the honest refusal rather than a
     conservative one: the whole offer is "go to where this should be", and a
-    season nobody can date has no where. Such a season is simply absent; the
-    stored half shows it if this instance holds it and nothing does if not.
+    season nobody can date has no where.
 
-    A FILM HAS NO SEASONS and gets the single row its own release date names,
-    which is why the two paths meet here rather than in the caller: "what can I
-    offer for this hit" has one answer per hit whatever its media.
+    THE RECORDS ARE BUILT BY THE SOURCE, THROUGH ITS OWN CALENDAR BUILDER. This
+    module used to assemble them by hand out of the detail projection, and every
+    field that projection quietly dropped became a bug of its own — see
+    `DetailPort.records_for` for the list. Asking the source removes the class.
 
     THE SEASON LIST IS ALLOWED TO FAIL WITHOUT LOSING THE TITLE. A source that
-    describes a show but will not enumerate its seasons still knows when the
-    show first aired, and one row pointing at that is better than dropping a
-    title the reader asked for by name.
+    describes a show but will not enumerate its seasons still knows when the show
+    first aired, and one row pointing at that is better than dropping a title the
+    reader asked for by name.
     """
-    # WHICH SOURCE ANSWERS FOR A TITLE TWO OF THEM FOUND is already decided:
-    # `source_ids` is ordered by the registry, so its first entry is the leader —
-    # the same one the tracker's own pick calls a season lookup with. A merged
-    # hit carries no single `source`, because being one row assembled from
-    # several answers is the whole point of the merge.
     leader = next(iter(hit.source_ids.items()), None)
     if leader is None:
         return []
@@ -444,43 +463,73 @@ async def _describe(settings, hit, media: Media, tz: ZoneInfo) -> list[Elsewhere
     provider = providers.get(source)
     if provider is None or provider.detail_port is None:
         return []
-    try:
-        described = await provider.detail_port.fetch_details(
-            settings, media, source_id, None)
-    except SourceUnavailable as exc:
-        logger.debug("search: %s could not describe %s: %s", source, source_id, exc)
-        return []
-    if not isinstance(described, dict):
-        return []
 
     moments = []
     if media is not Media.MOVIE:
-        moments = await _season_premieres(settings, provider, source, source_id, media)
+        moments = await _season_premieres(settings, provider, source,
+                                          source_id, media)
     if not moments:
-        # The show's own first-air date, which is what a film always uses and
-        # what a show falls back to when its seasons could not be listed. Always
-        # an instant on both sources — a title's `first_aired` carries a time
-        # where a season list may not.
-        whole = _first_aired(described)
-        moments = [(None, whole, False)] if whole is not None else []
+        whole = await _first_aired_of(settings, provider, media, source_id)
+        moments = [(None, whole)] if whole else []
+    if not moments:
+        return []
 
+    records = await _records_for(provider, settings, source_id, media,
+                                 moments[:SEASONS_PER_SHOW])
+    endpoint_key = _endpoint_for(media)
     rows = []
-    for season, moment, date_only in moments[:SEASONS_PER_SHOW]:
-        day = _local_day(moment.timestamp(), date_only, tz)
-        record = _as_record(hit, described, moment, source, source_id, media,
-                            season=season, date_only=date_only)
-        endpoint_key = _endpoint_for(media)
+    for record in records:
+        day = _local_day(record.air_ts, record.date_only, tz)
         rows.append(Elsewhere(
             item=render(record, tz), endpoint_key=endpoint_key,
             endpoint_label=get_endpoint(endpoint_key).label,
-            year=day.year, month=day.month, day=day.isoformat(), record=record))
+            year=day.year, month=day.month, day=day.isoformat(), record=record,
+            source=str(source), source_id=str(source_id), media=str(media)))
     return rows
 
 
+async def _records_for(provider, settings, source_id, media: Media, moments):
+    """The source's own calendar records for these air times, ENRICHED.
+
+    TWO STEPS BECAUSE TWO SOURCES ANSWER DIFFERENTLY, and both are the fill's own
+    steps rather than this module's. A source whose calendar files carry every
+    field returns a finished record and the second step does nothing; Simkl's
+    carry a title, an id, a date and a poster, so its record arrives
+    `enriched=False` exactly as a filled one does and the ordinary enrichment
+    finishes it. Doing either by hand here is what produced a second record
+    builder and the drip of one-field bugs behind it.
+    """
+    records = await provider.detail_port.records_for(
+        settings, source_id, media, moments)
+    return await calendar_enrich.enrich_now(settings, records, now=db.now())
+
+
+async def _first_aired_of(settings, provider, media: Media, source_id) -> str:
+    """When the TITLE itself first aired, as the source states it, or "".
+
+    THE FALLBACK FOR A SHOW WHOSE SEASONS COULD NOT BE LISTED, and the only date
+    a film ever has. Read off the description because that is the one place both
+    sources put it.
+    """
+    try:
+        described = await provider.detail_port.fetch_details(
+            settings, media, source_id, None)
+    except SourceUnavailable:
+        return ""
+    if not isinstance(described, dict):
+        return ""
+    raw = str(described.get("first_aired") or "").strip()
+    # REFUSED RATHER THAN PASSED ON. A source can state a date this app cannot
+    # read, and handing it to a record builder turns one unreadable field into a
+    # failed search. `_as_moment` is the same reading the season list gets.
+    return raw if _as_moment(raw) is not None else ""
+
+
 async def _season_premieres(settings, provider, source, source_id,
-                            media: Media) -> list[tuple[int, datetime, bool]]:
-    """`(season, premiere, date_only)` for every season this source can date,
-    NEWEST FIRST — see `_as_moment` for what the third element decides.
+                            media: Media) -> list[tuple[int, str]]:
+    """`(season, premiere)` for every season this source can date, NEWEST FIRST,
+    with the premiere left EXACTLY as the source spelled it — see `_as_moment`
+    for why the difference between a day and an instant must survive this.
 
     NEWEST FIRST BECAUSE THAT IS WHAT A SEARCH IS USUALLY ABOUT. Somebody typing
     a title they have just heard of wants the season now airing far more often
@@ -500,12 +549,19 @@ async def _season_premieres(settings, provider, source, source_id,
     out = []
     for entry in getattr(answer, "seasons", None) or []:
         number = entry.get("season")
-        dated = _as_moment(entry.get("first_aired"))
+        raw = entry.get("first_aired")
+        dated = _as_moment(raw)
         if number is None or dated is None:
             continue
-        out.append((int(number), dated[0], dated[1]))
-    out.sort(key=lambda row: row[1], reverse=True)
-    return out
+        # THE SOURCE'S OWN SPELLING TRAVELS, and the parsed instant is only used
+        # to order these. A record builder reads the string: a bare day means a
+        # calendar day and a timestamp means an instant, and handing it a parsed
+        # datetime would erase that difference — `str(datetime)` separates the
+        # date from the time with a SPACE, which every "is there a T in it"
+        # check in this codebase reads as "no time was given".
+        out.append((int(number), str(raw), dated[0]))
+    out.sort(key=lambda row: row[2], reverse=True)
+    return [(number, raw) for number, raw, _moment in out]
 
 
 def _as_moment(raw) -> tuple[datetime, bool] | None:
@@ -536,68 +592,3 @@ def _as_moment(raw) -> tuple[datetime, bool] | None:
     return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)), date_only
 
 
-def _first_aired(described: dict) -> datetime | None:
-    """The instant a described title first airs, or None.
-
-    TOLERANT OF THE SHAPES THE TWO PACKAGES ACTUALLY EMIT — an ISO string with
-    or without a zone — and refuses anything else rather than guessing. A guessed
-    date sends a reader to the wrong month, which is worse than not offering.
-    """
-    raw = described.get("first_aired") or described.get("air_date") or ""
-    text = str(raw).strip()
-    if not text:
-        return None
-    try:
-        moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-
-
-def _as_record(hit, described: dict, moment: datetime, source, source_id,
-               media: Media, *, season: int | None = None,
-               date_only: bool = False):
-    """A catalogue hit plus its description, as the Record a card draws from.
-
-    IT IS A REAL `Record` AND NOT A LOOKALIKE, so the same template renders it
-    and a field added to a card cannot quietly skip these rows. `enriched` is
-    True because a per-title lookup is exactly what enrichment IS — this row is
-    not waiting on one.
-
-    `season` IS WHAT MAKES ONE SHOW'S ROWS DIFFERENT FROM EACH OTHER. Every
-    season premiere of a title shares one description, so without the number
-    they render as the same card repeated — same heading, same date line, no way
-    to tell which one a link goes to. It is NOT part of `mark_key`, which is the
-    title's identity by design, so anything asking "is this row already on the
-    calendar" has to carry the season beside it.
-    """
-    from ..providers.base import Record
-
-    return Record(
-        source=source, media=media, id=str(source_id), season=season,
-        # A PREMIERE GIVEN AS A BARE DAY IS THE SAME DAY EVERYWHERE, and saying
-        # so here is what stops the card's own rendering shifting it back into a
-        # zone — the identical rule the calendar applies to a film's release.
-        date_only=date_only,
-        ids=dict(hit.ids or {}), detail_url=str(described.get("homepage") or ""),
-        title=hit.title or str(described.get("title") or ""),
-        air_ts=moment.timestamp(),
-        year=hit.year or described.get("year") or "",
-        network=str(described.get("network") or hit.network or ""),
-        # WITHOUT THIS THE COUNTRY FILTER CANNOT ACT ON THESE ROWS AT ALL. A
-        # record carrying no country is not excluded BY country, so a viewer
-        # excluding a dozen of them was still offered every one — and the month
-        # the row linked to could never draw the title. It is also what the row
-        # names on screen, which is how one franchise's many national versions
-        # are told apart.
-        country=str(described.get("country") or ""),
-        runtime=described.get("runtime") or hit.runtime,
-        status=str(described.get("status") or ""),
-        rating=described.get("rating"),
-        imdb_rating=described.get("imdb_rating"),
-        genres=[str(g) for g in (described.get("genres") or [])],
-        certification=str(described.get("certification") or ""),
-        overview=str(described.get("overview") or hit.overview or ""),
-        poster=str(described.get("poster") or ""),
-        enriched=True,
-    )

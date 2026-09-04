@@ -146,7 +146,7 @@ class StoredRecordTests(unittest.TestCase):
     }
 
     def record(self, entry=None, endpoint=SHOWS):
-        return trakt_calendar.to_record(entry or self.RICH, endpoint)
+        return trakt_calendar.to_record(entry or self.RICH, endpoint.media)
 
     def test_a_record_survives_the_round_trip_through_storage_unchanged(self):
         """The strongest possible statement of the stored shape's contract: what
@@ -204,7 +204,7 @@ class StoredRecordTests(unittest.TestCase):
         """Which is what makes the defaults above load-bearing rather than
         decorative: the ordinary record exercises them on every window."""
         stored = trakt_calendar.to_record(
-            _entry("plain", "2026-07-06T12:00:00Z"), SHOWS).to_dict()
+            _entry("plain", "2026-07-06T12:00:00Z"), SHOWS.media).to_dict()
         self.assertNotIn("certification", stored)
         self.assertNotIn("language", stored)
         self.assertNotIn("genres", stored)
@@ -222,7 +222,7 @@ class StoredRecordTests(unittest.TestCase):
 
     def test_an_entry_with_no_media_is_not_a_record(self):
         self.assertIsNone(
-            trakt_calendar.to_record({"first_aired": "2026-01-01T00:00:00Z"}, SHOWS))
+            trakt_calendar.to_record({"first_aired": "2026-01-01T00:00:00Z"}, SHOWS.media))
 
 
 # ---------------------------------------------------------------------------

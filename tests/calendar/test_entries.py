@@ -592,12 +592,14 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 1)
 
-    async def test_the_feed_wins_when_it_is_next_asked(self):
-        """DELIBERATE, AND THE HONEST ORDER OF AUTHORITY. A fill replaces what a
-        source holds for a span, so a source that STILL omits the title removes
-        this row — and the next search puts it back. Anything else would mean a
-        row nobody can ever retract, resurrecting titles a service has
-        deliberately dropped.
+    async def test_a_fill_of_the_same_span_does_not_take_it_away(self):
+        """THE WHOLE POINT, AND IT WAS BRIEFLY THE OPPOSITE. A fill REPLACES what
+        a source holds for a span — delete, then insert what came back — because
+        a title a source has stopped listing must stop being drawn. A repaired
+        row is in that delete's path and not in the insert's, so it survived only
+        until the window next refetched: measured at under seven days for the
+        month Half Man sits in. The delete now spares rows no feed ever listed,
+        which are exactly the rows it would never put back.
         """
         await self._write([_record("halfman", 1, 1, AIR)])
         await calendar_cache.store_window(
@@ -606,7 +608,44 @@ class AirningsWrittenWithoutAFeedTests(unittest.IsolatedAsyncioTestCase):
             sources=["trakt"], asked=["trakt"])
         back, _asked, _answered, _at = await calendar_entries.read_span(
             SHOWS, date(2026, 7, 6), date(2026, 7, 13))
+        self.assertEqual(sorted(r.title for r in back),
+                         ["Halfman", "Somethingelse"])
+
+    async def test_the_feed_takes_the_row_back_when_it_lists_the_title(self):
+        """AND THE EXEMPTION ENDS THE MOMENT IT IS NOT NEEDED. A feed row for the
+        SAME airing has the same natural key, so it overwrites the searched one
+        and returns it to an ordinary row — after which the next fill may remove
+        it like any other. Without this a title would be exempt for ever on the
+        strength of one search, and a service that later dropped it could never
+        take it off the calendar.
+        """
+        await self._write([_record("halfman", 1, 1, AIR)])
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record("halfman", 1, 1, AIR)], 600, 2_000_000,
+            sources=["trakt"], asked=["trakt"])
+        flag = await db.fetch_value(
+            "SELECT from_search FROM calendar_airings WHERE source_id = ?",
+            ("halfman",))
+        self.assertEqual(flag, 0, "a feed row did not reclaim the searched one")
+
+        # ...and now an ordinary fill that no longer lists it removes it.
+        await calendar_cache.store_window(
+            SHOWS, calendar_cache.window_start(date(2026, 7, 6)),
+            [_record("somethingelse", 1, 1, AIR)], 600, 3_000_000,
+            sources=["trakt"], asked=["trakt"])
+        back, _asked, _answered, _at = await calendar_entries.read_span(
+            SHOWS, date(2026, 7, 6), date(2026, 7, 13))
         self.assertEqual([r.title for r in back], ["Somethingelse"])
+
+    async def test_a_searched_row_is_still_reclaimed_by_retention(self):
+        """IT IS AN EXEMPTION FROM THE FILL, NOT FROM AGEING. A title every
+        service has genuinely dropped must not live on the calendar for ever on
+        the strength of one search years ago."""
+        await self._write([_record("halfman", 1, 1, AIR)], now=1_000_000)
+        await calendar_entries.sweep(now=1_000_000 + calendar_entries.RETAIN_SECONDS + 1)
+        self.assertEqual(
+            await db.fetch_value("SELECT COUNT(*) FROM calendar_airings"), 0)
 
     async def test_nothing_to_write_touches_nothing(self):
         self.assertEqual(await self._write([]), 0)

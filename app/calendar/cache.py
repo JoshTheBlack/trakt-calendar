@@ -664,40 +664,15 @@ async def read_cached_window(endpoint_key: str, start: date) -> tuple[CachedWind
     return CachedWindow(groups, tuple(answered), tuple(asked)), int(stored_at)
 
 
-async def cached_calendar_groups() -> list[dict]:
-    """Every group ANY currently-stored calendar window holds, across every
-    endpoint and window, read straight off `api_cache` — no fetch, and no
-    dependency on whether a viewer has ever read one of these windows.
-
-    THIS IS WHAT app/calendar/enrich.py's DRAIN SCANS to learn which Simkl ids
-    the stored calendar names, rather than depending on an in-memory queue a
-    viewer's read happened to populate — see that module for the starvation a
-    queue-fed design produced. A window is filled (by fetch_window_records)
-    before anybody has read it, so the ids it names are knowable straight from
-    this table; nothing about deriving the drain's work needs a read to have
-    happened first.
-
-    PREFER `entries.owed_titles` TO THIS WHERE THE QUESTION IS "what does
-    enrichment still owe". This one materializes and GROUPS every stored airing
-    to hand back a shape the old blob happened to have; that is the right answer
-    for a caller which genuinely needs every group (the tracker's name index),
-    and much more than a drain needs. The old implementation had no such choice —
-    inflating every window was the only way to see inside one — which is why its
-    measurement is worth keeping as a warning rather than deleting: 101 windows,
-    5.2 MB, ~358ms, called twice per drain pass, and a drain pass therefore spent
-    most of a second of event-loop time before it made a single request.
-    """
-    records = await entries.all_records()
-    return group_records(records)
-
-
 async def stored_window_signature() -> str:
     """A short value that changes whenever the stored calendar might name a title
     it did not name before. Cheap: no payload leaves the database.
 
     FOR CALLERS THAT DERIVE WORK FROM THE STORED CALENDAR and would otherwise
-    redo it on every request. `cached_calendar_groups` inflates every window —
-    measured at roughly 30ms for 3,700 groups on the author's instance — which is
+    redo it on every request. Materialising and grouping every stored airing to
+    answer a question about a handful of titles — measured at 3.0 SECONDS over
+    33,314 groups on the author's instance, most of it blocking the event loop —
+    is what this exists to avoid, and it is
     nothing once, and is worth avoiding on a page load that will find exactly what
     the previous one found. A caller pairs this with its own notion of what it
     still owes: unchanged on both sides means the answer cannot have moved.

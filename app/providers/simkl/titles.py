@@ -321,6 +321,15 @@ def _extract(payload: dict) -> dict[str, Any]:
         genres.append("anime")
     return {
         "extract_version": EXTRACT_VERSION,
+        # RETURNED, NOT STORED, AND SO NOT AN EXTRACT_VERSION CHANGE.
+        # `entries.enrichment_values` names every field it keeps and this is not
+        # one of them, so no stored row gains a column and nothing is re-fetched.
+        # What it is for: the calendar SEARCH builds a record for a title this
+        # instance has never listed, and `calendar.to_show_record` needs a name.
+        # The stored extraction deliberately keeps none — the calendar already
+        # had one from the listing that put the card on screen — and that
+        # reasoning is about STORAGE, not about what a lookup may hand back.
+        "title": str(payload.get("title") or ""),
         "genres": genres,
         "network": str(payload.get("network") or ""),
         "country": str(payload.get("country") or ""),

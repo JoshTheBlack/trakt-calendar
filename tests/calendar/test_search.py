@@ -21,6 +21,7 @@ import unittest
 from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app import db
@@ -249,20 +250,60 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
                                year=2026, network="", runtime=None, overview="")
 
     def _port(self, described, seasons=None):
-        """A detail port that answers both halves of what a catalogue row needs.
+        """A detail port that answers all three halves of what a row needs.
 
         `seasons=None` MEANS "THIS SOURCE WILL NOT LIST THEM", which is a real
         state and the one most of these tests want: it makes the hit fall back
-        to the show's own first-air date, so the assertions about placement stay
+        to the show's own first-air date, so assertions about placement stay
         about placement.
+
+        `records_for` BUILDS REAL RECORDS, because the real one does. A provider
+        answers this by running the payload through its OWN calendar record
+        builder — that is the entire point of the port — so a double that
+        returned some other shape, or that skipped the fields a filter reads,
+        would test a pipeline this app does not have. This is the lesson the
+        merged-hit double taught once already.
+
+        `enriched=True` BECAUSE THIS STANDS IN FOR A SOURCE WHOSE CALENDAR ROWS
+        ARE COMPLETE. Simkl's are not, and its records come back needing the
+        enrichment pass; saying so here would send these tests at the network,
+        which the autouse guard in tests/conftest.py would rightly stop.
         """
         async def _seasons(settings, source_id, media):
             if seasons is None:
                 raise SourceUnavailable("no season list")
             return SimpleNamespace(seasons=list(seasons))
 
+        async def _records(settings, source_id, media, moments):
+            from app.providers.base import Record
+
+            out = []
+            for season, when in moments:
+                bare = len(str(when)) <= 10
+                text = f"{when}T00:00:00+00:00" if bare else str(when).replace("Z", "+00:00")
+                moment = datetime.fromisoformat(text)
+                out.append(Record(
+                    source=Source.SIMKL, media=media, id=str(source_id),
+                    ids={"simkl": str(source_id), "tmdb": 777},
+                    detail_url="", title=described.get("title") or "Unseen Show",
+                    air_ts=moment.timestamp(), date_only=bare, season=season,
+                    year=described.get("year") or 2026,
+                    network=str(described.get("network") or ""),
+                    country=str(described.get("country") or ""),
+                    certification=str(described.get("certification") or ""),
+                    genres=[str(g).lower().replace(" ", "-")
+                            for g in (described.get("genres") or [])],
+                    poster=str(described.get("poster") or ""),
+                    overview=str(described.get("overview") or ""),
+                    runtime=described.get("runtime"),
+                    status=str(described.get("status") or ""),
+                    rating=described.get("rating"),
+                    imdb_rating=described.get("imdb_rating"),
+                    enriched=True))
+            return out
+
         return SimpleNamespace(fetch_details=AsyncMock(return_value=described),
-                               fetch_seasons=_seasons)
+                               fetch_seasons=_seasons, records_for=_records)
 
     async def _catalogue(self, described, known=frozenset(), seasons=None):
         # ANSWERS FOR SHOWS AND NOT FOR FILMS, because the real thing asks
@@ -344,57 +385,24 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
             seasons=[{"season": 1, "first_aired": "2026-04-28"}])
         self.assertEqual(found.elsewhere[0].day, "2026-04-28")
 
-    async def test_what_it_finds_is_written_into_the_calendar(self):
-        """THE POINT OF THE CATALOGUE HALF, AFTER THE REPORT THAT BROKE IT.
-        Linking to a month was honest and useless: Half Man's premiere is in
-        Trakt's SHOW record and absent from Trakt's premieres CALENDAR, so the
-        month filled correctly and still had no such card. Everything needed to
-        write that airing was already in hand to draw the row, so it is written
-        — which is also the only way this app can show a premiere both services'
-        calendars have missed.
+    async def test_searching_writes_nothing_at_all(self):
+        """THE WIDENING THIS UNDOES. The write first ran over every row a search
+        returned, so typing "traitors" and pressing Enter put sixteen season
+        premieres into a calendar shared by everyone on the instance — sixteen
+        decisions out of one act of curiosity. A search offers; it does not
+        decide. Following a result is the act that names exactly one thing.
         """
-        stored = []
+        wrote = []
 
         async def _store(endpoint_key, records, *, now, stale_after):
-            stored.append((endpoint_key, [r.title for r in records]))
+            wrote.append(endpoint_key)
             return len(records)
 
         with patch("app.calendar.entries.store_loose_airings", _store):
-            await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
-                                   "title": "Unseen Show"})
-        self.assertEqual(stored, [("shows/premieres", ["Unseen Show"])])
-
-    async def test_a_store_that_fails_still_answers_the_reader(self):
-        """A REPAIR IS A BONUS, NEVER THE ANSWER. The rows are already described
-        and already drawable; a database that would not take them is a reason to
-        try again next time, not a reason to turn a working search into an
-        error."""
-        async def _boom(endpoint_key, records, *, now, stale_after):
-            raise RuntimeError("disk is unhappy")
-
-        with patch("app.calendar.entries.store_loose_airings", _boom):
-            found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z"})
+            found = await self._catalogue(
+                {"first_aired": "2026-11-04T20:00:00Z", "title": "Unseen Show"})
         self.assertEqual(len(found.elsewhere), 1)
-
-    async def test_shows_and_films_are_written_to_their_own_calendars(self):
-        """Airings are keyed by endpoint, and one search can offer both — so
-        grouping by endpoint is not tidiness, it is the key."""
-        seen = []
-
-        async def _store(endpoint_key, records, *, now, stale_after):
-            seen.append(endpoint_key)
-            return len(records)
-
-        async def _search(asked, settings, media, query):
-            return SimpleNamespace(hits=[self._hit()], failed=frozenset())
-
-        with patch("app.distrakt.search.search_catalogue", new=_search),              patch("app.calendar.entries.store_loose_airings", _store),              patch("app.providers.for_catalogue_search",
-                   return_value=[(Source.SIMKL, object())]),              patch("app.providers.get", return_value=SimpleNamespace(
-                 detail_port=self._port({"first_aired": "2026-11-04T20:00:00Z"}))):
-            await calendar_search.catalogue(
-                "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
-                known=frozenset())
-        self.assertEqual(sorted(seen), ["movies", "shows/premieres"])
+        self.assertEqual(wrote, [], "a search wrote to the shared calendar")
 
     async def test_a_show_is_offered_once_per_season_premiere(self):
         """WHAT THE SHOW-SHAPED ROW COULD NOT DO. A long-running title has one
@@ -480,7 +488,9 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
                  detail_port=SimpleNamespace(
                      fetch_details=AsyncMock(return_value={
                          "first_aired": "2026-11-04T20:00:00Z"}),
-                     fetch_seasons=_seasons))):
+                     fetch_seasons=_seasons,
+                     records_for=self._port(
+                         {"first_aired": "2026-11-04T20:00:00Z"}).records_for))):
             found = await calendar_search.catalogue(
                 "a film", settings=self.settings, prefs=self.prefs, tz=self.tz,
                 known=frozenset())
@@ -570,14 +580,18 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         url = found.elsewhere[0].url
         self.assertIn("year=2026", url)
         self.assertIn("month=11", url)
-        # ANCHORED AT THE DAY, BUT NOT HIGHLIGHTED, and the difference is what
-        # this row is allowed to claim. `#day-` is resolved by the browser: it
-        # scrolls there when that day is drawn and does nothing when it is not,
-        # so pointing costs nothing to be wrong about. `highlight=` names a
-        # specific CARD, and the identity a catalogue lookup builds need not be
-        # the one the calendar draws for the same title.
-        self.assertIn("#day-2026-11-04", url)
-        self.assertNotIn("highlight=", url)
+        # IT GOES THROUGH THE JUMP ROUTE, which writes this one airing and then
+        # redirects. Straight to the month was honest and useless: the month can
+        # fill perfectly and still not draw the title, because a service's show
+        # record and its calendar feed disagree.
+        self.assertIn("/calendar/jump?", url)
+        # AND IT CARRIES A SERVICE AND THAT SERVICE'S OWN ID AND NOTHING ELSE
+        # THAT MATTERS. Everything a row is made of comes back from the service,
+        # so this link cannot be edited into a calendar row of one's choosing.
+        self.assertIn("source=simkl", url)
+        self.assertIn("id=4242", url)
+        self.assertNotIn("title=", url)
+        self.assertNotIn("air", url)
 
     async def test_a_title_with_no_date_is_not_offered_at_all(self):
         """The whole offer is "go to where this should be", and a title nobody
@@ -626,7 +640,8 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
                  detail_port=SimpleNamespace(
                      fetch_details=_details,
                      fetch_seasons=AsyncMock(
-                         side_effect=SourceUnavailable("no season list"))))):
+                         side_effect=SourceUnavailable("no season list")),
+                     records_for=AsyncMock(return_value=[])))):
             await calendar_search.catalogue(
                 "unseen", settings=self.settings, prefs=self.prefs, tz=self.tz,
                 known=frozenset())

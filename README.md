@@ -31,7 +31,7 @@ title for cast, an embedded trailer, and the full episode list.
 
 - 📅 Browse premieres for any month/year, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
-- 🔍 **Find a title and jump to it** — search your own calendar as you type, with no calls to anybody; press Enter to also ask the services, which turns up titles your calendar hasn't loaded yet and links to the month they belong to.
+- 🔍 **Find a title and jump to it** — search the calendar you're on as you type, with no calls to anybody, and widen to your other calendars from the results; press Enter to also ask the services, which turns up titles your calendar hasn't loaded yet. Those come back a season at a time, and opening one writes it onto the day it belongs to — including premieres the services left off their own calendars.
 - 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, which services show is a tick-box in the calendar's **Filters** panel, and whose description you read when both list the same title is an order on your **Account** page. Simkl needs no credentials to fill a calendar
 - 🖼️ Rich poster tiles — rating, runtime, network, and episode (SxxEyy) badges, plus language, country, day-of-week, and a lazily-loaded current-season summary (episode count, latest / next air date)
 - 🔍 **Details modal** on click — full overview, an embedded trailer, cast (headshots + characters), and the season's episode list with air dates

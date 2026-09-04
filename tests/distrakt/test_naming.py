@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 
 from app import db, distrakt
 from app.calendar import cache as calendar_cache
+from app.calendar import entries as calendar_entries
 from app.distrakt import naming, store
 from app.providers.base import ItemKey, Media, Record, Source
 from tests.distrakt.test_store import DistraktTestCase, a_record, month_back
@@ -222,17 +223,23 @@ class NotLookingAgainForNothingTests(DistraktTestCase):
         self.walks = 0
 
     def _count_walks(self):
-        """Count inflations of the stored windows without stubbing out what they
-        return — the point is how OFTEN the walk happens, not what it finds."""
-        real = calendar_cache.cached_calendar_groups
+        """Count the calendar lookups without stubbing out what they return —
+        the point is how OFTEN one happens, not what it finds.
 
-        async def counting():
+        IT COUNTS THE KEYED READ NOW, not the whole-calendar walk it replaced.
+        The walk was measured at 3.8 seconds to learn two names on a live
+        instance; the guard these tests protect is what kept it from running on
+        every load, and it still earns its keep against a keyed read — a query
+        nobody needs is still a query.
+        """
+        real = calendar_entries.slugs_for
+
+        async def counting(keys):
             self.walks += 1
-            return await real()
+            return await real(keys)
 
-        naming.calendar_cache.cached_calendar_groups = counting
-        self.addCleanup(setattr, naming.calendar_cache,
-                        "cached_calendar_groups", real)
+        naming.calendar_entries.slugs_for = counting
+        self.addCleanup(setattr, naming.calendar_entries, "slugs_for", real)
 
     async def test_an_unpayable_debt_is_not_re_examined_every_pass(self):
         """A title the calendar has never named. The first pass has to look; the

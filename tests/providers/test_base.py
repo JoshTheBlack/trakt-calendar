@@ -70,7 +70,7 @@ class TestCollectIds:
 
 class TestNormalizeProducesARecord:
     def test_provenance_is_source_ids_and_detail_url(self):
-        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        record = trakt_calendar.to_record(ENTRY, SHOWS.media)
         assert record.source == Source.TRAKT
         # `trakt_slug` beside `slug`: both services call a title's readable
         # name `slug` and disagree on it, so each one's is namespaced at the
@@ -86,7 +86,7 @@ class TestNormalizeProducesARecord:
         URL for a movie 404s rather than failing visibly here."""
         entry = {"released": "2026-07-15",
                  "movie": {"title": "A Film", "ids": {"slug": "a-film", "trakt": 9}}}
-        record = trakt_calendar.to_record(entry, MOVIES)
+        record = trakt_calendar.to_record(entry, MOVIES.media)
         assert record.detail_url == "https://trakt.tv/movies/a-film"
 
     def test_a_slugless_entry_links_by_id_rather_than_to_the_homepage(self):
@@ -96,14 +96,14 @@ class TestNormalizeProducesARecord:
         it worked, so nobody reports it, and lands nowhere near the title."""
         entry = {**ENTRY, "show": {**ENTRY["show"],
                                    "ids": {"trakt": 123, "tvdb": 456}}}
-        record = trakt_calendar.to_record(entry, SHOWS)
+        record = trakt_calendar.to_record(entry, SHOWS.media)
         assert record.detail_url == "https://trakt.tv/shows/123"
 
     def test_the_slug_still_wins_when_trakt_named_one(self):
         """The id is the FALLBACK, not the preference. Both services ask that the
         readable name be sent when it is known, because resolving the numeric id
         costs them a title lookup and a redirect they need not have done."""
-        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        record = trakt_calendar.to_record(ENTRY, SHOWS.media)
         assert record.detail_url == "https://trakt.tv/shows/a-show"
 
     def test_an_entry_naming_no_trakt_id_at_all_still_has_a_url(self):
@@ -111,21 +111,21 @@ class TestNormalizeProducesARecord:
         answer: there is no title to point at. It must not render `None` into
         the path, which would 404 instead."""
         entry = {**ENTRY, "show": {**ENTRY["show"], "ids": {"tvdb": 456}}}
-        record = trakt_calendar.to_record(entry, SHOWS)
+        record = trakt_calendar.to_record(entry, SHOWS.media)
         assert record.detail_url == "https://trakt.tv"
 
     def test_media_is_the_enum_and_still_equals_its_string(self):
         """Templates, DB columns and the response keys all hold the plain
         string; the enum has to stay interchangeable with it or every one of
         those boundaries grows a conversion."""
-        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        record = trakt_calendar.to_record(ENTRY, SHOWS.media)
         assert record.media is Media.SHOW
         assert record.media == "show"
 
     def test_a_record_carries_no_viewer_local_spelling_of_its_air_time(self):
         """The whole reason the cache can be shared: a record says WHEN in POSIX
         seconds and nothing else, so one stored copy serves every timezone."""
-        record = trakt_calendar.to_record(ENTRY, SHOWS)
+        record = trakt_calendar.to_record(ENTRY, SHOWS.media)
         assert record.air_ts == 1784145600.0
         assert not hasattr(record, "air_date")
 

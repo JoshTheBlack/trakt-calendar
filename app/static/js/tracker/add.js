@@ -241,20 +241,86 @@ function announceAdded(season, asFinished) {
 
 let pendingRewatch = null;
 
+// A DAY, WRITTEN THE WAY A PERSON READS ONE.
+function rewatchDay(iso) {
+    if (!iso) { return ''; }
+    return new Date(iso + 'T00:00:00').toLocaleDateString(
+        undefined, { day: 'numeric', month: 'long', year: 'numeric' });
+}
+
+// The day BEFORE an ISO day, so "do not count these episodes" can be expressed
+// as the same kind of value the date field holds.
+function rewatchDayAfter(iso) {
+    const d = new Date(iso + 'T00:00:00');
+    d.setDate(d.getDate() + 1);
+    return d.toISOString().slice(0, 10);
+}
+
 function openRewatchPrompt(prompt, season) {
     pendingRewatch = { ...prompt, season: season };
-    const when = prompt.completed_on
-        ? new Date(prompt.completed_on + 'T00:00:00').toLocaleDateString(
-            undefined, { day: 'numeric', month: 'long', year: 'numeric' })
-        : 'some time ago';
+    const restart = prompt.restart || null;
+    const finished = rewatchDay(prompt.completed_on) || 'some time ago';
     document.getElementById('rewatchQuestion').textContent =
-        `Your history says you finished ${prompt.title} season ${prompt.season} on ${when}.`;
-    // WHERE A FRESH RUN STARTS, EDITABLE. The offered day is the one after that
-    // old finish, which is what makes a new pass start empty; moving it earlier
-    // is how somebody who watched an episode or two before adding the season
-    // gets those counted.
+        `Your history says you finished ${prompt.title} season ${prompt.season} on ${finished}.`;
+
+    // WHAT HAS BEEN WATCHED SINCE, WHEN THE ORDER SHOWS A SECOND PASS BEGAN.
+    // Listing the episodes is what lets the question be answered by looking
+    // rather than by remembering; without it the reader is being asked to date
+    // their own viewing from memory.
+    const since = document.getElementById('rewatchSince');
+    const list = document.getElementById('rewatchEpisodes');
+    const presets = document.getElementById('rewatchPresets');
+    const episodes = (restart && restart.episodes) || [];
+
+    if (episodes.length) {
+        const count = episodes.length === 1 ? 'One episode has' : `${episodes.length} episodes have`;
+        document.getElementById('rewatchSinceLead').textContent =
+            `${count} been watched since then:`;
+        list.innerHTML = episodes.map(e => `<li>${esc(
+            `S${String(prompt.season).padStart(2, '0')}E${String(e.episode).padStart(2, '0')}`
+        )} <span class="rewatch-when">${esc(rewatchDay(e.day))}</span></li>`).join('');
+        since.hidden = false;
+        presets.hidden = false;
+    } else {
+        since.hidden = true;
+        presets.hidden = true;
+    }
+
+    // WHERE A FRESH RUN STARTS, EDITABLE, AND PRE-FILLED WITH THE ANSWER THE
+    // PLAY ORDER SUGGESTS — the day the run began where there is one, and the
+    // day after the last play where there is not.
     document.getElementById('rewatchFrom').value = prompt.suggested_from || '';
+    syncRewatchButton();
     document.getElementById('rewatchModal').classList.add('open');
+}
+
+// The two named answers, written INTO the date field rather than answering on
+// their own. `before` counts the episodes listed — the run began on the first of
+// them; `after` does not, so it begins the day following the last. Filling the
+// field instead of submitting is what keeps one answer to this question: the
+// date. It also means a reader can take a preset and then adjust it.
+// THE SUBMIT NAMES THE DAY IT WILL USE. Presets and typing both write into one
+// field, so the button has to read from that field rather than carry a fixed
+// label — otherwise filling the date and then reading "start a fresh run" gives
+// no sign the two are connected, which is exactly how it read.
+function syncRewatchButton() {
+    const value = document.getElementById('rewatchFrom').value;
+    const button = document.getElementById('rewatchSubmit');
+    button.textContent = value
+        ? `Start the run from ${rewatchDay(value)}`
+        : 'Start a fresh run';
+}
+
+function setRewatchFrom(which) {
+    const restart = (pendingRewatch && pendingRewatch.restart) || null;
+    const episodes = (restart && restart.episodes) || [];
+    if (!episodes.length) { return; }
+    const field = document.getElementById('rewatchFrom');
+    field.value = which === 'before'
+        ? episodes[0].day
+        : rewatchDayAfter(episodes[episodes.length - 1].day);
+    syncRewatchButton();
+    field.focus();
 }
 
 function closeRewatchPrompt() {

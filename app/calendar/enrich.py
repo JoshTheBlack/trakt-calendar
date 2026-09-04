@@ -421,6 +421,47 @@ async def overlay_match_ids(records: list[Record]) -> list[Record]:
     return records
 
 
+async def enrich_now(settings, records: list[Record], *, now: int) -> list[Record]:
+    """Fetch and apply enrichment for these records IMMEDIATELY, rather than
+    leaving them to the drain.
+
+    THE DRAIN IS RIGHT FOR A FILL AND WRONG FOR A SEARCH. A month's fill names
+    hundreds of titles at once against a ten-requests-a-second ceiling, so
+    nothing on that path may look a title up inline. A search that has just been
+    asked about ONE title is the opposite case: the reader is waiting, it is one
+    lookup, and handing them a card with no genres and no certification — which
+    every filter then declines to act on — is worse than the moment it costs.
+
+    IT IS THE DRAIN'S OWN MACHINERY, not a second copy. `_fetch_one` asks Simkl
+    and writes the answer into `simkl_titles`; `apply_stored_enrichment` reads
+    that back onto the records. So a title learned this way is learned for the
+    WHOLE INSTANCE — every other window naming it is enriched too, and the drain
+    finds one less thing owed rather than the same work queued twice.
+
+    ONLY SIMKL, because only Simkl's calendar rows arrive incomplete. Trakt's
+    calendar carries every field it will ever have, so a Trakt record is already
+    finished and asking again would spend a request to learn nothing. A film's
+    release types are a different lookup on a different schedule and stay the
+    release drain's.
+
+    A FAILURE COSTS THE FIELDS AND NOT THE ROW. The record is returned either
+    way, `enriched` still False, which is exactly the state a fill leaves and
+    which the read path already draws — see filter.py on why an unenriched
+    record is shown rather than filtered out.
+    """
+    owed = {(int(r.ids["simkl"]), str(r.media)) for r in records
+            if r.source is Source.SIMKL and not r.enriched and r.ids.get("simkl")}
+    for simkl_id, media in owed:
+        try:
+            await _fetch_one(settings, simkl_id, media, now)
+        # Deliberately broad: see this function's own last paragraph. Whatever
+        # went wrong, the caller still has a drawable record.
+        except Exception:
+            logger.warning("immediate enrichment failed for simkl id %s (%s)",
+                           simkl_id, media, exc_info=True)
+    return await apply_stored_enrichment(records)
+
+
 async def apply_stored_enrichment(records: list[Record]) -> list[Record]:
     """Give the Simkl records a fill is about to STORE whatever `simkl_titles`
     already knows about them. Mutates in place and returns `records`.
@@ -531,6 +572,23 @@ def _media_values() -> tuple[str, str]:
     return (str(Media.SHOW), str(Media.MOVIE))
 
 
+async def _forget_unusable(rows: list[tuple[int, str]]) -> None:
+    """Record that a given-up title has no answer, replacing one nothing can use.
+
+    THE ROW IS NOT DELETED, because the failure count and the timestamp on it are
+    what stop this being asked again and what let it age back in later. Only the
+    unusable payload goes, which turns the row into exactly the shape a title
+    that never answered has — see `_upsert_failure`.
+    """
+    empty = _compress({})
+    await db.executemany(
+        "UPDATE simkl_titles SET payload = ? WHERE simkl_id = ? AND media = ?",
+        [(empty, int(simkl_id), str(media)) for simkl_id, media in rows])
+    logger.info("Simkl enrichment: %d given-up title(s) held an answer from an "
+                "older extraction that nothing can use; recorded as unanswered "
+                "so they stop being counted as outstanding.", len(rows))
+
+
 async def _owed_titles() -> dict[tuple[int, str], str]:
     """Every (simkl_id, media) any currently-stored calendar window names,
     mapped to that title's display name — the full set of Simkl titles this
@@ -562,6 +620,16 @@ async def _fetch_one(settings, simkl_id: int, media: str, now: int) -> bool:
         if simkl_transport.blocked_seconds_remaining() > 0:
             return False
         failures = await _upsert_failure(simkl_id, media, now)
+        # THE COUNT, WHILE IT IS STILL COUNTING. A drain that reports "fetched 0
+        # of 10" every tick says nothing about whether it is getting anywhere,
+        # and the ceiling that ends it is invisible until it is reached — which
+        # is how ten titles came to be asked about several hundred times each
+        # without anybody being able to see it happening from the log.
+        if failures < _GIVE_UP_AFTER:
+            logger.info("Simkl enrichment: no answer for simkl id %s (%s); "
+                        "%d more attempt%s before giving up on it.",
+                        simkl_id, media, _GIVE_UP_AFTER - failures,
+                        "" if _GIVE_UP_AFTER - failures == 1 else "s")
         if failures == _GIVE_UP_AFTER:
             # ONCE, AT THE TRANSITION, rather than on every tick that skips it:
             # a title being given up on is an event worth reading, and a line
@@ -636,6 +704,7 @@ async def drain(settings, *, now: int | None = None) -> int:
     # with complete stored answers beside them.
     unprojected = await entries.unenriched(str(Source.SIMKL), "simkl")
     rebuild: list[tuple[int, str, dict]] = []
+    stale: list[tuple[int, str]] = []
     batch: list[tuple[int, str, str]] = []
     for (simkl_id, media), title in owed.items():
         if len(batch) >= DRAIN_BATCH_SIZE:
@@ -661,14 +730,41 @@ async def drain(settings, *, now: int | None = None) -> int:
             # it is owed a re-fetch regardless of backoff, which exists to
             # slow down repeated FAILURES, not to protect a stale success
             # from being refreshed.
-            if not fields and row["fail_count"] >= _GIVE_UP_AFTER:
+            if row["fail_count"] >= _GIVE_UP_AFTER and fields:
+                # GIVEN UP ON, AND HOLDING AN ANSWER NOBODY CAN USE. A row whose
+                # extraction is the wrong version is already treated as
+                # unanswered everywhere else — that is why it was queued at all —
+                # but the readout counts a non-empty payload as an answer owed to
+                # the calendar row, and the rebuild pass will never hand this one
+                # over. So the two disagreed and the box could not reach zero.
+                #
+                # SAYING SO OUTRIGHT IS THE HONEST RECORD: the lookup is finished
+                # with, and what is stored cannot answer for the title, so the
+                # row is marked as having no answer. It still ages out and is
+                # asked about again from scratch, exactly as any other given-up
+                # title is.
+                stale.append((simkl_id, media))
+                continue
+            if row["fail_count"] >= _GIVE_UP_AFTER:
                 # Asked about enough times to conclude Simkl has no answer. Not
                 # forever: the row ages out of `simkl_titles` and the title is
                 # asked about again from scratch — see _GIVE_UP_AFTER.
+                #
+                # WHATEVER THE ROW HOLDS, AND THAT IS THE CORRECTION. This used
+                # to give up only on a row with NO stored answer, so a title
+                # holding a STALE one — written by an older extraction and
+                # therefore owed a re-fetch — was exempt from the ceiling and
+                # asked about on every single pass. Measured on a live instance:
+                # ten titles at 171 to 759 failures each, because Simkl answers
+                # `[]` for those ids now and no number of attempts will change
+                # that. The failures are what the ceiling is counting; what the
+                # row happens to hold does not make them less conclusive.
                 continue
             if not fields and not _backoff_elapsed(row["fail_count"], row["failed_at"], ts):
                 continue  # failed recently; not worth asking again yet
         batch.append((simkl_id, media, title))
+    if stale:
+        await _forget_unusable(stale)
     if rebuild:
         # BEFORE THE FETCH AND WITHOUT ONE. These are answers this instance has
         # already paid for; handing them to the rows that lack them is a local

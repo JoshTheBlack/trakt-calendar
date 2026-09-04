@@ -25,7 +25,7 @@ from urllib.parse import urlencode
 from ... import perftrace
 from ...config import Settings
 from ...endpoints import Endpoint
-from ..base import Media, Record, Source
+from ..base import epoch_seconds, Media, Record, Source
 from . import _ids, transport
 from .transport import TraktError
 
@@ -112,7 +112,7 @@ async def fetch_window(endpoint: Endpoint, settings: Settings, start: date, days
     for entry in raw:
         if not isinstance(entry, dict):
             continue
-        record = to_record(entry, endpoint)
+        record = to_record(entry, endpoint.media)
         if record is not None:
             records.append(record)
     return records
@@ -160,15 +160,23 @@ def _detail_url(media: Media, ids: dict) -> str:
     return f"https://trakt.tv/{kind}/{name}" if name else "https://trakt.tv"
 
 
-def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
+def to_record(entry: dict, kind: Media) -> Record | None:
     """Turn a raw Trakt calendar entry into the uniform Record shape.
 
     VIEWER-INDEPENDENT BY CONSTRUCTION — no timezone is passed in and none is
     needed. The instant goes into `air_ts` and the four local spellings of it are
     `base.render`'s to derive, which is what lets one stored record serve every
     viewer of the window it sits in.
+
+    IT TAKES A MEDIA AND NOT AN ENDPOINT, because a media is all it ever read off
+    one — and an endpoint is exactly what a caller outside the fill does not
+    have. The calendar SEARCH builds records from a per-title lookup, and the
+    `show` object that lookup returns is the same shape as the one an entry
+    carries; feeding this function a one-entry synthetic is what keeps a searched
+    row and a filled row the same row, built by the same code, instead of two
+    builders drifting apart field by field.
     """
-    media = entry.get(endpoint.media) or {}
+    media = entry.get(str(kind)) or {}
     aired_raw = entry.get("first_aired") or entry.get("released")
     if not aired_raw or not media:
         return None
@@ -199,7 +207,7 @@ def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
 
     return Record(
         source=Source.TRAKT,
-        media=endpoint.media,
+        media=kind,
         id=ids.get("slug") or str(ids.get("trakt") or ""),
         ids=_ids.normalize(ids),
         # THE SLUG IF TRAKT NAMED ONE, THE NUMERIC ID IF IT DID NOT. Trakt resolves
@@ -208,7 +216,7 @@ def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
         # have it. What this replaced sent every slug-less entry to the Trakt
         # HOMEPAGE, which is a link that looks like it worked and goes nowhere near
         # the title the viewer clicked.
-        detail_url=_detail_url(endpoint.media, ids),
+        detail_url=_detail_url(kind, ids),
         title=media.get("title") or "Untitled",
         year=media.get("year") or "",
         network=media.get("network") or "",
@@ -224,7 +232,7 @@ def to_record(entry: dict, endpoint: Endpoint) -> Record | None:
         certification=(media.get("certification") or "").upper(),
         overview=overview,
         poster=poster(media),
-        air_ts=dt.timestamp(),
+        air_ts=epoch_seconds(dt),
         date_only=date_only,
         episode_label=ep_label,
         episode_title=episode.get("title") or "",

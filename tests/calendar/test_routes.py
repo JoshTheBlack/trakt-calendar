@@ -1210,6 +1210,93 @@ class TheJumpAnchorIsRenderedByTheServerTests(CalendarRouteTestCase):
         self.assertNotIn('id="jump-target"', resp.text)
 
 
+class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
+    """`/calendar/jump` — the click, and the only thing that writes.
+
+    WHY A WRITE HAPPENS AT ALL. A service can be missing its own title: Trakt's
+    show record dates Half Man's first season to 2026-04-28T20:00Z and Trakt's
+    premieres calendar for that week does not list it. So a result could name a
+    month, the month would fill correctly, and there would still be no such card.
+
+    WHY IT HAPPENS HERE AND NOT IN THE SEARCH. The write first ran over every row
+    a search returned, which turned typing "traitors" and pressing Enter into
+    sixteen premieres written to a calendar everybody on the instance shares.
+    Following one result is the act that names exactly one thing.
+    """
+
+    MONTH = "/calendar?year=2026&month=4&endpoint=shows"
+    JUMP = ("/calendar/jump?source=trakt&id=246405&media=show&season=1"
+            "&endpoint=shows&year=2026&month=4")
+
+    def setUp(self):
+        super().setUp()
+        self.sign_in_as(self._make_user("jumper2"))
+
+    def _go(self, url=None, mark="show:tmdb:1"):
+        async def _fill(settings, **kw):
+            self.asked = kw
+            return mark
+
+        with patch("app.calendar.search.fill_one_gap", _fill):
+            return self.client.get(url or self.JUMP, follow_redirects=False)
+
+    def test_it_redirects_to_the_month_with_the_card_named(self):
+        resp = self._go()
+        self.assertEqual(resp.status_code, 303)
+        where = resp.headers["location"]
+        self.assertIn("year=2026", where)
+        self.assertIn("month=4", where)
+        self.assertIn("highlight=", where)
+        self.assertTrue(where.endswith("#jump-target"), where)
+
+    def test_it_asks_the_service_for_exactly_what_the_link_named(self):
+        self._go()
+        self.assertEqual(str(self.asked["source"]), "trakt")
+        self.assertEqual(self.asked["source_id"], "246405")
+        self.assertEqual(self.asked["season"], 1)
+        self.assertEqual(self.asked["endpoint_key"], "shows")
+
+    def test_a_write_that_could_not_happen_still_opens_the_month(self):
+        """The month is worth opening either way — it may hold the title from an
+        ordinary fill, and if it does not the reader sees the month they asked
+        for rather than an error about machinery."""
+        resp = self._go(mark="")
+        self.assertEqual(resp.status_code, 303)
+        where = resp.headers["location"]
+        self.assertNotIn("highlight=", where)
+        self.assertNotIn("#jump-target", where)
+
+    def test_a_service_this_app_does_not_know_is_not_an_error(self):
+        """A link from an older version, or a hand-edited one. The reader still
+        gets the month; nothing is written."""
+        called = []
+
+        async def _fill(settings, **kw):
+            called.append(kw)
+            return "x"
+
+        with patch("app.calendar.search.fill_one_gap", _fill):
+            resp = self.client.get(
+                "/calendar/jump?source=nosuchservice&id=1&endpoint=shows"
+                "&year=2026&month=4", follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(called, [], "an unknown service reached the writer")
+
+    def test_a_link_naming_no_id_writes_nothing(self):
+        called = []
+
+        async def _fill(settings, **kw):
+            called.append(kw)
+            return "x"
+
+        with patch("app.calendar.search.fill_one_gap", _fill):
+            resp = self.client.get(
+                "/calendar/jump?source=trakt&endpoint=shows&year=2026&month=4",
+                follow_redirects=False)
+        self.assertEqual(resp.status_code, 303)
+        self.assertEqual(called, [])
+
+
 class CalendarSearchRouteTests(CalendarRouteTestCase):
     """The search route: a fragment, and one that spends nothing unless asked.
 

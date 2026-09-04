@@ -81,6 +81,35 @@ class _TraktDetailPort:
         return await detail.fetch_details(settings, str(media), source_id, season,
                                           cache_only=cache_only)
 
+    async def records_for(self, settings: Settings, source_id, media: Media,
+                          moments) -> list[Record]:
+        """app/providers/base.py's DetailPort.records_for.
+
+        ONE FETCH, N RECORDS, AND THE SYNTHETIC ENTRY IS THE WHOLE TRICK. A Trakt
+        calendar entry is `{first_aired, show|movie, episode}`, and the object
+        under that middle key is EXACTLY what `shows/{id}?extended=full` returns
+        — so wrapping the per-title payload in a one-entry envelope lets
+        `calendar.to_record` read it without knowing where it came from. Same
+        builder, same fields, same normalisation as a filled row.
+
+        A SEASON PREMIERE IS EPISODE ONE, and saying so matters beyond the label:
+        airings are keyed on (season, episode), so a row written with no episode
+        coordinate would not be replaced by the feed's own row for the same
+        airing — it would sit beside it as a duplicate.
+        """
+        raw = await detail.fetch_title_payload(settings, str(media), source_id)
+        if not raw:
+            return []
+        out = []
+        for season, when in moments:
+            entry = {str(media): raw, "first_aired": when}
+            if season is not None and media is not Media.MOVIE:
+                entry["episode"] = {"season": int(season), "number": 1, "title": ""}
+            record = calendar.to_record(entry, media)
+            if record is not None:
+                out.append(record)
+        return out
+
     async def fetch_season_summary(self, settings: Settings, source_id,
                                    season: int, media: Media) -> dict:
         # Movies have no seasons, and answering an empty one is what lets the

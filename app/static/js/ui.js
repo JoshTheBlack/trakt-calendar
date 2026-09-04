@@ -11,6 +11,61 @@
  * only holding this because it happened to be the file every page loaded.
  */
 
+// ---- "Working on it" for the things htmx does not drive --------------------
+// The page's progress bar is marked by htmx itself for anything htmx requests
+// (`hx-indicator` on <body>, inherited by everything under it). A hand-written
+// fetch is invisible to that, and some of those are the slowest actions in the
+// app: adding a season asks a service for its episode list and then recomputes
+// the whole month, which can run to several seconds with nothing on screen.
+//
+// COUNTED, NOT A FLAG. Two overlapping requests would otherwise have the first
+// to finish clear a bar the second still needs, and the reader would watch it
+// flicker off while the page was still working.
+//
+// A SEPARATE CLASS FROM htmx's OWN, so the two cannot fight: htmx adds and
+// removes `htmx-request` on its own schedule, and a shared class would let one
+// of them clear the other's state. The stylesheet shows the bar for either.
+let pageBusyDepth = 0;
+
+function pageBusy(busy) {
+    const bar = document.getElementById('pageProgress');
+    if (!bar) { return; }
+    pageBusyDepth = Math.max(0, pageBusyDepth + (busy ? 1 : -1));
+    bar.classList.toggle('is-busy', pageBusyDepth > 0);
+}
+
+// REQUESTS THAT SAY NOTHING ABOUT WHETHER THE PAGE IS BUSY, and the only two.
+// A card's season summary fires once per card as the calendar is scrolled, and
+// the integrations status polls on a timer; neither is anybody waiting on, and
+// a bar that lit for them would be up for most of a scroll. Everything else is
+// something a person asked for and is now waiting through.
+const QUIET_REQUESTS = [/^\/api\/tile\b/, /^\/api\/integrations\//];
+
+// EVERY FETCH, IN ONE PLACE, because the rule is about all of them. Wrapping the
+// call sites instead means each new one has to remember — which is exactly what
+// happened: the bar was added for adding a show and then missing from removing
+// one, from adding a film, and from the month load an ordinary refresh runs.
+// A rule that every caller must uphold cannot live in the callers.
+//
+// htmx REQUESTS DO NOT COME THROUGH HERE. It uses XMLHttpRequest and marks the
+// bar itself through `hx-indicator`, so the two never double-count.
+const nativeFetch = window.fetch.bind(window);
+
+window.fetch = function (input, init) {
+    let path = '';
+    try {
+        const raw = typeof input === 'string' ? input : (input && input.url) || '';
+        path = new URL(raw, window.location.href).pathname;
+    } catch (e) { /* a shape we cannot read is not a reason to refuse the call */ }
+    if (QUIET_REQUESTS.some(pattern => pattern.test(path))) {
+        return nativeFetch(input, init);
+    }
+    pageBusy(true);
+    // `finally` so a refused request releases the bar exactly as a served one
+    // does — a failure is still the end of the waiting.
+    return nativeFetch(input, init).finally(() => pageBusy(false));
+};
+
 function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }

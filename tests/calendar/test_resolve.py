@@ -56,7 +56,7 @@ class ACardRendersExactlyAsItDidTests(unittest.TestCase):
     """Field by field, against literals from the previous implementation."""
 
     def item(self, tz_name="America/New_York", entry=None, endpoint=SHOWS):
-        return render(trakt_calendar.to_record(entry or RICH, endpoint), ZoneInfo(tz_name))
+        return render(trakt_calendar.to_record(entry or RICH, endpoint.media), ZoneInfo(tz_name))
 
     def test_every_display_field_is_what_it_always_was(self):
         item = self.item()
@@ -227,7 +227,7 @@ class AReleaseDateIsNotAnInstantTests(unittest.TestCase):
              "movie": {"title": "A Film", "ids": {"slug": "a-film", "trakt": 9}}}
 
     def item(self, tz_name):
-        return render(trakt_calendar.to_record(self.ENTRY, MOVIES), ZoneInfo(tz_name))
+        return render(trakt_calendar.to_record(self.ENTRY, MOVIES.media), ZoneInfo(tz_name))
 
     def test_every_viewer_sees_the_release_on_the_day_it_was_released(self):
         for tz_name in ("UTC", "America/Los_Angeles", "Pacific/Apia", "Asia/Tokyo"):
@@ -246,14 +246,14 @@ class AReleaseDateIsNotAnInstantTests(unittest.TestCase):
         """The flag is not "never convert" — a broadcast happens at a moment, and
         two viewers in different zones are right to see different local times for
         it."""
-        record = trakt_calendar.to_record(RICH, SHOWS)
+        record = trakt_calendar.to_record(RICH, SHOWS.media)
         self.assertFalse(record.date_only)
         self.assertEqual(render(record, ZoneInfo("America/New_York")).air_time, "16:00")
 
     def test_the_flag_travels_through_storage(self):
         """It decides how a card is drawn at READ, so a window that lost it would
         put every film back a day for half the world until its TTL expired."""
-        stored = trakt_calendar.to_record(self.ENTRY, MOVIES).to_dict()
+        stored = trakt_calendar.to_record(self.ENTRY, MOVIES.media).to_dict()
         self.assertTrue(Record.from_dict(stored).date_only)
 
 

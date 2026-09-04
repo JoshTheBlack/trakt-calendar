@@ -35,14 +35,14 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from . import (cache as calendar_cache, detail_source, enrich as calendar_enrich,
                filter as calendar_filter, resolve as calendar_resolve,
                search as calendar_search, share_links, state as calendar_state)
-from .. import auth, authz, chrome, clock, route_params
+from .. import auth, authz, chrome, clock, db, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
-from ..providers.base import Media, SourceUnavailable
+from ..providers.base import Media, Source, SourceUnavailable
 from ..providers.trakt import TraktError
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
@@ -988,6 +988,67 @@ async def calendar_day(request: Request):
         {**context, "group": grouped[0] if grouped else None,
          "error": None, "partial": meta["partial"]},
     )
+
+
+@guard.get("/calendar/jump", AuthLevel.CALENDAR_APPROVED)
+async def jump_to_a_searched_title(request: Request):
+    """Follow a search result that this instance's calendar does not hold: write
+    the one airing, then send the reader to the month it lands on.
+
+    A REDIRECT AND NOT A PAGE, so the address bar ends up on the calendar itself.
+    Back then returns to wherever the reader was rather than replaying a write,
+    and a reload of the month is an ordinary month load.
+
+    IT WRITES ONE THING BECAUSE ONE THING WAS ASKED FOR. The search offers
+    everything that matched — sixteen rows for a franchise — and writing all of
+    them would turn one act of curiosity into sixteen decisions about a calendar
+    everybody on this instance shares. Following a result is the act that names
+    exactly one.
+
+    THE QUERY NAMES A SERVICE AND THAT SERVICE'S OWN ID, AND NOTHING ELSE IS
+    BELIEVED. Title, date, network, poster and the shared ids all come back from
+    the service, so this link cannot be hand-edited into a calendar row of
+    somebody's choosing — see calendar/search.py's `fill_one_gap`.
+
+    A WRITE THAT COULD NOT HAPPEN STILL REDIRECTS. The month is worth opening
+    either way: it may hold the title from an ordinary fill, and if it does not
+    the reader sees the month they asked for rather than an error about
+    machinery.
+    """
+    settings = load_settings()
+    user = await auth.current_user(request)
+    today = clock.today()
+    params = request.query_params
+    year = route_params.valid_year(params.get("year"), today.year)
+    month = route_params.valid_month(params.get("month"), today.month)
+    endpoint = get_endpoint(params.get("endpoint"))
+    destination = (f"/calendar?year={year}&month={month}"
+                   f"&endpoint={quote(endpoint.key, safe='')}")
+
+    # A NAME THIS APP DOES NOT KNOW IS NOT AN ERROR, it is a link from an older
+    # version or a hand-edited one; the reader still gets the month.
+    try:
+        source = Source(str(params.get("source") or ""))
+    except ValueError:
+        source = None
+    source_id = str(params.get("id") or "").strip()
+    if source is None or not source_id:
+        return RedirectResponse(destination, status_code=303)
+    try:
+        media = Media(params.get("media") or "show")
+    except ValueError:
+        media = Media.SHOW
+    season = route_params.season(params.get("season"))
+
+    mark = await calendar_search.fill_one_gap(
+        settings, source=source, source_id=source_id, media=media,
+        season=season, endpoint_key=endpoint.key,
+        tz=_resolve_viewer_tz(user, settings), now=db.now())
+    if mark:
+        destination += f"&highlight={quote(mark, safe='')}#jump-target"
+    # 303, so following this is a GET however the browser got here, and so a
+    # reload of where it lands does not re-run the write.
+    return RedirectResponse(destination, status_code=303)
 
 
 @guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)

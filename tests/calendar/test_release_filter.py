@@ -33,7 +33,8 @@ from datetime import date
 from zoneinfo import ZoneInfo
 
 from app import db
-from app.calendar import cache as calendar_cache, enrich as calendar_enrich
+from app.calendar import cache as calendar_cache
+from app.calendar import entries as calendar_entries, enrich as calendar_enrich
 from app.calendar import filter as calendar_filter
 from app.config import Settings
 from app.endpoints import get_endpoint
@@ -324,10 +325,12 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
         the read stop rebuilding it per viewer."""
         await self._enrich(1, {"US": [THEATRICAL]})
         await self._stored([_film(1, title="American")])
-        groups = await calendar_cache.cached_calendar_groups()
-        stored = [g for g in groups if (g.get("by_source") or {}).get("simkl")]
-        self.assertTrue(stored)
-        for group in stored:
-            self.assertEqual(
-                group["by_source"]["simkl"]["release_types_by_country"],
-                {"US": [THEATRICAL]})
+        # READ BACK THE STORED ROWS, which is what the assertion is actually
+        # about. This used to inflate the whole calendar to reach them, through a
+        # helper that no longer has any caller in the app.
+        stored, _asked, _answered, _at = await calendar_entries.read_span(
+            MOVIES.key, date(2026, 7, 6), date(2026, 7, 13))
+        simkl = [r for r in stored if r.source is Source.SIMKL]
+        self.assertTrue(simkl)
+        for record in simkl:
+            self.assertEqual(record.release_types_by_country, {"US": [THEATRICAL]})
