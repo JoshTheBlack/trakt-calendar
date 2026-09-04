@@ -217,7 +217,19 @@ async function addPickedShow(season) {
             // `pickedShow` survives this — closing hides the modal and does not
             // reset the pick — which is what lets the answer perform the add.
             closeAddShow();
-            openRewatchPrompt(d.needs_decision, season);
+            // THE REQUEST THAT RAISED IT GOES WITH IT, so the answer re-posts
+            // this add rather than the modal reaching back for whatever the
+            // picker happens to still be holding. That is what lets a second
+            // caller — the untracked-episode row — raise the same question
+            // about its own add.
+            openRewatchPrompt(d.needs_decision, season, {
+                url: '/api/distrakt/add',
+                body: {
+                    year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+                    ids: pickedShow.ids, title: pickedShow.title,
+                    network: pickedShow.network, season: season,
+                },
+            });
             return;
         }
         announceAdded(season, asFinished);
@@ -256,8 +268,8 @@ function rewatchDayAfter(iso) {
     return d.toISOString().slice(0, 10);
 }
 
-function openRewatchPrompt(prompt, season) {
-    pendingRewatch = { ...prompt, season: season };
+function openRewatchPrompt(prompt, season, resubmit) {
+    pendingRewatch = { ...prompt, season: season, resubmit: resubmit };
     const restart = prompt.restart || null;
     const finished = rewatchDay(prompt.completed_on) || 'some time ago';
     document.getElementById('rewatchQuestion').textContent =
@@ -334,15 +346,17 @@ async function answerRewatch(fresh) {
     const from = fresh ? (document.getElementById('rewatchFrom').value || asked.suggested_from) : '';
     closeRewatchPrompt();
     try {
-        // THE SAME ROUTE AS THE ADD, because this IS the add: one place decides
-        // what a season becomes, and it now has the answer it was missing.
-        const res = await fetch('/api/distrakt/add', {
+        // THE SAME ROUTE THAT ASKED, because that route IS the add: one place
+        // decides what a season becomes, and it now has the answer it was
+        // missing. WHICH route that is comes from the caller, because there are
+        // two ways to reach this question — searching for a season, and saying
+        // yes to an episode the history could not place — and each has to finish
+        // its own act rather than being turned into the other one.
+        const res = await fetch(asked.resubmit.url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
-                ids: pickedShow.ids, title: pickedShow.title,
-                network: pickedShow.network, season: asked.season,
+                ...asked.resubmit.body,
                 decided: true, history_from: from,
             })
         });

@@ -47,7 +47,7 @@ from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
 from ..providers.base import (ID_KEYS, ItemKey, Media, Source, SourceUnavailable,
-                              collect_ids, parse_item_key, parse_media)
+                              collect_ids, parse_item_key, parse_media, resolve_key)
 from ..providers.trakt import TraktError, TraktRateLimitError
 # Reached through the MODULE rather than by importing the functions off it. A name
 # bound at import time is a second reference to the same function that patching
@@ -129,6 +129,147 @@ async def _distrakt_user_id(request: Request) -> int:
     runs; current_user is cached on the request by the dependency that gated it."""
     user = await auth.current_user(request)
     return user.user_id
+
+
+def _point_at(payload: dict, key, season) -> dict:
+    """Name the row a mutation just wrote, so the page can scroll to it and say
+    which one it is.
+
+    THE SERVER NAMES IT BECAUSE THE SERVER IS THE ONE THAT KNOWS. A caller posts
+    ids and a season number; which roster row or month record that became is
+    worked out here, from the title's own ids, and a page re-deriving it from the
+    payload would be a second implementation of `resolve_key` written in
+    JavaScript — wrong for exactly the titles the first one exists to get right.
+
+    ADVISORY, AND THE PAGE TREATS IT THAT WAY. An add whose season settles
+    somewhere the current month does not draw leaves nothing to point at, and a
+    highlight that finds no row is simply not drawn. So this makes no promise
+    that the row is on the page; it says which row it would be.
+    """
+    payload["highlight"] = {"key": str(key), "season": int(season)}
+    return payload
+
+
+async def _rewatch_question(user_id, settings, record, key, season: int, total,
+                            data, *, title: str) -> tuple[dict | None, str]:
+    """`(what to ask before writing anything, whether they answered "count
+    everything" about a season the history says is finished)`.
+
+    ONE IMPLEMENTATION BECAUSE THERE IS ONE QUESTION. A season reaches the roster
+    two ways — somebody searches for it, or the history reports a play nothing
+    could place and they say yes to the row — and "have you already finished
+    this, and does the earlier viewing count" is the same question on both. It
+    was asked on the first and not the second, which meant re-watching something
+    the tracker had never heard of added it silently at its full episode count:
+    the case the question exists for, arrived at by the other door.
+
+    THE HISTORY IS FETCHED HERE AND NOT BY THE CALLER, AND THAT PLACEMENT IS THE
+    WHOLE POINT OF THE ARGUMENT. This question is asked of STORED watch state, and
+    a title entering the roster for the first time has none — so a caller that
+    asks before baselining compares a finished season against a count of zero,
+    concludes nothing is finished, and adds it in silence. That is not a
+    hypothetical: it was fixed in the search route by moving the baseline above
+    the question, and then reproduced EXACTLY in the untracked-episode route,
+    which had never baselined at all. Twice is a design fault rather than an
+    oversight. Fetching inside the question makes the two inseparable, so a third
+    caller cannot get the order wrong because there is no order to get wrong.
+
+    A FIRST ADD IS THE ONLY ADD THE QUESTION HAS. A season finished years ago is
+    by definition not on the list, so every add of one is a first add; asking
+    before fetching meant the question could not see the single case it exists
+    for, and appeared to work whenever it was tested twice.
+
+    THIS IS A WRITE BEFORE THE QUESTION AND IT IS ALLOWED. What the callers'
+    "write nothing until it is answered" rule protects is the ROSTER ROW and the
+    MONTH RECORD — the writes that put a season on the list and let the recompute
+    settle it where the answer can no longer reach. Watch state is neither: it
+    names no month, puts nothing on any list, and is re-derived from the services
+    on any later pass.
+
+    AND IT COSTS THE ADD NOTHING. Both callers baseline this title anyway, one a
+    few lines further down and the other by way of the month recompute, so the
+    same one call per source is made either way.
+
+    THE ANSWER IS READ BACK FROM THE HISTORY, NEVER TAKEN FROM THE BODY. A floor
+    in the request is the viewer saying "this pass starts here"; the absence of
+    one is the other answer, and whether that answer MEANS anything is a fact
+    about their plays. A request claiming a season is finished cannot make it so.
+
+    `(None, "")` FOR ALMOST EVERY ADD, which is the case that must stay cheap: a
+    season with no history at all fails the count test on its first comparison.
+    """
+    try:
+        await watch_history.baseline_show(settings, user_id, record)
+    # Deliberately broad: this is what the question is asked OF, not the add
+    # itself. Whatever went wrong — a service refusing, a malformed history row,
+    # a database hiccup — the caller can still proceed, and the question then
+    # sees no history and does not fire, which is the answer that changes
+    # nothing.
+    except Exception:
+        logger.warning("baseline_show failed for %s", key, exc_info=True)
+    if not data.get("decided"):
+        finished, offered, restart = await _completed_before_add(
+            user_id, key, season, total)
+        if not finished:
+            return None, ""
+        return {
+            "key": str(key), "season": season, "title": title,
+            "completed_on": finished,
+            # WHERE A FRESH RUN WOULD START, offered rather than imposed, and
+            # worked out rather than assumed — see `_completed_before_add`. The
+            # viewer can still move it, which is what keeps this an offer.
+            "suggested_from": offered,
+            # WHAT THE VIEWER NEEDS TO SEE TO ANSWER, when the play order shows
+            # they have already begun again: the day the previous run ended, and
+            # the episodes watched since. The question was a date and nothing
+            # else, which meant answering it from memory; naming the episodes
+            # lets it be answered by looking. Absent when nothing restarted, and
+            # the page then asks the plainer version.
+            "restart": restart,
+        }, ""
+    if _valid_day(data.get("history_from")):
+        return None, ""   # a floor IS the other answer
+    already, _offered, _restart = await _completed_before_add(
+        user_id, key, season, total)
+    return None, already
+
+
+async def _file_finished(user_id, month_key: str, record: dict, detail) -> dict:
+    """Record a season as FINISHED on the month being looked at.
+
+    THE VIEWER WAS ASKED AND ANSWERED THAT EVERYTHING THEY HAVE WATCHED COUNTS,
+    about a season every episode of which has been seen — so it is done, and a
+    done season belongs in Completed rather than sitting on the list at 18/18 for
+    ever.
+
+    THIS MONTH AND NOT THE MONTH THE HISTORY NAMES, which is the author's
+    decision. `lifecycle.finish_if_done` settles onto the month the last play
+    dates and REFUSES when that month was never tracked, for a good reason: it is
+    reached from an ordinary read of some other month, and settling there would
+    conjure an untracked month out of merely looking at one. That refusal is what
+    left a season finished in 2023 stuck on the list. A MANUAL ADD IS NOT AN
+    ORDINARY READ — somebody is standing on a month saying "this one, now" — so
+    nothing is inferred and no month is invented. Filling in a past month
+    deliberately is still api_distrakt_add_completed's job, and it still refuses
+    to touch the current one.
+
+    NO ROSTER ROW GOES WITH IT. A completed season is not on anybody's list, and
+    writing both would draw it twice and leave the roster row for the live pass
+    to settle a second time.
+
+    THE TOTAL, NOT THE HISTORY'S COUNT. Getting here means every episode has been
+    seen — `_completed_before_add` will not answer otherwise — and a service that
+    reports a title finished without itemizing it would otherwise write a
+    completed season at 11/13.
+    """
+    total = int((detail or {}).get("total") or 0)
+    return await distrakt_store.add_month_record(user_id, month_key, {
+        **record,
+        **{field: (detail or {}).get(field) for field in lifecycle.CATALOGUE_FIELDS},
+        "kind": distrakt_store.RecordKind.COMPLETED,
+        "watched": total,
+        "total": total,
+    })
 
 
 async def _distrakt_settings(user_id: int):
@@ -1544,7 +1685,12 @@ async def api_distrakt_add_movie(request: Request):
     month = route_params.valid_month(data.get("month_view"), today.month)
     payload, status = await _distrakt_month_payload(
         user_id, year, month, await _distrakt_settings(user_id))
-    return JSONResponse(payload, status_code=status)
+    # A film has no season, and -1 is what the roster's own schema uses for
+    # "this record is not about one" (see db.py's calendar_airings and
+    # store._SEASON_WHERE). The page matches on both, so it needs the same
+    # not-a-season the film row is drawn with.
+    return JSONResponse(_point_at(payload, resolve_key(Media.MOVIE, ids) or "", -1),
+                        status_code=status)
 
 
 async def _resnapshot_if_closed(user_id: int, month_key: str) -> None:
@@ -1790,33 +1936,17 @@ async def api_distrakt_add(request: Request):
     # they had just added. One watched in an untracked month stayed and showed
     # its full episode count as this run's progress. Writing nothing until the
     # question is answered makes both unreachable rather than compensated for.
-    if not data.get("decided"):
-        finished, offered, restart = await _completed_before_add(
-            user_id, key, int(show["season"]), detail.get("total"))
-        if finished:
-            return JSONResponse({
-                "ok": True,
-                "needs_decision": {
-                    "key": str(key), "season": int(show["season"]),
-                    "title": show["title"], "completed_on": finished,
-                    # WHERE A FRESH RUN WOULD START, offered rather than
-                    # imposed, and worked out rather than assumed — see
-                    # `_completed_before_add`. The viewer can still move it,
-                    # which is what keeps this an offer.
-                    "suggested_from": offered,
-                    # WHAT THE VIEWER NEEDS TO SEE TO ANSWER, when the play
-                    # order shows they have already begun again: the day the
-                    # previous run ended, and the episodes watched since. The
-                    # question was a date and nothing else, which meant
-                    # answering it from memory; naming the episodes lets it be
-                    # answered by looking. Absent when nothing restarted, and
-                    # the page then asks the plainer version.
-                    "restart": restart,
-                },
-            })
+    floor = _valid_day(data.get("history_from"))
+    ask, already_finished = await _rewatch_question(
+        user_id, settings, show, key, int(show["season"]), detail.get("total"),
+        data, title=show["title"])
+    if ask:
+        return JSONResponse({"ok": True, "needs_decision": ask})
 
     await distrakt_store.clear_prompt_dismissal(user_id, key, int(show["season"]))
-    if detail and not detail.get("started_airing"):
+    if already_finished:
+        await _file_finished(user_id, month_key, show, detail)
+    elif detail and not detail.get("started_airing"):
         await distrakt_store.add_month_record(user_id, month_key, {
             **show,
             "kind": distrakt_store.premiere_kind(show["season"]),
@@ -1825,14 +1955,6 @@ async def api_distrakt_add(request: Request):
     else:
         await lifecycle.follow(user_id, {**show, **detail, "season": show["season"]})
     await _register_networks(user_id, [show["network"]])
-    try:  # baseline the show's watch history now so its counts are correct immediately
-        await watch_history.baseline_show(settings, user_id, show)
-    # Deliberately broad: this is a nicety, not the add. Whatever went wrong —
-    # Trakt refusing, a malformed history row, a database hiccup — the row is
-    # already stored and the next month load re-baselines it, so failing the
-    # user's add over it would be the worse outcome.
-    except Exception:
-        logger.warning("baseline_show failed for %s", key, exc_info=True)
     # THE DECISION, AS A FLOOR, WRITTEN BEFORE THE MONTH IS RECOMPUTED. A
     # `history_from` in the body says "this pass starts here": the plays before
     # it belong to the previous run and are not counted, which is what makes a
@@ -1848,12 +1970,11 @@ async def api_distrakt_add(request: Request):
     # month keeps that record — `lifecycle.follow` writes the roster row and
     # nothing else — so the old viewing stays where it settled and the re-watch
     # exists beside it, which is what a re-watch is.
-    floor = _valid_day(data.get("history_from"))
     if floor:
         await distrakt_store.set_history_from(
             user_id, key, int(show["season"]), floor)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
-    return JSONResponse(payload, status_code=status)
+    return JSONResponse(_point_at(payload, key, show["season"]), status_code=status)
 
 
 def _valid_day(raw) -> str:
@@ -2018,7 +2139,7 @@ async def api_distrakt_add_completed(request: Request):
             status_code=400)
 
     try:
-        await distrakt_store.add_month_record(user_id, month_key, {
+        stored = await distrakt_store.add_month_record(user_id, month_key, {
             "media": Media.SHOW,
             "ids": ids,
             "title": data.get("title") or "",
@@ -2049,7 +2170,8 @@ async def api_distrakt_add_completed(request: Request):
         await distrakt_store.save_month(user_id, doc)
     await _register_networks(user_id, [data.get("network") or ""])
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    return JSONResponse(_point_at(payload, (stored or {}).get("key") or "", season),
+                        status_code=status)
 
 
 @guard.get("/api/distrakt/backfill", AuthLevel.DISTRAKT_APPROVED)
@@ -2276,7 +2398,36 @@ async def api_distrakt_unknown_add(request: Request):
         live.network_for(settings, record),
     )
     record["network"] = record["network"] or network
-    await lifecycle.follow(user_id, {**record, **detail, "season": season})
+    today = clock.today()
+    year = route_params.valid_year(data.get("year"), today.year)
+    month = route_params.valid_month(data.get("month"), today.month)
+
+    # THE SAME QUESTION THE ORDINARY ADD ASKS, AND FOR A BETTER REASON HERE. This
+    # row exists BECAUSE a play arrived that nothing could place — which for a
+    # season already watched right through is precisely what starting it again
+    # looks like. Answering yes used to add it at its full episode count with no
+    # question, so a re-watch arrived already finished.
+    #
+    # NOTHING IS WRITTEN WHILE IT IS ASKED, including the prompt's own closure:
+    # a question the viewer abandons has to still be there afterwards, or saying
+    # nothing would quietly discard the play that raised it.
+    ask, already_finished = await _rewatch_question(
+        user_id, settings, {**record, **detail, "season": season}, key, season,
+        (detail or {}).get("total"), data, title=record["title"])
+    if ask:
+        return JSONResponse({"ok": True, "needs_decision": ask})
+
+    if already_finished:
+        await _file_finished(
+            user_id, distrakt_store.month_key(year, month), record, detail)
+    else:
+        await lifecycle.follow(user_id, {**record, **detail, "season": season})
+        # THE DECISION, AS A FLOOR. A `history_from` says this pass starts here,
+        # so the plays before it are the previous run's and are not counted —
+        # which is what makes a re-watch show as a current season at zero.
+        floor = _valid_day(data.get("history_from"))
+        if floor:
+            await distrakt_store.set_history_from(user_id, key, season, floor)
     # The viewer's own emoji map is keyed by network name, so a network nothing
     # registered draws nothing — the same call the manual add makes for the same
     # reason.
@@ -2285,11 +2436,8 @@ async def api_distrakt_unknown_add(request: Request):
     # standing_questions to notice the season is now listed keeps the answer and
     # its effect in one place; that check is the safety net, not the mechanism.
     await distrakt_store.close_prompt(user_id, key, season)
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
     payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    return JSONResponse(_point_at(payload, key, season), status_code=status)
 
 
 @guard.post("/api/distrakt/unknown-resume", AuthLevel.DISTRAKT_APPROVED)

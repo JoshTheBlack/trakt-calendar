@@ -99,17 +99,28 @@ async function addUnknownSeason(key, season, button) {
     const row = button.closest('.distrakt-unknown-row');
     let ids = {};
     try { ids = JSON.parse((row && row.dataset.ids) || '{}'); } catch (e) { ids = {}; }
+    const body = {
+        key, season, ids, title: (row && row.dataset.title) || '',
+        year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
+    };
     try {
         const res = await fetch('/api/distrakt/unknown-add', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                key, season, ids, title: (row && row.dataset.title) || '',
-                year: window.DISTRAKT_YEAR, month: window.DISTRAKT_MONTH,
-            }),
+            body: JSON.stringify(body),
         });
         const d = await res.json();
         if (!d.ok) throw new Error(d.error || 'failed');
+        // NOTHING WAS ADDED YET, and the reason this row exists is the reason to
+        // expect it. The question was raised by a play nothing could place — and
+        // for a season already watched right through, that IS what beginning it
+        // again looks like. So the server wrote nothing and asked which run this
+        // play belongs to; answering re-posts this same add with the answer.
+        if (d.needs_decision) {
+            openRewatchPrompt(d.needs_decision, season,
+                              { url: '/api/distrakt/unknown-add', body: body });
+            return;
+        }
         toast('Added', true);
         applyMonthResponse(d);  // a new row exists now, so the month is redrawn
     } catch (e) {

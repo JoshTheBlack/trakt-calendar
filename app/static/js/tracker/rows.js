@@ -156,7 +156,7 @@ function byWatchedAt(a, b) {
 function filmRow(m) {
     const day = String(m.watched_at || '').slice(0, 10);
     return `
-        <div class="distrakt-show-row distrakt-film-row">
+        <div class="distrakt-show-row distrakt-film-row" data-key="${esc(m.key || '')}" data-season="-1">
             <span class="distrakt-badge">🎬</span>
             <span class="distrakt-title"><span class="tt">${esc(m.title || 'Untitled')}</span></span>
             <span class="distrakt-season"></span>

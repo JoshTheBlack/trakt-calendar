@@ -904,6 +904,24 @@ body.hide-not-watching .card.not-watching { display: none; }
     100% { box-shadow: 0 0 0 14px rgba(34,197,94,0); }
 }
 .card.jump-target { animation: jump-target-pulse 1.3s ease-out 2; border-color: rgba(34,197,94,0.7); }
+/* THE ROW A TRACKER MUTATION JUST WROTE. The same claim the calendar's
+   jump-target makes — "this is the one you asked for" — so it is said the same
+   way rather than invented again, and let go just as quickly. The row is not a
+   .card, so it takes the animation on its own selector; `scroll-margin-block`
+   keeps it clear of the sticky header the way the calendar's anchor does. */
+.distrakt-show-row.row-marked {
+    animation: jump-target-pulse 1.3s ease-out 2;
+    border-radius: 6px;
+    scroll-margin-block: 30vh 20vh;
+}
+@media (prefers-reduced-motion: reduce) {
+    /* No pulse, but still say which row: the mark is the information and the
+       animation is only how it is delivered. */
+    .card.jump-target, .distrakt-show-row.row-marked {
+        animation: none;
+        box-shadow: 0 0 0 2px rgba(34,197,94,0.7);
+    }
+}
 /* WHERE A JUMP LANDS, decided in CSS rather than by a script calling
    scrollIntoView({block:'center'}). The server marks the card a search result
    asked for and ships its whole day with the shell, so the browser's own

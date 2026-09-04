@@ -25,6 +25,44 @@ function applyMonthResponse(d) {
                    d.unbacked_verdicts || []);
     renderCopyBlocks(d.post1 || '', d.post2 || '');
     if (emojiEntries.length) renderEmojiRows();  // refresh emoji-row logos now we have tmdb
+    if (d.highlight) { pointAtRow(d.highlight); }
+}
+
+// How long the mark stays up. Long enough to be seen after the scroll settles,
+// short enough that it is gone before the reader starts using the page — it says
+// "this is the one you just added", which stops being worth saying almost at once.
+const ROW_MARK_MS = 2600;
+
+// WHICH ROW A MUTATION JUST WROTE, scrolled to and marked.
+//
+// WHY THE PAGE DOES NOT WORK IT OUT ITSELF. A season posted as ids-plus-a-number
+// becomes a row under a key the SERVER derives, by a rule about which of a
+// title's ids wins; re-deriving that here would be a second copy of it in a
+// second language, wrong for exactly the co-tracked titles the first one exists
+// to get right. So the route says which row it wrote and this finds it.
+//
+// NOT FOUND IS AN ORDINARY OUTCOME AND NOT A FAILURE. An add can settle onto a
+// month this page is not showing, and a film added to a closed month lands in a
+// snapshot rather than here — so there is often nothing to point at, and the
+// honest response is to draw nothing rather than to report a problem.
+//
+// THE LIST IS ALREADY DRAWN when this runs — renderShowList sets innerHTML
+// synchronously — so there is none of the calendar's waiting for a day block to
+// arrive. What CAN still move it is a network logo loading and resizing a row
+// above it, which is why the mark is added first and the scroll is re-issued
+// once on the next frame rather than being chased.
+function pointAtRow(target) {
+    const key = String((target && target.key) || '');
+    const season = String((target && target.season) !== undefined ? target.season : '');
+    if (!key) { return; }
+    const row = document.querySelector(
+        `#distraktShowList .distrakt-show-row[data-key="${CSS.escape(key)}"]` +
+        `[data-season="${CSS.escape(season)}"]`);
+    if (!row) { return; }
+    row.classList.add('row-marked');
+    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    requestAnimationFrame(() => row.scrollIntoView({ block: 'center', behavior: 'auto' }));
+    setTimeout(() => row.classList.remove('row-marked'), ROW_MARK_MS);
 }
 
 async function loadMonthData() {

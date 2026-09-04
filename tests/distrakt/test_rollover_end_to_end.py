@@ -190,6 +190,7 @@ class RolloverOverHttpTestCase(AppTestCase):
         held = premieres or {}
         self.season_calls = []
         self.network_calls = []
+        self.baseline_calls = []
 
         async def read_month(endpoint, settings, year=None, month=None, **kw):
             key = distrakt_store.month_key(int(year), int(month))
@@ -202,6 +203,24 @@ class RolloverOverHttpTestCase(AppTestCase):
         async def sync_and_baseline(settings, user_id, roster, force=False, today=None,
                                     since_month=None):
             return _watch_state(roster, plays)
+
+        async def baseline_show(settings, user_id, record):
+            """The per-title history read that the re-watch question is asked OF.
+
+            RECORDED RATHER THAN MERELY STUBBED, for the reason `network_for`
+            gives just below: it is an outbound call per CLICK, and a change that
+            starts making one per ROW should have to say so here. It arrived when
+            the re-watch question moved inside `_rewatch_question` — asking
+            whether a season is already finished is asking about stored watch
+            state, and a title being added for the first time has none until
+            something fetches it.
+
+            IT FILLS NOTHING IN, which is right for this file: `sync_and_baseline`
+            above already answers with the whole state these tests describe
+            through `plays`, and the seasons here are single new episodes rather
+            than finished runs, so there is no re-watch question to raise.
+            """
+            self.baseline_calls.append(str((record.get("ids") or {}).get("tmdb") or ""))
 
         async def network_for(settings, rec):
             """The show-level lookup an add from a history prompt makes, because
@@ -217,6 +236,7 @@ class RolloverOverHttpTestCase(AppTestCase):
                 ("app.providers.trakt.sync.fetch_watched_progress", _no_progress),
                 ("app.providers.trakt.detail.fetch_season_detail", season_detail),
                 ("app.distrakt.watch_history.sync_and_baseline", sync_and_baseline),
+                ("app.distrakt.watch_history.baseline_show", baseline_show),
                 ("app.distrakt.live.network_for", network_for),
             ):
                 stack.enter_context(mock.patch(target, side_effect=fake))

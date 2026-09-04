@@ -38,9 +38,12 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ### 🥚
 - Adding or removing something used to take about four seconds, nearly all of it spent reading the whole wall calendar end to end to look up a couple of names it was missing. It asks about the names it wants now. Well under a second.
+- Adding something no longer leaves you hunting for where it went. It takes you to it and says which one it is.
 - It can go looking somewhere it hadn't thought to before, when the first place comes up empty-handed.
 - It will ask before assuming you're picking up where you left off — and it asks *first*, writing nothing down until you've answered. 
 - Starting over, you can say where "over" begins. It reads the order to work out where you began again, offers that, and takes a different day if you'd rather.
+- Told that everything you have counts, it files it done against the page you are on — rather than leaving it in hand with nowhere left to go.
+- The same question whichever door you come in by: one you went looking for, or one it offered you because it noticed.
 - Most of the way through is not the same as done.
 - It knows who you'd rather hear from, and asks in order without being reminded.
 - Where they report differently, it's learned to tell which one means what — and to fill in what one left blank from what the other already knew.
