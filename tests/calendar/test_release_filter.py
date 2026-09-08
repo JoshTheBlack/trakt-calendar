@@ -261,18 +261,18 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
 
         grouped, meta = await self._read(movie_release_countries="us")
         self.assertEqual([i.title for g in grouped for i in g["items"]], ["US Only"])
-        self.assertEqual(meta["release_filtered"], 1)
+        self.assertEqual(meta["filtered"], 1)
 
         grouped, meta = await self._read(movie_release_countries="jp")
         self.assertEqual(grouped, [])
-        self.assertEqual(meta["release_filtered"], 2)
+        self.assertEqual(meta["filtered"], 2)
 
     async def test_nothing_is_removed_and_nothing_is_reported_with_no_spec(self):
         await self._enrich(1, {"BR": [PREMIERE]})
         await self._stored([_film(1, title="Brazil Only")])
         grouped, meta = await self._read()
         self.assertEqual([i.title for g in grouped for i in g["items"]], ["Brazil Only"])
-        self.assertEqual(meta["release_filtered"], 0)
+        self.assertEqual(meta["filtered"], 0)
 
     async def test_a_film_enrichment_has_not_reached_yet_still_renders(self):
         """The same deliberate, temporary gap the film prune and the genre
@@ -283,7 +283,7 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
         grouped, meta = await self._read(movie_release_countries="us")
         self.assertEqual([i.title for g in grouped for i in g["items"]],
                          ["Not Looked Up Yet"])
-        self.assertEqual(meta["release_filtered"], 0)
+        self.assertEqual(meta["filtered"], 0)
 
     async def test_the_country_and_type_meet_on_one_block_end_to_end(self):
         await self._enrich(1, {"BR": [PREMIERE], "JP": [THEATRICAL]})
@@ -307,7 +307,7 @@ class ReleaseFilterThroughAssembleRangeTests(unittest.IsolatedAsyncioTestCase):
             start_date=date(2026, 7, 7), end_date=date(2026, 7, 7),
             movie_release_countries="us", movie_release_types="3", now=1000)
         self.assertEqual([i.title for g in grouped for i in g["items"]], ["A Series"])
-        self.assertEqual(meta["release_filtered"], 0)
+        self.assertEqual(meta["filtered"], 0)
 
     async def test_the_release_map_is_stored_with_the_entry(self):
         """THIS TEST USED TO ASSERT THE OPPOSITE, and the reversal is the design.

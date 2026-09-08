@@ -32,7 +32,7 @@ title for cast, an embedded trailer, and the full episode list.
 - 📅 Browse premieres for any month/year, grouped by day
 - 📡 **Switchable endpoints** — new shows, season premieres, season finales, all episodes, or movies
 - 🔍 **Find a title and jump to it** — search the calendar you're on as you type, with no calls to anybody, and widen to your other calendars from the results; press Enter to also ask the services, which turns up titles your calendar hasn't loaded yet. Those come back a season at a time, and opening one writes it onto the day it belongs to — including premieres the services left off their own calendars.
-- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, which services show is a tick-box in the calendar's **Filters** panel, and whose description you read when both list the same title is an order on your **Account** page. Simkl needs no credentials to fill a calendar
+- 🔀 **Two sources, one calendar** — Trakt and, optionally, [Simkl](#simkl--an-optional-second-source). A month is built from both, a title both of them list is one card rather than two, which services show is a tick-box in the calendar's **🎚️ Filters** panel, and whose description you read when both list the same title is an order on your **Account** page. Simkl needs no credentials to fill a calendar
 - 🖼️ Rich poster tiles — rating, runtime, network, and episode (SxxEyy) badges, plus language, country, day-of-week, and a lazily-loaded current-season summary (episode count, latest / next air date)
 - 🔍 **Details modal** on click — full overview, an embedded trailer, cast (headshots + characters), and the season's episode list with air dates
 - ✅ Mark shows **watching / not watching** — saved server-side, so it follows you across devices — plus a one-click filter to hide the ones you're not watching
@@ -234,7 +234,7 @@ for why it's split that way and what's still in the file.
 | **Seerr** | Instance URL + API key to enable the request button (works with the Overseerr/Jellyseerr lineage) |
 | **Public base URL** | The origin this instance is reached on — see [Serving over HTTPS](#serving-over-https) |
 | **Trusted proxy addresses** | Whose `X-Forwarded-For` to believe — see [Serving over HTTPS](#serving-over-https) |
-| **Genres / Countries / Certifications / Networks** (Calendar section) | The instance's **content floor** — see below. Not the same thing as your own 🔎 Filters. |
+| **Genres / Countries / Certifications / Networks** (Calendar section) | The instance's **content floor** — see below. Not the same thing as your own 🎚️ Filters. |
 
 Two settings are deliberately file-only, because a wrong value in the UI could lock the
 operator out of the UI that would fix it. Edit `data/settings.json` and restart:
@@ -247,15 +247,48 @@ switching, and every choice persists. Marking something "not watching" is a deci
 the **show**, not about the card you clicked: it applies on every calendar view, in every
 month, and on your public share page, until you turn it back on.
 
-**🔎 Filters** in the header narrows your calendar by genre, country, certification, and
-network. The button reads **🔎 Filtered** and stays lit while anything is being held back.
-Filters belong to your account, not to the instance — two people read the same cached month
-and each see it filtered their own way. Genres and countries are comma-separated, and a
-leading `-` excludes instead of including (`drama, -reality`); networks are matched exactly
-as Trakt spells them. Certifications (US TV Parental Guidelines for shows, MPA ratings for
-movies) are set with a click-to-cycle chip picker instead of free text — there's no open
-vocabulary to type, just a fixed, small list of real-world rating labels. **New accounts
-start with nothing filtered.**
+**🎚️ Filters** in the header narrows your calendar by genre, country, certification and
+network. The button reads **🎚️ Filtered** while anything is being held back, and
+**🎚️ Filters off** while you have switched them off without clearing them. Filters belong
+to your account, not to the instance — two people read the same cached month and each see it
+filtered their own way. **New accounts start with nothing filtered.**
+
+The panel has two tabs, **📺 TV** and **🎬 Movies**, and opens on whichever kind of calendar
+you are looking at. They hold **separate answers**: excluding a genre from your shows leaves
+your films alone. The tab you are not on carries a count, so a narrowed film calendar says so
+while you are reading your show calendar.
+
+| | 📺 TV | 🎬 Movies |
+|---|---|---|
+| Services | which services fill your show calendars | which fill your film calendar |
+| Genres | ✅ | ✅ (separate answer) |
+| Countries — where a title was *made* | ✅ | ✅ (separate answer) |
+| Networks | ✅ | — (a film has no network) |
+| Certifications | US TV Parental Guidelines | MPA film ratings |
+| Release markets and formats — where a film is being *shown* | — | ✅ |
+
+Each dimension is a row of chips: press one to keep **only** that value, again to **filter it
+out**, again to stop filtering on it — green and red, the same two answers a badge on a card
+offers. Anything the chips don't name (an unusual genre, any ISO country code, a network) is
+typed into the box under them and becomes a chip of its own. Networks are matched **exactly**
+as the service spells them, capitals included: `tvN` and `TVN` are two different broadcasters.
+Each field's **i** button explains what it does and what it does not.
+
+**Services are asked once per medium.** One service has the deeper show coverage and the other
+the wider film listing, which is a preference no amount of narrowing can express — so the TV
+tab and the Movies tab each get their own answer. Each service is an independent switch, so a
+service added to this app later arrives switched on for anyone who had them all on. At least
+one has to stay on.
+
+**The switch at the top turns every filter off without clearing any of them.** Your answers
+stay exactly where they are and come back the moment you switch it on again; it is meant for
+"show me everything for a bit". Your **share links keep filtering** while it is off — turning
+your own view wide open should not quietly publish a wider calendar to everyone holding a link.
+
+You can also filter straight from a card: press the genre, country, network or certification a
+card is already showing and choose *filter out* or *only this*. It writes to the tab that card
+belongs to, so a genre you exclude from a film card does not touch your show calendar. A change
+lands on the next page load, since filtering happens while the month is put together.
 
 > Trakt gates its own calendar filtering behind a [VIP subscription](https://trakt.tv/vip/filtering),
 > but this app filters the cached response itself rather than asking Trakt to, so the
@@ -263,7 +296,7 @@ start with nothing filtered.**
 
 ### The content floor — Settings > Calendar > Genres / Countries / Certifications / Networks
 
-These fields look like the per-account 🔎 Filters above, but they are not: they are
+These fields look like the per-account 🎚️ Filters above, but they are not: they are
 instance-wide, and they filter **before** the shared calendar cache is ever populated, not
 at read time. A show excluded here never enters the cache at all — no per-account filter
 can bring it back, because there's nothing left to filter. Anything else in the app that

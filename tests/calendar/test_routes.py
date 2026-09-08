@@ -28,6 +28,7 @@ from fastapi.testclient import TestClient
 from app import auth, db, providers
 from app.calendar import cache as calendar_cache, routes as calendar_routes
 from app.calendar import state as calendar_state
+from app.calendar import vocab
 from app.endpoints import ENDPOINTS
 from app.providers.base import Capabilities
 from app.providers.trakt import TraktError
@@ -286,29 +287,42 @@ class ViewerFilterTests(CalendarRouteTestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def set_filters(self, **fields):
+        """POST the panel the way the browser does: ONE FIELD PER TOKEN.
+
+        The panel has no "genres" input to fill in any more — it renders a chip
+        per token and each chip posts its own answer, which is what keeps the
+        spec format entirely in app/calendar/filter.py. Spelling the names
+        through `vocab.field_name` rather than by hand is the same discipline: a
+        test that hard-coded "chip:tv_genres:drama" would be a second statement
+        of the encoding.
+        """
+        payload = {}
+        for field, tokens in fields.items():
+            for token, mode in tokens.items():
+                payload[vocab.field_name(field, token)] = mode
+        return self.client.post("/api/me/filters", json=payload)
+
     def test_a_new_account_starts_with_no_filters_at_all(self):
         """A filter removes shows without ever saying one exists, so it is not
         something an account inherits from the instance's configuration."""
         prefs = asyncio.run(auth.get_user_prefs(self.user1))
-        self.assertEqual(prefs["genres"], "")
-        self.assertEqual(prefs["countries"], "")
-        self.assertEqual(prefs["show_certifications"], "")
-        self.assertEqual(prefs["movie_certifications"], "")
-        self.assertEqual(prefs["movie_release_countries"], "")
-        self.assertEqual(prefs["movie_release_types"], "")
-        self.assertEqual(prefs["network_filter"], [])
+        for field in (*vocab.TV_FIELDS, *vocab.MOVIE_FIELDS):
+            with self.subTest(field=field):
+                self.assertFalse(prefs[field])
+        self.assertFalse(prefs["filters_paused"])
 
     def test_the_release_filter_round_trips_and_keeps_only_numbers(self):
-        """The release types are stored as the numbers the service publishes,
-        so a word is dropped on the way IN rather than stored as a preference
-        that can never do anything — the read path already ignores one it
-        cannot parse."""
+        """The release types are stored as the numbers the service publishes, so
+        a chip can only ever offer one — but a token typed into the box beside
+        them can be anything, and is dropped on the way IN rather than stored as
+        a preference that could never act."""
         self.sign_in_as(self.user1)
-        resp = self.client.post("/api/me/prefs", json={
-            "movie_release_countries": " us , , -br ",
-            "movie_release_types": "3, theatrical, -1, 3"})
+        resp = self.set_filters(
+            movie_release_countries={"us": "include", "br": "exclude"},
+            movie_release_types={"3": "include", "theatrical": "include", "1": "exclude"})
         self.assertEqual(resp.status_code, 200, resp.text)
-        prefs = self.client.get("/api/me/prefs").json()["prefs"]
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
         self.assertEqual(prefs["movie_release_countries"], "us, -br")
         self.assertEqual(prefs["movie_release_types"], "3, -1")
 
@@ -317,21 +331,19 @@ class ViewerFilterTests(CalendarRouteTestCase):
         so the show calendars have to be untouched rather than merely
         unaffected by accident."""
         self.sign_in_as(self.user1)
-        self.client.post("/api/me/prefs", json={
-            "movie_release_countries": "zz", "movie_release_types": "5"})
+        self.set_filters(movie_release_countries={"zz": "include"},
+                         movie_release_types={"5": "include"})
         page = self.client.get("/?year=2026&month=7").text
         self.assertIn("The Drama", page)
         self.assertIn("The Comedy", page)
 
     def test_a_viewer_can_filter_shows_by_certification(self):
-        """A per-user certification exclude behaves exactly like the existing
-        genre/country filters: one viewer's calendar narrows, the other's does
-        not, from the same cached window."""
+        """A per-user certification exclude behaves exactly like the genre and
+        country filters: one viewer's calendar narrows, the other's does not,
+        from the same cached window."""
         self.sign_in_as(self.user1)
-        resp = self.client.post("/api/me/prefs", json={"show_certifications": "-tv-ma"})
+        resp = self.set_filters(show_certifications={"TV-MA": "exclude"})
         self.assertEqual(resp.status_code, 200, resp.text)
-        prefs = self.client.get("/api/me/prefs").json()["prefs"]
-        self.assertEqual(prefs["show_certifications"], "-tv-ma")
         page = self.client.get("/?year=2026&month=7").text
         self.assertIn("The Drama", page)
         self.assertNotIn("The Comedy", page)
@@ -344,7 +356,7 @@ class ViewerFilterTests(CalendarRouteTestCase):
 
     def test_each_viewer_filters_the_same_cached_month_their_own_way(self):
         self.sign_in_as(self.user1)
-        resp = self.client.post("/api/me/prefs", json={"genres": "-comedy"})
+        resp = self.set_filters(tv_genres={"comedy": "exclude"})
         self.assertEqual(resp.status_code, 200, resp.text)
         page = self.client.get("/?year=2026&month=7").text
         self.assertIn("The Drama", page)
@@ -357,55 +369,221 @@ class ViewerFilterTests(CalendarRouteTestCase):
         self.assertIn("The Drama", page2)
         self.assertIn("The Comedy", page2)
 
+    def test_a_shows_genre_filter_leaves_the_film_calendar_alone(self):
+        """THE WHOLE POINT OF THE SPLIT. Excluding a genre from the show
+        calendar used to exclude it from films as well, which is why neither
+        question could be answered properly."""
+        self.sign_in_as(self.user1)
+        self.set_filters(tv_genres={"comedy": "exclude"})
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
+        self.assertEqual(prefs["tv_genres"], "-comedy")
+        self.assertEqual(prefs["movie_genres"], "")
+
+    def test_saving_one_tab_leaves_the_other_tabs_answers_standing(self):
+        """A tab posts every one of ITS chips, including the ones set to
+        nothing, and mentions none of the other tab's — so clearing works and a
+        tab nobody opened is left exactly as it was."""
+        self.sign_in_as(self.user1)
+        self.set_filters(movie_genres={"horror": "exclude"})
+        self.set_filters(tv_genres={"comedy": "exclude"})
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
+        self.assertEqual(prefs["movie_genres"], "-horror")
+        self.assertEqual(prefs["tv_genres"], "-comedy")
+
     def test_a_non_admin_can_read_and_write_their_own_filters(self):
         """The whole point: no admin rights involved."""
         self.sign_in_as(self.user1)
-        resp = self.client.post("/api/me/prefs", json={
-            "genres": " drama , ", "countries": "us", "network_filter": "HBO, hbo , Netflix"})
+        resp = self.set_filters(
+            tv_genres={"drama": "include"}, tv_countries={"us": "include"},
+            network_filter={"HBO": "include", "Netflix": "exclude"})
         self.assertEqual(resp.status_code, 200, resp.text)
 
-        prefs = self.client.get("/api/me/prefs").json()["prefs"]
-        self.assertEqual(prefs["genres"], "drama")       # empty token dropped
-        self.assertEqual(prefs["countries"], "us")
-        # De-duplicated case-insensitively, keeping the spelling first given.
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
+        self.assertEqual(prefs["tv_genres"], "drama")
+        self.assertEqual(prefs["tv_countries"], "us")
+        self.assertEqual(prefs["network_filter"], ["HBO", "-Netflix"])
+
+    def test_two_spellings_of_a_network_are_two_networks(self):
+        """`tvN` and `TVN` are a Korean broadcaster and a Polish one, and the read
+        path matches them exactly for that reason. The de-duplication on the way
+        IN folded case, so a viewer could set both and find only the first
+        stored — the panel let them add two chips and the save quietly kept
+        one."""
+        self.sign_in_as(self.user1)
+        self.set_filters(network_filter={"tvN": "include", "TVN": "exclude"})
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
+        self.assertEqual(prefs["network_filter"], ["tvN", "-TVN"])
+
+    def test_the_same_spelling_twice_is_still_one_network(self):
+        """Exact de-duplication, not none: a name repeated verbatim is one
+        entry, which is what the check was there for before it started folding
+        case as well."""
+        self.sign_in_as(self.user1)
+        asyncio.run(auth.update_user_prefs(
+            self.user1, network_filter=calendar_routes._network_list("HBO, HBO , Netflix")))
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
         self.assertEqual(prefs["network_filter"], ["HBO", "Netflix"])
 
     def test_the_network_filter_narrows_to_the_named_networks(self):
         self.sign_in_as(self.user1)
-        self.client.post("/api/me/prefs", json={"network_filter": "HBO"})
+        self.set_filters(network_filter={"HBO": "include"})
         page = self.client.get("/?year=2026&month=7").text
         self.assertIn("The Drama", page)
         self.assertNotIn("The Comedy", page)
 
     def test_a_filter_can_be_cleared_again(self):
-        """Present-but-empty has to mean "no filter" rather than "unchanged", or
-        a filter could be set and never taken off."""
+        """A chip set back to grey posts an EMPTY value rather than being left
+        out, and that is what makes clearing possible: absent means "this tab
+        was not open", empty means "stop filtering on this"."""
         self.sign_in_as(self.user1)
-        self.client.post("/api/me/prefs", json={"genres": "-comedy"})
-        self.client.post("/api/me/prefs", json={"genres": "", "network_filter": []})
-        prefs = self.client.get("/api/me/prefs").json()["prefs"]
-        self.assertEqual(prefs["genres"], "")
-        self.assertEqual(prefs["network_filter"], [])
+        self.set_filters(tv_genres={"comedy": "exclude"})
+        self.set_filters(tv_genres={"comedy": ""})
+        prefs = asyncio.run(auth.get_user_prefs(self.user1))
+        self.assertEqual(prefs["tv_genres"], "")
         self.assertIn("The Comedy", self.client.get("/?year=2026&month=7").text)
 
+    def test_the_switch_stops_a_filter_acting_without_forgetting_it(self):
+        """The stash. Nothing is copied aside and nothing is restored — the
+        answers stay where they are and the read path asks the switch first, so
+        turning filters back on cannot have lost one."""
+        self.sign_in_as(self.user1)
+        self.set_filters(tv_genres={"comedy": "exclude"})
+        self.assertNotIn("The Comedy", self.client.get("/?year=2026&month=7").text)
+
+        self.client.post("/api/me/filters", json={"filters_on": False})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("The Comedy", page)
+        self.assertEqual(asyncio.run(auth.get_user_prefs(self.user1))["tv_genres"],
+                         "-comedy")
+
+        self.client.post("/api/me/filters", json={"filters_on": True})
+        self.assertNotIn("The Comedy", self.client.get("/?year=2026&month=7").text)
+
+    def test_the_month_says_how_many_cards_the_filters_removed(self):
+        """ON EVERY CALENDAR, not only the film one. The count started as a
+        films-only number because the release rule is the one that can empty a
+        month outright — but a genre exclude removes cards just as silently, and
+        a month that is short with nothing on the page to say why reads as the
+        app being broken whichever filter did it."""
+        self.sign_in_as(self.user1)
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertNotIn('id="statFiltered"', page)
+
+        self.set_filters(tv_genres={"comedy": "exclude"})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn('id="statFiltered"', page)
+        self.assertIn(">1</strong>", page)
+
+    def test_the_count_covers_the_network_filter_too(self):
+        """The network filter runs later than the others — it needs the rendered
+        item, which is the only shape a network exists on — so its removals are
+        the ones most easily left out of a total assembled before it ran."""
+        self.sign_in_as(self.user1)
+        self.set_filters(network_filter={"HBO": "include"})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn('id="statFiltered"', page)
+        self.assertIn(">1</strong>", page)
+
     def test_the_header_button_says_when_a_filter_is_narrowing_the_month(self):
-        """A filter's only other evidence is the shows that aren't there, which
-        looks exactly like Trakt not listing them."""
+        """A filter's only other evidence is the shows that are not there, which
+        looks exactly like the service not listing them."""
         self.sign_in_as(self.user1)
         unfiltered = self.client.get("/?year=2026&month=7").text
         self.assertIn('id="filtersBtn"', unfiltered)
-        self.assertNotIn('id="filtersBtn" class="pill-btn active"', unfiltered)
+        self.assertNotIn('class="pill-btn active"', unfiltered)
 
-        self.client.post("/api/me/prefs", json={"genres": "-comedy", "network_filter": "HBO"})
+        self.set_filters(tv_genres={"comedy": "exclude"},
+                         network_filter={"HBO": "include"})
         filtered = self.client.get("/?year=2026&month=7").text
-        self.assertIn('id="filtersBtn" class="pill-btn active"', filtered)
+        self.assertIn('class="pill-btn active"', filtered)
         self.assertIn("genre, network", filtered)
+
+    def test_the_button_looks_different_again_while_the_filters_are_off(self):
+        """THREE STATES, NOT TWO. "Nothing set" and "set but switched off" both
+        show a calendar with everything on it, and if they looked alike a viewer
+        would forget their filters existed."""
+        self.sign_in_as(self.user1)
+        self.set_filters(tv_genres={"comedy": "exclude"})
+        self.client.post("/api/me/filters", json={"filters_on": False})
+        page = self.client.get("/?year=2026&month=7").text
+        self.assertIn("pill-btn paused", page)
+        self.assertIn("Filters off", page)
 
     def test_the_filter_endpoints_still_need_a_session(self):
         self.client.cookies.clear()
         self.assertEqual(self.client.get("/api/me/prefs").status_code, 401)
         self.assertEqual(
-            self.client.post("/api/me/prefs", json={"genres": "drama"}).status_code, 401)
+            self.client.post("/api/me/filters", json={"filters_on": False}).status_code,
+            401)
+
+
+class SeriesPremieresAreToldFromReturningSeasonsTests(CalendarRouteTestCase):
+    """On the Season Premieres calendar every card is somebody's episode 1, and
+    they all looked identical — the only way to tell a brand-new show from a
+    fifth season was to read the season number off a small blue label.
+
+    ONE RULE ACROSS EVERY CALENDAR: episode 1 gets a label, and a first season
+    gets the accent. That is what lets All Episodes mark the premieres inside it
+    without marking every episode of a first season, with no endpoint named
+    anywhere in the template.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.user_id = self._make_user("premiere_viewer")
+        self.sign_in_as(self.user_id)
+        first = _entry("brand-new", "Brand New", "2026-07-15T20:00:00Z")
+        first["episode"]["season"] = 1
+        first["episode"]["number"] = 1
+        fifth = _entry("long-runner", "Long Runner", "2026-07-16T20:00:00Z")
+        fifth["episode"]["season"] = 5
+        fifth["episode"]["number"] = 1
+        midseason = _entry("mid-season", "Mid Season", "2026-07-17T20:00:00Z")
+        midseason["episode"]["season"] = 1
+        midseason["episode"]["number"] = 7
+        patcher = patch("app.calendar.cache.fetch_window_records",
+                        window_fetch([first, fifth, midseason]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def cards(self, endpoint="shows/premieres") -> dict[str, str]:
+        """{title: that card's markup} for the month."""
+        page = self.client.get(f"/?year=2026&month=7&endpoint={endpoint}").text
+        out = {}
+        for chunk in page.split('<div class="card')[1:]:
+            card = '<div class="card' + chunk.split("</div>\n</div>")[0]
+            for title in ("Brand New", "Long Runner", "Mid Season"):
+                if f'data-title="{title}"' in card:
+                    out[title] = card
+        return out
+
+    def test_a_first_season_says_so_and_carries_the_accent(self):
+        card = self.cards()["Brand New"]
+        self.assertIn("SERIES PREMIERE", card)
+        self.assertIn("is-series-premiere", card)
+        self.assertIn("premiere-badge first-season", card)
+
+    def test_a_later_season_is_labelled_but_not_accented(self):
+        """A returning season is the ordinary case on this calendar, so it gets
+        the word and not the gold — making both of them loud would leave the pair
+        as hard to tell apart as no labels at all."""
+        card = self.cards()["Long Runner"]
+        self.assertIn("RETURNING", card)
+        self.assertNotIn("SERIES PREMIERE", card)
+        self.assertNotIn("is-series-premiere", card)
+
+    def test_an_episode_that_is_not_a_premiere_is_not_labelled(self):
+        """THE PART THAT MAKES ONE RULE WORK EVERYWHERE. An S01E07 on the All
+        Episodes calendar is in a first season and is not a series premiere, so
+        the first-season test alone would have been wrong there."""
+        card = self.cards("shows")["Mid Season"]
+        self.assertNotIn("premiere-badge", card)
+        self.assertNotIn("is-series-premiere", card)
+
+    def test_the_premieres_inside_all_episodes_are_still_marked(self):
+        cards = self.cards("shows")
+        self.assertIn("SERIES PREMIERE", cards["Brand New"])
+        self.assertIn("RETURNING", cards["Long Runner"])
 
 
 # ---------------------------------------------------------------------------
@@ -1424,15 +1602,19 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         self.assertEqual(_day_sections(resp.text), [])
         self.assertEqual(resp.text.strip(), "")
 
+    def _exclude_drama(self):
+        return self.client.post("/api/me/filters", json={
+            vocab.field_name(vocab.TV_GENRES, "drama"): "exclude"})
+
     def test_it_applies_this_viewers_saved_filters(self):
-        self.client.post("/api/me/prefs", json={"genres": "-drama"})
+        self._exclude_drama()
         self.assertNotIn("The Drama", self.client.get(self.DAY).text)
 
     def test_the_query_cannot_widen_or_change_the_filters(self):
         """The filters are the viewer's, read from their session. A query
         parameter naming them would let one link ask for an unfiltered day —
         or for somebody else's view of it."""
-        self.client.post("/api/me/prefs", json={"genres": "-drama"})
+        self._exclude_drama()
         text = self.client.get(self.DAY + "&genres=&countries=&network_filter=").text
         self.assertNotIn("The Drama", text)
 

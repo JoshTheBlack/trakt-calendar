@@ -1,0 +1,46 @@
+{# One filter chip: a token, and which of the three answers it currently carries.
+
+   THREE RADIOS, NOT A BUTTON WITH A VALUE, and it is the same argument
+   _filter_badge.html makes for the card badges: the browser holds the choice, the
+   stylesheet reads it (`:has(:checked)`), and no state is kept anywhere for
+   anything to fall out of step with. It also means the panel's Cancel is
+   `form.reset()` and its save is the form's own values — neither needs a script
+   that knows what a chip is.
+
+   THE RADIOS ARE THE KEYBOARD CONTROL AND THE BUTTON IS THE POINTER ONE. A
+   radiogroup already does arrow-key cycling, labelling and ARIA properly, so the
+   real inputs are what a keyboard reaches; the visible face is a button taken out
+   of the tab order and hidden from assistive tech, existing only so that a
+   pointer can cycle the three in one press instead of three. Nothing is
+   duplicated — the button sets the radios and reads back from them.
+
+   THE NAME CARRIES THE DESTINATION. `chip:<pref column>:<token>` is spelled by
+   app/calendar/vocab.py's `field_name` and parsed back by the same module, so
+   this template never spells the format itself. #}
+{% macro chip(state) %}
+<span class="fchip" role="radiogroup" aria-label="{{ state.label }}">
+    <input type="radio" name="{{ state.name }}" value=""
+           autocomplete="off" aria-label="{{ state.label }}: not filtered"
+           {% if state.mode == '' %}checked{% endif %}>
+    <input type="radio" name="{{ state.name }}" value="include"
+           autocomplete="off" aria-label="{{ state.label }}: only this"
+           {% if state.mode == 'include' %}checked{% endif %}>
+    <input type="radio" name="{{ state.name }}" value="exclude"
+           autocomplete="off" aria-label="{{ state.label }}: filter out"
+           {% if state.mode == 'exclude' %}checked{% endif %}>
+    <button type="button" class="fchip-face" tabindex="-1" aria-hidden="true"
+            title="{{ state.label }} — press to cycle: not filtered, only this, filter out">{{ state.label }}</button>
+</span>
+{% endmacro %}
+
+{# The legend, which is the whole of the explanation the chips need. Drawn once
+   per chip section rather than once per panel: a section can be scrolled to
+   without the top of the panel in view, and a colour code nobody can see is a
+   colour code nobody can read. #}
+{% macro legend() %}
+<p class="fchip-legend">
+    <span><i class="fswatch"></i> not filtered</span>
+    <span><i class="fswatch on"></i> only these</span>
+    <span><i class="fswatch off"></i> filtered out</span>
+</p>
+{% endmacro %}

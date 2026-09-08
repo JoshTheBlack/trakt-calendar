@@ -117,8 +117,8 @@ class UpgradePathTests(RouteTestCase):
                                          (user["id"],)))
         self.assertEqual(user["timezone"], "America/New_York")
         self.assertEqual(prefs["endpoint"], "shows/premieres")
-        self.assertEqual(prefs["genres"], "-anime,-music")
-        self.assertEqual(prefs["countries"], "us,gb")
+        self.assertEqual(prefs["tv_genres"], "-anime,-music")
+        self.assertEqual(prefs["tv_countries"], "us,gb")
         self.assertEqual(prefs["network_filter_json"], '["HBO"]')
 
     def test_adopts_an_existing_trakt_token_as_a_linked_identity(self):

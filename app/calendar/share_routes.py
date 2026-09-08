@@ -33,7 +33,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 
 from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
-               state as calendar_state)
+               state as calendar_state, vocab)
 from .. import auth, authz, chrome, clock, perftrace, route_params
 from ..auth import AuthLevel
 from ..authz import Guard
@@ -334,13 +334,19 @@ async def _read_month(view: ShareView, settings, owner_prefs,
         return [], None
     return await calendar_cache.read_month(
         view.endpoint, settings, tz=view.tz, year=view.year, month=view.month,
-        genres=owner_prefs["genres"], countries=owner_prefs["countries"],
-        show_certifications=owner_prefs["show_certifications"],
-        movie_certifications=owner_prefs["movie_certifications"],
-        movie_release_countries=owner_prefs["movie_release_countries"],
-        movie_release_types=owner_prefs["movie_release_types"],
+        # THE OWNER'S FILTERS FOR THIS CALENDAR'S MEDIUM, and `honour_pause` is
+        # False on purpose: the stash is a private look at your own calendar, so
+        # an owner who switched their filters off for the afternoon does not
+        # silently publish a wider calendar to everyone holding their link.
+        **{k: v for k, v in vocab.active_specs(
+            owner_prefs, view.endpoint.media, honour_pause=False).items()
+           if k != "network_filter"},
+        # The view's own networks rather than the owner's, because a link may
+        # narrow further than the calendar it was made from.
         network_filter=view.network_filter,
-        prefs=_narrowed_prefs(await source_prefs.load(owner_id), view, settings),
+        prefs=_narrowed_prefs(
+            (await source_prefs.load(owner_id)).for_media(view.endpoint.media),
+            view, settings),
         allow_fetch=False,
     )
 

@@ -121,6 +121,19 @@ async function toggleWatch(btn, event) {
     } catch (e) {
         console.error(e);
         setSyncStatus(false, 'Save failed');
+        // AND PUT THE CARD BACK. The mark is applied here BEFORE it is stored,
+        // which is right -- a mark must feel instant and the round trip is not.
+        // But a failed save used to leave the card looking marked while nothing
+        // had been written, and the only evidence was a toast that scrolls away:
+        // the show stayed crossed out until the next reload, and anything
+        // reading the stored marks -- the tracker's import, most visibly --
+        // correctly saw a title that was never marked. A refusal has to undo the
+        // thing it refused, or the screen is lying about what is saved.
+        cardsForShow(id).forEach(c => setCardState(c, !isNotWatching));
+        if (isNotWatching) notWatching.delete(id); else notWatching.add(id);
+        notWatchingCount -= isNotWatching ? cards : -cards;
+        watchingCount += isNotWatching ? cards : -cards;
+        updateStats();
     }
 }
 

@@ -34,7 +34,8 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 
 from . import (cache as calendar_cache, detail_source, enrich as calendar_enrich,
                filter as calendar_filter, resolve as calendar_resolve,
-               search as calendar_search, share_links, state as calendar_state)
+               search as calendar_search, share_links, state as calendar_state,
+               vocab)
 from .. import auth, authz, chrome, clock, db, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
@@ -142,11 +143,17 @@ def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
 
 
 def _filters_active(prefs: dict) -> bool:
-    return bool(
-        prefs["genres"] or prefs["countries"] or prefs["network_filter"]
-        or prefs["show_certifications"] or prefs["movie_certifications"]
-        or prefs["movie_release_countries"] or prefs["movie_release_types"]
-    )
+    """Whether anything is set, PAUSED OR NOT.
+
+    Deliberately blind to the pause, because the toolbar button has three states
+    and this is the one that separates the outer two from the middle. "Nothing
+    set" and "set but switched off" must not look alike: the first is a calendar
+    that shows everything because nobody narrowed it, the second is a calendar
+    that shows everything because somebody chose to see it that way, and reading
+    the second as the first is how a viewer forgets their filters exist. The
+    template asks this AND `filters_paused` and draws one of three looks.
+    """
+    return vocab.any_set(prefs, (*vocab.TV_FIELDS, *vocab.MOVIE_FIELDS))
 
 
 def _filters_summary(prefs: dict) -> str:
@@ -158,8 +165,12 @@ def _filters_summary(prefs: dict) -> str:
     not a value, so it does not need to distinguish them."""
     named = [
         label for label, value in (
-            ("genre", prefs["genres"]),
-            ("country", prefs["countries"]),
+            # ONE LABEL FOR BOTH MEDIA'S COPY OF A DIMENSION, the same way the
+            # two certification specs already shared one: a tooltip naming
+            # dimensions has nothing to say about which tab an answer was typed
+            # on, and "genre, genre" would be the alternative.
+            ("genre", prefs["tv_genres"] or prefs["movie_genres"]),
+            ("country", prefs["tv_countries"] or prefs["movie_countries"]),
             ("certification", prefs["show_certifications"] or prefs["movie_certifications"]),
             ("network", prefs["network_filter"]),
             # One label for the two release specs, the same way the two
@@ -181,10 +192,17 @@ def _requested_endpoint(request: Request, prefs: dict, settings):
     )
 
 
-async def _viewer_source_selection(request: Request, user) -> source_prefs.SourcePrefs:
-    """This viewer's saved source preferences, with `calendar_source` swapped
-    for a `?source=` override when the query names one of the app's own
+async def _viewer_source_selection(request: Request, user, media=None) -> source_prefs.SourcePrefs:
+    """This viewer's saved source preferences for `media`, with `calendar_source`
+    swapped for a `?source=` override when the query names one of the app's own
     selections.
+
+    `media` NARROWS FIRST AND THE OVERRIDE STILL WINS, which is the order the two
+    want: the medium picks which of the account's two saved answers is in play,
+    and `?source=` is a transient "show me this one instead" that was never about
+    either. Passing None means the caller is not asking about one calendar — the
+    search does that, because it spans both media and narrows per endpoint
+    itself.
 
     THE OVERRIDE IS NEVER PERSISTED. It exists so a coverage-gap message (see
     _coverage_gap below) can offer "show Trakt instead" as a link for THIS
@@ -195,6 +213,8 @@ async def _viewer_source_selection(request: Request, user) -> source_prefs.Sourc
     error for a stray query string.
     """
     saved = await source_prefs.load(user.user_id)
+    if media is not None:
+        saved = saved.for_media(media)
     requested = request.query_params.get("source")
     if requested and source_prefs.is_selection(requested):
         return dataclasses.replace(saved, calendar_source=requested)
@@ -232,6 +252,95 @@ def _answering_services(endpoint, settings) -> list[tuple[str, str]]:
     return services if len(services) >= 2 else []
 
 
+def _answering_services_for_media(media, settings) -> list[tuple[str, str]]:
+    """(name, label) for every service that could fill ANY calendar of `media`.
+
+    THE FILTERS PANEL ASKS PER MEDIUM WHERE THE TOOLBAR ASKS PER CALENDAR, and
+    the union is what makes the two agree. A service that publishes All Episodes
+    but not Season Finales still belongs on the TV tab: the answer stored there
+    governs four endpoints, and a service missing from the tab could never be
+    switched on for the one it does answer. The per-endpoint question is still
+    asked where it is genuinely per-endpoint -- `_answering_services` and the
+    toolbar control it feeds.
+
+    The fewer-than-two rule comes back with it, unchanged and for the same
+    reason: one service answering a whole medium is not a choice.
+    """
+    seen: dict[str, str] = {}
+    for endpoint in ENDPOINTS.values():
+        if endpoint.media is not media:
+            continue
+        for name, label in _answering_services(endpoint, settings):
+            seen.setdefault(name, label)
+    return list(seen.items()) if len(seen) > 1 else []
+
+
+def _source_toggles(media, settings, saved: source_prefs.SourcePrefs) -> list[dict]:
+    """One tab's service switches, each independently on or off.
+
+    INDEPENDENT BOXES RATHER THAN A "BOTH / TRAKT / SIMKL" PICKER, and the
+    difference only shows itself later: a picker enumerates the services that
+    exist today, so registering a third makes it a menu somebody has to be
+    re-offered, while a box per service simply grows one more. It is also what
+    keeps `auto` expressible -- every box ticked is "whatever there is, now and
+    later" rather than a named set of the two that happened to exist.
+    """
+    for_media = saved.for_media(media)
+    return [{"source": name, "label": label, "on": for_media.admits_calendar(name)}
+            for name, label in _answering_services_for_media(media, settings)]
+
+
+def _filter_panel(prefs: dict, saved: source_prefs.SourcePrefs, settings, endpoint) -> dict:
+    """Everything the filters panel draws, resolved server-side.
+
+    THE CHIPS ARE MARKUP THE SERVER BUILDS, not a vocabulary string a script
+    inflates after the fact. Every chip is a real named input the browser holds
+    the state of, so the panel needs no hydration request when it opens, no
+    client copy of the vocabulary, and no knowledge anywhere in JavaScript of
+    what a filter spec looks like -- app/calendar/vocab.py's docstring is where
+    that argument is made in full.
+
+    THE TAB THAT OPENS IS THE MEDIUM IN FRONT OF THE VIEWER, which is a Jinja
+    conditional on this value rather than a boot script, because it is decided
+    once when the page is built and never changes while it is open.
+
+    WHAT IS NOT HERE IS THE PROSE. Labels, hints and the per-field notes are the
+    template's, so a wording change is a template change; this answers only what
+    the server knows -- which chips exist, how each is currently set, how many
+    answers a tab is carrying, and which services could fill it.
+    """
+    return {
+        "media": str(endpoint.media),
+        "paused": bool(prefs["filters_paused"]),
+        "chips": {field: vocab.chips_for(field, prefs.get(field))
+                  for field in vocab.FIELDS},
+        # The name a chip added by typing will post under, minus its token. The
+        # panel's one piece of client-side markup -- a chip cloned from a
+        # <template> when somebody names something the vocabulary does not --
+        # appends the token to this, so the FORMAT of a field name stays
+        # app/calendar/vocab.py's and is never spelled in JavaScript.
+        "name_prefix": {field: vocab.field_name(field, "") for field in vocab.FIELDS},
+        # Whether a token typed into a field is the same token as one already
+        # drawn when only the case differs. The browser has to know, because it
+        # is the one deciding whether to add a chip or light an existing one —
+        # and it must not decide by guessing which dimension it is looking at.
+        "case_sensitive": {field: field in vocab.CASE_SENSITIVE_FIELDS
+                           for field in vocab.FIELDS},
+        # PER TAB, so the tab a viewer is NOT on can say what it is holding.
+        # Counted in tokens rather than dimensions: "3" means three things are
+        # being filtered, where a dimension count would say "1" for somebody who
+        # had excluded nine genres.
+        "counts": {
+            "show": vocab.count_set(prefs, vocab.TV_FIELDS),
+            "movie": vocab.count_set(prefs, vocab.MOVIE_FIELDS),
+        },
+        "sources": {
+            "show": _source_toggles(Media.SHOW, settings, saved),
+            "movie": _source_toggles(Media.MOVIE, settings, saved),
+        },
+    }
+
+
 def _source_choices(endpoint, requested, settings) -> list[dict]:
     """The toolbar's source control: what it offers, which option is on, and
     whether it is drawn at all. An empty list means the toolbar draws nothing.
@@ -240,7 +349,7 @@ def _source_choices(endpoint, requested, settings) -> list[dict]:
     here out of the query string rather than out of the stored row. `?source=`
     has always been a transient override (see `_viewer_source_selection`); this
     is the way to reach it without typing one. Choosing something re-reads THIS
-    page and writes nothing — the account's answer is stated once, in the 🔎
+    page and writes nothing — the account's answer is stated once, in the 🎚️
     Filters panel beside the rest of its per-viewer narrowing, and a control on
     the toolbar that quietly rewrote it would change every other view the account
     has as a side effect of a look. The two are deliberately not merged: this one
@@ -291,7 +400,7 @@ def _share_source_choices(endpoint, settings) -> list[dict]:
     so the panel and the toolbar disappear together.
 
     TICKS RATHER THAN A LIST OF ANSWERS, because a source selection is a SET.
-    It is the same shape the 🔎 Filters panel draws for the stored version of
+    It is the same shape the 🎚️ Filters panel draws for the stored version of
     this question, and it is the shape that survives a service being registered:
     a list of answers would have to enumerate the combinations, and those double
     per service.
@@ -420,7 +529,7 @@ class MonthAssembly:
     # only in Brazil does not match a US filter at all — so it can empty a month
     # outright, and an empty month with nothing on the page to explain it reads
     # as a broken calendar rather than as a filter doing its job.
-    release_filtered: int = 0
+    filtered: int = 0
 
 
 async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
@@ -458,12 +567,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
             assembly.grouped, meta = await calendar_cache.assemble_range(
                 endpoint, settings, tz=tz,
                 start_date=date(year, month, 1), end_date=date(year, month, days),
-                genres=prefs["genres"], countries=prefs["countries"],
-                show_certifications=prefs["show_certifications"],
-                movie_certifications=prefs["movie_certifications"],
-                movie_release_countries=prefs["movie_release_countries"],
-                movie_release_types=prefs["movie_release_types"],
-                network_filter=prefs["network_filter"] or None,
+                **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
                 not_watching_ids=not_watching,
                 prefs=source_selection,
             )
@@ -482,7 +586,7 @@ async def assemble_month(user, settings, prefs: dict, endpoint, tz: ZoneInfo,
         # instead of silently showing a short one.
         assembly.partial = meta["partial"]
         assembly.unenriched = meta["unenriched"]
-        assembly.release_filtered = meta["release_filtered"]
+        assembly.filtered = meta["filtered"]
         assembly.show_counts = Counter(
             item.mark_key for group in assembly.grouped for item in group["items"])
         # The is-new diff and its baseline commit belong to whoever produced
@@ -606,7 +710,7 @@ async def calendar_page(request: Request):
     # (app/sources/prefs.py). What they have LINKED is deliberately not part of
     # it: a calendar needs no viewer credential, so linkage narrows the tracker
     # and nothing here (app/sources/prefs.py's `admits_calendar`).
-    source_selection = await _viewer_source_selection(request, user)
+    source_selection = await _viewer_source_selection(request, user, endpoint.media)
 
     # This viewer's marks, read ONCE and handed to the assembly so the cards come
     # out of the template already carrying the class. The client used to add it
@@ -669,20 +773,12 @@ async def calendar_page(request: Request):
         # draws nothing at all rather than an inert control.
         "source_choices": _source_choices(
             endpoint, request.query_params.get("source"), settings),
-        # THE STORED ANSWER THE TOOLBAR CONTROL ABOVE IS A TEMPORARY OVERRIDE OF,
-        # drawn in the 🔎 Filters panel beside the genre and certification
-        # narrowing because it is the same kind of thing: a per-viewer decision
-        # applied at read over rows every viewer shares. Built from the SAVED
-        # preference and never from `?source=`, so a look at one service does not
-        # leave the panel offering to make that permanent.
-        #
-        # Empty on an instance with nothing to choose between, by the same rule
-        # the toolbar control uses — one service showing is not a choice.
-        "source_toggles": [
-            {"source": name, "label": label,
-             "on": saved_sources.admits_calendar(name)}
-            for name, label in _answering_services(endpoint, settings)
-        ],
+        # THE WHOLE FILTERS PANEL, resolved here rather than assembled by script
+        # once it opens. It carries the stored source answer the toolbar control
+        # above is a temporary override of — built from the SAVED preference and
+        # never from `?source=`, so a look at one service does not leave the
+        # panel offering to make that permanent.
+        "filter_panel": _filter_panel(prefs, saved_sources, settings, endpoint),
         # The Share panel's own Sources control, which asks a narrower question
         # than the toolbar's — see _share_source_choices — and is likewise absent
         # when there is nothing to choose between. TWO SHAPES OF THE SAME ANSWER:
@@ -749,7 +845,7 @@ async def calendar_page(request: Request):
         # How many films this viewer's own release filter took off this month,
         # so a page it emptied can name the filter that emptied it instead of
         # showing a month that looks like it has nothing in it.
-        "release_filtered": month_view.release_filtered,
+        "filtered": month_view.filtered,
         # A Simkl-only month outside its declared coverage window renders
         # this explicit state rather than a blank calendar. `switch_url` is
         # the query string to append to THIS page's own URL to preview the
@@ -933,7 +1029,7 @@ async def calendar_day(request: Request):
     # the placeholder it built for this day already carries the same `source`
     # override, so this read asks the same source(s) the shell's own numbers
     # for the month were computed from.
-    source_selection = await _viewer_source_selection(request, user)
+    source_selection = await _viewer_source_selection(request, user, endpoint.media)
 
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
@@ -952,12 +1048,7 @@ async def calendar_day(request: Request):
         with span("calendar.day", endpoint=endpoint.key, day=day.isoformat()) as sp:
             grouped, meta = await calendar_cache.assemble_range(
                 endpoint, settings, tz=tz, start_date=day, end_date=day,
-                genres=prefs["genres"], countries=prefs["countries"],
-                show_certifications=prefs["show_certifications"],
-                movie_certifications=prefs["movie_certifications"],
-                movie_release_countries=prefs["movie_release_countries"],
-                movie_release_types=prefs["movie_release_types"],
-                network_filter=prefs["network_filter"] or None,
+                **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
                 not_watching_ids=not_watching,
                 prefs=source_selection,
             )
@@ -1252,14 +1343,23 @@ def _release_type_spec(value) -> str:
 
 def _network_list(value) -> list[str]:
     """Networks as a de-duplicated list, from either a JSON array or the comma
-    string the textarea produces. Names are matched exactly on the read path, so
-    they keep their case; the duplicate check does not."""
+    string a text field produces.
+
+    THE DUPLICATE CHECK IS EXACT, LIKE THE MATCHING. It folded case once, on the
+    reasoning that somebody typing "HBO, hbo" meant one network — which is true
+    of a typo and false of the vocabulary: `parse_network_spec` matches names
+    exactly BECAUSE one week of this calendar carried both 'TVN' and 'tvN', a
+    Polish broadcaster and a Korean one. Folding here made those two one entry
+    and silently dropped whichever was named second, so a viewer could add both
+    in the filters panel and find only one stored. Two spellings the read path
+    treats as two networks have to survive as two.
+    """
     raw = [str(v) for v in value] if isinstance(value, list) else str(value or "").split(",")
     seen: set[str] = set()
     names: list[str] = []
     for name in (item.strip() for item in raw):
-        if name and name.lower() not in seen:
-            seen.add(name.lower())
+        if name and name not in seen:
+            seen.add(name)
             names.append(name)
     return names
 
@@ -1305,27 +1405,14 @@ async def post_me_prefs(request: Request):
         updates["day_packing"] = data["day_packing"]
     if "hide_not_watching" in data:
         updates["hide_not_watching"] = bool(data["hide_not_watching"])
-    # Present-but-empty is a real value here — it is how a filter is CLEARED —
-    # so these key off presence rather than truthiness.
-    if "genres" in data:
-        updates["genres"] = _filter_spec(data["genres"])
-    if "countries" in data:
-        updates["countries"] = _filter_spec(data["countries"])
-    if "show_certifications" in data:
-        updates["show_certifications"] = _filter_spec(data["show_certifications"])
-    if "movie_certifications" in data:
-        updates["movie_certifications"] = _filter_spec(data["movie_certifications"])
-    if "movie_release_countries" in data:
-        updates["movie_release_countries"] = _filter_spec(data["movie_release_countries"])
-    if "movie_release_types" in data:
-        # NUMBERS ONLY, AND A BAD TOKEN IS DROPPED HERE RATHER THAN AT READ.
-        # The read path already ignores one it cannot parse, so storing it would
-        # be storing a preference that silently does nothing forever — the same
-        # reason /api/me/calendar-sources refuses an unknown service on the way
-        # in while resolution tolerates one on the way out.
-        updates["movie_release_types"] = _release_type_spec(data["movie_release_types"])
-    if "network_filter" in data:
-        updates["network_filter"] = _network_list(data["network_filter"])
+    # THE FILTERS ARE NOT HERE ANY MORE. They are one panel's worth of chips,
+    # submitted whole, and they now have a route of their own that speaks that
+    # shape — see post_me_filters. This one keeps the view preferences: what a
+    # card looks like, how days pack, whether marked titles hide. Both are
+    # "things the viewer chose", which is why they shared a route for a while,
+    # but they are not the same verb: these arrive one field at a time as a
+    # control is touched, and a filter save replaces every answer on a tab at
+    # once.
     if not updates:
         return JSONResponse({"ok": False, "error": "Nothing to update"}, status_code=400)
     await auth.update_user_prefs(user.user_id, **updates)
@@ -1334,15 +1421,130 @@ async def post_me_prefs(request: Request):
     return JSONResponse({"ok": True})
 
 
-# Which stored preference each badge dimension writes into. Certification is the
-# only one that needs the card's media: TV Parental Guidelines and MPA ratings are
-# separate vocabularies stored in separate fields, and a card knows which it is.
+@guard.post("/api/me/filters", AuthLevel.CALENDAR_APPROVED)
+async def post_me_filters(request: Request):
+    """Save one tab of the filters panel: its chips, its services, and the
+    master switch.
+
+    ONE ROUTE FOR A PANEL THAT WAS TWO REQUESTS. The narrowing and the service
+    selection live in different tables and used to be posted separately, in a
+    fixed order so they could not land half-applied. They still write to two
+    tables, and the order still matters for exactly the same reason -- the
+    services save is the one that can be REFUSED -- but a viewer pressed one
+    button, so it is one request that either takes both or takes neither.
+
+    THE CHIPS ARRIVE ONE FIELD PER TOKEN and app/calendar/vocab.py turns them
+    back into specs, using app/calendar/filter.py's own merge to do it. Nothing
+    in the browser knows what a spec looks like, and a spec written here is
+    byte-identical to one a card badge writes.
+
+    ONLY THE DIMENSIONS THE PAYLOAD MENTIONS ARE WRITTEN, which is what makes a
+    per-tab save safe: the TV tab posts every TV chip, including the ones set to
+    nothing, so clearing works -- and mentions no film chip at all, so the other
+    tab is left exactly as it was.
+
+    THE PAUSE IS A FIELD LIKE ANY OTHER on the same form, so switching filters
+    off and editing them in the same visit is one save. It is stored rather than
+    held for the session because "show me everything for a bit" is a state
+    somebody wants to still be in tomorrow, and every read path asks it before
+    applying anything (app/calendar/vocab.py's `active_specs`).
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+
+    # SERVICES FIRST, BECAUSE THIS IS THE HALF THAT CAN REFUSE. Unticking every
+    # service is the one thing the panel can ask for and not get, and refusing it
+    # before anything is written leaves the panel exactly as the viewer left it
+    # rather than half-saved.
+    saved_sources = await source_prefs.load(user.user_id)
+    settings = load_settings()
+    # AN ACCOUNT WITH NO ROW HAS NO OPINION, and saving one it did not ask for
+    # would undo that: `load` answers with the defaults rather than creating
+    # anything, which is what keeps the table free for the majority of accounts
+    # that will never state a source preference. So the write below happens only
+    # if this save actually changed the selection.
+    stated = False
+    for key, media in (("sources_show", Media.SHOW), ("sources_movie", Media.MOVIE)):
+        if key not in data:
+            continue
+        available = {name for name, _ in _answering_services_for_media(media, settings)}
+        chosen = {name.strip() for name in str(data[key] or "").split(",") if name.strip()}
+        # AN INSTANCE WITH NOTHING TO CHOOSE BETWEEN DRAWS NO CONTROL, so a
+        # payload naming services on such a calendar is not a viewer's doing and
+        # is ignored rather than refused.
+        if not available:
+            continue
+        if unknown := chosen - available:
+            return authz.error(f"This app has no calendar source called {sorted(unknown)[0]!r}.")
+        if not chosen:
+            return authz.error("At least one service has to be showing.")
+        # EVERY SERVICE TICKED IS `auto`, NOT A NAMED SET, and the difference
+        # outlives this request: `auto` means "whatever there is, now and later",
+        # so an instance that registers a third service starts showing it, where
+        # a named set is a choice made from the menu that existed at the time.
+        selection = (source_prefs.AUTO if chosen == available
+                     else source_prefs.SEPARATOR.join(sorted(chosen)))
+        field = ("movie_calendar_source" if media is Media.MOVIE else "calendar_source")
+        if getattr(saved_sources, field) != selection:
+            saved_sources = dataclasses.replace(saved_sources, **{field: selection})
+            stated = True
+    if stated:
+        try:
+            await source_prefs.save(saved_sources)
+        except ValueError as exc:
+            return authz.error(str(exc))
+
+    updates: dict = dict(vocab.specs_from_form(data))
+    # THROUGH THE SAME NORMALIZERS EVERY OTHER WRITER USES, so a spec assembled
+    # from chips is stored in the shape a badge press and the old text fields
+    # both produced. `movie_release_types` is the one with a vocabulary narrow
+    # enough to validate, and it is dropped here rather than at read for the
+    # reason its own normalizer states.
+    for field, value in list(updates.items()):
+        if field == vocab.NETWORK_FILTER:
+            updates[field] = _network_list(value)
+        elif field == vocab.MOVIE_RELEASE_TYPES:
+            updates[field] = _release_type_spec(value)
+        else:
+            updates[field] = _filter_spec(value)
+    # THE SWITCH IS SENT THE WAY IT READS AND STORED THE WAY IT DEFAULTS, and
+    # this line is the whole of the difference. On the panel it says "Filters
+    # are on", because a switch that lights up when the thing it names is
+    # happening is the only polarity anybody reads correctly; in the column it
+    # is `filters_paused`, because every account starts having paused nothing
+    # and a boolean whose default is false needs no migration to mean that.
+    # Inverted once, here, rather than drawing the control backwards to match a
+    # column name.
+    if "filters_on" in data:
+        updates["filters_paused"] = not bool(data["filters_on"])
+    if updates:
+        await auth.update_user_prefs(user.user_id, **updates)
+        # Mirrored into share_links exactly as the badge route does -- that
+        # table's owner-default columns are seeded from user_prefs and have no
+        # editor of their own. The PAUSE is deliberately not among them: it is a
+        # private look at your own calendar, and a share link keeps filtering
+        # whatever the owner is currently looking at.
+        if await share_links.get(user.user_id) is not None:
+            await share_links.update_owner_defaults(
+                user.user_id, **{k: v for k, v in updates.items() if k != "filters_paused"})
+    return JSONResponse({"ok": True})
+
+
+# Which stored preference each badge dimension writes into, given the media of
+# the card it was pressed on. EVERY DIMENSION NEEDS THE MEDIA NOW, where once
+# only certification did: a genre excluded from a card in the film calendar is a
+# statement about films, and writing it into the show calendar's genres is
+# exactly the conflation the split exists to end.
 _BADGE_FIELDS = {
-    "genre": lambda media: "genres",
-    "country": lambda media: "countries",
-    "network": lambda media: "network_filter",
+    "genre": lambda media: (
+        vocab.MOVIE_GENRES if media == "movie" else vocab.TV_GENRES),
+    "country": lambda media: (
+        vocab.MOVIE_COUNTRIES if media == "movie" else vocab.TV_COUNTRIES),
+    # A film has no network at all, so a network badge can only have been pressed
+    # on a show card and there is one field it can mean.
+    "network": lambda media: vocab.NETWORK_FILTER,
     "certification": lambda media: (
-        "movie_certifications" if media == "movie" else "show_certifications"),
+        vocab.MOVIE_CERTIFICATIONS if media == "movie" else vocab.SHOW_CERTIFICATIONS),
 }
 _BADGE_MODES = ("include", "exclude", "")
 
@@ -1386,7 +1588,7 @@ async def post_me_filter_badge(request: Request):
 
     field = resolve(str(data.get("media") or ""))
     prefs = await auth.get_user_prefs(user.user_id)
-    is_list = field == "network_filter"
+    is_list = field in vocab.LIST_FIELDS
     merged = calendar_filter.merge_token(prefs.get(field), token, mode, is_list=is_list)
     # THROUGH THE SAME NORMALIZERS THE MODAL'S OWN SAVE USES, so a spec written by
     # a badge and one typed into the modal cannot come out in different shapes.

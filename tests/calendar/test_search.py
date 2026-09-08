@@ -38,9 +38,10 @@ SHOWS = "shows/premieres"
 AIR = 1783540800.0
 
 NO_FILTERS = {
-    "genres": "", "countries": "", "show_certifications": "",
-    "movie_certifications": "", "movie_release_countries": "",
-    "movie_release_types": "", "network_filter": [],
+    "tv_genres": "", "tv_countries": "", "movie_genres": "", "movie_countries": "",
+    "show_certifications": "", "movie_certifications": "",
+    "movie_release_countries": "", "movie_release_types": "", "network_filter": [],
+    "filters_paused": False,
 }
 
 
@@ -150,7 +151,7 @@ class AJumpIsOnlyOfferedForACardThatWouldBeDrawnTests(SearchTestCase):
 
     async def test_a_title_the_viewers_country_filter_removes_is_not_offered(self):
         await self.store(_record("Severance", country="th"))
-        prefs = dict(NO_FILTERS, countries="-th")
+        prefs = dict(NO_FILTERS, tv_countries="-th")
         self.assertEqual((await self.find("severance", prefs=prefs)).airings, ())
         # ...and the same search without that filter does find it, so the test is
         # about the filter rather than about the title being unfindable.
@@ -158,7 +159,7 @@ class AJumpIsOnlyOfferedForACardThatWouldBeDrawnTests(SearchTestCase):
 
     async def test_a_title_the_genre_filter_removes_is_not_offered(self):
         await self.store(_record("Severance"))
-        prefs = dict(NO_FILTERS, genres="-drama")
+        prefs = dict(NO_FILTERS, tv_genres="-drama")
         self.assertEqual((await self.find("severance", prefs=prefs)).airings, ())
 
     async def test_a_source_this_viewer_does_not_admit_is_not_offered(self):
@@ -508,13 +509,13 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         could never draw the title, which is exactly the report: "The Traitors
         S02, Prime Video, and it isn't on that page".
         """
-        self.prefs = {**self.prefs, "countries": "-in"}
+        self.prefs = {**self.prefs, "tv_countries": "-in"}
         found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
                                        "country": "IN"})
         self.assertEqual(found.elsewhere, ())
 
     async def test_a_country_this_viewer_keeps_is_still_offered(self):
-        self.prefs = {**self.prefs, "countries": "-in"}
+        self.prefs = {**self.prefs, "tv_countries": "-in"}
         found = await self._catalogue({"first_aired": "2026-08-12T00:00:00Z",
                                        "country": "US"})
         self.assertEqual(len(found.elsewhere), 1)
@@ -535,7 +536,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
         could never draw it — so "not on your calendar" quietly covered both
         "not there yet" and "not there, ever", with no way to tell which.
         """
-        self.prefs = {**self.prefs, "genres": "-reality"}
+        self.prefs = {**self.prefs, "tv_genres": "-reality"}
         found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
                                        "genres": ["Reality"]})
         self.assertEqual(found.elsewhere, ())
@@ -543,7 +544,7 @@ class TheCatalogueHalfIsADifferentPromiseTests(SearchTestCase):
     async def test_a_title_that_passes_the_filters_is_still_offered(self):
         """The other side of the same rule, so the filter cannot pass by
         rejecting everything."""
-        self.prefs = {**self.prefs, "genres": "-reality"}
+        self.prefs = {**self.prefs, "tv_genres": "-reality"}
         found = await self._catalogue({"first_aired": "2026-11-04T20:00:00Z",
                                        "genres": ["Drama"]})
         self.assertEqual(len(found.elsewhere), 1)

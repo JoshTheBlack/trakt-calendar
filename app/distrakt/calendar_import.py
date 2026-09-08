@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 
 from ..calendar import state as calendar_state
-from ..providers.base import Item, Media, collect_ids
+from ..providers.base import Item, Media, collect_ids, resolve_key
 from . import store
 from .store import ADDED_BY_CALENDAR, load_month, normalize_show, record_key, save_month
 
@@ -49,16 +49,27 @@ def calendar_record(item: Item) -> dict:
 def matches_not_watching(rec: dict, nw_ids: set[str]) -> bool:
     """Whether the user has marked this title not-watching on the calendar.
 
-    BOTH ids are asked about rather than just calendar_mark_id's answer, because a
-    mark already in the store was written under whichever id the card carried at
-    the time: a title that has since gained a slug would stop matching a mark made
-    before it had one, and the show would quietly come back.
+    THE CALENDAR'S OWN RULE, CALLED RATHER THAN RESTATED. This used to be a
+    second implementation — the record's slug and its Trakt id — and it was
+    narrower than the one the grid uses in two ways that both showed up on a real
+    instance: a mark spelled with Trakt's slug missed a card that had resolved to
+    Simkl's description, and a mark spelled `lazarus` missed a title whose only
+    match for it was Simkl's `tvdbslug`. Both were hidden on the calendar and
+    imported onto the month anyway, which is the one direction a mark must never
+    travel.
+
+    THE KEY IS RESOLVED HERE because the record is not a card: `calendar_record`
+    deliberately drops the display id, so there is nothing to pass as one, and
+    the identity has to be computed from the id map the record does carry.
     """
     ids = rec.get("ids") or {}
-    return str(ids.get("slug") or "") in nw_ids or str(ids.get("trakt") or "") in nw_ids
+    key = resolve_key(rec.get("media") or Media.SHOW, ids)
+    return calendar_state.marked_by_ids(
+        nw_ids, mark_key=str(key) if key is not None else "", ids=ids)
 
 
-async def premiere_records(user_id: int, settings, year: int, month: int) -> list[dict]:
+async def premiere_records(user_id: int, settings, year: int, month: int,
+                           nw_ids: set[str] | None = None) -> list[dict]:
     """This month's calendar premieres split by rule: shows/new -> New (S01);
     shows/premieres minus shows/new -> Returning (S02+).
 
@@ -88,31 +99,52 @@ async def premiere_records(user_id: int, settings, year: int, month: int) -> lis
 
     from .. import auth
     from ..calendar import cache as calendar_cache
+    from ..calendar import vocab
     from ..endpoints import get_endpoint
+    from ..providers.base import Media
     prefs = await auth.get_user_prefs(user_id)
     tz = ZoneInfo(settings.timezone)
+    # BOTH ENDPOINTS ARE SHOW CALENDARS, so both read the importer's TV answers
+    # — asked through the one function that knows which stored column governs
+    # which medium rather than by naming columns here. The tracker holds shows
+    # and nothing else, so the film side never comes into it.
+    # `honour_pause` IS FALSE, AND THE ASYMMETRY IS THE POINT. Switching filters
+    # off is a temporary look at a calendar — nothing is written, and turning
+    # them back on undoes it completely. An import WRITES ROWS onto a month, and
+    # a row does not come back off when the switch does: importing while paused
+    # produced 85 rows of Italian game shows and Japanese anime this viewer
+    # filters out, every one of which then had to be deleted by hand. So the
+    # import reads the filters as they are STATED rather than as they are
+    # currently being applied, which is the only reading where "show me
+    # everything for a moment" cannot leave a mess behind.
+    specs = vocab.active_specs(prefs, Media.SHOW, honour_pause=False)
     (new_items, _), (prem_items, _) = await asyncio.gather(
         calendar_cache.read_month(
             get_endpoint("shows/new"), settings, tz=tz, year=year, month=month,
-            genres=prefs["genres"], countries=prefs["countries"],
-            show_certifications=prefs["show_certifications"],
+            genres=specs["genres"], countries=specs["countries"],
+            show_certifications=specs["show_certifications"],
         ),
         calendar_cache.read_month(
             get_endpoint("shows/premieres"), settings, tz=tz, year=year, month=month,
-            genres=prefs["genres"], countries=prefs["countries"],
-            show_certifications=prefs["show_certifications"],
+            genres=specs["genres"], countries=specs["countries"],
+            show_certifications=specs["show_certifications"],
         ),
     )
+    # A CALLER THAT DOES NOT PASS MARKS IS READING THE MONTH, NOT IMPORTING IT.
+    # The roster this returns is also what the preview and the diff are built
+    # from, and those describe the calendar rather than write to it; only the ADD
+    # path owes the viewer their marks, and it passes them.
+    marks = nw_ids or set()
     out: list[dict] = []
     new_keys: set[tuple[str, int]] = set()
     for item in new_items:
-        record = _keyable(item)
+        record = _keyable(item, marks)
         if record is None:
             continue
         new_keys.add(_present_key(record))
         out.append(record)
     for item in prem_items:
-        record = _keyable(item)
+        record = _keyable(item, marks)
         if record is None:
             continue
         if _present_key(record) in new_keys:
@@ -121,12 +153,30 @@ async def premiere_records(user_id: int, settings, year: int, month: int) -> lis
     return out
 
 
-def _keyable(item: Item) -> dict | None:
+def _keyable(item: Item, nw_ids: set[str]) -> dict | None:
     """The record for `item`, or None when it cannot go on a roster: no season to
-    file it under, or no shared id to file it by. Skipped rather than raised —
-    a calendar month is a list somebody else assembled, and one unusable entry in
-    it is not a reason to fail the import."""
+    file it under, no shared id to file it by, or a mark saying the viewer has
+    turned this title away. Skipped rather than raised — a calendar month is a
+    list somebody else assembled, and one unusable entry in it is not a reason to
+    fail the import.
+
+    THE MARK IS ASKED OF THE ITEM AND NOT OF THE RECORD, and that is the whole
+    repair. A mark may be stored under any spelling a title has ever been known
+    by — the calendar accepts six of them — while a record's id map is
+    `collect_ids`, an ALLOWLIST that keeps the ids the tracker files rows under
+    and drops the rest. Three of those six (`traktslug`, `tvdbslug`, `mdlslug`)
+    are among the dropped, so a record simply cannot answer this question:
+    measured here, a viewer's Nocturne mark reads `lazarus`, which the card
+    carries as Simkl's `tvdbslug` and the record does not carry at all. The
+    calendar hid the show and the import added it, and no amount of comparing
+    records could have found each other.
+
+    So it is asked at the last moment the full id map exists, through the
+    calendar's own predicate.
+    """
     if item.season is None:
+        return None
+    if calendar_state.marked(nw_ids, item):
         return None
     record = calendar_record(item)
     try:
@@ -145,9 +195,11 @@ async def add_premieres(doc: dict, present: set[tuple[str, int]], user_id: int, 
     """Append this month's premieres to `doc` as premiere records (skip existing +
     not-watching). Mutates `doc['shows']`/`present`; returns the number added."""
     added = 0
-    for rec in await premiere_records(user_id, settings, year, month):
+    # THE MARKS TRAVEL DOWN rather than being applied to what comes back: the
+    # question needs the card's whole id map and a record no longer has one.
+    for rec in await premiere_records(user_id, settings, year, month, nw_ids):
         key = _present_key(rec)
-        if key in present or matches_not_watching(rec, nw_ids):
+        if key in present:
             continue
         doc["shows"].append(normalize_show({
             **rec,

@@ -72,7 +72,31 @@ def marked(marks, item) -> bool:
     tracker's import all ask it, and a copy that asked only half the question
     would make a show hidden on one screen and visible on the next.
     """
-    if item.mark_key in marks or str(item.id) in marks:
+    return marked_by_ids(marks, mark_key=item.mark_key, ids=item.ids,
+                         display_id=item.id)
+
+
+def marked_by_ids(marks, *, mark_key: str, ids, display_id="") -> bool:
+    """The rule itself, said without an `Item`.
+
+    IT TAKES THE PIECES BECAUSE NOT EVERY CALLER HOLDS A CARD. The tracker's
+    import holds an identity RECORD — an id map and a season, built from the
+    card and deliberately carrying no display id — and it used to answer this
+    question with a narrower copy of its own: the card's slug and its Trakt id,
+    two of the six spellings below. What that cost, measured on a real instance:
+    a viewer's Grey's Anatomy mark reads `grey-s-anatomy`, which is Trakt's slug,
+    while the card resolved to Simkl's description and carried `greys-anatomy` —
+    so the calendar hid the show and the import added it. Nocturne was marked
+    under `lazarus`, a name that appears only as Simkl's `tvdbslug`, and the copy
+    never looked in that namespace at all.
+
+    So the docstring above was true as an intention and false as a fact, which
+    is the exact failure a rule stated in one place and implemented in two
+    produces. There is one implementation now and every surface calls it.
+    """
+    if mark_key and mark_key in marks:
+        return True
+    if display_id and str(display_id) in marks:
         return True
     # EVERY SPELLING THIS CARD HAS EVER BEEN IDENTIFIED BY, not just the one it
     # carries today. Simkl's own slugs are not unique, so records moved from
@@ -80,7 +104,7 @@ def marked(marks, item) -> bool:
     # September stopped matching overnight, every one of them a Simkl title
     # marked under the slug the card used to send. The stored mark is a fact
     # about a title; which spelling it happens to be written in is not.
-    ids = item.ids or {}
+    ids = ids or {}
     return any(str(ids[name]) in marks for name in _LEGACY_ID_NAMESPACES
                if ids.get(name) not in (None, ""))
 

@@ -1,0 +1,51 @@
+{# One dimension of the filters panel: its chips, and a box for anything the
+   vocabulary does not name.
+
+   THE PROSE IS THE CALLER'S. Every field's explanation differs and belongs beside
+   the field it explains, so it is passed in as the macro's body rather than being
+   looked up here — which also means a wording change is a change to the panel and
+   never to this file.
+
+   THE EXPLANATION IS BEHIND A DISCLOSURE, and that is the whole point of the
+   redesign. The reasoning is worth keeping — it is why the network field is
+   case-sensitive and why a release market is not a production country — but read
+   once and then in the way for ever after. A <details> keeps it one press away
+   and out of the way, and the browser owns the opening, the keyboard and the ARIA
+   exactly as it does for a card badge. #}
+{% import '_filter_chip.html' as fc with context %}
+
+{% macro info() %}
+<details class="finfo">
+    <summary aria-label="What this filters">i</summary>
+    <div class="finfo-body">{{ caller() }}</div>
+</details>
+{% endmacro %}
+
+{# `placeholder` empty means a CLOSED VOCABULARY and no box is drawn. Ratings and
+   release formats are the two: a service publishes a fixed set of each, so a
+   field offering to add a seventh rating would be offering something that can
+   never match anything. #}
+{% macro field(name, label, placeholder='') %}
+{% set chips = filter_panel.chips[name] %}
+{% set set_count = chips | selectattr('mode') | list | length %}
+<div class="ffield" data-field="{{ name }}">
+    <div class="ffield-head">
+        <span class="ffield-label">{{ label }}</span>
+        {% if set_count %}<span class="ffield-count">{{ set_count }} set</span>{% endif %}
+        <details class="finfo">
+            <summary aria-label="What {{ label | lower }} does">i</summary>
+            <div class="finfo-body">{{ caller() }}</div>
+        </details>
+    </div>
+    {% if chips %}{{ fc.legend() }}{% endif %}
+    <div class="fchips">
+        {% for state in chips %}{{ fc.chip(state) }}{% endfor %}
+    </div>
+    {% if placeholder %}
+    <input type="text" class="fchip-add" placeholder="{{ placeholder }}"
+           aria-label="Add to {{ label | lower }}" autocomplete="off" spellcheck="false"
+           data-name-prefix="{{ filter_panel.name_prefix[name] }}"
+           {% if filter_panel.case_sensitive[name] %}data-exact-case="1"{% endif %}>
+    {% endif %}
+</div>
+{% endmacro %}

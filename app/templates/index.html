@@ -90,7 +90,7 @@
            sets the same transient `?source=` override the coverage-gap banner's
            "show it anyway" link does, so it applies to this page and to the days
            it fetches in, and writes nothing. The account's own answer is stated
-           in the 🔎 Filters panel — one place, deliberately — and the first
+           in the 🎚️ Filters panel — one place, deliberately — and the first
            option here is that answer, which is also the way to stop overriding.
 
            A GET form for the same reason the calendar picker beside it is one:
@@ -115,7 +115,7 @@
            and then leave alone.
 
            `details`/`summary` and the .nav-menu classes rather than anything new:
-           the ☰ Menu at the other end of this bar and the 🔎 Filters panel are
+           the ☰ Menu at the other end of this bar and the 🎚️ Filters panel are
            both already this, so a third popover that behaved or looked
            differently would be a third thing to learn for no gain. It also means
            this works with no JavaScript at all, which the two selects that submit
@@ -199,14 +199,22 @@
            the one it is on. #}
         <button type="button" id="searchBtn" class="pill-btn" onclick="openCalendarSearch()"
                 title="Find a title on your calendar">🔍 Search</button>
-        {# In the bar rather than behind the ☰ menu, and lit up while a filter is
+        {# In the bar rather than behind the ☰ menu, and lit while a filter is
            set. A filter REMOVES shows, so a calendar quietly missing something
            has to carry the reason on its face — buried one click away, the only
-           evidence was the absence itself. #}
-        <button type="button" id="filtersBtn" class="pill-btn{% if view.filters_active %} active{% endif %}"
+           evidence was the absence itself.
+
+           THREE STATES, NOT TWO, and the third is why this is worth spelling
+           out. "Nothing set" and "set but switched off" both show a calendar
+           with everything on it, and if they looked alike a viewer would forget
+           their filters existed — so a paused panel gets its own look rather
+           than falling back to the plain one. #}
+        {% set filters_off = view.filters_active and filter_panel.paused %}
+        <button type="button" id="filtersBtn"
+                class="pill-btn{% if view.filters_active and not filter_panel.paused %} active{% endif %}{% if filters_off %} paused{% endif %}"
                 onclick="openFilters()"
-                title="{% if view.filters_active %}Filtering this calendar by {{ view.filters_summary }}{% else %}Filter this calendar by genre, country, or network{% endif %}">
-            🔎 {% if view.filters_active %}Filtered{% else %}Filters{% endif %}
+                title="{% if filters_off %}Your filters are switched off — this calendar is showing everything{% elif view.filters_active %}Filtering this calendar by {{ view.filters_summary }}{% else %}Filter this calendar by genre, country, or network{% endif %}">
+            🎚️ {% if filters_off %}Filters off{% elif view.filters_active %}Filtered{% else %}Filters{% endif %}
         </button>
         <button type="button" id="hideToggle" class="pill-btn{% if view.hide_not_watching %} active{% endif %}" onclick="toggleHideNotWatching()" title="Toggle hiding not-watching items">
             <span id="hideToggleLabel">{% if view.hide_not_watching %}🚫 Hiding{% else %}👁️ Showing all{% endif %}</span>
@@ -233,23 +241,31 @@
     <hr class="stats-divider">
     <div class="stats-row"><span>👀 Watching:</span><strong id="statWatching">{{ stats.watching }}</strong></div>
     <div class="stats-row"><span>🚫 Not Watching:</span><strong id="statNotWatching">{{ stats.not_watching }}</strong></div>
-    {# A RELEASE FILTER REMOVES FILMS RATHER THAN MOVING THEM: a film out only in
-       Brazil does not match a filter asking for American releases at all, so this
-       one can empty a month completely — which is exactly the state that reads as
-       a broken calendar if the page says nothing. It sits here rather than in a
-       banner above the grid because it is a COUNT ABOUT THIS MONTH, which is what
-       every other line in this card is; a banner made the one filter that can
-       hide everything look like an error, and pushed the calendar down the page
+    {# WHAT THIS VIEWER'S OWN FILTERS TOOK OUT OF THIS MONTH — every dimension,
+       on every calendar. A filter REMOVES titles rather than moving them: a film
+       out only in Brazil does not match a filter asking for American releases at
+       all, and a show whose genre you excluded is simply not there. Either can
+       empty a month completely, which is exactly the state that reads as a
+       broken calendar if the page says nothing.
+
+       IT COUNTS ONLY WHAT THE READER CAN UNDO. The instance-wide content floor
+       removes titles too, and so does the rule that keeps films off a series
+       calendar; neither is this viewer's to change, and counting them here would
+       point somebody at a panel that cannot bring the title back.
+
+       It sits here rather than in a banner above the grid because it is a COUNT
+       ABOUT THIS MONTH, which is what every other line in this card is; a banner
+       made the filters look like an error, and pushed the calendar down the page
        to say it.
 
        RED, ON THE SAME RULE AS A FALLING TOTAL. `.delta-msg.down` is what this
        calendar already uses for "there is less here than you might expect", and a
        second colour for a second kind of absence would be a second thing to
        learn. Clicking it opens the filter that caused it. #}
-    {% if release_filtered %}
-    <div class="stats-row stats-filtered" title="Films with no release in the countries or formats you picked">
-        <span>🎬 <a href="#" onclick="openFilters(); return false;">Filtered:</a></span>
-        <strong id="statFiltered">{{ release_filtered }}</strong>
+    {% if filtered %}
+    <div class="stats-row stats-filtered" title="Cards your own filters removed from this month — click to open them">
+        <span>🎚️ <a href="#" onclick="openFilters(); return false;">Filtered:</a></span>
+        <strong id="statFiltered">{{ filtered }}</strong>
     </div>
     {% endif %}
     {# THE BACKGROUND DRAINS' REMAINING WORK, instance-wide and not this month's.
@@ -609,7 +625,7 @@
                 <div class="tab-panel" data-tab-panel="calendar" role="tabpanel" hidden>
                 <p class="hint">Defaults for accounts created from here on, and the caching every
                     account's calendar is served from. Each person's own view controls and
-                    🔎 Filters override the defaults for them.</p>
+                    🎚️ Filters override the defaults for them.</p>
                 <div class="two-col">
                     <div class="field">
                         <label for="s_timezone">Timezone</label>
@@ -633,7 +649,7 @@
                 <div class="settings-section">🚧 Content floor <span class="hint">(instance-wide, applied before caching)</span></div>
                 <p class="hint"><strong>These pre-filter the shared calendar cache at fetch time, so they
                     remove content for EVERY user</strong> — on top of whatever each person sets in their
-                    own 🔎 Filters. A show excluded here never enters the cache at all, so no per-account
+                    own 🎚️ Filters. A show excluded here never enters the cache at all, so no per-account
                     filter can bring it back. Use this to trim genres/countries nobody on this instance
                     will ever watch, or to keep certain content off a shared/family instance. Leave blank
                     to filter nothing at this layer.</p>
@@ -834,122 +850,198 @@
     </div>
 </div>
 
+{# WHAT THIS VIEWER'S CALENDAR CONTAINS. Applied per viewer at read time against
+   one shared cache (app/calendar/filter.py), which is what lets two people
+   filter the same cached month differently.
+
+   TWO TABS OVER TWO SETS OF STORED VALUES, not one set shown twice. Somebody who
+   never wants a reality SHOW usually still wants documentary films, and while
+   the two questions shared one answer neither could be answered properly. The
+   columns are app/db.py's migration 38; which of them belongs to which medium is
+   app/calendar/vocab.py's TV_FIELDS/MOVIE_FIELDS.
+
+   THE TABS ARE RADIOS AND THE STYLESHEET DRAWS THEM. No script switches a panel,
+   nothing has to be re-bound when the modal opens, and the tab that opens is
+   whichever radio the server rendered `checked` — the medium of the calendar
+   behind the panel. Both radios sit before the tab strip AND before the bodies,
+   so one sibling selector can reach either.
+
+   EVERY CONTROL IS A REAL NAMED INPUT IN ONE REAL FORM. The panel needs no
+   hydration request when it opens (its values are already in it), Cancel is the
+   form's own reset, and the save serializes the form rather than reading fields
+   out by id. #}
+{% import '_filter_fields.html' as ff with context %}
 <div id="filtersModal" class="modal-overlay" onclick="if(event.target===this) closeFilters()">
-    <div class="modal">
+    <div class="modal filters-modal" id="filtersPanel">
         <div class="modal-head">
-            <h2>🔎 Filters</h2>
+            <h2>🎚️ Filters</h2>
             <button type="button" class="modal-close" onclick="closeFilters()">&times;</button>
         </div>
         <form id="filtersForm" onsubmit="return saveFilters(event)" hx-boost="false">
-            <div class="modal-body">
-                <p class="hint">These apply to your calendar only — everyone else keeps their own.</p>
-                <div class="field">
-                    <label for="f_genres">Genres</label>
-                    <input type="text" id="f_genres" name="genres" spellcheck="false" autocomplete="off"
-                           placeholder="drama, -reality">
-                    <span class="hint">Comma-separated genre slugs; prefix one with <code>-</code> to exclude it.
-                        Blank means every genre.</span>
-                </div>
-                <div class="field">
-                    <label for="f_countries">Countries</label>
-                    <input type="text" id="f_countries" name="countries" spellcheck="false" autocomplete="off"
-                           placeholder="us, gb, -jp">
-                    <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code> to exclude.
-                        Blank means everywhere.</span>
-                </div>
-                <p class="hint">Certifications: click a chip to cycle it —
-                    <strong>grey</strong> (ignored) → <strong>green</strong> (keep only these) →
-                    <strong>red</strong> (exclude these). Leave every chip grey to keep every rating.</p>
-                <div class="two-col">
-                    <div class="field">
-                        <label>Show certifications <span class="hint">(TV ratings)</span></label>
-                        <div class="chip-picker" id="f_show_certifications" data-vocab="TV-Y,TV-Y7,TV-G,TV-PG,TV-14,TV-MA,NR"></div>
-                    </div>
-                    <div class="field">
-                        <label>Movie certifications <span class="hint">(film ratings)</span></label>
-                        <div class="chip-picker" id="f_movie_certifications" data-vocab="G,PG,PG-13,R,NC-17,NR"></div>
-                    </div>
-                </div>
-                {# FILMS ONLY, and the label says so rather than leaving somebody
-                   to discover it by setting one and watching nothing happen on
-                   Season Premieres. This is a different question from the
-                   Countries field above: that one is where a title was MADE,
-                   this one is where and how it is being RELEASED, and one
-                   service's film calendar is every release in every market —
-                   over a thousand titles in a month — which is unreadable
-                   without it. A film released nowhere you picked is REMOVED,
-                   not moved to another date; the calendar says how many, so a
-                   month this empties can be undone. #}
-                <p class="hint">Film releases: these narrow the movie calendars only, and
-                    they are about where a film is being <em>released</em> rather than where
-                    it was made.</p>
-                <div class="field">
-                    <label for="f_release_countries">Release countries</label>
-                    <input type="text" id="f_release_countries" name="movie_release_countries"
-                           spellcheck="false" autocomplete="off" placeholder="us, gb, -br">
-                    <span class="hint">Comma-separated 2-letter ISO codes, with the same <code>-</code>
-                        to exclude. Blank means every market. A film with no release in any of
-                        these disappears from the calendar rather than moving.</span>
-                </div>
-                <div class="field">
-                    <label>Release types</label>
-                    <div class="chip-picker" id="f_release_types"
-                         data-vocab="1,2,3,4,5,6"
-                         data-labels="Premiere,Limited theatrical,Theatrical,Digital,Physical,TV"></div>
-                    <span class="hint">Same three-state chips as above. A country and a type are
-                        matched <strong>together</strong>: "us" plus "Theatrical" means a film in
-                        American cinemas, not one that premiered elsewhere and opened in cinemas
-                        somewhere else. Leave every chip grey to keep every format.</span>
-                </div>
-                <div class="field">
-                    <label for="f_networks">Networks</label>
-                    <textarea id="f_networks" name="network_filter" spellcheck="false"
-                              placeholder="HBO, Netflix, BBC One"></textarea>
-                    <span class="hint">Comma-separated network names, matched exactly as Trakt spells
-                        them &mdash; capitals included, because <code>tvN</code> and <code>TVN</code> are
-                        two different networks. Put a <code>-</code> in front of a name to exclude it
-                        instead (<code>-Netflix</code>). Blank means every network.</span>
-                </div>
-                {# WHICH SERVICES SHOW AT ALL. Here rather than on a screen of its
-                   own because it is the same KIND of narrowing as everything
-                   above it: a per-viewer decision applied at read over rows every
-                   viewer shares, changing nothing about what is fetched or
-                   stored, and taking effect on the next page rather than after a
-                   cache expires.
 
-                   NOT DRAWN when there is nothing to choose between — one
-                   service showing is not a choice, and the same rule empties the
-                   toolbar's own control. #}
-                {% if source_toggles|length > 1 %}
-                <div class="field">
-                    <label>Services</label>
-                    <div class="source-toggles">
-                        {% for choice in source_toggles %}
-                        <label class="source-toggle">
-                            <input type="checkbox" name="calendar_sources" value="{{ choice.source }}"
-                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
-                            {{ choice.label }}
-                        </label>
-                        {% endfor %}
-                    </div>
-                    <span class="hint">Unticking one takes its listings off your calendar entirely.
-                        Which service's <em>description</em> wins when both list the same show — its
-                        poster, overview and network — is set on your
-                        <a href="/me">👤 Account</a> page. At least one has to stay ticked.</span>
-                </div>
-                {% endif %}
-                {# Genre and country filtering is a Trakt VIP feature only when
-                   Trakt does it. This app filters the cached result itself, so
-                   it works on any account — worth saying, because the Settings
-                   screen still carries the VIP caveat for the fields Trakt is
-                   asked about directly. #}
-                <p class="hint">Filtering happens here, not at Trakt, so these work on any Trakt account.</p>
+            {# THE MASTER SWITCH, above the tabs because it governs both. Nothing
+               is copied aside and nothing is restored: the answers stay where
+               they are and every read path asks this one value before applying
+               them, so turning filters back on cannot have lost one. A share
+               link deliberately ignores it — app/calendar/vocab.py's
+               `active_specs` is where that is argued. #}
+            {# THE SWITCH READS THE WAY EVERY OTHER SWITCH DOES: on means the
+               thing is happening. It is stored the other way round — the column
+               is `filters_paused`, because "nobody has paused anything" is the
+               state every account starts in and a default of false is what
+               makes that true — so the FIELD is inverted once, on the way in
+               (see post_me_filters), rather than the control being drawn
+               backwards to match a column name. #}
+            <label class="filter-power">
+                <span class="filter-power-copy">
+                    <strong>Filters</strong>
+                    <span class="filter-power-on">On. Turn them off to see everything for a while — nothing is forgotten.</span>
+                    <span class="filter-power-off">Off. Your calendar is showing everything, and nothing below has been cleared.</span>
+                </span>
+                <input type="checkbox" id="f_filters_on" name="filters_on" autocomplete="off"
+                       {% if not filter_panel.paused %}checked{% endif %}>
+                <span class="fswitch"><span class="fswitch-knob"></span></span>
+            </label>
+
+            <input type="radio" name="filters_tab" id="ftab_show" class="ftab-radio" autocomplete="off"
+                   {% if filter_panel.media != 'movie' %}checked{% endif %}>
+            <input type="radio" name="filters_tab" id="ftab_movie" class="ftab-radio" autocomplete="off"
+                   {% if filter_panel.media == 'movie' %}checked{% endif %}>
+            <div class="ftabs">
+                <label class="ftab ftab-show" for="ftab_show">📺 TV{% if filter_panel.counts.show %}<span class="ftab-count">{{ filter_panel.counts.show }}</span>{% endif %}</label>
+                <label class="ftab ftab-movie" for="ftab_movie">🎬 Movies{% if filter_panel.counts.movie %}<span class="ftab-count">{{ filter_panel.counts.movie }}</span>{% endif %}</label>
             </div>
+
+            <div class="modal-body">
+                {# ---------------- TV ---------------- #}
+                <div class="ftab-panel ftab-panel-show">
+                    {% if filter_panel.sources.show %}
+                    <div class="ffield">
+                        <div class="ffield-head">
+                            <span class="ffield-label">Services</span>
+                            {% call ff.info() %}Which services list your TV calendar. Each is its own
+                                switch, so a service added to this app later arrives switched on for
+                                anyone who had them all on. It narrows like everything else on this
+                                tab: nothing is fetched or stored differently, and it lands on your
+                                next page load. Your movie calendar keeps its own answer.{% endcall %}
+                        </div>
+                        <div class="fsources">
+                            {% for choice in filter_panel.sources.show %}
+                            <label class="fsource">
+                                <input type="checkbox" name="sources_show" value="{{ choice.source }}"
+                                       autocomplete="off"{% if choice.on %} checked{% endif %}>
+                                <span>{{ choice.label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p class="hint">At least one has to stay on.</p>
+                    </div>
+                    {% endif %}
+
+                    {% call ff.field('tv_genres', 'Genres', 'Another genre, then Enter…') %}
+                        Press a chip once to keep <em>only</em> that genre, again to filter it out,
+                        again to stop filtering on it. A show is kept if it carries any genre you
+                        asked for and none you excluded. This happens here rather than at Trakt, so
+                        it works on any account — the Settings screen still carries a VIP caveat,
+                        and it is about the fields Trakt is asked for directly.
+                    {% endcall %}
+                    {% call ff.field('tv_countries', 'Countries', 'Another country code, then Enter…') %}
+                        Where a show was <em>made</em>. Two-letter ISO codes; the box takes any of
+                        them, including the ones with no chip here.
+                    {% endcall %}
+                    {% call ff.field('network_filter', 'Networks', 'Network name, then Enter…') %}
+                        Matched exactly as the service spells it, capitals included — one week of
+                        this calendar carried both <code>TVN</code> and <code>tvN</code>, a Polish
+                        broadcaster and a Korean one, so folding the case would merge two networks
+                        that are not the same network. No chips are offered because there are
+                        thousands of them: pressing a network's badge on a card is the quick way in.
+                    {% endcall %}
+                    {% call ff.field('show_certifications', 'Ratings') %}
+                        TV ratings only — films have their own on the Movies tab, because TV
+                        Parental Guidelines and MPA ratings are separate vocabularies.
+                        <code>NR</code> covers anything the service gave no rating.
+                    {% endcall %}
+                </div>
+
+                {# ---------------- MOVIES ---------------- #}
+                <div class="ftab-panel ftab-panel-movie">
+                    {% if filter_panel.sources.movie %}
+                    <div class="ffield">
+                        <div class="ffield-head">
+                            <span class="ffield-label">Services</span>
+                            {% call ff.info() %}Which services list your movie calendar, answered
+                                separately from TV — one service's film calendar is every release in
+                                every market, measured at 1314 titles in one real August against the
+                                other's 25, and that is a preference worth stating once per medium.{% endcall %}
+                        </div>
+                        <div class="fsources">
+                            {% for choice in filter_panel.sources.movie %}
+                            <label class="fsource">
+                                <input type="checkbox" name="sources_movie" value="{{ choice.source }}"
+                                       autocomplete="off"{% if choice.on %} checked{% endif %}>
+                                <span>{{ choice.label }}</span>
+                            </label>
+                            {% endfor %}
+                        </div>
+                        <p class="hint">At least one has to stay on.</p>
+                    </div>
+                    {% endif %}
+
+                    {% call ff.field('movie_genres', 'Genres', 'Another genre, then Enter…') %}
+                        Separate from the TV tab's genres: excluding <em>reality</em> from your shows
+                        no longer touches your films. Same three states — press to keep only, again
+                        to filter out, again to stop filtering.
+                    {% endcall %}
+                    {% call ff.field('movie_countries', 'Countries', 'Another country code, then Enter…') %}
+                        Where a film was <em>made</em>. Not the same question as release markets
+                        below, which is where it is being <em>shown</em> — a Brazilian film opening
+                        in America matches one and not the other.
+                    {% endcall %}
+                    {% call ff.field('movie_certifications', 'Ratings') %}
+                        Film ratings. <code>NR</code> covers anything the service left unrated.
+                    {% endcall %}
+                    {% call ff.field('movie_release_countries', 'Release markets', 'Another market, then Enter…') %}
+                        Where a film is being <em>released</em>, which is what makes a global film
+                        calendar readable at all — one service lists every release in every market,
+                        over a thousand titles in a busy month. A film with no release in any market
+                        you keep is <strong>removed</strong> rather than moved to another date; the
+                        calendar says how many, so a month this empties can be undone.
+                    {% endcall %}
+                    {% call ff.field('movie_release_types', 'Release formats') %}
+                        A market and a format are matched <strong>together</strong>: US plus
+                        Theatrical means a film in American cinemas, not one that premiered elsewhere
+                        and opened in cinemas somewhere else.
+                    {% endcall %}
+                </div>
+            </div>
+
             <div class="modal-foot">
-                <button type="button" class="btn-ghost" onclick="clearFilters()">Clear all</button>
+                {# CLEARS THE VISIBLE TAB and says which one, rather than leaving
+                   somebody to find out by pressing it. Both labels are drawn and
+                   the stylesheet shows whichever matches the open tab, so no
+                   script keeps the button in step with the tabs. #}
+                <button type="button" class="btn-ghost fclear" onclick="clearFilters(event)">
+                    <span class="fclear-show">Clear TV filters</span>
+                    <span class="fclear-movie">Clear movie filters</span>
+                </button>
                 <button type="submit" class="btn-primary">Save &amp; reload</button>
             </div>
         </form>
+
+        {# THE ONE PIECE OF MARKUP THE CLIENT BUILDS, and it is authored here so
+           that it is still markup an editor and a grep can see. Adding a token
+           the vocabulary does not name clones this and fills in the name and the
+           text; the NAME FORMAT comes from the input's own data-name-prefix,
+           which the server spelled, so nothing in JavaScript knows how a filter
+           field is named. #}
+        <template id="fchipTemplate">
+            <span class="fchip" role="radiogroup">
+                <input type="radio" value="" autocomplete="off">
+                <input type="radio" value="include" autocomplete="off" checked>
+                <input type="radio" value="exclude" autocomplete="off">
+                <button type="button" class="fchip-face" tabindex="-1" aria-hidden="true"></button>
+            </span>
+        </template>
     </div>
 </div>
 

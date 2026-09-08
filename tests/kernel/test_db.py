@@ -198,6 +198,87 @@ class MigrationTests(DbTestCase):
         finally:
             conn.close()
 
+    async def test_migration_38_gives_the_show_calendar_todays_filters_and_the_film_one_none(self):
+        """The split, over data that already exists.
+
+        `genres` and `countries` were one answer applied to whichever calendar
+        was open, and the upgrade has to decide what that answer MEANT. It keeps
+        it for shows and starts the film columns empty, which is a real
+        behaviour change: an account that filtered genres sees a WIDER film
+        calendar the first time it loads one. Copying both ways would look like
+        nothing changed while silently asserting that a filter written for shows
+        was meant for films too — which is the conflation the split exists to
+        end.
+
+        The source selection goes the other way and is copied, because there is
+        no "empty" for it: no service showing is the one state the app refuses,
+        so the only answer that preserves what somebody chose is their own.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-38-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 37]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'filtered', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (2, 'unfiltered', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO user_prefs (user_id, endpoint, card_style, day_packing, "
+                "genres, countries, show_certifications, movie_certifications, "
+                "network_filter_json) "
+                "VALUES (1, 'shows/new', 'vertical', 'grid', '-reality,drama', "
+                "'us,-jp', '-TV-MA', '-R', '[\"HBO\"]')")
+            conn.execute(
+                "INSERT INTO user_prefs (user_id, endpoint, card_style, day_packing) "
+                "VALUES (2, 'shows/new', 'vertical', 'grid')")
+            conn.execute(
+                "INSERT INTO source_prefs (user_id, calendar_source) VALUES (1, 'trakt')")
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            row = conn.execute("SELECT * FROM user_prefs WHERE user_id = 1").fetchone()
+            self.assertEqual(row["tv_genres"], "-reality,drama")
+            self.assertEqual(row["tv_countries"], "us,-jp")
+            self.assertEqual(row["movie_genres"], "")
+            self.assertEqual(row["movie_countries"], "")
+            # The dimensions that were ALREADY per-medium are untouched — this
+            # migration finishes a split the schema had started, it does not
+            # redo it.
+            self.assertEqual(row["show_certifications"], "-TV-MA")
+            self.assertEqual(row["movie_certifications"], "-R")
+            self.assertEqual(row["network_filter_json"], '["HBO"]')
+            # And the stash starts off, so nobody's calendar changes because a
+            # switch they have never seen defaulted the wrong way.
+            self.assertEqual(row["filters_paused"], 0)
+
+            blank = conn.execute("SELECT * FROM user_prefs WHERE user_id = 2").fetchone()
+            self.assertEqual(blank["tv_genres"], "")
+            self.assertEqual(blank["movie_genres"], "")
+
+            sources = conn.execute("SELECT * FROM source_prefs WHERE user_id = 1").fetchone()
+            self.assertEqual(sources["calendar_source"], "trakt")
+            self.assertEqual(sources["movie_calendar_source"], "trakt")
+
+            # The columns the two specs used to share are gone rather than left
+            # behind to be read by mistake.
+            columns = {c["name"] for c in conn.execute("PRAGMA table_info(user_prefs)")}
+            self.assertNotIn("genres", columns)
+            self.assertNotIn("countries", columns)
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
     async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
         """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
         which made admitting a third service a table rebuild.

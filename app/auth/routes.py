@@ -853,53 +853,6 @@ async def set_own_metadata_order(request: Request):
     return JSONResponse({"ok": True, "order": list(saved.metadata_order)})
 
 
-@guard.post("/api/me/calendar-sources", AuthLevel.SESSION)
-async def set_own_calendar_sources(request: Request):
-    """State which services this account's calendar shows.
-
-    IT IS A NARROWING AND IT BELONGS WITH THE OTHER NARROWINGS, which is why it
-    is stated in the calendar's own 🔎 Filters panel rather than on a screen of
-    its own. Excluding a service is the same KIND of act as excluding a genre:
-    both are read-time decisions over rows every viewer shares, neither changes
-    what is fetched or stored, and both take effect on the next page rather than
-    after a cache expires.
-
-    EVERY SERVICE SELECTED IS `auto` AND NOT A NAMED SET, and the difference
-    outlives this request. `auto` means "whatever there is, now and later", so an
-    instance that registers a third service starts showing it; a named set is a
-    choice made from the menu that existed at the time, and a third service is
-    not something the chooser agreed to. Somebody who ticks everything means the
-    first, which is also the state they started in.
-
-    NONE SELECTED IS REFUSED rather than stored. An empty calendar with no
-    explanation reads as a broken app, and the honest way to see nothing is to
-    stop opening the page. `source_prefs.save` would take it — the column can
-    hold any named set — so the refusal is here, where the intent is legible.
-    """
-    user = await auth.require_session(request)
-    data = await authz.json_body(request)
-    names = data.get("sources")
-    if not isinstance(names, list):
-        return authz.error("Sources must be a list of service names.")
-    source_prefs = _source_prefs()
-    chosen = {str(name) for name in names}
-    available = {str(p.source) for p in providers.calendar_sources(settings=load_settings())}
-    unknown = chosen - available
-    if unknown:
-        return authz.error(f"This app has no calendar source called {sorted(unknown)[0]!r}.")
-    if not chosen:
-        return authz.error("At least one service has to be showing.")
-    selection = (source_prefs.AUTO if chosen == available
-                 else source_prefs.SEPARATOR.join(sorted(chosen)))
-    prefs = await source_prefs.load(user.user_id)
-    try:
-        saved = await source_prefs.save(dataclasses.replace(
-            prefs, calendar_source=selection))
-    except ValueError as exc:
-        return authz.error(str(exc))
-    return JSONResponse({"ok": True, "sources": saved.calendar_source})
-
-
 @guard.post("/api/me/tracker-retired", AuthLevel.SESSION)
 async def set_own_retired_trackers(request: Request):
     """State which services' stored numbers this account no longer counts.

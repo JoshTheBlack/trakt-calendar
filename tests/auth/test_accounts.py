@@ -153,8 +153,10 @@ class UserTests(AuthTestCase):
         user_id = await auth.create_user(username="unfiltered", password="hunter2hunter2",
                                          settings=self._seeding_settings())
         prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
-        self.assertEqual(prefs["genres"], "")
-        self.assertEqual(prefs["countries"], "")
+        self.assertEqual(prefs["tv_genres"], "")
+        self.assertEqual(prefs["tv_countries"], "")
+        self.assertEqual(prefs["movie_genres"], "")
+        self.assertEqual(prefs["movie_countries"], "")
         self.assertEqual(prefs["show_certifications"], "")
         self.assertEqual(prefs["movie_certifications"], "")
         self.assertEqual(prefs["network_filter_json"], "[]")
@@ -173,8 +175,14 @@ class UserTests(AuthTestCase):
 
         user_id = await db.transaction(_work)
         prefs = await db.fetch_one("SELECT * FROM user_prefs WHERE user_id = ?", (user_id,))
-        self.assertEqual(prefs["genres"], "-anime")
-        self.assertEqual(prefs["countries"], "us,gb")
+        # SEEDED INTO BOTH MEDIA, which is the opposite of what migration 38
+        # does to an existing account and deliberately so: settings.json's value
+        # predates the split and was applied to whichever calendar was open, so
+        # copying it both ways is what keeps the operator's own view intact.
+        self.assertEqual(prefs["tv_genres"], "-anime")
+        self.assertEqual(prefs["tv_countries"], "us,gb")
+        self.assertEqual(prefs["movie_genres"], "-anime")
+        self.assertEqual(prefs["movie_countries"], "us,gb")
         self.assertEqual(prefs["show_certifications"], "-tv-ma")
         self.assertEqual(prefs["movie_certifications"], "pg,pg-13")
         self.assertEqual(prefs["network_filter_json"], '["HBO", "Netflix"]')

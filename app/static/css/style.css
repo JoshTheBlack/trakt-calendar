@@ -491,9 +491,22 @@ body.card-horizontal .trakt-btn img { height: 12px; }
 }
 
 .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 14px; overflow: hidden; position: relative; transition: all .22s ease; display: flex; flex-direction: column; cursor: pointer; }
-.card:hover { transform: translateY(-6px) scale(1.015); box-shadow: 0 18px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(232,181,69,0.35); border-color: var(--gold); }
+/* THE LIFT IS FOR A POINTER THAT CAN HOVER, AND ONLY FOR ONE. On a touch screen
+   there is no hover state to enter, so a browser synthesizes one on the first
+   tap: :hover applies, this rule MOVES THE CARD six pixels up and scales it, and
+   the click that follows is dispatched against the layout as it now is. A finger
+   aimed at a badge in the card therefore lands next to it, on the card, and
+   opens the details modal instead of the badge's offer — which is exactly what
+   filtering from a card badge did on a phone, and never on a desktop.
+   Confining the whole thing to `hover: hover` costs a touch device nothing it
+   could perceive and gives it a target that stays where it was aimed. The same
+   applies to every other hover transform a card carries, which is why the
+   not-watching variant is in here too rather than left outside. */
+@media (hover: hover) {
+    .card:hover { transform: translateY(-6px) scale(1.015); box-shadow: 0 18px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(232,181,69,0.35); border-color: var(--gold); }
+    .card.not-watching:hover { transform: none; box-shadow: none; border-color: rgba(224,56,77,0.7); }
+}
 .card.not-watching { opacity: 0.72; border-color: rgba(224,56,77,0.5); }
-.card.not-watching:hover { transform: none; box-shadow: none; border-color: rgba(224,56,77,0.7); }
 .card.not-watching .card-body { opacity: 0.55; }
 body.hide-not-watching .card.not-watching { display: none; }
 /* In hide mode, collapse a whole day whose items are all not-watching (JS-driven). */
@@ -524,6 +537,51 @@ body.hide-not-watching .card.not-watching { display: none; }
 .network-badge.no-logo .network-logo { display: none; }
 .network-badge.no-logo .network-fallback { display: inline; }
 .rating-badge { position: absolute; top: 10px; right: 10px; z-index: 5; background: rgba(10,12,16,0.78); border: 1px solid rgba(232,181,69,0.5); color: var(--gold-soft); font-size: 0.78rem; font-weight: 700; padding: 4px 8px; border-radius: 8px; backdrop-filter: blur(4px); }
+
+/* SERIES PREMIERE vs RETURNING.
+   On the Season Premieres calendar every card is somebody's episode 1 and they
+   all looked the same, so telling a brand-new show from a fifth season meant
+   reading the season number off the small blue episode label. The distinction is
+   the reason that calendar is worth opening, so it is said in words and, for a
+   first season, on the card's own frame.
+
+   STACKED ON THE EPISODE BADGE rather than given a corner of its own. All four
+   corners of the poster are already spoken for — runtime top-left, rating
+   top-right, episode bottom-left, network bottom-right — and this belongs beside
+   the episode label anyway: that one says where in the run the card sits, this
+   says what that makes it. */
+.premiere-badge {
+    position: absolute; bottom: 34px; left: 9px; z-index: 5;
+    font-size: 0.6rem; font-weight: 800; letter-spacing: 0.06em;
+    padding: 2px 6px; border-radius: 7px; backdrop-filter: blur(4px);
+    background: rgba(10,12,16,0.82); border: 1px solid var(--card-border);
+    color: var(--text-dim); white-space: nowrap;
+}
+/* GOLD IS SPENT ON THE FIRST SEASON ALONE. A returning season is the ordinary
+   case on this calendar and gets a label without an accent; making both of them
+   loud would leave the pair as hard to tell apart as no labels at all. */
+.premiere-badge.first-season {
+    border-color: var(--gold); color: var(--gold-soft);
+    background: rgba(232,181,69,0.16);
+}
+/* The frame, for a first season only. Deliberately NOT the same green as
+   ✨ NEW, which answers a different question — that one means "this appeared
+   since you last looked", and a returning season can be new in that sense while
+   a series premiere you have already seen is not. */
+.card.is-series-premiere { border-color: var(--gold); }
+
+/* NOT-WATCHING OUTRANKS IT, the way it already outranks ✨ NEW. A card you have
+   turned away is drawn as turned away first; a gold frame competing with the
+   crimson one would say two things at once about a card that is answering only
+   one question. */
+.card.not-watching.is-series-premiere { border-color: rgba(224,56,77,0.5); }
+.card.not-watching .premiere-badge { opacity: 0.5; }
+
+/* In poster-only mode the frame IS the poster's border rather than the card's —
+   the card itself has no border there (see body.card-poster .card) — so the mark
+   moves onto the poster to survive. */
+body.card-poster .card.is-series-premiere { border-color: transparent; }
+body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gold); }
 
 .watch-toggle { position: absolute; top: 48px; right: 10px; z-index: 6; width: 30px; height: 30px; border-radius: 50%; border: 1px solid rgba(255,255,255,0.18); background: rgba(10,12,16,0.78); backdrop-filter: blur(4px); display: flex; align-items: center; justify-content: center; cursor: pointer; transition: all .18s ease; padding: 0; }
 .watch-toggle:hover { transform: scale(1.14); background: rgba(232,181,69,0.9); }
@@ -685,6 +743,186 @@ body.hide-not-watching .card.not-watching { display: none; }
 @media (prefers-reduced-motion: reduce) {
     .filter-offer, .filter-bar { animation: none; transition: none; }
 }
+
+/* ---- The filters panel ----
+   Two tabs over two sets of stored values (app/db.py migration 38), and almost
+   all of it is drawn from markup the server rendered: chips are radios, tabs are
+   radios, and the only thing script does here is cycle one in a single press.
+
+   The colours are the two the card badges already use for include and exclude,
+   so a chip pressed in this panel and a badge pressed on a card speak one
+   language. */
+.filters-modal { max-width: 720px; }
+
+/* THE MASTER SWITCH, and it is a label wrapping its own checkbox so the whole
+   strip is the hit area rather than the 26px track alone. */
+.filter-power {
+    display: flex; align-items: center; gap: 12px; cursor: pointer;
+    margin: 14px 20px 0; padding: 10px 14px;
+    border: 1px solid var(--card-border); border-radius: 12px; background: var(--card);
+}
+.filter-power-copy { display: flex; flex-direction: column; gap: 2px; }
+.filter-power-copy strong { font-size: 0.9rem; }
+.filter-power-copy span { font-size: 0.76rem; color: var(--text-faint); }
+.filter-power input { position: absolute; opacity: 0; pointer-events: none; }
+/* WHICH LINE SHOWS IS THE CHECKBOX'S JOB, not a script's — the same reason the
+   chips are radios. Both lines are rendered and the stylesheet picks one.
+   CHECKED IS "FILTERS ARE ON", which is the switch lit and the calendar
+   narrowed; the stored column is the inverse and is inverted once at the route
+   rather than here. */
+.filter-power-on { display: none; }
+.filter-power:has(input:checked) .filter-power-on { display: block; }
+.filter-power:has(input:checked) .filter-power-off { display: none; }
+.filter-power:not(:has(input:checked)) { border-color: var(--gold); }
+.fswitch {
+    margin-left: auto; flex: 0 0 auto; position: relative;
+    width: 46px; height: 26px; border-radius: 999px;
+    background: var(--card-border); transition: background .16s ease;
+}
+.fswitch-knob {
+    position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--text-faint); transition: transform .16s ease, background .16s ease;
+}
+.filter-power:has(input:checked) .fswitch { background: rgba(232,181,69,0.35); }
+.filter-power:has(input:checked) .fswitch-knob { transform: translateX(20px); background: var(--gold); }
+.filter-power:has(input:focus-visible) .fswitch { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* Paused: the form goes quiet without hiding, so what is stashed can still be
+   read and changed while it is not being applied. */
+.filters-modal:has(#f_filters_on:not(:checked)) .ftab-panel { opacity: 0.5; }
+
+/* THE TABS ARE THE TWO RADIOS ABOVE THEM. Both sit before the strip and before
+   the bodies, so one sibling combinator reaches either — which is the whole
+   reason switching tabs runs no script. */
+.ftab-radio { position: absolute; opacity: 0; pointer-events: none; }
+.ftabs { display: flex; gap: 4px; margin: 16px 20px 0; border-bottom: 1px solid var(--card-border); }
+.ftab {
+    cursor: pointer; font-weight: 500; color: var(--text-dim);
+    padding: 9px 14px 10px; display: inline-flex; align-items: center; gap: 8px;
+    border-bottom: 2px solid transparent; margin-bottom: -1px;
+    transition: color .14s ease, border-color .14s ease;
+}
+.ftab:hover { color: var(--text); }
+.ftab-count {
+    font-size: 0.7rem; font-weight: 700; padding: 1px 7px; border-radius: 999px;
+    background: rgba(232,181,69,0.16); color: var(--gold-soft);
+}
+#ftab_show:checked ~ .ftabs .ftab-show,
+#ftab_movie:checked ~ .ftabs .ftab-movie { color: var(--text); border-bottom-color: var(--gold); }
+/* THE COUNT IS FOR THE TAB YOU ARE NOT ON. On the open tab the fields say what
+   they are holding, so the number would be saying it a second time. */
+#ftab_show:checked ~ .ftabs .ftab-show .ftab-count,
+#ftab_movie:checked ~ .ftabs .ftab-movie .ftab-count { display: none; }
+/* A keyboard focus lands on the hidden radio, so the visible tab has to show it. */
+#ftab_show:focus-visible ~ .ftabs .ftab-show,
+#ftab_movie:focus-visible ~ .ftabs .ftab-movie { outline: 2px solid var(--gold); outline-offset: -2px; }
+.ftab-panel { display: none; flex-direction: column; }
+#ftab_show:checked ~ .modal-body .ftab-panel-show,
+#ftab_movie:checked ~ .modal-body .ftab-panel-movie { display: flex; }
+/* The footer's button names the tab it clears, and the stylesheet keeps the two
+   in step so no script has to. */
+.fclear-show, .fclear-movie { display: none; }
+#ftab_show:checked ~ .modal-foot .fclear-show,
+#ftab_movie:checked ~ .modal-foot .fclear-movie { display: inline; }
+
+/* One dimension. Hairlines rather than nested cards: the panel is one surface,
+   and a border on every block flattens the hierarchy instead of building it. */
+.ffield { padding: 18px 0; border-bottom: 1px solid var(--card-border); display: flex; flex-direction: column; gap: 10px; }
+.ffield:last-child { border-bottom: none; }
+.ffield-head { display: flex; align-items: center; gap: 8px; }
+.ffield-label { font-size: 0.74rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); font-weight: 700; }
+.ffield-count { font-size: 0.72rem; color: var(--gold-soft); }
+
+/* WHERE THE PROSE WENT. Every paragraph this panel used to shout is behind one
+   of these, so the reasoning is a press away and never in the way. A details
+   element means the opening, the keyboard and the ARIA are the browser's,
+   exactly as they are for a card badge. */
+.finfo { position: relative; margin-left: auto; }
+.finfo > summary {
+    list-style: none; cursor: pointer; width: 20px; height: 20px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 0.72rem; font-weight: 700;
+    color: var(--text-faint); border: 1px solid var(--card-border);
+}
+.finfo > summary::-webkit-details-marker { display: none; }
+.finfo > summary::marker { content: ""; }
+.finfo > summary:hover, .finfo[open] > summary { color: var(--gold); border-color: var(--gold); }
+.finfo-body {
+    position: absolute; right: 0; top: 26px; z-index: 20; width: min(330px, 74vw);
+    background: var(--bg-raise, #1b1b1f); border: 1px solid var(--card-border); border-radius: 10px;
+    padding: 11px 13px; font-size: 0.8rem; line-height: 1.55; color: var(--text-dim);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.55);
+}
+.finfo-body code { color: var(--gold-soft); }
+
+.fchip-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 0.76rem; color: var(--text-faint); }
+.fchip-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.fswatch { width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--card-border); display: inline-block; }
+.fswatch.on { background: #30a46c; border-color: #30a46c; }
+.fswatch.off { background: #e5484d; border-color: #e5484d; }
+
+.fchips { display: flex; flex-wrap: wrap; gap: 6px; }
+/* THE RADIOS ARE THE KEYBOARD CONTROL and are hidden rather than removed: a
+   radiogroup already does arrow-key cycling and labelling properly, so they stay
+   focusable and the chip shows their focus. The button is the pointer control,
+   out of the tab order, and exists only so one press cycles three answers. */
+.fchip { position: relative; display: inline-block; }
+.fchip input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.fchip-face {
+    font: inherit; font-size: 0.82rem; cursor: pointer;
+    padding: 5px 11px; border-radius: 999px;
+    background: transparent; border: 1px solid var(--card-border); color: var(--text-dim);
+    transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.fchip-face:hover { border-color: var(--gold-soft); color: var(--text); }
+.fchip:has(input:focus-visible) .fchip-face { outline: 2px solid var(--gold); outline-offset: 2px; }
+.fchip:has(input[value="include"]:checked) .fchip-face {
+    border-color: #30a46c; color: #8fe3b4; background: rgba(48,164,108,0.12);
+}
+.fchip:has(input[value="exclude"]:checked) .fchip-face {
+    border-color: #e5484d; color: #ff9ea1; background: rgba(229,72,77,0.12); text-decoration: line-through;
+}
+.fchip-add {
+    font: inherit; width: 100%; padding: 7px 11px; border-radius: 10px;
+    background: var(--card); border: 1px solid var(--card-border); color: var(--text);
+}
+.fchip-add:focus { outline: none; border-color: var(--gold); }
+.fchip-add::placeholder { color: var(--text-faint); }
+
+/* Independent switches, one per service, rather than a Both/Trakt/Simkl picker:
+   a picker enumerates the services that exist today, and a box per service
+   simply grows one more the day a third is registered. The tick is what says so
+   — a lit pill among unlit ones reads as a chosen option instead. */
+.fsources { display: flex; gap: 6px; flex-wrap: wrap; }
+.fsource { position: relative; }
+.fsource input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.fsource span {
+    display: block; padding: 7px 16px; border-radius: 10px; font-size: 0.86rem;
+    border: 1px solid var(--card-border); color: var(--text-dim); background: var(--card);
+    transition: border-color .12s ease, color .12s ease, background .12s ease;
+}
+.fsource span::before { content: "\25CB"; margin-right: 7px; opacity: 0.55; }
+.fsource input:checked ~ span { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
+.fsource input:checked ~ span::before { content: "\2713"; opacity: 1; }
+.fsource input:focus-visible ~ span { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* The last one showing. Marked rather than disabled — a disabled checkbox is
+   left out of the submission entirely, which would post an empty group and earn
+   the very refusal the lock exists to avoid. */
+.fsource.is-locked input { cursor: default; }
+.fsource.is-locked span { opacity: 0.8; }
+
+/* Filters exist but are switched off. Its own look rather than a fall back to
+   plain, because "nothing set" and "set but off" both show a calendar with
+   everything on it — and if they looked alike a viewer would forget the filters
+   were there at all. */
+.pill-btn.paused {
+    border-color: var(--gold); color: var(--text-faint);
+    background: repeating-linear-gradient(135deg, rgba(232,181,69,0.13) 0 6px, transparent 6px 12px);
+}
+
+@media (max-width: 620px) {
+    .filters-modal .modal-body { max-height: none; }
+    .ftabs { overflow-x: auto; }
+}
+
 }
 .chip.network { color: var(--accent-blue); border-color: rgba(79,163,224,0.35); }
 .chip.country { color: var(--gold-soft); border-color: rgba(232,181,69,0.3); }
