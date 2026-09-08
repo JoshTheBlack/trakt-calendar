@@ -2869,6 +2869,65 @@ MIGRATION_37 = """
 ALTER TABLE calendar_airings ADD COLUMN from_search INTEGER NOT NULL DEFAULT 0;
 """
 
+# ONE CALENDAR'S FILTERS STOP BEING THE OTHER'S.
+#
+# `genres` and `countries` were one answer applied to whichever calendar was
+# open, which made them unanswerable: somebody who never wants a reality SHOW
+# had no way to say so without also losing documentary films, and the two
+# questions had genuinely different answers. Certifications were already split
+# (a TV rating and an MPA rating are not the same vocabulary) and the release
+# pair was always films-only, so this finishes a split the schema had already
+# started rather than inventing one.
+#
+# TV KEEPS TODAY'S VALUES AND THE FILM COLUMNS START EMPTY, which is a real
+# behaviour change and the reason this note is long. An account that had filtered
+# genres or countries sees a WIDER film calendar the first time it loads one
+# after this runs. The alternative -- copying both ways -- keeps every calendar
+# looking the same on upgrade but silently asserts that a filter written for
+# shows was meant for films too, and the whole reason for the split is that it
+# usually was not. The changelog says so in as many words; a person who wanted
+# the old narrowing on films can restate it in one press per chip.
+#
+# WHICH COLUMN IS WHICH IS NOT INFERRED FROM ITS NAME AT READ TIME.
+# app/calendar/vocab.py's TV_FIELDS/MOVIE_FIELDS is what maps a medium to its
+# columns, so a sixth endpoint or a third medium changes that tuple and not a
+# string test somewhere in the read path.
+#
+# `filters_paused` IS THE WHOLE OF THE STASH. Nothing is copied aside or
+# restored: the specs stay exactly where they are and every read path asks this
+# one boolean before applying them, so turning filters back on cannot lose an
+# answer. It is per account rather than per session because the question people
+# actually ask is "show me everything for a bit", and a switch that silently
+# reset itself at the next sign-in would answer a different one.
+MIGRATION_38 = """
+ALTER TABLE user_prefs ADD COLUMN tv_genres TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN tv_countries TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN movie_genres TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN movie_countries TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_prefs ADD COLUMN filters_paused INTEGER NOT NULL DEFAULT 0;
+
+UPDATE user_prefs SET tv_genres = genres, tv_countries = countries;
+
+ALTER TABLE user_prefs DROP COLUMN genres;
+ALTER TABLE user_prefs DROP COLUMN countries;
+
+-- WHICH SERVICES ANSWER IS ALSO ASKED PER MEDIUM NOW, and `calendar_source`
+-- keeps meaning the SHOW calendar so an instance that has never opened the panel
+-- needs no rewrite of a column it is already using.
+--
+-- app/sources/prefs.py's `admits_calendar` carried a note saying this question
+-- was NO LONGER asked per calendar, and that note was right about what it
+-- described: a per-ENDPOINT override, five separate answers, removed because the
+-- problem it was reaching for (one service's film calendar is every release in
+-- every market) is better answered by the release filters. This is not that.
+-- It is per MEDIUM, two answers, and it exists because the services genuinely
+-- differ in what they are good for on each side -- one has the deeper show
+-- coverage, the other the wider film listing -- which is a preference no
+-- narrowing can express.
+ALTER TABLE source_prefs ADD COLUMN movie_calendar_source TEXT NOT NULL DEFAULT 'auto';
+UPDATE source_prefs SET movie_calendar_source = calendar_source;
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2907,6 +2966,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (35, MIGRATION_35),
     (36, MIGRATION_36),
     (37, MIGRATION_37),
+    (38, MIGRATION_38),
 ]
 
 

@@ -29,15 +29,26 @@ def insert_user_prefs(conn: db.Connection, user_id: int, settings: Settings,
     operator's own from before this instance had accounts, and their calendar
     has to keep rendering as it did.
     """
+    # THE SETTINGS SEED IS ONE ANSWER AND THERE ARE NOW TWO COLUMNS TO PUT IT IN.
+    # settings.json's `genres`/`countries` predate the per-medium split and were
+    # always applied to whichever calendar was open, so seeding both sides is
+    # what preserves the operator's own view through onboarding. That is the
+    # opposite of what migration 38 does to an EXISTING account, and deliberately
+    # so: the migration is deciding what a filter written for shows meant, while
+    # this is copying an instance-wide value that never meant either medium in
+    # particular.
     conn.execute(
         "INSERT INTO user_prefs (user_id, endpoint, card_style, day_packing, "
-        "hide_not_watching, network_filter_json, genres, countries, "
+        "hide_not_watching, network_filter_json, tv_genres, tv_countries, "
+        "movie_genres, movie_countries, "
         "show_certifications, movie_certifications) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             user_id, settings.endpoint, settings.card_style, settings.day_packing,
             int(bool(settings.hide_not_watching)),
             json.dumps(list(settings.network_filter or [])) if seed_filters else "[]",
+            (settings.genres or "") if seed_filters else "",
+            (settings.countries or "") if seed_filters else "",
             (settings.genres or "") if seed_filters else "",
             (settings.countries or "") if seed_filters else "",
             (settings.show_certifications or "") if seed_filters else "",
@@ -59,17 +70,22 @@ async def get_user_prefs(user_id: int) -> dict:
     fallback here is cheap and keeps this a total function)."""
     row = await db.fetch_one(
         "SELECT endpoint, card_style, day_packing, hide_not_watching, "
-        "network_filter_json, genres, countries, show_certifications, "
-        "movie_certifications, movie_release_countries, movie_release_types "
+        "network_filter_json, tv_genres, tv_countries, movie_genres, "
+        "movie_countries, show_certifications, "
+        "movie_certifications, movie_release_countries, movie_release_types, "
+        "filters_paused "
         "FROM user_prefs WHERE user_id = ?",
         (user_id,),
     )
     if row is None:
         return {
             "endpoint": None, "card_style": None, "day_packing": None,
-            "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
+            "hide_not_watching": False, "network_filter": [],
+            "tv_genres": "", "tv_countries": "",
+            "movie_genres": "", "movie_countries": "",
             "show_certifications": "", "movie_certifications": "",
             "movie_release_countries": "", "movie_release_types": "",
+            "filters_paused": False,
         }
     return {
         "endpoint": row["endpoint"],
@@ -77,12 +93,15 @@ async def get_user_prefs(user_id: int) -> dict:
         "day_packing": row["day_packing"],
         "hide_not_watching": bool(row["hide_not_watching"]),
         "network_filter": json.loads(row["network_filter_json"] or "[]"),
-        "genres": row["genres"] or "",
-        "countries": row["countries"] or "",
+        "tv_genres": row["tv_genres"] or "",
+        "tv_countries": row["tv_countries"] or "",
+        "movie_genres": row["movie_genres"] or "",
+        "movie_countries": row["movie_countries"] or "",
         "show_certifications": row["show_certifications"] or "",
         "movie_certifications": row["movie_certifications"] or "",
         "movie_release_countries": row["movie_release_countries"] or "",
         "movie_release_types": row["movie_release_types"] or "",
+        "filters_paused": bool(row["filters_paused"]),
     }
 
 
@@ -91,9 +110,9 @@ async def get_user_prefs(user_id: int) -> dict:
 # way into their column; the rest write straight through).
 _USER_PREF_FIELDS = frozenset({
     "endpoint", "card_style", "day_packing", "hide_not_watching",
-    "network_filter", "genres", "countries",
-    "show_certifications", "movie_certifications",
-    "movie_release_countries", "movie_release_types",
+    "network_filter", "tv_genres", "tv_countries", "movie_genres",
+    "movie_countries", "show_certifications", "movie_certifications",
+    "movie_release_countries", "movie_release_types", "filters_paused",
 })
 
 
@@ -107,8 +126,8 @@ async def update_user_prefs(user_id: int, **fields) -> None:
     columns: list[str] = []
     params: list = []
     for key, value in updates.items():
-        if key == "hide_not_watching":
-            columns.append("hide_not_watching = ?")
+        if key in ("hide_not_watching", "filters_paused"):
+            columns.append(f"{key} = ?")
             params.append(int(bool(value)))
         elif key == "network_filter":
             columns.append("network_filter_json = ?")

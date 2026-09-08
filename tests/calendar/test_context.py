@@ -32,9 +32,11 @@ DEFAULT_SOURCE_SELECTION = source_prefs.SourcePrefs(user_id=1)
 
 NO_PREFS = {
     "endpoint": None, "card_style": None, "day_packing": None,
-    "hide_not_watching": False, "network_filter": [], "genres": "", "countries": "",
+    "hide_not_watching": False, "network_filter": [],
+    "tv_genres": "", "tv_countries": "", "movie_genres": "", "movie_countries": "",
     "show_certifications": "", "movie_certifications": "",
     "movie_release_countries": "", "movie_release_types": "",
+    "filters_paused": False,
 }
 
 
@@ -68,14 +70,14 @@ def _day(date_iso: str, *item_ids: str) -> dict:
 
 def _meta(total: int, watching: int = 0, not_watching: int = 0,
           partial: bool = False, show_ids=(), unenriched: int = 0,
-          release_filtered: int = 0, not_watching_keys=()) -> dict:
+          filtered: int = 0, not_watching_keys=()) -> dict:
     # `not_watching_keys` is the viewer's marks AS MARK KEYS, expanded once by
     # the assembler — see cache.assemble_range. It is in the real meta, so it is
     # in this one: a double that quietly omitted it would let the shell read a
     # key that production always supplies.
     return {"total": total, "watching": watching, "not_watching": not_watching,
             "partial": partial, "show_ids": list(show_ids), "unenriched": unenriched,
-            "release_filtered": release_filtered,
+            "filtered": filtered,
             "not_watching_keys": set(not_watching_keys)}
 
 
@@ -202,9 +204,27 @@ class ViewPreferencesTests(unittest.TestCase):
 
     def test_filters_are_reported_as_active_and_named_by_dimension(self):
         view = calendar_routes._view_preferences(
-            {**NO_PREFS, "genres": "drama", "network_filter": ["HBO"]}, Settings())
+            {**NO_PREFS, "tv_genres": "drama", "network_filter": ["HBO"]}, Settings())
         self.assertTrue(view["filters_active"])
         self.assertEqual(view["filters_summary"], "genre, network")
+
+    def test_a_films_genre_filter_is_reported_too(self):
+        """The button speaks for the whole account, not for the tab in front of
+        it: a narrowed film calendar has to light the control even while a show
+        calendar is open, or the one place that says a filter exists goes quiet
+        on the calendar it is not describing."""
+        view = calendar_routes._view_preferences(
+            {**NO_PREFS, "movie_genres": "horror"}, Settings())
+        self.assertTrue(view["filters_active"])
+        self.assertEqual(view["filters_summary"], "genre")
+
+    def test_a_paused_account_still_reports_its_filters_as_active(self):
+        """`filters_active` is deliberately blind to the switch. "Nothing set"
+        and "set but switched off" both show a calendar with everything on it,
+        and the template needs to tell them apart to draw the third state."""
+        view = calendar_routes._view_preferences(
+            {**NO_PREFS, "tv_genres": "drama", "filters_paused": True}, Settings())
+        self.assertTrue(view["filters_active"])
 
     def test_both_certification_specs_collapse_to_one_label(self):
         """The tooltip names the DIMENSION, and the endpoint decides which of the

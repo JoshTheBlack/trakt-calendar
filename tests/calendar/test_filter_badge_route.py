@@ -88,11 +88,24 @@ class TheBadgeRouteTests(AppTestCase):
     def test_a_genre_writes_the_genres_field(self):
         resp = self.press(dimension="genre", token="reality", mode="exclude")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(self.prefs()["genres"], "-reality")
+        self.assertEqual(self.prefs()["tv_genres"], "-reality")
 
     def test_a_country_writes_the_countries_field(self):
         self.press(dimension="country", token="pl", mode="exclude")
-        self.assertEqual(self.prefs()["countries"], "-pl")
+        self.assertEqual(self.prefs()["tv_countries"], "-pl")
+
+    def test_a_press_on_a_film_card_writes_the_film_fields(self):
+        """EVERY DIMENSION NEEDS THE CARD'S MEDIA NOW, not only certification.
+        A genre excluded from a card in the film calendar is a statement about
+        films, and writing it into the show calendar's genres is exactly the
+        conflation the two tabs exist to end."""
+        self.press(dimension="genre", token="horror", mode="exclude", media="movie")
+        self.press(dimension="country", token="br", mode="include", media="movie")
+        prefs = self.prefs()
+        self.assertEqual(prefs["movie_genres"], "-horror")
+        self.assertEqual(prefs["movie_countries"], "br")
+        self.assertEqual(prefs["tv_genres"], "")
+        self.assertEqual(prefs["tv_countries"], "")
 
     def test_a_network_writes_the_list_field_with_its_case_kept(self):
         self.press(dimension="network", token="tvN", mode="exclude")
@@ -112,7 +125,7 @@ class TheBadgeRouteTests(AppTestCase):
         outright."""
         self.press(dimension="genre", token="reality", mode="exclude")
         self.press(dimension="genre", token="music", mode="exclude")
-        includes, excludes = parse_spec(self.prefs()["genres"])
+        includes, excludes = parse_spec(self.prefs()["tv_genres"])
         self.assertEqual(excludes, {"reality", "music"})
         self.assertEqual(includes, set())
 
@@ -120,13 +133,13 @@ class TheBadgeRouteTests(AppTestCase):
         self.press(dimension="genre", token="reality", mode="exclude")
         self.press(dimension="country", token="pl", mode="exclude")
         prefs = self.prefs()
-        self.assertEqual(prefs["genres"], "-reality")
-        self.assertEqual(prefs["countries"], "-pl")
+        self.assertEqual(prefs["tv_genres"], "-reality")
+        self.assertEqual(prefs["tv_countries"], "-pl")
 
     def test_removing_a_token_takes_it_back_out(self):
         self.press(dimension="genre", token="reality", mode="exclude")
         self.press(dimension="genre", token="reality", mode="")
-        self.assertEqual(self.prefs()["genres"], "")
+        self.assertEqual(self.prefs()["tv_genres"], "")
 
     def test_a_dimension_the_filter_does_not_have_is_refused(self):
         """A card draws a language and a weekday; neither is something this app
@@ -147,7 +160,7 @@ class TheBadgeRouteTests(AppTestCase):
     def test_it_answers_with_what_it_stored(self):
         """So a caller never has to read the field back to know where it landed."""
         body = self.press(dimension="genre", token="reality", mode="exclude").json()
-        self.assertEqual(body["field"], "genres")
+        self.assertEqual(body["field"], "tv_genres")
         self.assertEqual(body["value"], "-reality")
 
     def test_it_needs_a_session(self):

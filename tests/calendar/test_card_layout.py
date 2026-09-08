@@ -131,7 +131,7 @@ class NothingOnThePosterIsDrawnOnTopOfAnythingElseTests(unittest.TestCase):
     # rather than discovered, because "is this drawn on the poster" is a fact
     # about the markup and a stylesheet scan cannot tell an overlay from a modal.
     OVERLAYS = (".runtime-badge", ".ep-badge", ".network-badge", ".rating-badge",
-                ".watch-toggle", ".new-badge", ".poster-marks")
+                ".watch-toggle", ".new-badge", ".poster-marks", ".premiere-badge")
 
     # Two marks anchored this close on both axes will touch: the smallest of them
     # is a 15px logo in a padded plate and the largest a 30px round button.

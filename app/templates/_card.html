@@ -70,7 +70,7 @@
    with no script, provided the element is in the document when it parses — and
    the route ships this card's whole day inline for exactly that reason. The
    `scroll-margin` that centres it lives in style.css. #}
-<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if highlight is defined and highlight and item.mark_key == highlight %} jump-target{% endif %}"{% if highlight is defined and highlight and item.mark_key == highlight %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
+<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if highlight is defined and highlight and item.mark_key == highlight %} jump-target{% endif %}"{% if highlight is defined and highlight and item.mark_key == highlight %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>
@@ -78,6 +78,24 @@
            whole card in poster-only mode and has no room for two of anything. #}
         {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}
         {% if item.episode_label %}<div class="ep-badge">{{ item.episode_label }}</div>{% endif %}
+        {# WHICH KIND OF PREMIERE THIS IS, sat directly above the S01E01 badge it
+           qualifies, because the two are one statement: the episode label says
+           WHERE in the run this card is and this says WHAT that makes it. On the
+           Season Premieres calendar both kinds sit side by side and looked
+           identical, so the only way to tell a brand-new show from a returning
+           one was to read the season number off a small blue label.
+
+           EPISODE 1 IS THE WHOLE CONDITION, and that is what makes one rule work
+           on every calendar without asking which one is open. Season Premieres
+           is entirely episode 1s and gets both labels; All Episodes marks only
+           the premieres inside it and leaves the other twenty episodes of a
+           season unlabelled, which is correct — an S01E07 is not a series
+           premiere. Series Premieres is all first seasons and lights up
+           entirely, which says nothing new but says nothing wrong either. #}
+        {% if item.episode_number == 1 and item.season %}
+        <div class="premiere-badge{% if item.season == 1 %} first-season{% endif %}">
+            {{ 'SERIES PREMIERE' if item.season == 1 else 'RETURNING' }}</div>
+        {% endif %}
         {% if item.runtime %}<div class="runtime-badge">⏱️ {{ item.runtime }}m</div>{% endif %}
         {% if item.network %}{% set logo %}<img class="network-logo" src="/api/network-logo?name={{ item.network | urlencode }}&amp;tmdb={{ item.ids.get('tmdb') or '' }}" alt="" loading="lazy" onerror="this.closest('.network-badge').classList.add('no-logo')"><span class="network-fallback">📡 {{ item.network }}</span>{% endset %}
         {% if can_filter %}{% call fb.badge('network', item.network, item.network, 'network-badge', 'at-poster') %}{{ logo }}{% endcall %}{% else %}<div class="network-badge" title="{{ item.network }}">{{ logo }}</div>{% endif %}{% endif %}

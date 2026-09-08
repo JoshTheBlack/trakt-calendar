@@ -50,6 +50,7 @@ from . import cache as calendar_cache
 from . import enrich as calendar_enrich
 from . import entries
 from . import filter as calendar_filter
+from . import vocab
 from .. import db, providers
 from ..endpoints import get_endpoint
 from ..perftrace import span
@@ -250,14 +251,20 @@ async def stored(query: str, *, settings, prefs, tz: ZoneInfo,
                 continue
             records = await entries.read_groups(endpoint.key, keys)
             groups = calendar_cache.group_records(records)
+            # NARROWED PER ENDPOINT, INSIDE THE LOOP, because a search across
+            # every calendar spans both media: the film endpoint answers under
+            # the film filters and the film services, the show endpoints under
+            # theirs. Resolving either once outside the loop would apply one
+            # medium's answers to the other's results.
+            specs = vocab.active_specs(prefs, endpoint.media, honour_pause=True)
             kept, _narrowed = await calendar_cache.visible_records(
                 groups, endpoint,
-                genres=prefs["genres"], countries=prefs["countries"],
-                show_certifications=prefs["show_certifications"],
-                movie_certifications=prefs["movie_certifications"],
-                movie_release_countries=prefs["movie_release_countries"],
-                movie_release_types=prefs["movie_release_types"],
-                prefs=source_selection, settings=settings)
+                genres=specs["genres"], countries=specs["countries"],
+                show_certifications=specs["show_certifications"],
+                movie_certifications=specs["movie_certifications"],
+                movie_release_countries=specs["movie_release_countries"],
+                movie_release_types=specs["movie_release_types"],
+                prefs=source_selection.for_media(endpoint.media), settings=settings)
             for record in kept:
                 item = render(record, tz)
                 # THE TITLE IS CHECKED AGAIN AFTER RESOLUTION, because a group is
@@ -358,12 +365,15 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
         for media in (Media.SHOW, Media.MOVIE):
             merged = await shared_search.search_catalogue(asked, settings, media, query)
             failed |= set(merged.failed)
-            # THE SAME SPECS THE CALENDAR ITSELF READS, picked per media the way
-            # every other caller does: the two certification vocabularies are
-            # different (TV Parental Guidelines against MPA ratings), so passing
-            # the wrong one silently keeps everything.
-            certifications = (prefs["movie_certifications"] if media is Media.MOVIE
-                              else prefs["show_certifications"])
+            # THE SAME SPECS THE CALENDAR ITSELF READS, picked per media by the
+            # one function that knows which column answers for which medium.
+            # Every dimension needs that now, not only certification: the two
+            # certification vocabularies were always different (TV Parental
+            # Guidelines against MPA ratings), and genres and countries became
+            # per-medium with the panel that asks for them.
+            specs = vocab.active_specs(prefs, media, honour_pause=True)
+            certifications = (specs["movie_certifications"] if media is Media.MOVIE
+                              else specs["show_certifications"])
             described = await asyncio.gather(*(
                 _describe(settings, hit, media, tz)
                 for hit in merged.hits[:CATALOGUE_LIMIT]))
@@ -372,7 +382,7 @@ async def catalogue(query: str, *, settings, prefs, tz: ZoneInfo,
                     if (row.item.mark_key, row.item.season) in known:
                         continue
                     if not calendar_filter.filter_records(
-                            [row.record], prefs["genres"], prefs["countries"],
+                            [row.record], specs["genres"], specs["countries"],
                             certifications):
                         continue
                     out.append(row)

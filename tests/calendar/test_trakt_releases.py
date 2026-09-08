@@ -302,7 +302,7 @@ class TheDefectClosingEndToEndTests(unittest.IsolatedAsyncioTestCase):
         await self._stored(_film(1), _film(2))
         grouped, meta = await self._read(movie_release_countries="us")
         self.assertEqual([i.ids["trakt"] for g in grouped for i in g["items"]], [2])
-        self.assertEqual(meta["release_filtered"], 1)
+        self.assertEqual(meta["filtered"], 1)
 
     async def test_a_trakt_film_nothing_has_looked_up_yet_is_still_kept(self):
         """The promise that survives. A film waiting on its first lookup must not

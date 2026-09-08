@@ -3,7 +3,7 @@
 Backs the `source_prefs` table. Three facts live here:
 
   - CALENDAR SOURCES: which services this account's calendar shows. Stated in
-    the 🔎 Filters panel beside the genre and certification narrowing, because
+    the 🎚️ Filters panel beside the genre and certification narrowing, because
     it is the same KIND of thing — a per-viewer narrowing applied at read over
     rows every viewer shares, never a change to what is fetched or stored.
   - METADATA ORDER: when two services describe the same title differently,
@@ -45,7 +45,7 @@ import json
 from dataclasses import dataclass, field, replace
 
 from .. import db
-from ..providers.base import Source
+from ..providers.base import Media, Source
 
 # "Whatever there is to show", stated by nobody. THE DEFAULT, and for the
 # calendar it means every source the instance can fill from — no link is spent
@@ -166,7 +166,14 @@ class SourcePrefs:
     one.
     """
     user_id: int
+    # WHICH SERVICES ANSWER THE SHOW CALENDAR. It keeps the unqualified name it
+    # has always had because it keeps the meaning it has always had for the four
+    # show endpoints; the film calendar's answer is the field below.
     calendar_source: str = DEFAULT_SELECTION
+    # And the film calendar's, which is a separate answer because the services
+    # are separately good at the two jobs — one has the deeper show coverage,
+    # the other the wider film listing. See `for_media`.
+    movie_calendar_source: str = DEFAULT_SELECTION
     # Source names, most preferred first — see `source_order`, which is the
     # whole of what it does. Empty means "no opinion" and leaves the app's
     # declared order standing, which is what every account had before this
@@ -197,17 +204,44 @@ class SourcePrefs:
         named — is exactly what it says and is honoured whatever is linked; this
         only ever widens the default.
 
-        IT IS NO LONGER ASKED PER CALENDAR. A per-endpoint override existed
-        because one service's movie listing is a global release calendar while
-        its show listing is coverage worth having — measured, on one real
-        August, at 1773 movie records against Trakt's 46. That problem is now
-        answered where it is actually felt: the filters panel narrows films by
-        release country and type, which is the axis that makes a movie calendar
-        readable, and does it for every service at once rather than by switching
-        one off.
+        IT IS ASKED PER MEDIUM, AND `for_media` IS WHERE THAT HAPPENS RATHER
+        THAN HERE. This method answers for whichever selection the instance it
+        is called on carries, so a caller that has a medium in hand narrows the
+        prefs first and every path below it stays a single-selection question.
+
+        A PER-ENDPOINT OVERRIDE ONCE EXISTED AND IS NOT WHAT THIS IS. Five
+        separate answers were removed because the problem they were reaching for
+        — one service's movie listing is a global release calendar, measured on
+        one real August at 1773 movie records against Trakt's 46 — is better
+        answered by the release filters, which narrow films by market and format
+        for every service at once. That reasoning still holds and the release
+        filters still do that job. What it never covered is a viewer who simply
+        rates one service's film listing and the other's show listing
+        differently: no narrowing can express a preference between two services
+        that both have the title. Two answers, one per medium, is that
+        preference — not the five-way switch that came back.
         """
         named = named_sources(self.calendar_source)
         return True if named is None else str(source) in named
+
+    def for_media(self, media) -> "SourcePrefs":
+        """This account's preferences with `calendar_source` set to the selection
+        that governs `media`.
+
+        RETURNS A WHOLE SourcePrefs RATHER THAN A SELECTION STRING, because what
+        the rest of the app passes around is a SourcePrefs — `calendar_sources`
+        takes one, `resolve` takes one, the share path takes one. Handing those
+        an already-narrowed record means none of them learns that the question
+        has two answers, and `admits_calendar` stays the single-selection test it
+        has always been.
+
+        THE MEDIUM ARRIVES AS THE ENDPOINT'S OWN `media`, so this compares
+        against the app's Media vocabulary rather than against a string: an
+        endpoint added later carries one of those values or it does not exist.
+        """
+        if media is Media.MOVIE:
+            return replace(self, calendar_source=self.movie_calendar_source)
+        return self
 
     def source_order(self, sources) -> list[str]:
         """`sources` reordered so the service this account prefers comes first —
@@ -427,7 +461,7 @@ def _stored_order(document) -> list[str]:
 async def load(user_id: int) -> SourcePrefs:
     """This account's preferences, or the defaults if it has stated none."""
     row = await db.fetch_one(
-        "SELECT calendar_source, metadata_order_json, "
+        "SELECT calendar_source, movie_calendar_source, metadata_order_json, "
         "tracker_order_json, tracker_retired_json FROM source_prefs WHERE user_id = ?",
         (user_id,),
     )
@@ -436,6 +470,7 @@ async def load(user_id: int) -> SourcePrefs:
     return SourcePrefs(
         user_id=user_id,
         calendar_source=_stored_selection(row["calendar_source"]),
+        movie_calendar_source=_stored_selection(row["movie_calendar_source"]),
         metadata_order=_stored_order(row["metadata_order_json"]),
         tracker_priority=_stored_tracker_priority(row["tracker_order_json"]),
         # Same tolerant read as the order beside it: unreadable means "count
@@ -452,6 +487,7 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
     does not have to re-read to know what it now holds.
     """
     calendar_source = _selection(prefs.calendar_source, "calendar_source")
+    movie_calendar_source = _selection(prefs.movie_calendar_source, "movie_calendar_source")
     # THE SAME VALIDATION THE TRACKER'S ORDER GETS, and for the same reason: a
     # service this app has never heard of is a bug in the caller, and storing it
     # would leave a screen offering a choice nothing can act on.
@@ -459,18 +495,20 @@ async def save(prefs: SourcePrefs) -> SourcePrefs:
     tracker_priority = _tracker_priority(prefs.tracker_priority)
     tracker_retired = _tracker_retired(prefs.tracker_retired)
     await db.execute(
-        "INSERT INTO source_prefs (user_id, calendar_source, metadata_order_json, "
-        "tracker_order_json, tracker_retired_json) "
-        "VALUES (?, ?, ?, ?, ?) "
+        "INSERT INTO source_prefs (user_id, calendar_source, movie_calendar_source, "
+        "metadata_order_json, tracker_order_json, tracker_retired_json) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(user_id) DO UPDATE SET "
         "calendar_source = excluded.calendar_source, "
+        "movie_calendar_source = excluded.movie_calendar_source, "
         "metadata_order_json = excluded.metadata_order_json, "
         "tracker_order_json = excluded.tracker_order_json, "
         "tracker_retired_json = excluded.tracker_retired_json",
-        (prefs.user_id, calendar_source, json.dumps(metadata_order),
+        (prefs.user_id, calendar_source, movie_calendar_source, json.dumps(metadata_order),
          json.dumps(tracker_priority), json.dumps(tracker_retired)),
     )
     return replace(prefs, calendar_source=calendar_source,
+                   movie_calendar_source=movie_calendar_source,
                    metadata_order=metadata_order,
                    tracker_priority=tracker_priority,
                    tracker_retired=tracker_retired)

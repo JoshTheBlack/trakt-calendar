@@ -1052,7 +1052,14 @@ async def visible_records(groups, endpoint, *, genres="", countries="",
                                               exempt_unenriched=True)
         sp.set(kept=len(kept))
 
-    return kept, release_filtered
+    # EVERY PER-VIEWER REMOVAL, IN ONE NUMBER. The release rule and the
+    # genre/country/certification rule are different questions with different
+    # vocabularies, but the reader's question is one: how much of this month am I
+    # not being shown. Counted here rather than inferred from a total, because
+    # the instance-wide floor and `prune_disguised_films` also remove records and
+    # neither is this viewer's doing — attributing those to a filter somebody set
+    # would send them looking for a setting that would not bring the title back.
+    return kept, release_filtered + (len(records) - len(kept))
 
 
 async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
@@ -1119,7 +1126,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     not lose a service's record to a rule about something else. See
     filter.filter_release_groups.
 
-    `meta['release_filtered']` counts how many groups that rule removed, so a
+    `meta['filtered']` counts every card this viewer's filters removed, so a
     page emptied by it can say which filter emptied it rather than reading as a
     month with nothing in it.
 
@@ -1201,7 +1208,7 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
     # render is per-entry object building and timezone arithmetic, and is the one
     # that grows with a busy month; the grouping is a sort plus a walk.
     with span("calcache.filter", entries=len(groups)) as sp:
-        kept, release_filtered = await visible_records(
+        kept, filtered_out = await visible_records(
             groups, endpoint, genres=genres, countries=countries,
             show_certifications=show_certifications,
             movie_certifications=movie_certifications,
@@ -1220,7 +1227,13 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         sp.set(items=len(items))
 
     with span("calcache.group", items=len(items)):
+        before_network = len(items)
         items = calendar_filter.filter_by_network(items, network_filter, exempt_unenriched=True)
+        # THE NETWORK FILTER RUNS HERE AND NOT WITH THE OTHERS — it needs the
+        # rendered item, which is the shape a network only exists on — so its
+        # removals are counted here and added to the rest rather than being the
+        # one narrowing the page cannot account for.
+        filtered_out += before_network - len(items)
         # Sorted on the LOCAL DAY first and the instant second. The two agree for
         # anything converted through one timezone, but a date-only release is
         # pinned to its own calendar date rather than to an offset from an
@@ -1267,13 +1280,17 @@ async def assemble_range(endpoint: Endpoint, settings, *, tz: ZoneInfo,
         # up" without inventing a second way to ask the question this
         # function already answers.
         "unenriched": sum(1 for i in items if not i.enriched),
-        # How many titles the release filter removed from THIS read. A country
-        # rule removes films rather than re-dating them — a film released only
-        # in Brazil does not match a US filter at all — so a viewer who narrows
-        # hard enough can empty a month completely, and an empty month with
-        # nothing on the page to explain it reads as the app being broken. The
-        # calendar says which filter did it and offers the way back.
-        "release_filtered": release_filtered,
+        # HOW MANY CARDS THIS VIEWER'S OWN FILTERS REMOVED from this read —
+        # every dimension, not the release rule alone. A filter removes titles
+        # rather than re-dating them, so somebody who narrows hard enough can
+        # empty a month completely, and an empty month with nothing on the page
+        # to explain it reads as the app being broken. The page says how many
+        # and offers the way back.
+        #
+        # NOT the instance-wide floor and not `prune_disguised_films`: those
+        # remove titles too and neither is this viewer's to undo, so counting
+        # them here would point somebody at a setting that cannot help.
+        "filtered": filtered_out,
     }
     return grouped, meta
 

@@ -78,6 +78,36 @@ applied at read so unticking is immediate over windows already stored. A
 PER-VIEWER preference reaching a fill is the bug this shape exists to prevent
 (`tests/calendar/test_resolve.py`'s `TwoViewersOneWindowTests`).
 
+**A viewer's filters are per MEDIUM, and one function turns a medium into
+columns.** `app/calendar/vocab.py` owns it: `TV_FIELDS`/`MOVIE_FIELDS` say which
+`user_prefs` column belongs to which kind of title, and `active_specs` is what
+every read path calls to get the keywords the filter takes. There are four such
+paths — the calendar, a day fragment, the search (which narrows PER ENDPOINT
+inside its loop, because a search across every calendar spans both media) and a
+share link — and none of them may name a column itself; four copies of "which
+genres apply to a film" is four places to get it wrong. `filters_paused` is
+checked in that same function, which is why it takes `honour_pause` with no
+default: a viewer's own read passes True, and the share path passes False so a
+paused session never publishes a wider calendar than the owner's links promised.
+The stash stores nothing aside and restores nothing — the specs stay exactly
+where they are, so turning filters back on cannot have lost one.
+
+**The filters panel is markup the server built, and its field names are one
+module's format.** A chip posts `chip:<pref column>:<token>` with a value of
+`""`, `include` or `exclude` — one field per token, one flat string per field —
+spelled by `vocab.field_name` and read back by `vocab.specs_from_form`, which
+assembles specs by calling `filter.py`'s own `merge_token` rather than joining
+strings. So NOTHING IN THE BROWSER KNOWS WHAT A SPEC IS: not the leading `-`,
+not which dimensions fold case, not that networks are a list. The flat-string
+shape is also deliberate — mutating requests are `application/json` only, and
+the htmx json-encoding extensions this app is heading towards serialize a form
+as flat string name/value pairs with no dependable array convention, so a
+payload that is already flat needs no server change the day the submit handler
+becomes two attributes. A dimension the payload does not mention is LEFT ALONE
+and one mentioned with an empty value is CLEARED; that distinction is what makes
+a per-tab save safe, and `tests/calendar/test_vocab.py` holds the round trip
+between rendering a chip and reading it back.
+
 **A source's calendar records may arrive incomplete, and `simkl_titles` is the
 one place that completes them.** The schema is `app/db.py`'s like every other
 table's, but what goes into it, the read-time overlay and the background drain
