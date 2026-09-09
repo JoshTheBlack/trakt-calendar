@@ -352,6 +352,23 @@ def _simkl_ids(raw: dict) -> dict:
     # the calendar CDN costs no API quota at all, so a premiere built from one
     # arrives able to link to Simkl correctly without a single request being spent
     # on finding out how.
+    # SIMKL'S `traktslug` IS DELIBERATELY NOT READ, and this note exists because
+    # the omission looks exactly like an oversight. Simkl's files carry a
+    # `traktslug` — its claim about what TRAKT calls the title — on thousands of
+    # rows, and taking it would hand this app Trakt's name for nothing.
+    #
+    # IT IS NOT RELIABLE ENOUGH TO STORE. Checked against the live Trakt API over
+    # a random sample of 30 stored rows carrying one: 25 named the title exactly,
+    # and 5 named nothing on Trakt at all ('long-term-relationships',
+    # 'ode-hry-ke-hre-2024'). A slug that resolves to nothing is WORSE than no
+    # slug, because the link builders prefer a slug and fall back to the numeric
+    # id — so a wrong one turns a working link into a 404, which is the exact
+    # fault the namespaced slugs were introduced to fix.
+    #
+    # It is still a usable HINT for a title this app holds no Trakt id for, where
+    # nothing else can be asked; that would mean verifying each one against Trakt
+    # before storing it, which is a lookup rather than a free read. Whoever wants
+    # that should add it as a verified lookup, not by widening this map.
     return _ids.normalize({
         "simkl": raw.get("simkl_id"),
         "slug": raw.get("slug"),

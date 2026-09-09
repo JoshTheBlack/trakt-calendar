@@ -169,6 +169,22 @@ ON CONFLICT(source, media, source_id) DO UPDATE SET
     enriched   = MAX(calendar_titles.enriched, excluded.enriched),
     fetched_at = excluded.fetched_at
 """
+# `release_types_json` IS ABSENT FROM THE UPDATE ABOVE ON PURPOSE, and it is the
+# only enrichment-owned column that is, so it reads like an oversight and is
+# worth stating. A column left out of DO UPDATE SET keeps whatever it holds, so
+# the effect is the strongest possible guard: a re-fill can never touch it.
+#
+# THAT IS SAFE BECAUSE IT HAS EXACTLY ONE WRITER. `_UPDATE_ENRICHED` below is the
+# only statement that sets it, and it sets `enriched = 1` in the same breath, so
+# "this row has release types" implies "this row is enriched" by construction
+# rather than by observation. Trakt's half of the same question never writes here
+# at all — it keeps its own table and applies its answer as a read-time overlay
+# (enrich.overlay_releases), which is why there is no second writer to reconcile.
+#
+# WHAT WOULD CHANGE THAT: a provider filling `release_types_by_country` on a
+# CALENDAR record, which `Record` already permits and none does today. Then the
+# first fill would store it, every later one would silently ignore it, and this
+# column would need the same `CASE WHEN enriched = 1` its neighbours carry.
 
 # `from_search` IS THE LAST COLUMN AND THE CALLER STATES IT. A fill writes 0 and
 # the calendar search writes 1, which is what lets the fill's delete spare rows

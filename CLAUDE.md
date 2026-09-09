@@ -63,7 +63,15 @@ differ in what a request carries, not because the rule does. A change to what
 is what holds the two packages to one shape.
 
 **The calendar cache stores the UNFILTERED window once per (endpoint, 7 days),
-holding EVERY source's records under a v2 envelope.** Per-viewer filtering — and
+holding EVERY source's records as ROWS.** There is no stored window object: a
+versioned compressed envelope with a `PAYLOAD_VERSION` used to live here, and it
+went with the blob — `app/calendar/entries.py` now writes each source's records
+into `calendar_titles`, `calendar_airings` and `calendar_episodes`, so a shape
+change is a migration rather than a version byte. The reasoning that version
+carried still binds, and `app/calendar/cache.py` keeps it: a month spans five or
+six windows, so nothing may leave the stored calendar half-converted or one
+airing would draw merged in the span that had been refilled and split in the one
+that had not, on the same page. Per-viewer filtering — and
 per-viewer source selection — happen at READ time, so one viewer excluding a
 genre or narrowing to one service does not poison what another sees from the
 same rows (`app/calendar/cache.py` owns the envelope and the read path;
