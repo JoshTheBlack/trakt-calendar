@@ -2,12 +2,17 @@
  *
  * Same content as the calendar page — overview, trailer, cast, episodes — so the
  * render below is a copy of the calendar's details modal. The one difference is
- * where the data comes from: a token-scoped, rate-limited, CACHE-ONLY endpoint at
- * "<this page's path>/details", rather than the session-only /api/details. It
- * never calls a source — it serves back only what the owner's own views already
- * cached (see share_routes._details), so a public page still makes zero outbound
- * calls. Progressive enhancement: with JavaScript off, the card's own outbound
- * button still reaches the full details.
+ * where the data comes from: a token-scoped, rate-limited endpoint at "<this
+ * page's path>/details", rather than the session-only /api/details.
+ *
+ * THAT ENDPOINT DESCRIBES ONLY WHAT THIS PAGE ALREADY SHOWS, and the request
+ * below is shaped by that rule: it carries the page's own view — the month, the
+ * calendar, the timezone, everything that decides which airings are on screen —
+ * alongside the card's ids, because the server re-reads that exact month and
+ * refuses any title it does not contain. A public URL must never be able to turn
+ * an id a stranger typed into a call on the owner's credential; sending the view
+ * is what lets the server tell the two apart. Progressive enhancement: with
+ * JavaScript off, the card's own outbound button still reaches the full details.
  *
  * WHICH SERVICE ANSWERS IS THE SERVER'S DECISION, on both pages, and the card
  * simply hands over every id it carries — see the calendar modal's own
@@ -16,8 +21,8 @@
  */
 
 // One query-string parameter per service's own id, from a card's dataset. The
-// same shape the calendar's modal sends, because the endpoint behind both is the
-// same code with the fetch switched off.
+// same shape the calendar's modal sends, because the endpoint behind both makes
+// the same decision about who describes a title.
 const SHARE_DETAIL_ID_KEYS = { trakt: 'traktId', simkl: 'simklId' };
 
 function shareDetailsQuery(dataset, media, season) {
@@ -38,6 +43,16 @@ function shareDetailsQuery(dataset, media, season) {
 // by (/s/<token>, /u/<name>, /c/<slug>): the current path plus "/details".
 function shareDetailsBase() {
     return window.location.pathname.replace(/\/+$/, '') + '/details';
+}
+
+// The view this page is currently showing, as the server's own params. Passed
+// straight through rather than picked apart: the page's query string IS the
+// request the server answered to draw these cards, so handing it back is what
+// makes the details endpoint resolve the identical month. None of its names
+// collide with the id params above.
+function shareViewQuery() {
+    const view = window.location.search.replace(/^\?/, '');
+    return view ? `&${view}` : '';
 }
 
 async function openShareDetails(card, event) {
@@ -61,7 +76,7 @@ async function openShareDetails(card, event) {
         return;
     }
     try {
-        const res = await fetch(`${shareDetailsBase()}?${q}`);
+        const res = await fetch(`${shareDetailsBase()}?${q}${shareViewQuery()}`);
         const dd = await res.json();
         if (!dd.ok) throw new Error(dd.error || 'failed');
         renderShareDetails(dd, poster, media, title, season);

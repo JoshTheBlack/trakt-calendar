@@ -6,8 +6,10 @@ ends the visitor sees — that the options an owner set travel in the link and
 arrive applied, and that the page's own controls and details modal work for
 somebody with no account at all.
 
-No network: the share page reads the calendar cache, and the details modal is
-answered from the cache alone.
+No network: the share page reads the calendar cache, and the details modal may
+only look a title up when the owner's cached month already shows it — so every
+call it could make is stood in for by a double that either records the call or
+fails the test on being reached.
 """
 from __future__ import annotations
 
@@ -402,8 +404,23 @@ class SharePageViewControlsTests(SharePageTestCase):
 
 class SharePageDetailsModalTests(SharePageTestCase):
     """Clicking a card on a public page opens the SAME details modal as the
-    calendar page (cast, trailer, episodes) — served CACHE-ONLY from what the
-    owner's own views already fetched, so a public click never calls Trakt."""
+    calendar page (cast, trailer, episodes).
+
+    THE ENDPOINT MAY SPEND A LOOKUP, AND ONLY ON A TITLE THIS LINK ALREADY
+    SHOWS. A per-title answer is the same for every viewer and is cached
+    instance-wide, so one fetch serves everybody — but the route is public and
+    unauthenticated, so what may be looked up is bound to the owner's own cached
+    month rather than read off the query string. The tests below drive all three
+    dimensions of that bound (the id, the medium and the season), each against a
+    stand-in that fails the test if it is reached: every one of them is a
+    separate call upstream, so a bound that checked only one would still leave an
+    amplifier behind.
+    """
+
+    # The view the cards below were drawn in. The request has to name it, because
+    # the server re-reads that exact month to decide what it may describe — the
+    # page's own query string is what share.js sends back.
+    VIEW = "year=2026&month=7"
 
     def setUp(self):
         super().setUp()
@@ -428,6 +445,9 @@ class SharePageDetailsModalTests(SharePageTestCase):
             "shows/new", start, calendar_records([entry], get_endpoint("shows/new")),
             600, db.now(), sources=["trakt"]))
 
+    def _details(self, query: str):
+        return self.client.get(f"/s/{self.token}/details?{query}&{self.VIEW}")
+
     def _seed_detail_cache(self):
         """Write the raw Trakt payloads the OWNER's own detail view would have
         cached, at the exact URLs fetch_details reads."""
@@ -446,11 +466,48 @@ class SharePageDetailsModalTests(SharePageTestCase):
              "rating": 8.0}]))
 
     def _no_network(self):
-        """A client whose .get fails the test — cache_only must never reach it."""
+        """A client whose .get fails the test outright.
+
+        THE POINT OF ASSERTING INSIDE THE DOUBLE rather than counting calls
+        afterwards: a request that reached Trakt and then failed for some other
+        reason would still come back as a refusal, so a test that only checked
+        the status code would pass on exactly the hole it exists to catch.
+        """
         class _Boom:
             async def get(self, *a, **k):
-                raise AssertionError("share details must not call Trakt")
+                raise AssertionError(
+                    "a public details request reached Trakt for a title this "
+                    "link does not show")
         return patch("app.providers.trakt.transport.shared_client", return_value=_Boom())
+
+    def _recording(self, bodies):
+        """A client that answers from `bodies` by path and records what was asked.
+
+        The other half of the same claim: the bound has to ADMIT the titles the
+        link shows, or "no outbound call" would be satisfied by an endpoint that
+        never works.
+        """
+        called: list[str] = []
+
+        class _Response:
+            status_code = 200
+            text = ""
+            headers: dict = {}
+
+            def __init__(self, body):
+                self._body = body
+
+            def json(self):
+                return self._body
+
+        class _Client:
+            async def get(self, url, headers=None, timeout=None):
+                path = url.split("?", 1)[0].split("api.trakt.tv/", 1)[-1]
+                called.append(path)
+                return _Response(bodies.get(path))
+
+        return patch("app.providers.trakt.transport.shared_client",
+                     return_value=_Client()), called
 
     def test_the_page_wires_cards_to_the_modal(self):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7").text
@@ -459,9 +516,11 @@ class SharePageDetailsModalTests(SharePageTestCase):
         self.assertIn("/static/js/share.js", body)
 
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
+        """The common case: the owner has opened this title, so the shared cache
+        answers and the permission to fetch is never used."""
         self._seed_detail_cache()
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=123&season=2")
+            resp = self._details("media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
         d = resp.json()
         self.assertTrue(d["ok"])
@@ -471,28 +530,92 @@ class SharePageDetailsModalTests(SharePageTestCase):
         self.assertTrue(d["trailer"])
         self.assertEqual(d["episodes"][0]["number"], 5)
 
-    def test_an_uncached_show_returns_ok_with_empty_fields(self):
-        """A show the owner never opened has nothing cached — the modal renders
-        around the blanks rather than triggering a fetch."""
+    # -- the bound ---------------------------------------------------------
+
+    def test_a_title_this_link_does_not_show_is_never_looked_up(self):
+        """THE ONE THIS ENDPOINT EXISTS TO GET RIGHT. An id nobody put on the
+        owner's calendar is a stranger's input, and a public route that looked it
+        up would turn any id on the internet into a call on the owner's
+        credential, enumerable at the per-IP limit."""
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=555&season=1")
+            resp = self._details("media=show&trakt=999&season=2")
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(resp.json()["ok"])
+
+    def test_the_medium_is_part_of_the_bound(self):
+        """`movies/123` and `shows/123` are two different upstream calls, so an
+        id the calendar shows as a show may not be asked about as a film."""
+        with self._no_network():
+            resp = self._details("media=movie&trakt=123")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_the_season_is_part_of_the_bound(self):
+        """Each season is another call, so a bound that stopped at the title
+        would still let one shown title be turned into as many calls as there are
+        integers."""
+        with self._no_network():
+            resp = self._details("media=show&trakt=123&season=9")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_a_month_the_link_does_not_show_does_not_carry_the_title(self):
+        """The bound is per VIEW, not per owner: the same id in a month whose
+        cards do not include it is refused exactly like an unknown one."""
+        with self._no_network():
+            resp = self.client.get(
+                f"/s/{self.token}/details?media=show&trakt=123&season=2&year=2026&month=9")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_a_request_naming_no_month_falls_back_rather_than_widening(self):
+        """A details URL with no view on it resolves to today's month like every
+        other share request, and today is not the month this window holds — so
+        the omission narrows to nothing instead of skipping the check."""
+        with self._no_network():
+            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=123&season=2")
+        self.assertEqual(resp.status_code, 404)
+
+    def test_a_made_up_id_does_not_ride_along_with_a_real_one(self):
+        """A request carries one id per service and the server picks between
+        them, so the unknown ones are dropped BEFORE that choice — otherwise a
+        real id for one service would smuggle a stranger's id for the other past
+        the bound."""
+        save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid"))
+        with self._no_network(), \
+             patch("app.providers.simkl.transport.cached_get") as simkl_get:
+            resp = self._details("media=show&trakt=999&simkl=888&season=2")
+        self.assertEqual(resp.status_code, 404)
+        simkl_get.assert_not_called()
+
+    # -- and the permission it grants --------------------------------------
+
+    def test_a_title_the_link_shows_may_be_looked_up_when_nothing_is_cached(self):
+        """The relaxation itself. A detail answer is identical for every viewer
+        and is cached instance-wide, so one public lookup serves this title to
+        everybody who opens the link — which is the whole reason it is worth
+        allowing for a title the owner is already publishing."""
+        stub, called = self._recording({
+            "shows/123": {"title": "Test Show", "overview": "Fetched live."},
+            "shows/123/people": {"cast": []},
+            "shows/123/seasons/2": [{"number": 5, "title": "The One"}],
+        })
+        with stub:
+            resp = self._details("media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
-        d = resp.json()
-        self.assertTrue(d["ok"])
-        self.assertEqual(d["overview"], "")
-        self.assertEqual(d["cast"], [])
+        self.assertEqual(resp.json()["overview"], "Fetched live.")
+        self.assertIn("shows/123", called)
 
     def test_details_reach_through_the_username_url_form_too(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
         self._seed_detail_cache()
         with self._no_network():
-            resp = self.client.get("/u/modalowner/details?media=show&trakt=123&season=2")
+            resp = self.client.get(
+                f"/u/modalowner/details?media=show&trakt=123&season=2&{self.VIEW}")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(resp.json()["cast"][0]["name"], "A Actor")
 
     def test_a_bad_token_details_request_is_a_404(self):
         with self._no_network():
-            resp = self.client.get("/s/not-a-real-token/details?media=show&trakt=123&season=2")
+            resp = self.client.get(
+                f"/s/not-a-real-token/details?media=show&trakt=123&season=2&{self.VIEW}")
         self.assertEqual(resp.status_code, 404)
 
 

@@ -3,10 +3,19 @@ owner-facing API the calendar's Share panel calls to manage them.
 
 The three public routes do the SAME read as the authenticated calendar —
 calendar_cache.read_month, the per-(endpoint, 7-day window) cache, normalized
-into a viewer's timezone the same way — with the fetch branch permanently
-switched off: a public request serves whatever is cached — even stale, even
-nothing — and never spends the instance's Trakt rate limit. A visitor is never
-given a session, and nothing here writes anything on their behalf.
+into a viewer's timezone the same way — with the CALENDAR's fetch branch
+permanently switched off: a public request serves whatever month is cached —
+even stale, even nothing — and can never make this instance fill a window. A
+visitor is never given a session, and nothing here writes anything on their
+behalf.
+
+TWO PUBLIC SURFACES MAY MAKE A BOUNDED OUTBOUND CALL, and both are bounded to
+what the link ALREADY SHOWS rather than to a flag their callers pass: the
+preview picture warms artwork for the titles its own grid draws (`assemble_card`),
+and the details modal describes a title the owner's cached month contains
+(`_describe_shared_title`). Neither can be reached with an identifier the link
+does not already publish, which is the property that keeps a public URL from
+turning a stranger's input into a call on the owner's credential.
 
 A miss is identical whatever the reason — an unknown token, a disabled
 account, or a retired username/slug — so a share link can never be used to
@@ -23,6 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from itertools import groupby
+from typing import NamedTuple
 from urllib.parse import quote, urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -41,7 +51,7 @@ from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import posters, user_images
 from ..perftrace import span
-from ..providers.base import Item, Media, Source
+from ..providers.base import Item, Media, Source, parse_media
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
@@ -1214,20 +1224,36 @@ async def share_by_slug(request: Request, slug: str):
 # ---------------------------------------------------------------------------
 # details for a card on a public page — same modal content as the calendar
 # ---------------------------------------------------------------------------
-# CACHE-ONLY, same as the calendar view above: this never calls a source. The
-# owner's own calendar views already fetch and cache each title's detail (cast,
-# trailer, episodes) and the enrichment drain warms Simkl's catalogue record;
-# this serves that cache back to visitors. A title the owner has not viewed comes
-# back with empty fields and the modal renders around them — no public request
-# ever spends the owner's rate limit. Rate-limited per IP like every other share
-# request; no membership gate is needed because there is no fetch to amplify.
+# A PUBLIC REQUEST MAY SPEND ONE DETAIL LOOKUP, AND ONLY FOR A TITLE THE OWNER'S
+# OWN CACHED MONTH ALREADY SHOWS. A per-title detail answer is identical for
+# every viewer, so it is cached instance-wide rather than per person (the
+# transports pass no `private` for it) — which is what makes spending one here
+# worth it at all: a single lookup serves that title to every visitor for the
+# cache's whole lifetime, and warms it for the owner too. The alternative, which
+# is what this was, is a modal that opens on blanks for everybody until the owner
+# happens to click the same card on their own calendar.
+#
+# THE BINDING IS WHAT MAKES THAT SAFE RATHER THAN AN AMPLIFIER, and it is not
+# optional. This endpoint is public and unauthenticated, and it used to read ids
+# straight off the query string without ever asking what the month contained — so
+# with a fetch behind it, any id on the internet becomes a real call on the
+# owner's credential, enumerable at the per-IP limit. Binding converts "anything
+# a stranger can name" into "what this link already shows".
+#
+# THE PROMISE LIVES IN ONE FUNCTION AND NOT IN A FLAG EACH CALLER PASSES.
+# `_describe_shared_title` resolves the month through `_read_month` and
+# `_visible_items` — the same two functions the page and its preview picture
+# resolve through, so the three cannot come to different answers about what this
+# link shows — and it does the lookup itself, so there is no way to obtain
+# permission and then ask about something else. A boolean parameter would put the
+# rule back in every call site, which is the failure the preview picture's own
+# outbound warm is shaped to avoid.
 #
 # WHICH SERVICE ANSWERS IS DECIDED BY THE SAME CODE THE SIGNED-IN ROUTE USES
 # (detail_source), and that shared decision is the point: this modal is
 # documented as showing the same content as the calendar's, and two copies of
 # "who describes this title" would make that stop being true in a way neither
-# page could show on its own. Only the cache_only flag differs, which is exactly
-# the one thing that is genuinely different about a public request.
+# page could show on its own.
 
 def _season_param(value) -> int | None:
     try:
@@ -1236,28 +1262,101 @@ def _season_param(value) -> int | None:
         return None
 
 
+class _Described(NamedTuple):
+    """A public answer about one title: who gave it, and what they said."""
+    source: Source
+    details: dict
+
+
+def _ids_this_view_shows(items: Sequence[Item], media: str,
+                         season: int | None) -> dict[str, set[str]]:
+    """{id namespace: the values this view's own airings carry}, for the medium
+    and season a details request named.
+
+    THE MEDIUM AND THE SEASON ARE PART OF THE BOUND, not decoration. Each is a
+    separate lookup upstream — `shows/{id}` and `movies/{id}` are two calls, and
+    a season is another one per season — so a bound that checked only the id
+    would still let a stranger turn one title the calendar shows into as many
+    outbound calls as there are integers.
+
+    A REQUEST NAMING NO SEASON IS NOT NARROWED BY ONE. That is the film case and
+    the case of a show placed by its own first-air date, both of which carry no
+    season on the card the click came from.
+    """
+    shown: dict[str, set[str]] = {}
+    for item in items:
+        if str(item.media) != media:
+            continue
+        if season is not None and item.season != season:
+            continue
+        for namespace, value in (item.ids or {}).items():
+            if value not in (None, ""):
+                shown.setdefault(namespace, set()).add(str(value))
+    return shown
+
+
+async def _describe_shared_title(request: Request, share_row, settings) -> _Described | None:
+    """What a public details request may be told about one title, or None when
+    nothing may be said.
+
+    THIS IS THE ONLY PLACE A PUBLIC REQUEST IS ALLOWED TO COST AN OUTBOUND CALL,
+    and the reason it may is written above this function. Everything that decides
+    whether it may is here: the view the request names is resolved exactly as the
+    page resolves it, the month is read cache-only through `_read_month`, and the
+    ids the request carried are narrowed to the ones that month's visible airings
+    actually hold. What survives is by definition a title this link already
+    publishes, so the lookup behind it is one the owner's own calendar would have
+    made anyway.
+
+    NARROWED RATHER THAN CHECKED, and the difference matters: a request pairs one
+    id per service, and `detail_source.choose` picks between them. Dropping the
+    unknown ones before that choice is what stops a real id for one service
+    smuggling a made-up id for the other past the bound.
+    """
+    owner_id = int(share_row["user_id"])
+    owner_prefs = await auth.get_user_prefs(owner_id)
+    # `_effective_params` rather than the raw query string, for the same
+    # precedence reason the page and the picture both use it: a link handed out
+    # in its short form must resolve to the same view once it is expanded.
+    params = _effective_params(request)
+    view = resolve_view(params, share_row, settings)
+    # Whitelisted rather than trusted, like every other value a stranger can
+    # spell in this page's query string: an unusable one falls back instead
+    # of raising.
+    media = str(parse_media(params.get("media"), Media.SHOW))
+    season = _season_param(params.get("season"))
+
+    items, _as_of = await _read_month(view, settings, owner_prefs, owner_id)
+    visible = _visible_items(items, view, await calendar_state.not_watching_ids(owner_id))
+    shown = _ids_this_view_shows(visible, media, season)
+    asked = detail_source.ids_from_query(params)
+    bound = {namespace: value for namespace, value in asked.items()
+             if value in shown.get(namespace, ())}
+
+    chosen = detail_source.choose(settings, bound)
+    if chosen is None:
+        return None
+    details = await detail_source.describe(settings, chosen, media, season)
+    if details is None:
+        return None
+    return _Described(chosen.source, details)
+
+
 async def _details(request: Request, share_row) -> Response:
     settings = load_settings()
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     if share_row is None:
         return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
-    media = request.query_params.get("media", "show")
-    chosen = detail_source.choose(
-        settings, detail_source.ids_from_query(request.query_params))
-    if chosen is None:
+    described = await _describe_shared_title(request, share_row, settings)
+    if described is None:
+        # ONE REFUSAL FOR BOTH CASES, deliberately. "No source can describe this"
+        # and "this link does not show that title" are different facts, and a
+        # public page that told them apart would answer, for any id a stranger
+        # cared to try, whether the owner's calendar contains it.
         return JSONResponse({"ok": False, "error": "No source can describe this title"},
                             status_code=404)
-    season = _season_param(request.query_params.get("season"))
-    # cache_only unconditionally, whatever `chosen` says about reachability: a
-    # public request may never spend the owner's budget, which is a stricter rule
-    # than "nobody could be asked anyway" and does not depend on it.
-    details = await detail_source.describe(settings, chosen, media, season,
-                                           cache_only=True)
-    if details is None:
-        return JSONResponse({"ok": False, "error": "No source can describe this title"},
-                            status_code=404)
-    return JSONResponse({"ok": True, "source": str(chosen.source), **details})
+    return JSONResponse({"ok": True, "source": str(described.source), **described.details})
 
 
 @guard.get("/s/{token}/details", AuthLevel.PUBLIC)

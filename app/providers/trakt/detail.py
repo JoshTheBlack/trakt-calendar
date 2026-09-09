@@ -207,6 +207,29 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         # stops acting, which is the same defect the country field had.
         "genre_slugs": [str(g) for g in (info.get("genres") or [])],
         "rating": round(float(info["rating"]), 1) if info.get("rating") else None,
+        # THREE KEYS TRAKT HAS NOTHING TO SAY FOR, PRESENT AND EMPTY. A detail
+        # answer's key set is the same whoever gives it — see DetailPort in
+        # app/providers/base.py — because ONE renderer draws the modal, so a key
+        # only one source answers reads as a template bug rather than as a lookup
+        # that source cannot make. All three are on the Simkl package's answer
+        # and were simply absent from this one, which is the whole explanation
+        # for a chip that could never light on a Trakt-answered title.
+        #
+        # EMPTY IS THE HONEST ANSWER HERE, NOT A SHORTCUT, and it is a measured
+        # one rather than an assumption. TRAKT PUBLISHES NO EXTERNAL RATING BY
+        # ANY ROUTE: probed across 18 titles at show, film, season and episode
+        # level under extended=full, full,metadata, metadata and full,images plus
+        # eight speculative extended values; `rating` and `votes` are Trakt's own
+        # throughout, /shows/{id}/ratings answers Trakt's own 1-10 distribution
+        # and /shows/{id}/stats answers play counts. `anime_type` and
+        # `release_types_by_country` are likewise facts Trakt's catalogue does
+        # not state at all — the other service exposes both structurally, which
+        # is where their value comes from. A source that does state them fills
+        # these in; nothing reachable in Trakt's API can, so do not go looking
+        # for a parameter that would.
+        "anime_type": "",
+        "imdb_rating": None,
+        "release_types_by_country": {},
         "certification": (info.get("certification") or "").upper(),
         "trailer": info.get("trailer") or "",
         # WHEN THE TITLE ITSELF FIRST AIRED, which `extended=full` already

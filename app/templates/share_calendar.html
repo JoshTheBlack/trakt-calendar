@@ -210,8 +210,10 @@
 
 {% with note = 'A read-only shared calendar — no sign-in required.' %}{% include "_footer.html" %}{% endwith %}
 
-<!-- Details modal — same content as the calendar page (cast, trailer, episodes),
-     served cache-only from what the owner's own views already fetched. -->
+<!-- Details modal — same content as the calendar page (cast, trailer, episodes).
+     What may be looked up is bound to the titles THIS month shows; see
+     share_routes._describe_shared_title for why a public page is allowed to
+     look anything up at all. -->
 <div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeShareDetails()">
     <div class="modal wide">
         <div class="modal-head">

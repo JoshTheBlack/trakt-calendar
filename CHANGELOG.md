@@ -4,7 +4,11 @@ All notable changes to this project are documented here. Format loosely follows 
 
 ## 🏷️ [1.2.4] - 2026-09-09
 
+### Changed
+- 🔍 **A shared calendar fills in a card's details even when you are the first person to open it.** A link used to show only what its owner had already looked at themselves, so most cards opened on an empty panel with a title and nothing else. The page looks the title up now, and because that description is the same for everybody, one look-up serves every person who opens the link. It can only ever look up something the calendar in front of you is already showing — a link can never be used to make an account go and ask about anything else.
+
 ### Under the hood
+- 🎬 **Both services describe a title with the same set of facts.** One of them answered with three fewer than the other, so a detail could go missing from a card for no better reason than which service happened to describe it. Each answers the full set now, filled in where it has something to say and left blank where it genuinely has nothing.
 - 🧭 **The engine behind moving around the app is a major version newer.** Every link between pages, the day blocks that fill themselves in as you scroll, the board's tiers as you open them and the calendar search as you type all run on it. Nothing you do should look different — going Back still asks the server for the page as it stands now rather than handing you back the copy you walked away from, which is what stops a board you have rearranged since from refusing your next change.
 - 📨 **Groundwork for panels that submit themselves.** Filters, settings, share links, export options: each is a form whose contents are read out and sent by hand, once per panel, in the shape this app insists every write arrives in. The piece that lets a plain form send itself in that shape now ships with every page. Nothing uses it yet.
 

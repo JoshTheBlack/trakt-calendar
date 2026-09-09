@@ -29,9 +29,10 @@ import unittest
 
 from app import providers
 from app.config import Settings
-from app.providers.base import (CalendarPort, DetailPort, LibraryPort, PlayCountPort,
-                                Provider, SearchPort, SyncPort)
+from app.providers.base import (CalendarPort, DetailPort, LibraryPort, Media,
+                                PlayCountPort, Provider, SearchPort, SyncPort)
 from app.providers.trakt import detail as trakt_detail
+from tests.support import DatabaseTestCase
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -236,6 +237,120 @@ class EverySourceCanDescribeATitleTests(unittest.TestCase):
                 settings = Settings(**{f"{source}_client_id": "an-id"})
                 self.assertTrue(provider.detail_port.catalogue_configured(settings))
                 self.assertFalse(provider.is_configured(settings))
+
+
+def keys_only_one_source_has(answers: dict[str, frozenset[str]]) -> dict[str, set[str]]:
+    """{source: the keys ONLY that source answered}, empty when they all agree.
+
+    A plain symmetric difference against the shared core, so a failure names the
+    source that grew a key alone rather than saying two sets differ — which is
+    the whole question when a modal field lights on one service and not the
+    other.
+    """
+    shared = frozenset.intersection(*answers.values())
+    return {source: set(extra) for source, keys in answers.items()
+            if (extra := keys - shared)}
+
+
+class EveryDetailPortAnswersTheSameKeysTests(DatabaseTestCase):
+    """DetailPort's key-set promise, asserted rather than stated.
+
+    The protocol's own docstring says the answer's key set is the same whoever
+    gives it, and gives the reason: ONE renderer draws the modal, so a key only
+    one source answers reads as a template bug rather than as a lookup that
+    source cannot make. Nothing enforced it, and it had already gone wrong three
+    keys deep — `anime_type`, `imdb_rating` and `release_types_by_country` were
+    on one package's answer and absent from the other's, so a chip could never
+    light on a title the other service described whatever the data said.
+
+    WHY THIS IS A CONFORMANCE TEST AND NOT A UNIT ONE, and it is the same reason
+    `EveryIdReadingNamespacesTheSlugTests` below is: the rule is about the
+    RELATIONSHIP between two packages that never import each other, so neither
+    one's own tests can see it. A key added to one side alone is invisible on
+    that side — its own modal renders perfectly.
+
+    ASKED cache_only AGAINST AN EMPTY CACHE, which is deliberate on two counts.
+    It is the contract's own hardest case — every key present, every value empty
+    — and it needs no per-source stubbing, so a third registered source is
+    covered by this test the day it is registered rather than the day somebody
+    remembers to add a double for it. conftest's outbound guard is what says the
+    reads really cost nothing.
+    """
+
+    # A title id nothing has ever cached, so every port takes its miss path.
+    UNKNOWN_ID = "1"
+
+    # One cell per shape a caller can ask for: a season of a show, a show with no
+    # season named, and a film. A key that appears only when a season was given
+    # is the same drift one page-render away.
+    SHAPES = ((Media.SHOW, 1), (Media.SHOW, None), (Media.MOVIE, None))
+
+    def _settings(self):
+        """Every source's CATALOGUE credential and no private one — the live
+        instance's own shape, and what makes each port take its real path rather
+        than an unconfigured shortcut."""
+        return Settings(**{f"{source}_client_id": "an-id"
+                           for source, _port in self._ports()})
+
+    def _ports(self):
+        return [(str(source), provider.detail_port)
+                for source, provider in providers.registered().items()
+                if provider.detail_port is not None]
+
+    async def _answers(self, media, season) -> dict[str, frozenset[str]]:
+        settings = self._settings()
+        return {source: frozenset(await port.fetch_details(
+                    settings, media, self.UNKNOWN_ID, season, cache_only=True))
+                for source, port in self._ports()}
+
+    async def test_more_than_one_source_answers_or_this_file_proves_nothing(self):
+        """Two sets agree trivially when there is one of them."""
+        self.assertGreater(len(self._ports()), 1,
+                           "only one source can describe a title; the key-set "
+                           "comparison below is vacuous")
+
+    async def test_every_port_answers_the_same_keys(self):
+        for media, season in self.SHAPES:
+            with self.subTest(media=str(media), season=season):
+                answers = await self._answers(media, season)
+                self.assertEqual(
+                    keys_only_one_source_has(answers), {},
+                    "a detail key one source answers alone renders as a template "
+                    "bug on every other source's title")
+
+    async def test_a_port_answers_the_same_keys_whatever_it_is_asked_about(self):
+        """The other axis. A film's answer and a show's come from the same
+        projection, so a key that appears only for one of them would light a chip
+        on half a calendar and not the other half."""
+        for source, port in self._ports():
+            settings = self._settings()
+            shapes = {}
+            for media, season in self.SHAPES:
+                shapes[f"{media}/{season}"] = frozenset(await port.fetch_details(
+                    settings, media, self.UNKNOWN_ID, season, cache_only=True))
+            with self.subTest(source=source):
+                self.assertEqual(keys_only_one_source_has(shapes), {})
+
+    async def test_the_answer_is_the_modal_field_set_and_not_an_empty_dict(self):
+        """Guards every comparison above: two ports that both answered nothing
+        would agree perfectly. These are the keys the modal is FOR."""
+        answers = await self._answers(Media.SHOW, 1)
+        for source, keys in answers.items():
+            with self.subTest(source=source):
+                self.assertLessEqual(
+                    {"title", "overview", "episodes", "genres", "ids", "imdb_rating"},
+                    set(keys))
+
+    def test_the_comparison_would_actually_report_a_one_sided_key(self):
+        """The check reacting, because "the sets were equal" is weak evidence on
+        its own — see this file's closing tests for the same habit."""
+        self.assertEqual(
+            keys_only_one_source_has({"one": frozenset({"title"}),
+                                      "two": frozenset({"title", "imdb_rating"})}),
+            {"two": {"imdb_rating"}})
+        self.assertEqual(
+            keys_only_one_source_has({"one": frozenset({"title"}),
+                                      "two": frozenset({"title"})}), {})
 
 
 class EverySourceCanBeSearchedTests(unittest.TestCase):

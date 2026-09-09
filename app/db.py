@@ -2987,6 +2987,114 @@ CREATE TABLE distrakt_slug_repairs (
 CREATE INDEX ix_distrakt_slug_repairs_at ON distrakt_slug_repairs(repaired_at);
 """
 
+
+# ---------------------------------------------------------------------------
+# 40 — what a ranking board forgot, kept long enough to be asked for back
+# ---------------------------------------------------------------------------
+#
+# REMOVING A TITLE FROM A BOARD IS THE ONE RANKER ACTION THAT DESTROYS WORK, and
+# the only copy of what was removed lives in the page that removed it: a
+# serialized item on the row's own element, read back by a single-level undo that
+# a reload, a second tab or nine seconds throws away. A stash in the DOM cannot
+# answer "the last few things I deleted, put that one back" at all, because the
+# DOM only ever held the one row.
+#
+# SO THE RECORD MOVES HERE, and the shape is the one this schema already uses
+# wherever it keeps something it does not query INTO (ids_json,
+# network_filter_json, watched_episodes_json): the facts a lookup needs are
+# columns, and the record itself is one JSON column. That is what stops a column
+# added to `tier_items` later from silently going missing from a restore.
+#
+# NOT A COLUMN ON tier_boards, and the reason is contention rather than taste.
+# The board row is written on EVERY layout save, so a history living there would
+# be read-modify-written by every drag; it also could not be swept by age
+# against an index.
+#
+# RANKER-SPECIFIC ON PURPOSE. A tracker removal would restore a different record
+# into a different table under different rules, so nothing here is generalized
+# into a shared "deleted things" table that two features would then have to
+# change together.
+#
+# NO CALLER YET. The restore route and the sweep land in a later change and need
+# no schema work of their own once this ships, exactly as migration 14's
+# 'ranker_export' key did.
+MIGRATION_40 = """
+CREATE TABLE tier_item_removals (
+    id            INTEGER PRIMARY KEY,
+    board_id      INTEGER NOT NULL
+                  REFERENCES tier_boards(id) ON DELETE CASCADE,
+    -- The identity triple, as columns, because a restore has to ask "is this
+    -- title back on the board already?" before it writes -- tier_items is
+    -- UNIQUE on (board_id, media, match_source, match_id), so a title re-added
+    -- by hand in the meantime has to be a no-op that says so rather than a
+    -- constraint violation.
+    media         TEXT    NOT NULL,
+    match_source  TEXT    NOT NULL,
+    match_id      TEXT    NOT NULL,
+    -- WHERE IT SAT, so a restore puts it back rather than dropping it at the end
+    -- of the pool. category_uid is the CLIENT-generated uid and never the
+    -- integer id, for the same reason tier_boards.uid is the only identifier a
+    -- request may name a board by: an integer id is meaningless after a restore
+    -- into a database whose rowids came out different. NULL means it was in the
+    -- pool, which is also where a restore puts it when the tier it names has
+    -- since been deleted.
+    category_uid  TEXT,
+    rank_in_category INTEGER,
+    removed_at    INTEGER NOT NULL,
+    -- The whole record as the board's own item projection produced it. One
+    -- column, so a column added to tier_items later is carried across a removal
+    -- without an edit here.
+    item_json     TEXT    NOT NULL
+);
+-- Reading the history is always "what did I just remove from THIS board",
+-- newest first.
+CREATE INDEX ix_tier_item_removals_board
+    ON tier_item_removals(board_id, removed_at DESC);
+-- And the sweep is by age across every board at once, the way show_posters is
+-- swept. The caps -- a per-board last-few and a maximum age -- are application
+-- constants rather than schema so they can be tuned without a migration, but
+-- neither is expressible without this column and this index.
+CREATE INDEX ix_tier_item_removals_sweep
+    ON tier_item_removals(removed_at);
+"""
+
+
+# ---------------------------------------------------------------------------
+# 41 — a throttle key for the one public request that may cost an outbound call
+# ---------------------------------------------------------------------------
+#
+# Widen login_attempts.key_type to admit 'share_detail_fetch'. A public share
+# page's details request is bound to a title the owner's own cached month
+# already contains, which is what stops an arbitrary id becoming a call on the
+# owner's credential -- but a month holds many titles, so "bounded" is not the
+# same as "free", and the volume limiter for that spend belongs in the same
+# table every other rate limit in this app is counted in rather than in a
+# process-local counter a restart clears.
+#
+# SQLite cannot alter a CHECK constraint in place, so the table is rebuilt
+# exactly as migrations 7 and 14 rebuilt it; the rows are copied across for the
+# reason those comments give -- a rebuild that silently forgot an in-progress
+# lockout would be a way to clear one.
+#
+# NO CALLER YET, per migration 14's precedent above.
+MIGRATION_41 = """
+CREATE TABLE login_attempts_new (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    key_type     TEXT    NOT NULL CHECK (key_type IN
+                     ('username', 'ip', 'register_ip', 'invite_ip', 'share_ip',
+                      'handshake_ip', 'ranker_search', 'ranker_export',
+                      'share_detail_fetch')),
+    key_value    TEXT    NOT NULL,
+    attempted_at INTEGER NOT NULL,
+    succeeded    INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO login_attempts_new (id, key_type, key_value, attempted_at, succeeded)
+    SELECT id, key_type, key_value, attempted_at, succeeded FROM login_attempts;
+DROP TABLE login_attempts;
+ALTER TABLE login_attempts_new RENAME TO login_attempts;
+CREATE INDEX ix_login_attempts_lookup ON login_attempts(key_type, key_value, attempted_at);
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3027,6 +3135,8 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (37, MIGRATION_37),
     (38, MIGRATION_38),
     (39, MIGRATION_39),
+    (40, MIGRATION_40),
+    (41, MIGRATION_41),
 ]
 
 

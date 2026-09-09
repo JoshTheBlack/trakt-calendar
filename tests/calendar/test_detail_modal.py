@@ -22,9 +22,12 @@ a dict, so a path nobody stubbed fails loudly rather than reaching out.
 from __future__ import annotations
 
 import asyncio
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+from app import db
 from app.config import Settings, save_settings
+from app.providers.base import Media
 from app.providers.simkl import transport as simkl_transport
 from app.providers.trakt import transport as trakt_transport
 from tests.support import AppTestCase, ORIGIN
@@ -293,13 +296,28 @@ class DetailModalSourceTests(AppTestCase):
         self.assertEqual(self._get("media=show&tmdb=222623").status_code, 404)
 
 
+# The window the public tests below share: one Simkl-only airing, in a month a
+# request has to name. Built as app/providers/simkl/calendar.py's own record
+# builder produces one, because what the share page will admit is decided from
+# the ids a STORED record carries.
+SHARE_MONTH = date(2026, 7, 15)
+SHARE_VIEW = "year=2026&month=7"
+SIMKL_AIR_TS = datetime(2026, 7, 15, 20, 0, tzinfo=timezone.utc).timestamp()
+
+
 class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
     """The same title through the public page's own details endpoint.
 
-    The two are documented as showing the same content, and they now share the
-    code that decides who describes a title — this is what keeps that true. The
-    one difference is the one that matters: a public request makes no outbound
-    call, so a title nothing has cached comes back empty rather than fetched.
+    The two are documented as showing the same content, and they share the code
+    that decides who describes a title — this is what keeps that true. The
+    difference is what each may ASK ABOUT: the public one describes only a title
+    the owner's cached month already shows, which is what stops a public URL
+    turning a stranger's id into a call on the owner's credential.
+
+    THIS FILE'S HALF OF THAT IS THE SIMKL TRANSPORT. The rule is asserted end to
+    end against Trakt in tests/calendar/test_share_pages.py; a bound that held for
+    one service's ids and not the other's would be no bound at all, and the two
+    packages share no code below the port.
     """
 
     def make_settings(self):
@@ -307,16 +325,32 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
 
     def setUp(self):
         super().setUp()
-        from app.calendar import share_links
+        from app.calendar import cache as calendar_cache, share_links
+        from app.endpoints import get_endpoint
+        from app.providers.base import Record, Source
+
         self.user_id = self.make_user("shareowner", calendar_approved=True)
         self.token = asyncio.run(share_links.get_or_create(self.user_id))["token"]
         asyncio.run(share_links.set_enabled(self.user_id, "token", True))
+        record = Record(
+            source=Source.SIMKL, media=Media.SHOW, id="3204421",
+            ids={"simkl": 3204421, "slug": "somebody-knows-something"},
+            detail_url="https://simkl.com", title="Somebody Knows Something",
+            air_ts=SIMKL_AIR_TS, season=1, episode_number=1, episode_label="S01E01",
+            enriched=False,
+        )
+        asyncio.run(calendar_cache.store_window(
+            get_endpoint("shows/new").key, calendar_cache.window_start(SHARE_MONTH),
+            [record], 600, db.now(), sources=["simkl"], asked=["simkl"]))
 
     def _no_network(self):
         class _Boom:
             async def get(self, *a, **k):
                 raise AssertionError("a public request must not call a source")
         return patch.object(simkl_transport, "catalog_client", return_value=_Boom())
+
+    def _details(self, query):
+        return self.client.get(f"/s/{self.token}/details?{query}&{SHARE_VIEW}")
 
     def test_a_simkl_only_card_on_a_public_page_serves_what_is_cached(self):
         from app import cache
@@ -327,17 +361,53 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
         asyncio.run(cache.set(simkl_transport.cache_key("tv/episodes/3204421"),
                               SIMKL_EPISODES))
         with self._no_network():
-            resp = self.client.get(
-                f"/s/{self.token}/details?media=show&simkl=3204421&season=1")
+            resp = self._details("media=show&simkl=3204421&season=1")
         self.assertEqual(resp.status_code, 200, resp.text)
         body = resp.json()
         self.assertEqual(body["source"], "simkl")
         self.assertEqual(body["overview"], "Simkl's words.")
         self.assertEqual(body["cast"], [])
 
-    def test_a_simkl_title_nobody_has_cached_is_empty_rather_than_fetched(self):
-        with self._no_network():
-            resp = self.client.get(
-                f"/s/{self.token}/details?media=show&simkl=999999&season=1")
+    def test_an_unknown_id_beside_a_known_one_is_dropped_rather_than_preferred(self):
+        """WHAT A HAND-EDITED URL ACTUALLY DOES, and it is the case a bound that
+        only CHECKED would get wrong.
+
+        A request carries one id per service and `detail_source.choose` picks
+        between them, preferring Trakt wherever it has one. Editing the Trakt id
+        to something the link does not show must not hand the whole request to
+        that id — nor refuse the request outright, because the OTHER id on it is
+        a title this link really does publish. The unknown one is dropped before
+        the choice, so the answer comes from whoever still recognises the card.
+
+        Both credentials are configured here on purpose: without the narrowing
+        the made-up Trakt id would be preferred and looked up, which is what the
+        stand-in fails on.
+        """
+        from app import cache
+        save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
+                               trakt_client_id="tcid"))
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/3204421"), SIMKL_TITLE))
+        asyncio.run(cache.set(simkl_transport.cache_key("tv/episodes/3204421"),
+                              SIMKL_EPISODES))
+
+        class _Boom:
+            async def get(self, *a, **k):
+                raise AssertionError(
+                    "an id this link does not show was looked up because it "
+                    "rode along with one that it does")
+
+        with self._no_network(), \
+             patch.object(trakt_transport, "shared_client", return_value=_Boom()):
+            resp = self._details("media=show&trakt=999999&simkl=3204421&season=1")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["overview"], "")
+        self.assertEqual(resp.json()["source"], "simkl")
+        self.assertEqual(resp.json()["overview"], "Simkl's words.")
+
+    def test_a_simkl_title_this_link_does_not_show_is_never_looked_up(self):
+        """An id nobody put on the owner's calendar, asked of the other service's
+        transport. Nothing is cached behind it either, so an unbound endpoint
+        would go and ask — which is exactly what the stand-in fails on."""
+        with self._no_network():
+            resp = self._details("media=show&simkl=999999&season=1")
+        self.assertEqual(resp.status_code, 404)
+        self.assertFalse(resp.json()["ok"])
