@@ -279,6 +279,66 @@ class MigrationTests(DbTestCase):
             conn.close()
             path.unlink(missing_ok=True)
 
+    async def test_migration_39_adds_the_repair_log_and_touches_no_existing_row(self):
+        """A log whose GROWTH is the alarm, so it must arrive empty.
+
+        The table records where a per-service name was recovered from when a
+        stored record turned out not to have one. Rows dated to the first run
+        are the historical backlog; a row dated later means a writer is still
+        dropping names. That reading only works if the migration itself writes
+        nothing — a backfill here would date the whole backlog to the upgrade and
+        make the first genuine regression indistinguishable from it.
+        """
+        import sqlite3
+
+        from unittest.mock import patch
+
+        path = TMP / "migration-39-test.db"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        conn.isolation_level = None
+        try:
+            with patch.object(db, "MIGRATIONS", [m for m in db.MIGRATIONS if m[0] <= 38]):
+                db.migrate_sync(conn)
+            now = db.now()
+            conn.execute(
+                "INSERT INTO users (id, username, created_at, updated_at) "
+                "VALUES (1, 'someone', ?, ?)", (now, now))
+            conn.execute(
+                "INSERT INTO distrakt_month_records "
+                "(user_id, month, kind, media, match_source, match_id, season, "
+                " slug, simkl_slug, trakt_id, simkl_id, title, created_at) "
+                "VALUES (1, '2026-07', 'premiere', 'show', 'tmdb', '134421', 1, "
+                "'the-rookie-2018', 'the-rookie', 134421, 555, 'The Rookie', ?)", (now,))
+            conn.commit()
+
+            db.migrate_sync(conn)
+
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) c FROM distrakt_slug_repairs").fetchone()["c"],
+                0, "the migration must not date the backlog to the upgrade")
+            # The record it will later repair is untouched by the migration
+            # itself: recovering a name is the background pass's job, where it
+            # can be logged, not a silent UPDATE nobody can audit.
+            row = conn.execute("SELECT * FROM distrakt_month_records").fetchone()
+            self.assertEqual(row["slug"], "the-rookie-2018")
+            self.assertIsNone(row["trakt_slug"])
+
+            columns = {c["name"] for c in
+                       conn.execute("PRAGMA table_info(distrakt_slug_repairs)")}
+            self.assertEqual(
+                columns,
+                {"id", "user_id", "media", "match_source", "match_id", "column_name",
+                 "value", "evidence", "rows_changed", "title", "repaired_at"})
+            indexes = {i["name"] for i in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='distrakt_slug_repairs'")}
+            self.assertIn("ix_distrakt_slug_repairs_at", indexes,
+                          "the log is always read by date")
+        finally:
+            conn.close()
+            path.unlink(missing_ok=True)
+
     async def test_migration_21_opens_the_provider_column_and_keeps_every_row(self):
         """Both provider tables carried `CHECK (provider IN ('plex','trakt'))`,
         which made admitting a third service a table rebuild.

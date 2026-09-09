@@ -31,6 +31,7 @@ from app import providers
 from app.config import Settings
 from app.providers.base import (CalendarPort, DetailPort, LibraryPort, PlayCountPort,
                                 Provider, SearchPort, SyncPort)
+from app.providers.trakt import detail as trakt_detail
 
 
 class RegisteredProvidersConformTests(unittest.TestCase):
@@ -318,6 +319,64 @@ class TheCheckWouldActuallyFailTests(unittest.TestCase):
             with self.subTest(member=name):
                 self.assertIn(name, Provider.__protocol_attrs__)
 
+
+class EveryIdReadingNamespacesTheSlugTests(unittest.TestCase):
+    """A source's readable NAME for a title is namespaced wherever that source's
+    ids are read, in every path, in every package.
+
+    WHY THIS IS A CONFORMANCE TEST AND NOT A UNIT ONE. Both services call a
+    title's readable name `slug` and disagree about it — Trakt writes
+    `the-traitors-2023` where Simkl writes `the-traitors` — so a map carrying only
+    the bare key is a name nothing downstream can attribute. Each package answers
+    that once, in its own `_ids.normalize`, and every reading of that source's ids
+    is supposed to go through it.
+
+    ONE READING DID NOT, AND NOTHING SAID SO. `trakt.detail.ids_map` returned the
+    raw block, so titles added to the tracker by hand stored the shared name and
+    no `trakt_slug`, while the same title arriving from a calendar window carried
+    both. It broke nothing visible — a link falls back to the numeric id — and was
+    found by counting stored rows weeks later.
+
+    So the rule is asserted over the PUBLIC id readings rather than trusted to
+    each one's own docstring, which is what the module claiming it could not do
+    for its neighbour.
+    """
+
+    # The functions any code outside a provider package may use to read that
+    # source's ids off a payload. A source's `_ids` module is package-internal
+    # (the underscore names the MODULE), so these are what the ranker, the
+    # tracker and the calendar actually call.
+    PUBLIC_ID_READINGS = (
+        ("trakt", trakt_detail.ids_map, "slug", "trakt_slug"),
+    )
+
+    def test_a_public_id_reading_namespaces_the_service_name(self):
+        for source, read, bare, namespaced in self.PUBLIC_ID_READINGS:
+            with self.subTest(source=source):
+                out = read({"ids": {"trakt": 1, "tmdb": 2, bare: "a-title-2018"}})
+                self.assertEqual(
+                    out.get(namespaced), "a-title-2018",
+                    f"{source}'s public id reading dropped {namespaced}; a stored "
+                    f"record built from it can never link by name")
+
+    def test_it_carries_the_bare_key_through_as_well(self):
+        """The calendar builds a record's own id from the bare `slug` (see each
+        package's calendar.py), so namespacing may not replace it."""
+        for source, read, bare, _namespaced in self.PUBLIC_ID_READINGS:
+            with self.subTest(source=source):
+                out = read({"ids": {"trakt": 1, bare: "a-title-2018"}})
+                self.assertEqual(out.get(bare), "a-title-2018")
+
+    def test_it_drops_namespaces_this_app_does_not_name(self):
+        """`collect_ids` filters to ID_KEYS, so a namespace nothing can store
+        does not travel as though it could."""
+        out = trakt_detail.ids_map({"ids": {"trakt": 1, "tvrage": 99}})
+        self.assertNotIn("tvrage", out)
+
+    def test_an_empty_block_is_survivable(self):
+        for source, read, _bare, _namespaced in self.PUBLIC_ID_READINGS:
+            with self.subTest(source=source):
+                self.assertEqual(read({}), {})
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
