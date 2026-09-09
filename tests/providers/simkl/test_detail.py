@@ -154,6 +154,27 @@ class TheModalsFieldSetTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(kwargs["pool"], transport.CATALOG_POOL)
                 self.assertNotIn("private", kwargs)
 
+    async def test_the_ids_it_returns_name_the_slug_as_simkls(self):
+        """A DETAIL PAYLOAD IS A PUBLISHED SURFACE, and its `ids` is read by
+        callers that have to know WHOSE name they are holding: the tracker
+        repairs a stored record from it, and the calendar search builds one.
+
+        Both services call a title's readable name `slug` and disagree about it —
+        Simkl writes `the-traitors` where Trakt writes `the-traitors-2023` — so a
+        bare `slug` cannot be attributed, and a link built from the wrong one goes
+        nowhere. This projection handed over Simkl's raw block, which is the same
+        omission the Trakt package's search reading had: every other path in both
+        packages corrects it, and the two that did not were invisible because a
+        record short of a name still links by its numeric id.
+        """
+        with patch.dict(self.TITLE, {"ids": {"simkl": 55, "slug": "a-show"}},
+                        clear=False):
+            got, _calls = await self._details()
+        self.assertEqual(got["ids"].get("simkl_slug"), "a-show",
+                         "nothing downstream can tell whose name this is")
+        # The bare key travels too: the calendar builds a Record's own id from it.
+        self.assertEqual(got["ids"].get("slug"), "a-show")
+
     async def test_the_cast_is_empty_because_simkl_publishes_none(self):
         """Not a lookup that failed. Simkl has no cast on any endpoint this app
         can reach, and no third metadata service is pulled in to fill it."""

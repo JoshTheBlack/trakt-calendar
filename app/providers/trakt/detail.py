@@ -18,7 +18,7 @@ import httpx
 from ...config import Settings
 from .. import season as season_rules
 from ..base import Media
-from . import transport
+from . import _ids, transport
 from .transport import TraktError
 
 logger = logging.getLogger(__name__)
@@ -154,8 +154,9 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     # Deferred so this module stays importable from calendar.py's side of the
     # package: the poster reading lives there because that is where the feed's
     # own images are parsed, and a module-level import would close a cycle.
+    # `_ids` needs no such deferral — it reads only the shared value types — so
+    # it is imported at the top like `transport`.
     from . import calendar as trakt_calendar
-    from . import _ids
 
     return {
         "title": info.get("title") or "",
@@ -411,14 +412,29 @@ SEARCH_MEDIA = tuple(Media)
 
 
 def ids_map(media: dict) -> dict:
-    """Every id Trakt knows for a title, with the empty ones dropped.
+    """Every id Trakt knows for a title, in this app's own id vocabulary.
 
     The whole map travels rather than the one id a given caller happens to want:
     an id we discard here is one a future match against another service cannot
     use, and re-fetching it costs a call we have already paid for.
+
+    IT READS THE IDS THROUGH `_ids.normalize` LIKE EVERY OTHER PATH IN THIS
+    PACKAGE, and doing that here rather than dropping the raw block on callers is
+    the whole point of the function. `normalize` is what adds `trakt_slug`
+    alongside `slug`, because both services call a title's readable name `slug`
+    and disagree about it — so a map carrying only the bare one is a name nothing
+    downstream can attribute to a service.
+
+    THIS FUNCTION USED TO RETURN TRAKT'S RAW BLOCK, and it was the only reading
+    of a source's ids in either provider package that did. The consequence was
+    not theoretical: a title added to the tracker by hand stored the shared
+    `slug` and no `trakt_slug`, so its episode links fell back to the numeric id
+    for ever, while the same title arriving from a calendar window — which does
+    normalize — carried both. Two readings of one service's ids is one reading
+    too many, and the one that skipped the correction was invisible precisely
+    because the other three did it properly.
     """
-    ids = media.get("ids") or {}
-    return {key: value for key, value in ids.items() if value not in (None, "")}
+    return _ids.normalize(media.get("ids") or {})
 
 
 async def search_titles(settings: Settings, media: str, query: str) -> list[dict]:

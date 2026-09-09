@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.3] - 2026-09-09
+
+### 🥚
+- Something added by hand arrived not knowing what one of them calls it, so every link to it afterwards went by number instead of by name. It keeps the name now — and so does what the other one hands back, which was quietly dropping it in the same way.
+- Opening something up asks one of them about it and is told the name in the answer. It used to show the blank it already had and throw that answer away; now it keeps it, and the links read properly from then on.
+- A name that went missing before any of this gets found again. Where it can be proved from what is already written down, it is worked out for free; where it cannot, the one that owns the name is simply asked, a few at a time, and never asked twice for the same silence. It will not guess: a confident wrong name points at something that does not exist, while no name at all still gets you there.
+- Every one of those repairs is written down with the date and where the name came from. That log is the point — it should stop growing once the backlog clears, so if it starts up again something has begun dropping names once more and there is finally somewhere that says so.
+
 ## 🏷️ [1.2.2] - 2026-09-08
 
 ### Changed

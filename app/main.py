@@ -52,6 +52,7 @@ from .calendar import routes as calendar_routes
 from .calendar import share_card_cache
 from .calendar import share_routes
 from .distrakt import routes as distrakt_routes
+from .distrakt import slug_repair as distrakt_slug_repair
 from .integrations import routes as integrations_routes
 from .media import artwork, logos, posters
 from .ranker import routes as ranker_routes
@@ -194,6 +195,12 @@ async def _heartbeat_tick() -> None:
         # landing while a fill-triggered pass is already running folds into
         # it rather than starting a second, concurrent pass of its own.
         lambda: calendar_enrich.run_drain(settings),
+        # Recover per-service names a stored tracker record was written without,
+        # and log each one — a repair happening at all means some writer dropped
+        # a name it was handed, and nothing else in the app would say so. Two
+        # indexed reads that answer nothing on a settled instance, and no
+        # outbound call of its own, so it costs a tick nothing once it is done.
+        distrakt_slug_repair.repair_all,
     ):
         try:
             await job()

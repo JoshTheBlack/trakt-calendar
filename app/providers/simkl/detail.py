@@ -24,7 +24,7 @@ from datetime import date, datetime
 from ...config import Settings
 from .. import season as season_rules
 from ..base import Media, SeasonsAnswer
-from . import _naming, titles, transport
+from . import _ids, _naming, titles, transport
 
 logger = logging.getLogger(__name__)
 
@@ -435,7 +435,16 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # source's id, and asking the SERVICE who a title is keeps a hand-made
         # URL from deciding what a shared calendar row is about. `_extract` has
         # always kept these.
-        "ids": dict(fields.get("ids") or {}),
+        #
+        # READ THROUGH `_ids.normalize`, WHICH IS WHAT NAMES THE SLUG. Both
+        # services call a title's readable name `slug` and disagree about it, so
+        # a map carrying only the bare key is a name nothing downstream can
+        # attribute — and this projection handed the raw block over, so a record
+        # repaired from a Simkl answer could never learn `simkl_slug` from it.
+        # `_extract` keeps the raw spelling deliberately (it is stored, and its
+        # shape is versioned by EXTRACT_VERSION); the correction belongs here, at
+        # the projection, exactly where the Trakt package puts its own.
+        "ids": _ids.normalize(fields.get("ids") or {}),
         # THE POSTER, AS A FULL URL. `_extract` keeps Simkl's partial path and
         # this projection dropped it, so a card the calendar SEARCH wrote had no
         # picture. Built by this package's own one reading of that path -- the

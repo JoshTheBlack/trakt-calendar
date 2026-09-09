@@ -27,7 +27,8 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import backfill, counts, discord_fmt, lifecycle, live, unsettled, watch_history
+from . import (backfill, counts, discord_fmt, lifecycle, live, slug_repair,
+               unsettled, watch_history)
 # The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
 # rather than bare `search` so a call site reads which module it is, the same
 # reason the six modules above are imported by name rather than star-imported.
@@ -1350,6 +1351,24 @@ async def api_distrakt_details(request: Request):
     except Exception:
         logger.warning("Detail lookup failed for %s", source, exc_info=True)
         return JSONResponse({"ok": False, "error": "Could not load details."}, status_code=502)
+    # THE ANSWER CARRIES THE SERVICE'S OWN NAME FOR THE TITLE, and a record short
+    # of it is being looked at from a payload that has it. This used to render
+    # the stored value and throw the fresh one away, so a row written without a
+    # name stayed without one for ever however often it was opened — and its
+    # episode ticks kept falling back to the numeric id.
+    #
+    # NO EXTRA CALL IS MADE. `describe` above already asked, through the pooled,
+    # rate-limited client every read in that package shares; this only stops
+    # discarding what came back. The write is add-only (store.learn_ids), and it
+    # is logged because needing it at all means something stored the record
+    # without a name it had been handed.
+    fresh_ids = (details.get("ids") or {}) if isinstance(details, dict) else {}
+    learned = slug_repair.recoverable_names(ids, fresh_ids)
+    if learned:
+        await slug_repair.learn_and_log(
+            user_id, key, learned, slug_repair.EVIDENCE_DETAIL_LOOKUP,
+            str(placed.record.get("title") or ""))
+        ids = {**ids, **learned}
     rows = await db.fetch_all(
         "SELECT source, watched_episodes_json, trakt_id, simkl_id "
         "FROM distrakt_show_progress "

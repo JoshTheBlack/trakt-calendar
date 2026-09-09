@@ -2928,6 +2928,65 @@ ALTER TABLE source_prefs ADD COLUMN movie_calendar_source TEXT NOT NULL DEFAULT 
 UPDATE source_prefs SET movie_calendar_source = calendar_source;
 """
 
+
+# ---------------------------------------------------------------------------
+# 39 — a repair log for per-service names, kept so that its GROWTH is a symptom
+# ---------------------------------------------------------------------------
+#
+# WHAT THIS TABLE IS FOR IS NOT ITS CONTENTS. A tracker record carries each
+# service's own name for a title (`trakt_slug`, `simkl_slug`) beside that
+# service's id, and every path that writes a record is supposed to write the
+# name it was handed. When one does not, the record still works -- a link falls
+# back to the numeric id, which both services resolve -- so the omission is
+# invisible at every surface. It was found by counting rows, months after the
+# writer that caused it shipped.
+#
+# SO THE REPAIR RECORDS ITSELF. A row here means "something stored a record
+# without a name it had, and this is where the name was recovered from". A
+# handful of rows dated to the repair's first run is the historical backlog; a
+# row dated later means a writer is STILL dropping the name, and `evidence` says
+# which recovery path caught it. Nothing else in the app would have said so.
+#
+# IT IS NOT SWEPT, AND IT DOES NOT NEED TO BE. A name is only ever filled into a
+# column that is empty, and nothing empties one again, so an identity can be
+# repaired at most once per service per account — the table is bounded by the
+# roster, not by time. Sweeping it would also throw away the one thing it is
+# for: the dates.
+MIGRATION_39 = """
+CREATE TABLE distrakt_slug_repairs (
+    id           INTEGER PRIMARY KEY,
+    user_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- The identity, not a row: a name is a fact about the TITLE, so one repair
+    -- covers every season and every month of it (see store.learn_ids).
+    media        TEXT    NOT NULL,
+    match_source TEXT    NOT NULL,
+    match_id     TEXT    NOT NULL,
+    -- Which name was missing: 'trakt_slug' | 'simkl_slug'. An open set rather
+    -- than a CHECK, following show_posters.source -- a third service is a
+    -- registration, not a migration, and widening a CHECK means rebuilding a
+    -- table (see migration 14).
+    column_name  TEXT    NOT NULL,
+    value        TEXT    NOT NULL,
+    -- WHERE THE NAME CAME FROM, and the reason this column is the point of the
+    -- table. Each value names a different bug: 'shared_slug' means a writer
+    -- stored the old unattributed column and not the namespaced one;
+    -- 'detail_lookup' means a record was short of a name the service had
+    -- already handed us on an ordinary read.
+    evidence     TEXT    NOT NULL,
+    -- How many stored rows the repair actually changed. 0 is worth keeping: it
+    -- means the name was already there by the time the write landed, which is a
+    -- different story from a repair that did something.
+    rows_changed INTEGER NOT NULL DEFAULT 0,
+    -- Denormalized purely so the log is readable by a person. Nothing joins on
+    -- it and nothing may key off it.
+    title        TEXT    NOT NULL DEFAULT '',
+    repaired_at  INTEGER NOT NULL
+);
+-- Reading the log is always "what has been repaired lately", which is the
+-- question that distinguishes the backlog from a live leak.
+CREATE INDEX ix_distrakt_slug_repairs_at ON distrakt_slug_repairs(repaired_at);
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -2967,6 +3026,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (36, MIGRATION_36),
     (37, MIGRATION_37),
     (38, MIGRATION_38),
+    (39, MIGRATION_39),
 ]
 
 
