@@ -30,13 +30,17 @@ registerPage('rankings', boot);
 // What is left here is the LAZY FRAGMENT: a tier's body or a page of the pool
 // replacing one container. Re-initializing is safe because binding an
 // already-bound container is a no-op.
-document.addEventListener('htmx:afterSwap', (event) => {
-    if (event.detail && event.detail.boosted) return;
-    const swapped = (event.detail && event.detail.target) || event.target;
+document.addEventListener('htmx:after:swap', (event) => {
+    // static/js/boost.js's swappedContent, so "which element did this swap
+    // produce" is answered once for the tier body (which keeps its container)
+    // and the pool sentinel (which replaces itself) alike. Null is a whole-page
+    // arrival, which boot() above already handles.
+    const swapped = swappedContent(event);
+    if (!swapped) return;
     // Marked loaded only when rows actually arrived: a tier whose fragment
     // failed still holds its titles, and calling that container authoritative
     // would report it as empty.
-    if (swapped && swapped.classList && swapped.classList.contains('ranker-rows') &&
+    if (swapped.classList && swapped.classList.contains('ranker-rows') &&
         !swapped.querySelector('.ranker-failed')) {
         swapped.dataset.loaded = '1';
     }

@@ -352,7 +352,7 @@ class DropTargetTests(FragmentTestCase):
         swap to become droppable."""
         boot = (STATIC_DIR / "js" / "ranker" / "boot.js").read_text(encoding="utf-8")
         self.assertLess(boot.index("dataset.loaded = '1'"),
-                        boot.index("initSortable(document)", boot.index("afterSwap")))
+                        boot.index("initSortable(document)", boot.index("after:swap")))
 
     def test_an_inline_tier_body_says_it_is_loaded_and_a_deferred_one_does_not(self):
         self.board_with(tiered=4)

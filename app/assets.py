@@ -31,6 +31,21 @@ STYLESHEET = "static/css/style.css"
 HTMX = "static/js/htmx.min.js"
 BOOST = "static/js/boost.js"
 
+# htmx's json-enc extension, vendored from the same project's community
+# extension repository and served on every page beside htmx itself.
+#
+# ON EVERY PAGE BECAUSE THE THING IT ENCODES IS ON EVERY PAGE. Every mutating
+# request this app makes has to be application/json — app/authz.py's
+# request_shape_guard refuses anything else before routing — and the controls
+# that make those requests are spread across the calendar, the tracker, the
+# board and the shared header. A per-page list would be a second answer to
+# "which pages write?", and the first one to go stale would fail as a form that
+# silently posts the wrong content type.
+#
+# INERT UNTIL MARKUP ASKS FOR IT. The extension acts only on an element carrying
+# `hx-json-enc`, so loading it changes no request until one does.
+JSON_ENC = "static/js/htmx-json-enc.js"
+
 # What each page loads, and IN WHAT ORDER, keyed by the page's own name. The
 # lists live here rather than in the templates for the reason the stylesheet does:
 # a template that spelled out its own script filenames would be a second copy of
@@ -125,13 +140,13 @@ PAGE_SCRIPTS = {
 }
 
 # Every stylesheet and script served to a browser: the pages' own scripts, plus
-# the three files no page lists (the stylesheet, and the two the head macro puts
+# the four files no page lists (the stylesheet, and the three the head macro puts
 # on every page itself).
 # url() refuses a path that is not in here, which is what makes a `?v=` token a
 # promise rather than decoration: a script tag for an untracked file fails the
 # first time the page renders, instead of quietly serving a stale copy for as long
 # as a browser's cache holds it.
-_CACHED_ASSETS = (STYLESHEET, HTMX, BOOST) + tuple(
+_CACHED_ASSETS = (STYLESHEET, HTMX, JSON_ENC, BOOST) + tuple(
     dict.fromkeys(name for scripts in PAGE_SCRIPTS.values() for name in scripts))
 
 # Preloaded by every page: these are the faces the shared header and body text

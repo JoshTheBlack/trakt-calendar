@@ -114,11 +114,31 @@ class StaticCacheHeaderTests(unittest.TestCase):
     def test_htmx_is_self_hosted(self):
         """htmx ships from /static, not a CDN, so boosted navigation has no
         third-party dependency (consistent with the self-hosted fonts). It also
-        rides the same short /static cache lifetime as every other asset."""
+        rides the same short /static cache lifetime as every other asset.
+
+        THE MAJOR VERSION IS PART OF THE ASSERTION. The vendored file is the
+        only statement of which htmx this app is written against, and the
+        settings the loader carries — implicit inheritance, the no-swap status
+        list, no request deadline — are corrections to THIS major version's
+        defaults. Dropping an older bundle in place would leave every one of
+        them setting a key nothing reads."""
         resp = self.client.get("/static/js/htmx.min.js")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.headers.get("cache-control"), "max-age=600")
         self.assertIn("htmx", resp.text[:400])
+        self.assertRegex(resp.text, r'version\s*=\s*"4\.')
+
+    def test_the_json_encoder_ships_beside_htmx_and_asks_before_acting(self):
+        """The extension is served on every page, and it encodes a request only
+        for an element that names it. That is what lets it be vendored ahead of
+        the markup that will use it: nothing changes shape until something opts
+        in, so the dependency and the adoption are separate changes with
+        separate ways to go wrong."""
+        resp = self.client.get("/static/js/htmx-json-enc.js")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.headers.get("cache-control"), "max-age=600")
+        self.assertIn("registerExtension('json-enc'", resp.text)
+        self.assertIn("hx-json-enc", resp.text)
 
 
 class BoostedNavigationMarkupTests(unittest.TestCase):
@@ -155,7 +175,9 @@ class BoostedNavigationMarkupTests(unittest.TestCase):
         return resp.text
 
     def test_vendored_htmx_script_is_included(self):
-        self.assertIn("/static/js/htmx.min.js", self._page())
+        html = self._page()
+        self.assertIn("/static/js/htmx.min.js", html)
+        self.assertIn("/static/js/htmx-json-enc.js", html)
 
     def test_app_scripts_load_deferred_in_head(self):
         """A boosted nav swaps the <body>, so the app scripts must sit in <head>

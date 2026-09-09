@@ -200,11 +200,15 @@ function closeModal(id) {
 // two RESTORES that hand back a whole DOM:
 //
 //   - the back/forward cache, which returns the page exactly as it was left,
-//     including the choice the visitor made a moment before navigating away;
-//   - htmx's history cache, which serves a boosted Back from a snapshot and
-//     makes no request at all.
+//     including the choice the visitor made a moment before navigating away.
 //
-// Both put a select on screen naming a view the page is not showing, and because
+// A BOOSTED Back IS NO LONGER ONE OF THEM, and that is why only one listener
+// hangs off this. htmx re-asks the server for the page being returned to and
+// swaps its answer in, so the select that arrives is the one the server rendered
+// for that address — there is nothing left over to correct. The bfcache is a
+// browser restore with no request behind it and still needs this.
+//
+// It puts a select on screen naming a view the page is not showing, and because
 // these selects act on `change`, picking that same entry back fires no event —
 // so that view becomes unreachable until a third one is chosen first. The share
 // page shows it plainly: Back leaves the wrong endpoint named, and only F5
@@ -232,7 +236,3 @@ window.addEventListener('pageshow', event => {
     // selector on every page for no reason.
     if (event.persisted) resyncUrlStateSelects();
 });
-
-// htmx's own history restore, which is a different path from the bfcache and
-// fires no pageshow at all.
-document.body.addEventListener('htmx:historyRestore', resyncUrlStateSelects);

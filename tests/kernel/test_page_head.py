@@ -96,12 +96,18 @@ class HeadMacroTests(unittest.TestCase):
 
     def test_htmx_ships_on_every_page_and_ships_first(self):
         """A page without htmx is a one-way door out of a boosted session: you
-        can arrive there boosted, but every link on it is then a full reload."""
+        can arrive there boosted, but every link on it is then a full reload.
+
+        THE ORDER IS THE ASSERTION, not just the membership. An htmx extension
+        registers itself against the global htmx publishes as it executes, and
+        the loader sets the config htmx reads when the document finishes
+        parsing; both are wrong if they run first, and neither says so."""
         html = self.render(call="'Title', scripts=('static/js/ui.js',)")
         srcs = re.findall(r'<script src="([^"]+)"', html)
-        # htmx, then the loader that fetches a page's own scripts on a boosted
-        # arrival, then this page's.
-        self.assertEqual(srcs, [assets.url(assets.HTMX), assets.url(assets.BOOST),
+        # htmx, its extension, then the loader that fetches a page's own scripts
+        # on a boosted arrival, then this page's.
+        self.assertEqual(srcs, [assets.url(assets.HTMX), assets.url(assets.JSON_ENC),
+                                assets.url(assets.BOOST),
                                 assets.url("static/js/ui.js")])
 
     def test_every_script_is_deferred(self):
@@ -242,6 +248,31 @@ class EveryPageAgreesTests(unittest.TestCase):
                 self.assertIsNotNone(body, f"{name} has no <body> at the top level")
                 self.assertIn('hx-boost="true"', body.group(0), name)
 
+    def test_the_body_attributes_every_page_inherits_from_are_turned_on(self):
+        """A plain `hx-boost` on <body> reaches the links under it only because
+        the loader asks for it: htmx wants the parent to opt in per attribute
+        now, and an attribute nothing opted into is simply not inherited.
+
+        THE FAILURE IS SILENT, WHICH IS WHY THIS IS PINNED HERE. Nothing throws
+        and nothing logs — every link on every page quietly goes back to being a
+        full reload, and the progress bar stops lighting, and the page still
+        works well enough that it can ship. Either the flag stays or the
+        attributes below grow the `:inherited` suffix; this fails if neither is
+        true."""
+        loader = js_source(assets.BOOST)
+        self.assertRegex(
+            loader, r"htmx\.config\.implicitInheritance\s*=\s*true",
+            "the loader no longer turns implicit inheritance on")
+        for name in PAGES:
+            body = re.search(r"<body[^>]*>", markup(name)).group(0)
+            for attr in ("hx-boost", "hx-indicator"):
+                if attr not in body:
+                    continue
+                with self.subTest(page=name, attr=attr):
+                    self.assertNotIn(f"{attr}:inherited", body,
+                                     f"{name} declares {attr} explicitly inheritable — "
+                                     "the loader's implicitInheritance flag is now dead weight")
+
     def test_an_inline_body_script_that_declares_anything_is_wrapped(self):
         """htmx re-executes scripts inside the swapped body, so a top-level
         `const` becomes a redeclaration on the second arrival and the whole
@@ -304,7 +335,11 @@ class EveryPageAgreesTests(unittest.TestCase):
                     self.assertIn('hx-boost="false"', tag)
 
 
-VENDORED = ("htmx.min.js", "sortable.min.js")
+# Third-party files served as they were published. The rules the rest of this
+# module enforces — one declaration of a name across a session's scripts, a
+# boot file last — are rules about code this repository writes, and holding
+# somebody else's bundle to them would only teach us to edit it.
+VENDORED = ("htmx.min.js", "htmx-json-enc.js", "sortable.min.js")
 
 JS_DIR = assets.BASE_DIR / "static/js"
 
@@ -370,7 +405,7 @@ class PageScriptTests(unittest.TestCase):
         """A file nothing loads is dead code that still looks alive. Splitting a
         page script into a directory is exactly when one gets left behind."""
         loaded = {n for scripts in assets.PAGE_SCRIPTS.values() for n in scripts}
-        loaded.update({assets.HTMX, assets.BOOST})  # the head macro's own two
+        loaded.update({assets.HTMX, assets.JSON_ENC, assets.BOOST})  # the head macro's own three
         for path in sorted(JS_DIR.rglob("*.js")):
             name = path.relative_to(assets.BASE_DIR).as_posix()
             if path.name in VENDORED:

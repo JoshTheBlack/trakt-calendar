@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
+## 🏷️ [1.2.4] - 2026-09-09
+
+### Under the hood
+- 🧭 **The engine behind moving around the app is a major version newer.** Every link between pages, the day blocks that fill themselves in as you scroll, the board's tiers as you open them and the calendar search as you type all run on it. Nothing you do should look different — going Back still asks the server for the page as it stands now rather than handing you back the copy you walked away from, which is what stops a board you have rearranged since from refusing your next change.
+- 📨 **Groundwork for panels that submit themselves.** Filters, settings, share links, export options: each is a form whose contents are read out and sent by hand, once per panel, in the shape this app insists every write arrives in. The piece that lets a plain form send itself in that shape now ships with every page. Nothing uses it yet.
+
 ## 🏷️ [1.2.3] - 2026-09-09
 
 ### 🥚

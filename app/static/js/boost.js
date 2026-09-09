@@ -17,9 +17,10 @@
  * swap will bring the new page's copy with it, and this wears them.
  *
  * READ FROM THE DOM, NOT FROM THE RESPONSE. The obvious implementation parses the
- * incoming HTML in htmx:beforeSwap, and it silently misses the Back button:
- * htmx restores a page from its history cache without a request, so there is no
- * response to read. Anything already in the document is there either way.
+ * incoming HTML in htmx:before:swap, and it reads the swap's own payload rather
+ * than the document that payload is about to become — two facts to keep in step
+ * where one will do. Anything already in the document is there whatever brought
+ * it, so every arrival is handled by one path.
  *
  * NOTHING IS EVER LOADED TWICE. These are ordinary scripts sharing one global
  * scope (see assets.PAGE_SCRIPTS), so a second execution of one would re-declare
@@ -29,16 +30,63 @@
  * time it is needed and never again.
  */
 
-// BACK RE-ASKS THE SERVER. htmx caches each page's body as you leave it and
-// restores that snapshot on Back, with no request — and every page here is a view
-// of server state that has moved on since. The rankings board is the sharp edge:
-// its markup carries the board's VERSION, every save has to echo the current one,
-// and a restored snapshot carries the version from before whatever you did on the
-// way out. The next drag then saves against a stale version, gets the 409 that
-// means "another tab changed this", and reloads — losing the drag and looking
-// like a bug in saving rather than in going Back.
-// A restore then costs one local request, which is what a real navigation cost.
-htmx.config.historyCacheSize = 0;
+/* FOUR DEFAULTS TURNED BACK, and one behaviour this file no longer has to ask
+ * for. Each flag below restores the behaviour the app's markup and routes were
+ * written against; each is an exact-parity setting rather than a position, and
+ * each becomes deletable once the markup it protects says the same thing for
+ * itself. They are set here, at the top of the first script to run after htmx
+ * itself, because htmx reads its config when the document finishes parsing and
+ * deferred scripts all execute before that.
+ */
+
+// BACK RE-ASKS THE SERVER, AND THAT IS NOW THE FRAMEWORK'S OWN BEHAVIOUR — which
+// is why there is a paragraph here and no line under it. The reason still binds:
+// a Back that replayed a stored snapshot would hand back a page of server state
+// that has moved on since. The rankings board is the sharp edge — its markup
+// carries the board's VERSION, every save has to echo the current one, and a
+// snapshot carries the version from before whatever you did on the way out. The
+// next drag then saves against a stale version, gets the 409 that means "another
+// tab changed this", and reloads: the drag is lost and it looks like a bug in
+// saving rather than in going Back. A restore costs one local request instead,
+// which is what a real navigation cost anyway. If a future version offers to
+// cache history again, this is the paragraph that says not to take it.
+
+// ATTRIBUTE INHERITANCE. hx-boost and hx-indicator are declared once on <body>
+// and reach every link, form and fragment beneath them, in sixteen templates;
+// hx-target and hx-sync do the same over the calendar's search controls. htmx
+// now wants the parent to opt in per attribute (`hx-boost:inherited`), and the
+// failure without this is silent in the worst way: nothing throws, links simply
+// stop boosting and the progress bar stops lighting. The flag is exact parity
+// and costs one line; converting sixteen templates is a separate change to make
+// deliberately, not a side effect of taking a new version.
+htmx.config.implicitInheritance = true;
+
+// A 4xx OR 5xx IS NOT CONTENT. htmx now swaps every response but 204 and 304,
+// which would paint a session-expired page into a single day cell and an error
+// page's body into a document still wearing this page's <head>. Every fragment
+// route here answers 200 with a rendered gap when it has nothing — a failure is
+// something the server draws, not something the browser infers from a status —
+// so a non-200 reaching the swap is by definition a response no template here
+// wrote. The head's htmx:response:error handler turns the boosted case into a
+// real navigation; this is what stops the swap it would race.
+htmx.config.noSwap = [204, 304, '4xx', '5xx'];
+
+// NO CLOCK ON A REQUEST. htmx now aborts one after sixty seconds. Filling a
+// calendar month nobody has asked for yet is a long sequence of paced upstream
+// calls behind one request, and it is the exact request that most deserves to
+// finish: aborting it discards work already spent and leaves the month unstored,
+// so the next visit starts over. The page-wide progress bar exists to say that
+// wait is real and expected. The upstream transports carry their own per-call
+// deadlines, which is where a hung service is actually caught.
+htmx.config.defaultTimeout = 0;
+
+// AN OUT-OF-BAND-ONLY RESPONSE STILL SWAPS. The pool's last page is exactly
+// that: its rows travel out-of-band into the list and the response carries no
+// replacement sentinel, so the empty main swap IS the answer — it removes the
+// sentinel that asked and ends the chain. htmx now skips a main swap it would
+// have nothing to put in, which would leave "Loading more…" on screen for a pool
+// that has no more.
+htmx.config.allowEmptySwapAfterOOB = true;
 
 // Which scripts each page needs, in load order, as URLs with their cache-busting
 // token already on them. Rendered by the head macro from the one list in
@@ -115,10 +163,27 @@ function arrived() {
     if (meta.dataset.page) startPage(meta.dataset.page);
 }
 
-// Every way a page can arrive. afterSwap covers a boosted navigation,
-// historyRestore covers Back and Forward (which htmx serves from its own cache,
-// with no request and no swap event), and DOMContentLoaded covers a cold load —
+// Every way a page can arrive, and there are only two of them now. A swap covers
+// the boosted navigation AND Back/Forward alike, because a restore is a real
+// request answered by a real swap; DOMContentLoaded covers a cold load —
 // deferred scripts all execute before it, so every boot.js has registered by then.
-document.addEventListener('htmx:afterSwap', arrived);
-document.addEventListener('htmx:historyRestore', arrived);
+document.addEventListener('htmx:after:swap', arrived);
 document.addEventListener('DOMContentLoaded', arrived);
+
+// WHAT A SWAP PUT ON THE PAGE, for the two pages that have to finish a fragment
+// off by hand — a day block's marks, a tier's sortable containers. Null for a
+// whole-page arrival, which is this file's business and not theirs.
+//
+// IT IS NOT ONE PROPERTY, and that is the whole reason this lives in one place.
+// The swap context names the element that was AIMED AT, which is right while the
+// target survives the swap and wrong the moment it does not: a fragment replacing
+// its own placeholder leaves that name pointing at the detached placeholder,
+// while the event itself is dispatched on what replaced it. Asking whether the
+// aimed-at element is still in the document is what picks correctly between them,
+// and it is one question with one answer rather than a habit each page forms
+// separately from whichever swap style it happens to use.
+function swappedContent(event) {
+    const ctx = event.detail && event.detail.ctx;
+    if (!ctx || ctx.target === document.body) return null;
+    return ctx.target && ctx.target.isConnected ? ctx.target : event.target;
+}

@@ -81,6 +81,12 @@
      htmx is first and is on every page: it is what boosting is, and a page that
      omitted it would be a one-way door out of the boosted session. #}
   <script src="{{ assets.url(assets.HTMX) }}" defer></script>
+  {# Immediately after htmx, because an extension registers itself against the
+     global htmx puts up as it executes. Deferred scripts run in document order,
+     so this is a real ordering and not a hope. It does nothing to a request
+     until an element asks for it by name — assets.JSON_ENC says why it is on
+     every page regardless. #}
+  <script src="{{ assets.url(assets.JSON_ENC) }}" defer></script>
   {# What a boosted arrival needs and cannot get for itself: the swap replaces the
      body's children, so the page landed on has neither its own <body> classes nor
      its own scripts. boost.js reads this map to fetch the ones this session has
@@ -89,16 +95,43 @@
      is what loads them on every arrival after the first. #}
   <script id="pageScripts" type="application/json">{{ assets.page_script_urls() | tojson }}</script>
   <script src="{{ assets.url(assets.BOOST) }}" defer></script>
-  {# htmx does not swap a 4xx or 5xx response, so with every link boosted a click
-     that lands on an error page would do nothing at all and read as ignored.
-     This falls back to a real navigation, which renders that page in full with
-     its own <head> — the error pages are the ones that cannot count on the
-     stylesheet this page loaded. Boosted requests ONLY: a day fragment or a pool
-     page that fails must not take the whole page down with it.
+  {# htmx is configured not to swap a 4xx or 5xx response (static/js/boost.js
+     says why), so with every link boosted a click that lands on an error page
+     would do nothing at all and read as ignored. This falls back to a real
+     navigation, which renders that page in full with its own <head> — the error
+     pages are the ones that cannot count on the stylesheet this page loaded.
+     Boosted requests ONLY: a day fragment or a pool page that fails must not
+     take the whole page down with it. `HX-Boosted` is the header htmx sets on
+     exactly those requests, which makes it the request's own account of what it
+     was rather than an inference from where it was aimed.
+
+     AND htmx MUST NOT PARSE THE RESPONSE WE ARE WALKING AWAY FROM. Measured in
+     Firefox: htmx reads a response's title by parsing its <head> into a DETACHED
+     document, and a detached document's base URL is about:blank — so every url()
+     in an inline stylesheet there resolves to about:invalid, and the browser
+     keeps that parsed sheet keyed by its text. The navigation below then lands
+     the same page and is handed the poisoned copy: the markup arrives intact and
+     not one of its background images or webfonts is ever requested, which reads
+     as an unstyled page that a refresh mysteriously fixes. Fetching the same URL
+     and navigating to it does NOT do this — the detached parse is the whole
+     difference — and the error pages are the ones this can reach, because their
+     appearance is an inline <style> rather than the shared stylesheet.
+
+     `status` IS htmx'S OWN FIELD, AND SAYING THIS IS WHAT IT COSTS. htmx runs
+     its response step only while the request context still reads "issuing", and
+     the event fired here is not cancelable, so there is no public way to tell it
+     we have taken the response over. If a later version renames that field or
+     gates on something else, the parse stops being suppressed and the symptom
+     comes back as an error page with no artwork — silently, not as an exception.
+     Skipping that step also skips the history update htmx does at the top of it,
+     so the navigation below is the only thing that touches the address.
      In <head>, so a body swap never binds it a second time. #}
   <script>
-    document.addEventListener('htmx:responseError', (e) => {
-      if (e.detail && e.detail.boosted) window.location = e.detail.pathInfo.requestPath;
+    document.addEventListener('htmx:response:error', (e) => {
+      const ctx = e.detail && e.detail.ctx;
+      if (!ctx || !ctx.request.headers['HX-Boosted']) return;
+      ctx.status = 'superseded by a full navigation';
+      window.location = ctx.request.action;
     });
   </script>
   {% for script in scripts -%}

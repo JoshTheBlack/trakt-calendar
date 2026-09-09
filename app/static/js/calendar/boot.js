@@ -19,7 +19,7 @@ document.addEventListener('keydown', (e) => {
 // ---- One idempotent page init, run on first load AND after every boosted swap ----
 // hx-boost swaps the <body>'s children in place without re-running this script, so
 // everything that used to hang off its own DOMContentLoaded is gathered here and
-// re-run on htmx:afterSwap as well. Document-level delegated listeners (the
+// re-run on every boosted arrival as well. Document-level delegated listeners (the
 // hover-flip in calendar/layout.js, the Konami code in calendar/easter-egg.js, and
 // Escape above) are bound once as their file loads and survive swaps, so they
 // deliberately stay OUT of this function.
@@ -74,13 +74,13 @@ function applyViewStateTo(root) {
 // then is there an init to call — so it calls the one registered below, on the
 // cold load and on every arrival alike.
 // What is left here is the CONTENT swap, which only brings one day's cards and
-// must NOT re-run the init (see applyViewStateTo). The event is dispatched on what
-// the swap PRODUCED, which for a day block replacing its own placeholder (an
-// outerHTML swap) is the new section — detail.target is still the placeholder htmx
-// just detached, so it is the wrong thing to look inside.
-document.addEventListener('htmx:afterSwap', (evt) => {
-    if (evt.detail && evt.detail.boosted) return;
-    applyViewStateTo(evt.target);
+// must NOT re-run the init (see applyViewStateTo). A day block replaces its own
+// placeholder, so what has to be walked is what the swap PRODUCED rather than
+// what it was aimed at; static/js/boost.js's swappedContent answers that for
+// every swap style at once, and answers null for a whole-page arrival.
+document.addEventListener('htmx:after:swap', (evt) => {
+    const swapped = swappedContent(evt);
+    if (swapped) applyViewStateTo(swapped);
 });
 
 registerPage('calendar', initCalendarPage);
