@@ -464,12 +464,18 @@ body.card-poster .premiere-info,
 body.card-horizontal .premiere-info { margin-top: 0; padding-top: 7px; }
 body.card-poster .season-info,
 body.card-horizontal .season-info { margin-top: 3px; }
-body.card-poster .links-row,
-body.card-horizontal .links-row { margin-top: 6px; }
-body.card-poster .trakt-btn,
-body.card-horizontal .trakt-btn { padding: 5px 0; }
-body.card-poster .trakt-btn img,
-body.card-horizontal .trakt-btn img { height: 12px; }
+/* THESE THREE SAY `.card` BECAUSE THEY ARE ABOUT CARDS. The body class names the
+   viewer's chosen CARD STYLE, and a compact card has no room for a full-size
+   outbound button — but the details panel sits inside that same body while
+   having nothing to do with how the calendar draws its cards, so it was being
+   shrunk by a preference that is not about it. Measured before the `.card` was
+   added: the panel's buttons were 39px under one style and 24px under another. */
+body.card-poster .card .links-row,
+body.card-horizontal .card .links-row { margin-top: 6px; }
+body.card-poster .card .trakt-btn,
+body.card-horizontal .card .trakt-btn { padding: 5px 0; }
+body.card-poster .card .trakt-btn img,
+body.card-horizontal .card .trakt-btn img { height: 12px; }
 
 @media (max-width: 700px) {
     body.pack-packed main { display: block; }
@@ -1018,6 +1024,16 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 /* The service NAME, on the button that goes there. Height rather than width, so
    two wordmarks of different proportions sit on one optical line. */
 .source-wordmark { height: 15px; width: auto; max-width: 100%; object-fit: contain; display: block; }
+/* THE DETAILS PANEL'S OWN OUTBOUND BUTTONS. Sized here rather than inherited,
+   for a reason beyond taste: `body.card-poster` and `body.card-horizontal`
+   shrink `.trakt-btn` because a compact CARD has no room for a full-size one —
+   and the panel sits inside that same body while being nothing to do with the
+   card style the viewer picked. Stated at a specificity those two cannot reach,
+   so the panel looks the same whichever way the calendar is drawn. */
+.details-links { margin: 14px 0 4px; }
+.details-links .trakt-btn { padding: 9px 0; }
+.details-links .trakt-btn img,
+.details-links .source-wordmark { height: 19px; }
 
 /* Sonarr / Radarr / Seerr add-to-library buttons (official icon + wordmark text) */
 .arr-btn { flex: 1; min-width: 0; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--card-border); background: rgba(255,255,255,0.03); color: var(--text); font-family: inherit; font-size: 0.76rem; font-weight: 700; letter-spacing: 0.2px; cursor: pointer; white-space: nowrap; transition: transform .16s ease, box-shadow .16s ease, border-color .16s ease, opacity .16s ease; }

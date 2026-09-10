@@ -1256,7 +1256,12 @@ async def details_fragment(request: Request):
         # THE IDS THE CARD CARRIED, not the answer's: a Trakt-described title's
         # payload holds no Simkl id, so building these from `details` would offer
         # one button for a card that legitimately has two.
-        links=detail_source.outbound_links({**asked, **(details.get("ids") or {})}, media))
+        # THE IDS AND THE NAMES THE CARD CARRIED, plus whatever the answer added.
+        # A name only decides how a link is spelled, so it is read separately from
+        # the ids and never reaches the who-answers decision.
+        links=detail_source.outbound_links(
+            {**asked, **detail_source.names_from_query(params),
+             **(details.get("ids") or {})}, media))
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

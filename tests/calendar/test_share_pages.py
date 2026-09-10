@@ -560,9 +560,12 @@ class SharePageDetailsModalTests(SharePageTestCase):
         self.assertIn("<img src=", resp.text)
         # AND THE OUTBOUND BUTTON IS BUILT FROM THE BOUND IDS, for the same
         # reason: a link is an id rendered into the page.
-        # By ID, because this window's record carries only the old shared `slug`
-        # and that one is nobody's in particular — see the panel's own tests.
-        self.assertIn('href="https://trakt.tv/shows/123"', resp.text)
+        # BY NAME, and from the MONTH rather than from the request: the airing
+        # this link publishes carries each service's own name for the title, so
+        # the button is spelled the way both services ask for rather than by an
+        # id they would have to resolve. A stranger's query string reaches none
+        # of this — the same rule the picture follows.
+        self.assertIn('href="https://trakt.tv/shows/test-show"', resp.text)
 
     # -- the bound ---------------------------------------------------------
 

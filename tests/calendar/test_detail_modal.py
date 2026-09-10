@@ -280,6 +280,40 @@ class DetailModalSourceTests(AppTestCase):
         self.assertNotIn("Episodes", html)
         self.assertIn("Simkl&#39;s words.", html)
 
+    # -- linking back ------------------------------------------------------
+
+    def test_the_panel_links_back_to_every_service_the_card_named(self):
+        """Both services ask that their data link to the page for the specific
+        item, and the tracker has no other way to reach one at all. The ids come
+        from the CARD, not from the answer: a Trakt-described title's payload
+        carries no Simkl id, so a panel working these out for itself could only
+        ever offer one of the two buttons."""
+        html = self._both().text
+        self.assertIn('href="https://trakt.tv/shows/203330"', html)
+        self.assertIn('href="https://simkl.com/tv/2601798"', html)
+
+    def test_a_link_is_spelled_with_the_services_own_name_where_the_card_has_it(self):
+        """THE NAME TRAVELS ON THE REQUEST, namespaced. Both services would rather
+        be sent the readable name than the id, which costs them a lookup and a
+        redirect — and the name has to say WHOSE, because the two do not agree
+        about what a title is called."""
+        html = self._get(
+            "media=show&trakt=203330&simkl=2601798&season=2"
+            "&trakt_slug=the-elusive-samurai&simkl_slug=elusive-samurai",
+            trakt={"shows/203330": TRAKT_SHOW, "shows/203330/people": TRAKT_PEOPLE,
+                   "shows/203330/seasons/2": TRAKT_EPISODES}).text
+        self.assertIn('href="https://trakt.tv/shows/the-elusive-samurai"', html)
+        self.assertIn('href="https://simkl.com/tv/2601798/elusive-samurai"', html)
+
+    def test_a_name_never_decides_who_is_asked(self):
+        """A slug is caller-supplied and only spells a link. Sending one for a
+        service whose id the card did not carry must not conjure a button for it,
+        and must not reach the who-answers decision either."""
+        html = self._simkl_only(
+            "media=show&simkl=3204421&season=1&trakt_slug=not-a-real-show").text
+        self.assertIn("Simkl&#39;s words.", html)
+        self.assertNotIn("trakt.tv", html)
+
     # -- the gate ----------------------------------------------------------
 
     def test_the_gate_asks_about_the_source_being_asked(self):

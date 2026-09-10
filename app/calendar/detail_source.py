@@ -64,6 +64,20 @@ def ids_from_query(params) -> dict[str, str]:
             if (value := params.get(str(source)) or "")}
 
 
+def names_from_query(params) -> dict[str, str]:
+    """Each service's own name for the title, as a details request carried them.
+
+    SEPARATE FROM `ids_from_query` BECAUSE THEY ARE FOR DIFFERENT THINGS and only
+    one of them may reach `choose`. An id decides WHO IS ASKED about a title; a
+    name only decides what a link to that service is spelled with. Folding them
+    into one map would put a caller-supplied string into the lookup decision for
+    no gain — the id is what a service is asked by.
+    """
+    return {f"{source}_slug": value.strip()
+            for source, _port in ports()
+            if (value := params.get(f"{source}_slug") or "")}
+
+
 class Outbound(NamedTuple):
     """One service's own page for a title, and which service it is."""
     source: Source

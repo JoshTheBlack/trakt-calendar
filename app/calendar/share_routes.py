@@ -1365,24 +1365,32 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     # THE BOUND IDS AND WHAT THE ANSWER ADDED, never the raw request: an outbound
     # button is built from an id, and an id a stranger spelled has no more business
     # in a rendered link than in a rendered picture.
-    return _Described(chosen.source, details,
-                      _poster_this_view_shows(visible, bound),
-                      detail_source.outbound_links(
-                          {**bound, **(details.get("ids") or {})}, media))
+    shown = _the_airing_this_names(visible, bound)
+    shown_ids = (shown.ids if shown else None) or {}
+    return _Described(
+        chosen.source, details, str((shown.poster if shown else "") or ""),
+        # THE MONTH'S OWN IDS, never the request's. An outbound button is an id
+        # rendered into a link, so it follows the picture's rule rather than the
+        # lookup's: what a public page publishes about a title comes from what the
+        # owner's calendar holds, not from what a stranger spelled. The airing also
+        # carries each service's own NAME for the title, which is what lets these
+        # links be spelled the way both services ask for.
+        detail_source.outbound_links(shown_ids, media))
 
 
-def _poster_this_view_shows(items: Sequence[Item], bound: dict[str, str]) -> str:
-    """The picture the grid drew for the title `bound` names, or "".
+def _the_airing_this_names(items: Sequence[Item], bound: dict[str, str]) -> Item | None:
+    """The airing `bound` names, out of the ones this view shows.
 
-    Read out of the same airings the bound was taken from, so the panel and the
-    card behind it cannot show different artwork for one title — the property
-    CLAUDE.md already requires of the preview picture, for the same reason.
+    ONE LOOKUP FOR EVERYTHING THE PANEL DRAWS THAT IS NOT THE ANSWER — the
+    picture and the outbound links both come from here, so the panel and the card
+    behind it cannot disagree about a title. That is the property CLAUDE.md
+    already requires of the preview picture, and for the same reason.
     """
     for item in items:
         ids = item.ids or {}
         if any(str(ids.get(namespace) or "") == value for namespace, value in bound.items()):
-            return str(item.poster or "")
-    return ""
+            return item
+    return None
 
 
 async def _details(request: Request, share_row) -> Response:

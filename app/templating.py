@@ -87,6 +87,14 @@ def details_url(base: str, media, ids, season) -> str:
     params = [("media", str(media or "show"))]
     params += [(str(source), value) for source in Source
                if (value := str((ids or {}).get(str(source)) or ""))]
+    # AND EACH SERVICE'S OWN NAME FOR THE TITLE, where the card has it. The panel
+    # draws an outbound button per service and both of them ask that the readable
+    # name be sent rather than the id — resolving the number costs them a lookup
+    # and a redirect. Namespaced, never the shared `slug`: the two services do not
+    # agree about what a title is called, so an unattributed name builds a URL for
+    # a title the other one has never heard of.
+    params += [(f"{source}_slug", value) for source in Source
+               if (value := str((ids or {}).get(f"{source}_slug") or ""))]
     if season not in (None, ""):
         params.append(("season", str(season)))
     return f"{base}?{urlencode(params)}"
