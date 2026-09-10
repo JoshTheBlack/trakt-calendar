@@ -304,12 +304,28 @@ function closeDetailsPanel() { closeModal('detailsModal'); }
 // reading "swapped" for a 404 whose swap was a no-op. Asking the DOM what is
 // actually on the page is one question with one answer, and it does not depend
 // on how the library spells its own progress.
+//
+// A SEASON TAB'S PANE IS THE SAME QUESTION ONE LEVEL IN. Each tab fetches its own
+// season into its own pane, which starts out holding the same pending marker, so
+// this asks about whatever inside the panel was aimed at rather than about the
+// panel alone. `ctx.target` is the element AIMED AT, which is what is wanted here
+// and is exactly right for these two swaps because both are innerHTML — a swap
+// that REPLACES its target would need boost.js's `swappedContent` instead, and
+// nothing here walks what a swap produced.
+//
+// `:scope >` IS LOAD-BEARING AND IT IS NOT A TIDINESS. The question is whether
+// THE PLACEHOLDER THIS REQUEST PUT THERE is still there, and a placeholder is
+// always the swap target's own immediate child. A descendant search asks a
+// different question, and the difference is a defect that shipped: a panel with
+// season tabs arrives holding one pending marker per UNOPENED season, so a
+// perfectly good answer was read as "nothing landed" and replaced with the
+// failure line. Anything with more than one season could not be opened at all.
 document.addEventListener('htmx:finally:request', (event) => {
     const ctx = event.detail && event.detail.ctx;
-    const body = document.getElementById('detailsBody');
-    if (!ctx || !body || ctx.target !== body) return;
-    if (!body.querySelector('[data-details-pending]')) return;
-    body.replaceChildren(detailsPanelState('detailsUnreachable'));
+    const target = ctx && ctx.target;
+    if (!target || !target.closest || !target.closest('#detailsBody')) return;
+    if (!target.querySelector(':scope > [data-details-pending]')) return;
+    target.replaceChildren(detailsPanelState('detailsUnreachable'));
 });
 
 

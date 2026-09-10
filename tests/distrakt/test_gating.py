@@ -31,6 +31,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from app import auth, db
 from app.distrakt import routes as distrakt_routes
+from app.distrakt import viewer as distrakt_viewer
 from app.calendar import share_code, share_links
 from app.config import Settings, save_settings
 from app.main import app
@@ -247,7 +248,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
     def test_the_settings_object_carries_the_users_token_not_the_instances(self):
         user_id = self.tracker_user(token="THE-USERS-TOKEN")
-        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
         self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
         self.assertNotEqual(settings.trakt_access_token, self.APP_WIDE)
         # The operator's refresh token has no business travelling next to
@@ -265,14 +266,14 @@ class RequestingUsersTokenTests(DistraktTestCase):
         asyncio.run(db.run(lambda conn: auth.insert_linked_identity(
             conn, user_id=user_id, provider="simkl", provider_user_id=90210,
             access_token="THEIR-SIMKL-TOKEN")))
-        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
         self.assertEqual(settings.trakt_access_token, "THE-USERS-TOKEN")
         self.assertEqual(settings.simkl_access_token, "THEIR-SIMKL-TOKEN")
 
     def test_an_account_with_no_simkl_link_carries_no_simkl_token(self):
         """`simkl_configured` then goes false and that port is simply not asked,
         which is exactly what has always been true of Trakt."""
-        settings = asyncio.run(distrakt_routes._distrakt_settings(self.tracker_user()))
+        settings = asyncio.run(distrakt_viewer.settings_for_user(self.tracker_user()))
         self.assertEqual(settings.simkl_access_token, "")
         self.assertFalse(settings.simkl_configured)
 
@@ -285,7 +286,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
             async def _fake(uid, settings=None):
                 return "FROM-THE-SOURCE"
             spy.side_effect = _fake
-            settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+            settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
         spy.assert_awaited_once()
         self.assertEqual(spy.await_args.args[0], user_id)
         self.assertEqual(settings.trakt_access_token, "FROM-THE-SOURCE")
@@ -354,7 +355,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         """
         user_id = self._make_user("tokenless", calendar_approved=True, distrakt_approved=True)
         self._link_trakt(user_id, provider_user_id=4242, access_token=None)
-        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
         self.assertEqual(settings.trakt_access_token, "")
         self.assertFalse(settings.trakt_configured)
 
@@ -374,7 +375,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
         user_id = self.tracker_user(token="PRIVATE-TOKEN")
         recorder = RecordingClient()
-        settings = asyncio.run(distrakt_routes._distrakt_settings(user_id))
+        settings = asyncio.run(distrakt_viewer.settings_for_user(user_id))
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
             asyncio.run(trakt_sync.fetch_show_progress_detail(settings, 7))
         self.assertTrue(recorder.urls)

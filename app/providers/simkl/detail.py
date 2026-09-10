@@ -483,6 +483,23 @@ async def fetch_details(settings: Settings, media: Media | str, simkl_id,
         # outbound button already offers this title's Simkl page.
         "homepage": "",
         "season": answered,
+        # TWO KEYS THIS SERVICE HAS NO SEASON-LEVEL ANSWER FOR, present and
+        # honest. Checked against Simkl's own documentation rather than inferred:
+        # across all 48 documented endpoints there is no season metadata and no
+        # cast, credits or people anywhere, and `tv/{id}` states one overview and
+        # one poster for the whole title. So a Trakt-described season shows that
+        # season's own name and its own words while a Simkl-described one shows
+        # the title's — the same key set either way, which is the rule DetailPort
+        # states and tests/providers/test_protocol_conformance.py holds.
+        "season_title": "",
+        # Nor a season's own description — same documentation, same absence. The
+        # panel draws the title's words above and nothing extra below.
+        "season_overview": "",
+        # THE COUNT IS ANSWERABLE, THOUGH, and from something already fetched:
+        # every episode carries its season number, so the episode list says how
+        # many seasons there are without a second call. Specials are excluded the
+        # same way the Trakt package excludes them — `seasons_known` drops them.
+        "season_count": len(seasons_known(episodes)),
         "cast": [],
         # NO SEASON MEANS NO EPISODE SECTION, rather than every season run
         # together. A list nobody can label is worse than none: the reader has no

@@ -16,10 +16,11 @@ from __future__ import annotations
 import re
 import unittest
 import asyncio
+import json
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qs, parse_qsl, urlsplit
 
 from app import auth, cache, db
 from app.endpoints import get_endpoint
@@ -29,7 +30,7 @@ from app.providers.base import Item, Media, Source
 from app.providers.trakt import transport as trakt_transport
 from app.config import Settings, save_settings
 from app.media import posters
-from tests.support import AppTestCase, ORIGIN, calendar_records
+from tests.support import AppTestCase, DetailsPanel, ORIGIN, calendar_records
 
 
 async def _no_poster_warm(settings, refs) -> int:
@@ -402,7 +403,7 @@ class SharePageViewControlsTests(SharePageTestCase):
         self.assertIn('<option value="1" selected>', body)
 
 
-class SharePageDetailsModalTests(SharePageTestCase):
+class _ShareDetailsTestCase(SharePageTestCase):
     """Clicking a card on a public page opens the SAME details panel as the
     calendar page (cast, trailer, episodes) — literally the same template,
     rendered by this route.
@@ -475,6 +476,17 @@ class SharePageDetailsModalTests(SharePageTestCase):
         asyncio.run(cache.set(f"{base}/shows/123/seasons/2?{ext}", [
             {"number": 5, "title": "The One", "first_aired": "2026-07-15T20:00:00Z",
              "rating": 8.0}]))
+        # THE SEASON'S OWN WORDS AND ITS OWN CAST, which the panel asks for now
+        # that it describes the season it is open on rather than the title. The
+        # owner's own view caches these on the same lookup, which is why a
+        # visitor reading them costs nothing.
+        asyncio.run(cache.set(f"{base}/shows/123/seasons?{ext}", [
+            {"number": 1, "title": "Season 1", "overview": "The first one.",
+             "episode_count": 6, "aired_episodes": 6},
+            {"number": 2, "title": "Season 2", "overview": "Season two's own words.",
+             "episode_count": 6, "aired_episodes": 6}]))
+        asyncio.run(cache.set(f"{base}/shows/123/seasons/2/people?{ext}", {
+            "cast": [{"person": {"name": "A Actor"}, "character": "Lead"}]}))
 
     def _no_network(self):
         """A client whose .get fails the test outright.
@@ -532,6 +544,17 @@ class SharePageDetailsModalTests(SharePageTestCase):
         # A refusal publishes no link either — there is no title to link to.
         self.assertNotIn("trakt.tv/shows", resp.text)
 
+
+class SharePageDetailsModalTests(_ShareDetailsTestCase):
+    """The panel itself: what it draws, and what the bound refuses.
+
+    A CLASS OF ITS OWN BENEATH THE SCAFFOLDING, so that the season-tab class
+    below can share the setup without inheriting these cases — a test class that
+    is also somebody's base runs every one of its own assertions again under the
+    subclass's fixtures, which proves nothing twice and hides which fixture a
+    failure belongs to.
+    """
+
     def test_the_page_wires_cards_to_the_modal(self):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7").text
         self.assertIn('onclick="openShareDetails(this, event)"', body)
@@ -549,7 +572,10 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with self._no_network():
             resp = self._details("media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
+        # BOTH DESCRIPTIONS, and they are different ones: what the show is, up
+        # with the chips, and what THIS season is about, under the picker.
         self.assertIn("Full overview.", resp.text)
+        self.assertIn("Season two&#39;s own words.", resp.text)
         self.assertIn("Returning Series", resp.text)  # normalized like the calendar
         self.assertIn("A Actor", resp.text)
         self.assertIn("Trailer", resp.text)
@@ -923,3 +949,104 @@ class CardTileOrderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharePageHasNoSeasonPickerTests(_ShareDetailsTestCase):
+    """A shared calendar publishes ONE MONTH, so it offers no season picker.
+
+    THE REASONING, AND IT IS THE OWNER'S DECISION AFTER SEEING IT WORK. The strip
+    was built here first and it did work — but what may be looked up on a public
+    page is bound to what that view shows, the season included, so on a link
+    showing season 3 of a five-season show four of the five tabs refused. A
+    control that mostly says no is worse than no control, and the refusal has to
+    stay a single unhelpful sentence: telling a stranger which seasons the
+    owner's calendar contains is exactly what one message prevents.
+
+    SO THE BOUND IS UNCHANGED AND THE SURFACE IS NARROWER. The season is still a
+    dimension of what a details request may ask about — `test_the_season_is_part
+    _of_the_bound` above still holds it — there is simply nothing on the page
+    offering to cross it.
+    """
+
+    def _panel(self, query: str) -> DetailsPanel:
+        resp = self._details(query)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return DetailsPanel(resp.text)
+
+    def test_no_strip_is_drawn(self):
+        self._seed_detail_cache()
+        with self._no_network():
+            panel = self._panel("media=show&trakt=123&season=2")
+        self.assertEqual(panel.season_tabs, [])
+        self.assertNotIn("ep-seasons", panel.html)
+
+    def test_the_season_the_card_is_for_is_still_shown_in_full(self):
+        """Removing the picker removes navigation, not content: the season the
+        visitor clicked still gets its own description, its cast and its rows."""
+        self._seed_detail_cache()
+        with self._no_network():
+            panel = self._panel("media=show&trakt=123&season=2")
+        self.assertIn("Season two&#39;s own words.", panel.html)
+        self.assertIn("A Actor", panel.html)
+        self.assertIn("Season 2 Episodes", panel.html)
+
+    def test_the_season_fragment_endpoint_is_gone(self):
+        """It existed only to fill a tab. Left standing it would be a public
+        route nothing calls, which is a surface to keep bound for no reason."""
+        resp = self.client.get(
+            f"/s/{self.token}/details/season"
+            f"?media=show&trakt=123&season=2&{self.VIEW}")
+        self.assertEqual(resp.status_code, 404)
+
+    def _owner_watched(self, episodes, season: int = 2) -> None:
+        """What the OWNER has watched of this season, as their tracker recorded
+        it. Keyed on the identity the card resolves to, which is what the share
+        route looks it up by."""
+        asyncio.run(db.execute(
+            "INSERT OR REPLACE INTO distrakt_show_progress "
+            "(user_id, media, match_source, match_id, season, source, "
+            "watched_episodes_json, trakt_id) VALUES (?,?,?,?,?,?,?,?)",
+            (self.user_id, "show", "tmdb", "789", season, "trakt",
+             json.dumps({str(e): "2026-07-16T00:00:00Z" for e in episodes}), 123)))
+
+    def test_the_panel_shows_the_owners_watched_episodes(self):
+        """WHOSE PROGRESS THIS IS has an answer: the same person whose calendar,
+        whose filters and whose not-watching marks the page already publishes.
+        A visitor has no account here, so there is nothing else it could be."""
+        self._seed_detail_cache()
+        self._owner_watched([5])
+        with self._no_network():
+            panel = self._panel("media=show&trakt=123&season=2")
+        self.assertEqual(panel.watched, [5])
+        self.assertEqual(panel.by_source, {"trakt": [5]})
+
+    def test_turning_it_off_on_the_account_page_reaches_this_link(self):
+        """THE SWITCH IS THE ACCOUNT'S, NOT THE LINK'S, which is what makes it
+        able to un-publish a calendar somebody shared months ago. No query
+        parameter can turn it back on: it is not a view option."""
+        self._seed_detail_cache()
+        self._owner_watched([5])
+        asyncio.run(auth.update_user_prefs(self.user_id, share_watch_history=False))
+        with self._no_network():
+            panel = self._panel("media=show&trakt=123&season=2")
+        self.assertEqual(panel.watched, [])
+        self.assertNotIn("ep-check", panel.html)
+
+    def test_a_season_the_owner_has_watched_none_of_draws_no_ticks(self):
+        """The same rule the owner's own calendar follows, and it matters more
+        here: a column of hollow marks on every card would publish "this person
+        has watched nothing" about their entire month."""
+        self._seed_detail_cache()
+        with self._no_network():
+            panel = self._panel("media=show&trakt=123&season=2")
+        self.assertEqual(panel.services, [])
+        self.assertNotIn("ep-check", panel.html)
+
+    def test_a_title_this_link_does_not_show_yields_no_progress_either(self):
+        """The marks are addressed by the airing the MONTH holds, so a title the
+        view does not publish cannot be asked about — the same rule the picture
+        and the outbound links follow."""
+        self._owner_watched([5])
+        with self._no_network():
+            self.assertRefused(self._details("media=show&trakt=999&season=2"))
+

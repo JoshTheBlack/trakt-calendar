@@ -26,7 +26,7 @@ from app.providers.trakt import TraktError
 from app.providers.trakt import calendar as trakt_calendar
 from app.providers.trakt import sync as trakt_sync
 from app.providers.trakt import transport
-from app.providers.trakt.detail import _cast_from, _episodes_from
+from app.providers.trakt.detail import _CAST_SHOWN, _cast_from, _episodes_from
 
 SETTINGS = SimpleNamespace(
     trakt_access_token="token", trakt_client_id="id", pagination_limit=100,
@@ -556,9 +556,13 @@ class TestModalShaping:
         ]})
         assert [c["character"] for c in cast] == ["Solo", "Duo"]
 
-    def test_cast_is_capped_at_the_top_billed_sixteen(self):
+    def test_cast_is_capped_at_the_top_billed_twenty(self):
+        """A season's cast runs to 118 on some titles and the panel is not a
+        filmography. TWENTY rather than sixteen because the grid is five wide by
+        default, so it fills four rows exactly — sixteen left the last row three
+        short, which reads as the list having been cut off rather than bounded."""
         cast = _cast_from({"cast": [{"person": {"name": str(i)}} for i in range(40)]})
-        assert len(cast) == 16
+        assert len(cast) == _CAST_SHOWN == 20
 
     def test_an_undated_episode_keeps_its_place_in_the_list(self):
         """An announced-but-unscheduled episode still exists. Dropping it would

@@ -1,0 +1,105 @@
+{# WHAT ONE SEASON IS: its own description, its own cast, its own episodes.
+
+   A FRAGMENT AND AN INCLUDE AT ONCE. _details.html includes this for the season
+   the panel opened on, and a season tab fetches exactly this file for any other
+   one (app/details_panel.py's `season_pane`). Everything in here is a fact about
+   the SEASON, which is what makes it swappable: the chip row above describes the
+   title and does not move when a tab is pressed.
+
+   WHY THE CAST LIVES HERE AND NOT IN THE HERO. It varies by season and the panel
+   used to draw the title's, whatever season it was open on.
+   Measured across 14 seasons of six titles: of the 224 cast entries shown, 85
+   were actually in the season being viewed — 37%. The `true-detective` season 1
+   panel listed two actors from Night Country, four seasons later. Trakt states
+   both per season for every season probed, so this is a correction rather than a
+   flourish; app/providers/trakt/detail.py's fetch_details has the measurement.
+
+   A SOURCE WITH NO SEASON-LEVEL ANSWER DRAWS NO SEASON DESCRIPTION and falls back
+   to the title's CAST, which is what Simkl-described titles get: its API
+   publishes no season metadata and no cast at all. The title's own description is
+   above the picker either way, so nothing goes missing.
+
+   Context it reads: `d` (one source's detail answer, already scoped to `season`
+   by the provider), `media`, `season` (already reconciled by
+   app/details_panel.py) and `progress` — this viewer's own record of the season,
+   or nothing. Given none, the rows are the plain num/title/rating/date. #}
+{% import '_source_logo.html' as src with context %}
+
+{# ONE TICK. A link where the row carries an id for that service and plain text
+   where it does not, because a tick is what you press to go and correct the count
+   it disagrees with — pointing it somewhere unhelpful is worse than not linking.
+   The service's MARK is drawn only where there is more than one tick: a mark is
+   part of a control here (the rule _source_logo.html sets for drawing one at
+   all), and naming the only service there is would put a logo on every row of a
+   checklist with nothing to disambiguate. #}
+{%- macro tick(t, single) -%}
+{%- set body %}{% if not single %}{{ src.mark(t.source, 'ep-mark') }}{% endif %}{{ '✓' if t.seen else '○' }}{% endset -%}
+{%- set css = 'ep-check svc-' ~ t.source ~ ('' if t.seen else ' unseen') -%}
+{%- set label = src.label(t.source) ~ (' recorded this' if t.seen else ' has not recorded this') ~ ' — open on ' ~ src.label(t.source) -%}
+{% if t.url %}<a class="{{ css }}" href="{{ t.url }}" target="_blank" rel="noopener"
+   title="{{ label }}">{{ body }}</a>{% else %}<span class="{{ css }}" title="{{ label }}">{{ body }}</span>{% endif %}
+{%- endmacro -%}
+
+{# WHAT THIS SEASON IS ABOUT, where the source has something separate to say.
+   NOTHING AT ALL OTHERWISE, rather than a fallback: the title's own description
+   is already on screen above the picker, and repeating it under every tab would
+   say "this season is about the show" once per season. #}
+{% if d.season_overview %}
+<div class="details-section-title">📖 Season {{ season }}
+    {%- if d.season_title %} · {{ d.season_title }}{% endif %}</div>
+<div class="details-overview season">{{ d.season_overview }}</div>
+{% endif %}
+
+{% if d.cast %}
+<div class="details-section-title">🎭 Cast</div>
+<div class="cast-grid">
+    {%- for c in d.cast %}
+    <div class="cast-member">
+        {% if c.headshot %}<img class="headshot" src="{{ c.headshot }}" alt="{{ c.name }}" loading="lazy">
+        {%- else %}<div class="headshot placeholder">👤</div>{% endif %}
+        <div class="c-name">{{ c.name }}</div>
+        {% if c.character %}<div class="c-char">{{ c.character }}</div>{% endif %}
+    </div>
+    {%- endfor %}
+</div>
+{% endif %}
+
+{# NOTHING BELOW HERE FOR A FILM, which has a description and a cast and no
+   seasons at all — the same partial serves it, minus the episode half. #}
+{% if media != 'movie' and season %}
+{#- THE NAME IS NOT REPEATED HERE. It heads the season's description above,
+    which is the first thing under the picker; saying it again three inches
+    lower tells a reader nothing they have not just read. -#}
+<div class="details-section-title">📺 Season {{ season }} Episodes
+    {%- if progress and progress.count %} <span class="ep-watched-count">{{ progress.count }} watched</span>{% endif %}</div>
+{# Only where the services disagree, which is the same rule a calendar card
+   follows for a field two of them filled in differently: agreement needs no
+   caption, and captioning it everywhere would put a service's name on every row
+   of a one-service account's list. #}
+{% if progress and progress.counts %}<div class="ep-source-note">
+    {%- for c in progress.counts %}{{ src.label(c.source) }} recorded {{ c.count }}
+    {%- if not loop.last %} · {% endif %}{% endfor -%}
+</div>{% endif %}
+{% if d.episodes %}
+<div class="ep-list">
+    {%- for ep in d.episodes %}
+    <div class="ep-row{% if progress and progress.watched(ep.number) %} watched{% endif %}">
+        {%- if progress %}<span class="ep-checks">
+            {%- for t in progress.ticks(ep.number) %}{{ tick(t, progress.single) }}{% endfor -%}
+        </span>{% endif %}
+        <span class="ep-num">E{{ '%02d' | format(ep.number | int) }}</span>
+        <span class="ep-title">{{ ep.title }}</span>
+        {#- WHO WAS ASKED, on every row. The ticks beside it say who answered
+            yes; without this, "the other service does not have this episode" and
+            "the other service was never asked" look the same. -#}
+        {%- if progress and progress.checked_by %}<span class="ep-source">
+            {%- for name in progress.checked_by %}{{ src.label(name) }}
+            {%- if not loop.last %} · {% endif %}{% endfor -%}
+        </span>{% endif %}
+        {%- if ep.rating %}<span class="ep-rating">⭐ {{ ep.rating }}</span>{% endif %}
+        <span class="ep-date">{{ ep.air_display or 'TBA' }}</span>
+    </div>
+    {%- endfor %}
+</div>
+{% else %}<div class="d-empty">No episode list available for this season yet.</div>{% endif %}
+{% endif %}

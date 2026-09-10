@@ -613,6 +613,7 @@ async def me_page(request: Request):
     # function so that an operator switching one off empties this control by the
     # same rule that empties the calendar.
     describing = [str(p.source) for p in providers.calendar_sources(settings=settings)]
+    prefs = await auth.get_user_prefs(user.user_id)
     return templates.TemplateResponse(request, "auth_me.html", {
         "request": request,
         # is_admin, calendar_available, ranker_available, version, build
@@ -624,6 +625,12 @@ async def me_page(request: Request):
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
         "user": user,
         "linked": linked,
+        # WHETHER THIS ACCOUNT'S SHARE LINKS PUBLISH ITS WATCH HISTORY. It is on
+        # this page rather than in the Share panel because it is an account
+        # decision and not a per-link view option: switching it off has to reach
+        # links that were handed out months ago, which is exactly what somebody
+        # wants when they change their mind about publishing it at all.
+        "share_watch_history": bool(prefs["share_watch_history"]),
         # THE SERVICES THAT COULD SUPPLY A WATCH HISTORY AND ARE NOT LINKED, by
         # their own labels, for the notice that tells somebody with the tracker
         # grant why it has nothing to read. Asked of the registry rather than
@@ -892,6 +899,31 @@ async def set_own_retired_trackers(request: Request):
     except ValueError as exc:
         return authz.error(str(exc))
     return JSONResponse({"ok": True, "retired": list(saved.tracker_retired)})
+
+
+@guard.post("/api/me/share-watch-history", AuthLevel.SESSION)
+async def api_me_share_watch_history(request: Request):
+    """Turn the watch marks on this account's shared calendars on or off.
+
+    ACCOUNT-WIDE AND RETROACTIVE, which is the whole reason it is not beside the
+    other share options. Every one of those is a view option a link may override
+    and a visitor's query string may name; this one decides whether a viewing
+    history is published at all, and an answer a URL could change would not be an
+    answer. Stored on `user_prefs` (migration 42), read by the share page on the
+    request it is already reading the owner's filters on, so turning it off takes
+    effect on every link that account has ever handed out, immediately.
+
+    NO PER-LINK OVERRIDE IS OFFERED and that is deliberate rather than unfinished:
+    two switches would mean a link that still published the history after the
+    account said not to, which is the failure this exists to make impossible.
+    """
+    user = await auth.require_session(request)
+    data = await authz.json_body(request)
+    enabled = data.get("enabled")
+    if not isinstance(enabled, bool):
+        return authz.error("enabled must be true or false.")
+    await auth.update_user_prefs(user.user_id, share_watch_history=enabled)
+    return JSONResponse({"ok": True, "enabled": enabled})
 
 
 @guard.post("/api/me/username", AuthLevel.SESSION)

@@ -19,26 +19,18 @@
      look — so a surface opting in is one declared read rather than a template
      that knows the tracker exists.
 
+   THIS FILE IS THE TITLE; _details_season.html IS THE SEASON. Everything here —
+   the picture, the chips, the outbound buttons, the trailer — is a fact about the
+   title and stays put when a season tab is pressed. The description, the cast and
+   the episodes vary by season and live in that partial, which is included here
+   for the season the panel opened on and fetched by a tab for any other.
+
    Context it reads: `d` (one source's detail answer, whose key set is the same
    whoever gave it — see DetailPort in app/providers/base.py), `media`, `season`
-   (the season the rows below it are), `title` (the card's own, for the poster's
-   alt text), `poster`, `progress` and `links`. #}
+   (the season below it), `title` (the card's own, for the poster's alt text),
+   `poster`, `progress`, `links` and `tabs` (the season picker, empty where there
+   is nothing to pick between). #}
 {% import '_source_logo.html' as src with context %}
-
-{# ONE TICK. A link where the row carries an id for that service and plain text
-   where it does not, because a tick is what you press to go and correct the count
-   it disagrees with — pointing it somewhere unhelpful is worse than not linking.
-   The service's MARK is drawn only where there is more than one tick: a mark is
-   part of a control here (the rule _source_logo.html sets for drawing one at
-   all), and naming the only service there is would put a logo on every row of a
-   checklist with nothing to disambiguate. #}
-{%- macro tick(t, single) -%}
-{%- set body %}{% if not single %}{{ src.mark(t.source, 'ep-mark') }}{% endif %}{{ '✓' if t.seen else '○' }}{% endset -%}
-{%- set css = 'ep-check svc-' ~ t.source ~ ('' if t.seen else ' unseen') -%}
-{%- set label = src.label(t.source) ~ (' recorded this' if t.seen else ' has not recorded this') ~ ' — open on ' ~ src.label(t.source) -%}
-{% if t.url %}<a class="{{ css }}" href="{{ t.url }}" target="_blank" rel="noopener"
-   title="{{ label }}">{{ body }}</a>{% else %}<span class="{{ css }}" title="{{ label }}">{{ body }}</span>{% endif %}
-{%- endmacro -%}
 
 {# THE CARD'S PICTURE, THEN THE ANSWER'S, THEN THE PLACEHOLDER — one rule, and
    every surface draws a poster. A surface with a card in front of the reader
@@ -63,6 +55,10 @@
             {%- if d.certification %}<span class="chip cert" data-cert="{{ d.certification }}">{{ d.certification }}</span>{% endif -%}
             {%- for g in d.genres %}<span class="chip">{{ g }}</span>{% endfor -%}
         </div>
+        {#- WHAT THE SHOW IS, back beside the chips where it belongs. It answers a
+            different question from the season's own description below the picker —
+            the premise against what this particular run of it is about — and an
+            anthology wants both on screen at once. -#}
         {% if d.overview %}<div class="details-overview">{{ d.overview }}</div>
         {%- else %}<div class="d-empty">No overview available.</div>{% endif %}
     </div>
@@ -81,71 +77,92 @@
 </div>
 {% endif %}
 
-{# THE TRAILER. Trakt exposes it through extended=full and Simkl carries a bare
-   YouTube id its provider builds into a URL, so by the time it is here the field
-   means the same thing whoever filled it in. Embedded where it is a YouTube link
-   and linked out where it is not — `youtube_id` is a filter on the shared Jinja
-   environment rather than a per-route step, because "is this a YouTube URL and
-   which video is it" is one question and this is its one asker. #}
+{#- THE TRAILER, AND IT IS THE TITLE'S RATHER THAN THE SEASON'S. Measured before
+    it was placed here: neither service publishes a per-season trailer. Trakt's
+    season objects carry no `trailer` key from `seasons`, from `seasons/{n}/info`
+    or under four speculative `extended` values, and Simkl's array is free-text
+    names with sparse coverage — half of them opening credits or clips, and Fargo
+    has none at all. So the heading says Trailer and not "this season's", and it
+    sits ABOVE the season's own description rather than inside the swapped pane,
+    which is also what keeps ONE iframe on the page however many seasons get
+    opened.
+
+    Embedded where it is a YouTube link and linked out where it is not —
+    `youtube_id` is a filter on the shared Jinja environment rather than a
+    per-route step, because "is this a YouTube URL and which video is it" is one
+    question and this is its one asker. -#}
+{%- macro trailer() -%}
 {% if d.trailer %}
 {% set yt = d.trailer | youtube_id %}
+<div class="details-trailer">
 <div class="details-section-title">▶️ Trailer</div>
 {% if yt %}<div class="trailer-embed"><iframe src="https://www.youtube-nocookie.com/embed/{{ yt }}"
         title="Trailer" loading="lazy" referrerpolicy="strict-origin-when-cross-origin"
         allow="accelerometer; encrypted-media; gyroscope; picture-in-picture"
         allowfullscreen></iframe></div>
 {%- else %}<a class="pill-btn" href="{{ d.trailer }}" target="_blank" rel="noopener">Watch trailer ↗</a>{% endif %}
-{% endif %}
-
-{% if d.cast %}
-<div class="details-section-title">🎭 Cast</div>
-<div class="cast-grid">
-    {%- for c in d.cast %}
-    <div class="cast-member">
-        {% if c.headshot %}<img class="headshot" src="{{ c.headshot }}" alt="{{ c.name }}" loading="lazy">
-        {%- else %}<div class="headshot placeholder">👤</div>{% endif %}
-        <div class="c-name">{{ c.name }}</div>
-        {% if c.character %}<div class="c-char">{{ c.character }}</div>{% endif %}
-    </div>
-    {%- endfor %}
 </div>
 {% endif %}
+{%- endmacro -%}
 
-{# `season` IS THE ONE THAT WAS ANSWERED — app/details_panel.py reconciles what
+{# THE SEASON PICKER, AND EVERYTHING BELOW IT IS THAT SEASON'S.
+
+   IT SITS BENEATH THE OUTBOUND BUTTONS AND ABOVE THE TRAILER. What is above it —
+   the picture, the chips, what the SHOW is, the buttons — are facts about the
+   TITLE and do not move when a tab is pressed. What is below it is that season's
+   own description, its own cast and its own episodes.
+
+   THE TRAILER SITS INSIDE THIS CONTAINER, BETWEEN THE STRIP AND THE PANES, and
+   that is a layout device rather than a claim that it belongs to the season: the
+   flex `order` in style.css puts labels first, the trailer second and the panes
+   third, which is the only way to get one shared element between the two without
+   repeating it in every pane. Repeating it would mean an iframe per opened
+   season, all but one of them hidden and still loading.
+
+   `season` is the one that was ANSWERED — app/details_panel.py reconciles what
    the click asked about with what the source came back with, so there is one
-   reading of that rule rather than one per surface. Nothing here where a film was
-   asked about, or where nobody could say which season these episodes are. #}
-{% if media != 'movie' and season %}
-<div class="details-section-title">📺 Season {{ season }} Episodes
-    {%- if progress and progress.count %} <span class="ep-watched-count">{{ progress.count }} watched</span>{% endif %}</div>
-{# Only where the services disagree, which is the same rule a calendar card
-   follows for a field two of them filled in differently: agreement needs no
-   caption, and captioning it everywhere would put a service's name on every row
-   of a one-service account's list. #}
-{% if progress and progress.counts %}<div class="ep-source-note">
-    {%- for c in progress.counts %}{{ src.label(c.source) }} recorded {{ c.count }}
-    {%- if not loop.last %} · {% endif %}{% endfor -%}
-</div>{% endif %}
-{% if d.episodes %}
-<div class="ep-list">
-    {%- for ep in d.episodes %}
-    <div class="ep-row{% if progress and progress.watched(ep.number) %} watched{% endif %}">
-        {%- if progress %}<span class="ep-checks">
-            {%- for t in progress.ticks(ep.number) %}{{ tick(t, progress.single) }}{% endfor -%}
-        </span>{% endif %}
-        <span class="ep-num">E{{ '%02d' | format(ep.number | int) }}</span>
-        <span class="ep-title">{{ ep.title }}</span>
-        {#- WHO WAS ASKED, on every row. The ticks beside it say who answered
-            yes; without this, "the other service does not have this episode" and
-            "the other service was never asked" look the same. -#}
-        {%- if progress and progress.checked_by %}<span class="ep-source">
-            {%- for name in progress.checked_by %}{{ src.label(name) }}
-            {%- if not loop.last %} · {% endif %}{% endfor -%}
-        </span>{% endif %}
-        {%- if ep.rating %}<span class="ep-rating">⭐ {{ ep.rating }}</span>{% endif %}
-        <span class="ep-date">{{ ep.air_display or 'TBA' }}</span>
+   reading of that rule rather than one per surface.
+
+   A TAB IS A RADIO AND ITS ROWS ARE THE PANE BESIDE IT, which is what makes this
+   picker cost no JavaScript at all: the browser already owns "one of these at a
+   time", and the flex `order` in style.css lifts the labels into a strip above
+   the panes they are adjacent to. A pane is filled by htmx on the first click of
+   its tab — `hx-get` plus `hx-trigger="click once"`, the pattern
+   _ranker_board_shell.html opens a tier with and _day_skeleton.html documents —
+   and `once` is right here for the same reason the panes are separate rather
+   than one shared target: a season already fetched is still on the page, so
+   going back to it costs nothing and asks for nothing.
+
+   THE OPEN TAB CARRIES NO REQUEST AT ALL, exactly as a tier rendered open does.
+   Its rows came with the panel.
+
+   A FILM AND A SHOW NOBODY NAMED A SEASON FOR GET NO STRIP and the same partial
+   without one, which is where their description and cast come from. #}
+{% if tabs | length > 1 %}
+<div class="ep-seasons">
+    {#- THE TRAILER IS EMITTED FIRST AND DRAWN SECOND, and the order of those two
+        sentences is the whole point. Visually it belongs between the strip and
+        the panes, which only flex `order` can do — a pane has to stay the
+        ADJACENT SIBLING of its label for `:checked + label + pane` to switch it,
+        so nothing can be written between them.
+        IT USED TO BE EMITTED LAST, and that was a latent bug: with the ordering
+        rules missing for any reason — a stylesheet the browser had cached from
+        before they existed — the trailer fell to the BOTTOM of the panel, under
+        the episode list, which is where the owner found it. Emitted first, the
+        worst case is that it sits above the tabs, which is where it lived one
+        iteration ago and is a sane place for it. It also fixes the reading order
+        for anything that follows the document rather than the layout. -#}
+    {{ trailer() }}
+    {%- for tab in tabs %}
+    <input type="radio" name="detailsSeason" class="ep-season-radio"
+           id="epSeason-{{ tab.number }}"{% if tab.current %} checked{% else %}
+           hx-get="{{ tab.url }}" hx-trigger="click once"
+           hx-target="#epSeasonPane-{{ tab.number }}" hx-swap="innerHTML"{% endif %}>
+    <label class="ep-season-tab" for="epSeason-{{ tab.number }}">S{{ tab.number }}</label>
+    <div class="ep-season-pane" id="epSeasonPane-{{ tab.number }}">
+        {%- if tab.current %}{% include '_details_season.html' %}
+        {%- else %}<div class="details-loading" data-details-pending>⏳ Loading season…</div>{% endif -%}
     </div>
     {%- endfor %}
 </div>
-{% else %}<div class="d-empty">No episode list available for this season yet.</div>{% endif %}
-{% endif %}
+{% else %}{{ trailer() }}{% include '_details_season.html' %}{% endif %}

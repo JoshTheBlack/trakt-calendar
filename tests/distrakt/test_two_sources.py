@@ -42,7 +42,7 @@ from tests.support import AppTestCase, ORIGIN, migrated_db
 
 # What each account's request-scoped Settings looks like. A source is "linked"
 # for the tracker exactly when this object carries a usable credential for it —
-# see app/distrakt/routes.py's _distrakt_settings, which is what puts one
+# see app/distrakt/viewer.py's settings_for_user, which is what puts one
 # person's own tokens on it.
 #
 # THE CATALOGUE CREDENTIALS ARE THE OPERATOR'S AND ARE ON ALL THREE. What one
@@ -1297,7 +1297,7 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
 
         # Both sources configured at the instance level. Each account's own token
         # is what makes a source readable FOR THEM, and it comes off the linked
-        # identity below — see app/distrakt/routes.py's _distrakt_settings.
+        # identity below — see app/distrakt/viewer.py's settings_for_user.
         return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
                         simkl_client_id="simkl-cid")
 

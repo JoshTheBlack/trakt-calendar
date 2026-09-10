@@ -43,11 +43,11 @@ from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpo
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
-from ..providers.base import Media, Source, SourceUnavailable
+from ..providers.base import Media, Source, SourceUnavailable, parse_item_key
 from ..providers.trakt import TraktError
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
-from ..templating import templates
+from ..templating import details_query_names, templates
 
 logger = logging.getLogger(__name__)
 
@@ -1194,7 +1194,28 @@ async def api_tile(request: Request):
 
 @guard.get("/calendar/fragments/details", AuthLevel.CALENDAR_APPROVED)
 async def details_fragment(request: Request):
-    """The details panel's contents for one card.
+    """The details panel's contents for one card."""
+    return await _details_view(request, episodes_only=False)
+
+
+@guard.get("/calendar/fragments/details/season", AuthLevel.CALENDAR_APPROVED)
+async def details_season_fragment(request: Request):
+    """One season's episode rows for a card's panel — what a season tab fetches.
+
+    THE SAME QUESTION AS THE PANEL, ASKED ABOUT A DIFFERENT SEASON, so it is the
+    same body with a different amount of it drawn: resolve the ids, choose who
+    answers, describe that season, read this viewer's own record of it. A route
+    of its own rather than a mode flag on the one above keeps the address honest
+    about what comes back — and the panel's tab strip is built by putting
+    `/season` on the end of whatever address the panel itself was asked at
+    (app/details_panel.py's `season_tabs`), so the two cannot drift apart in what
+    a request has to carry.
+    """
+    return await _details_view(request, episodes_only=True)
+
+
+async def _details_view(request: Request, *, episodes_only: bool) -> Response:
+    """The details panel for one card, or one season of its episode rows.
 
     A VIEW, NOT AN API. It answers with the panel itself — templates/_details.html,
     the one this app has — so the calendar, the tracker and the public share page
@@ -1220,11 +1241,15 @@ async def details_fragment(request: Request):
 
     Catalogue credentials only, for the same reason as /api/tile: everything this
     returns — overview, cast, the episode list — is public and shared, and
-    "catalogue" is a question per SOURCE rather than Trakt's alone.
+    "catalogue" is a question per SOURCE rather than Trakt's alone. THE WATCHED
+    TICKS ARE NOT PART OF THAT and are fetched from nowhere: they are read out of
+    this app's own distrakt_show_progress for the signed-in viewer, which costs no
+    call, no token and no id translation.
     """
     params = request.query_params
     settings = load_settings()
     media = params.get("media", "show")
+    season = route_params.season(params.get("season"))
     asked = detail_source.ids_from_query(params)
     chosen = detail_source.choose(settings, asked)
     if chosen is None:
@@ -1234,8 +1259,7 @@ async def details_fragment(request: Request):
         # decides: reading the store back needs no credential and makes no
         # request, and refusing instead threw away a description this instance
         # had already fetched once. None is the genuinely empty case.
-        details = await detail_source.describe(
-            settings, chosen, media, route_params.season(params.get("season")))
+        details = await detail_source.describe(settings, chosen, media, season)
     except SourceUnavailable:
         # The shared degradation contract rather than one service's error type:
         # this route can be answered by either of two sources and catching only
@@ -1249,19 +1273,94 @@ async def details_fragment(request: Request):
         return details_panel.gap(request, "⚠️ Could not load details for this item.")
     if details is None:
         return details_panel.gap(request, "Nothing here can describe this item.")
+    # THE IDS AND THE NAMES THE CARD CARRIED, plus whatever the answer added.
+    # A Trakt-described title's payload carries no Simkl id, so building links
+    # from `details` alone would offer one button for a card that legitimately has
+    # two. A name only decides how a link is SPELLED, so it is read separately
+    # from the ids and never reaches the who-answers decision.
+    #
+    # ONE MAP FOR THE BUTTONS AND THE TICKS, which is the rule the tracker's own
+    # panel states: a service with a working tick has a working button, and two
+    # maps would let the same panel spell the same service's address two ways.
+    ids = {**asked, **detail_source.names_from_query(params),
+           **(details.get("ids") or {})}
+    progress = await _viewer_progress(request, params.get("key"), season, ids)
+    if episodes_only:
+        return details_panel.season_pane(request, details, media=media,
+                                         season=season, progress=progress)
     return details_panel.panel(
-        request, details, media=media,
-        season=route_params.season(params.get("season")),
+        request, details, media=media, season=season,
         title=params.get("title", ""), poster=params.get("poster", ""),
-        # THE IDS THE CARD CARRIED, not the answer's: a Trakt-described title's
-        # payload holds no Simkl id, so building these from `details` would offer
-        # one button for a card that legitimately has two.
-        # THE IDS AND THE NAMES THE CARD CARRIED, plus whatever the answer added.
-        # A name only decides how a link is spelled, so it is read separately from
-        # the ids and never reaches the who-answers decision.
-        links=detail_source.outbound_links(
-            {**asked, **detail_source.names_from_query(params),
-             **(details.get("ids") or {})}, media))
+        links=detail_source.outbound_links(ids, media),
+        progress=progress,
+        # THE CARD'S OWN SEASON IS THE COUNT, because a card for season 4 is a
+        # card for a title with three earlier ones behind it. Nothing has to be
+        # looked up to know that, which is what lets the picker be offered here at
+        # all — and a card naming no season gets no strip rather than a guess.
+        season_count=season or 0,
+        # WHAT A TAB CARRIES, NAMED. The id parameters come from `details_url`'s
+        # own walk over `Source`, so a third service registers once rather than
+        # being added here too; `key` rides beside them because the ticks are
+        # addressed by it. Nothing else does — a parameter this route does not
+        # read has no business being rendered back into the page.
+        carry=details_query_names() + ("key",))
+
+
+async def _viewer_progress(request: Request, key: str | None, season: int | None,
+                           ids: dict):
+    """This viewer's own watched episodes for the card's season, or None.
+
+    THE CALENDAR OPTS IN AND THE TEMPLATE DRAWS WHAT IT IS GIVEN, which is why
+    this is a read in a route rather than anything the panel knows about. The
+    tracker files a person's watched episodes under the SHARED identity waterfall
+    (app/providers/base.py's MATCH_SOURCES), which is exactly what a calendar card
+    resolves to and carries as its `key` — so this is a plain per-user database
+    read: no provider call, no token, no id translation.
+
+    A SEASON WITH NOTHING RECORDED STILL DRAWS ITS TICKS, hollow, and that is a
+    correction to what this first shipped as. The reasoning then was that a
+    calendar card is only something on television, so hollow ticks would claim a
+    knowledge of the viewer's watching that the calendar does not have. What that
+    missed is what a tick IS: it is the link to that episode at that service, and
+    withholding it withheld the one control on the row that works whether or not
+    anything has been recorded. An unticked box saying "not recorded, and here is
+    where to go about it" is the honest reading, and it is the same one the
+    tracker's own panel has always taken.
+
+    AN ACCOUNT THAT SYNCS NOTHING GETS THEM TOO, which is the second half of the
+    same correction. The worry was that a tick names a service the viewer does not
+    use; the answer is that it does not claim they use it — it links to the
+    episode's page at that service, which is a useful place to go whether or not
+    anybody has an account there. Nothing about a tick is a statement about the
+    reader.
+
+    A HAND-EDITED `key` READS THE CALLER'S OWN ROWS AND NOBODY ELSE'S — the read
+    is scoped to the session's user id, so the worst it can do is show somebody
+    their own viewing of a different title, which the tracker shows them anyway.
+
+    `ids` IS THE SAME MAP THE OUTBOUND BUTTONS ARE BUILT FROM, so a tick and a
+    button for the same service on the same panel are spelled the same way — the
+    rule the tracker's own panel already states. Where the card carries no id for
+    a service, the progress rows fill it in: each one records the id the service
+    that wrote it knows the title by.
+
+    The import is function-local because the tracker reads the calendar back, and
+    naming it at module level would close that loop at import time; see
+    tests/kernel/test_layering.py, where the edge is declared DEFERRED for exactly
+    that reason.
+    """
+    if not key or season is None:
+        return None
+    try:
+        item_key = parse_item_key(key)
+    except ValueError:
+        return None
+    user = await auth.current_user(request)
+    if user is None:
+        return None
+    from ..distrakt import episode_progress
+    progress = await episode_progress.for_season(user.user_id, item_key, season, ids)
+    return progress
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

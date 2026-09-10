@@ -51,7 +51,8 @@ from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import posters, user_images
 from ..perftrace import span
-from ..providers.base import Item, Media, Source, parse_media
+from ..providers.base import (Item, Media, Source, parse_item_key,
+                              parse_media)
 from ..sources import prefs as source_prefs
 from ..timezones import build_options as build_timezone_options
 from ..templating import templates
@@ -1289,6 +1290,9 @@ class _Described(NamedTuple):
     details: dict
     poster: str
     links: list
+    # The airing this names, out of what the view shows, or None. It is what the
+    # owner's own watch marks are looked up by — see `_owner_progress`.
+    airing: object = None
 
 
 def _ids_this_view_shows(items: Sequence[Item], media: str,
@@ -1375,7 +1379,7 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
         # owner's calendar holds, not from what a stranger spelled. The airing also
         # carries each service's own NAME for the title, which is what lets these
         # links be spelled the way both services ask for.
-        detail_source.outbound_links(shown_ids, media))
+        detail_source.outbound_links(shown_ids, media), shown)
 
 
 def _the_airing_this_names(items: Sequence[Item], bound: dict[str, str]) -> Item | None:
@@ -1398,9 +1402,35 @@ async def _details(request: Request, share_row) -> Response:
 
     A VIEW, NOT AN API: the same panel the owner's own calendar opens
     (templates/_details.html), so a visitor is shown what the owner is shown and
-    there is no second renderer for a public surface to drift away in. WITHOUT
-    THE TICKS — whose progress would they be? A visitor has no account here, and
-    the owner's watch record is not part of what a share link publishes.
+    there is no second renderer for a public surface to drift away in.
+
+    THE WATCH TICKS ARE THE OWNER'S, AND THE OWNER DECIDES WHETHER THEY APPEAR.
+    "Whose progress would they be?" has an answer — the same person whose
+    calendar, whose filters and whose not-watching marks this page already
+    publishes — and showing how far along they are is most of why somebody shares
+    a calendar. THE VISITOR IS NEVER ASKED ABOUT: the read is `owner_id`'s, and a
+    visitor has no account here to confuse it with.
+
+    IT IS SWITCHED FROM THE ACCOUNT PAGE, NOT FROM THE LINK, and that is the one
+    part worth being careful about. Publishing a viewing history is a different
+    KIND of fact from an airing date, so the default being ON only works because
+    it can be turned off — and turned off ONCE, for every link already handed out,
+    rather than per link. `user_prefs.share_watch_history` (migration 42) is that
+    switch; the owner's prefs are already read here for the filters, so consulting
+    it costs no second query.
+
+    THE IDENTITY COMES FROM THE MONTH, never from the request — the same rule the
+    picture and the outbound links follow. A stranger cannot name a title and be
+    told what the owner has watched of it.
+
+    NO SEASON PICKER HERE, AND THAT IS THE POINT RATHER THAN AN OMISSION. A
+    shared calendar publishes ONE MONTH. What may be looked up is bound to what
+    that view shows — the id, the medium AND the season — so on a link showing
+    season 3 of a five-season show, four of the five tabs would refuse. Offering
+    a control that mostly says no is worse than not offering it, and the refusal
+    has to stay a single unhelpful sentence (telling a stranger which seasons the
+    owner's calendar contains is exactly what that one message prevents). So the
+    panel is drawn with `picker=False` and shows the season the card is for.
     """
     settings = load_settings()
     params = _effective_params(request)
@@ -1414,18 +1444,59 @@ async def _details(request: Request, share_row) -> Response:
         # and "this link does not show that title" are different facts, and a
         # public page that told them apart would answer, for any id a stranger
         # cared to try, whether the owner's calendar contains it. A LINK THAT DOES
-        # NOT RESOLVE AT ALL answers the same way for the same reason.
+        # NOT RESOLVE AT ALL answers the same way for the same reason, and so does
+        # a SEASON TAB for a season this view has no airing of.
         return details_panel.gap(request, _NO_DESCRIPTION)
+    season = _season_param(params.get("season"))
+    progress = await _owner_progress(share_row, described, season)
     return details_panel.panel(
         request, described.details,
         media=str(parse_media(params.get("media"), Media.SHOW)),
-        season=_season_param(params.get("season")),
+        season=season,
         # THE NAME THE PANEL'S POSTER IS DESCRIBED BY comes from the answer here
         # rather than from the request, for the same reason the picture does. It
         # is alt text and nothing else — the heading above it is set from the card
         # the visitor clicked, before this request is even made.
         title=str(described.details.get("title") or ""),
-        poster=described.poster, links=described.links)
+        poster=described.poster, links=described.links, progress=progress,
+        # NO STRIP ON A PUBLIC PAGE — see the note above. Nothing is carried
+        # forward either, because there is no tab to carry it.
+        picker=False)
+
+
+async def _owner_progress(share_row, described: _Described, season: int | None):
+    """The OWNER's watched episodes for this season, or None.
+
+    THREE THINGS HAVE TO BE TRUE and each is a separate refusal. The account must
+    have left the switch on; the view must actually be showing this title, so the
+    identity comes from the airing rather than from anything the visitor spelled;
+    and there must be something recorded — a season the owner has watched none of
+    draws no ticks at all, which is the rule the calendar's own panel follows and
+    it matters more here, where a column of hollow marks on every card would
+    publish "the owner has watched nothing" about their whole month.
+
+    A FILM HAS NO SEASON TO LOOK UP, and neither has a title the waterfall cannot
+    key; both are None rather than an error.
+
+    The import is function-local because the tracker reads the calendar back, and
+    naming it at module level would close that loop at import time — the same
+    reason the calendar's own route defers it. See tests/kernel/test_layering.py,
+    where the edge is declared DEFERRED.
+    """
+    if season is None or described.airing is None:
+        return None
+    owner_id = int(share_row["user_id"])
+    prefs = await auth.get_user_prefs(owner_id)
+    if not prefs.get("share_watch_history"):
+        return None
+    try:
+        key = parse_item_key(str(described.airing.mark_key))
+    except ValueError:
+        return None
+    from ..distrakt import episode_progress
+    progress = await episode_progress.for_season(
+        owner_id, key, season, described.airing.ids or {})
+    return progress if progress.count else None
 
 
 # What a public request is told when it may not be told anything. Named once

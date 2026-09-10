@@ -251,7 +251,20 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "onto one ItemKey, the (key, season) unit, whole-show-absorbs-seasons) "
         "that a second implementation would get wrong from memory. Deferred "
         "because distrakt reads the calendar back, and naming it at module "
-        "level would close that loop at import time",
+        "level would close that loop at import time. "
+        "IT ALSO READS THE VIEWER'S OWN WATCHED EPISODES for the card a details "
+        "panel was opened from, through episode_progress — the tracker files "
+        "those under the SHARED identity waterfall (providers/base.py's "
+        "MATCH_SOURCES), which is exactly what a calendar card resolves to, so "
+        "this is a per-user database read rather than anything asked of a "
+        "service: no call, no token, no id translation. The alternative was the "
+        "calendar re-deriving which services an account syncs, which id each of "
+        "them knows a title by and where a wrong count is corrected — five facts "
+        "that already have one home. THE PUBLIC SHARE PAGE READS IT TOO, for the "
+        "OWNER rather than the visitor, behind that account's own "
+        "user_prefs.share_watch_history switch: the identity comes from the "
+        "airing the owner's month holds and never from the request, so a stranger "
+        "cannot name a title and be told what the owner watched of it",
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "

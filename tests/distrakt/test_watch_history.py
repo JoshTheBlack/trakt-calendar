@@ -20,7 +20,7 @@ from tests.support import migrated_db
 # One linked service and nothing else, which is what almost every account has.
 # The tracker asks each registered source whether this request's settings carry a
 # usable credential for it, so a fake settings object has to be able to answer —
-# see app/distrakt/routes.py's _distrakt_settings, which is what fills these in
+# see app/distrakt/viewer.py's settings_for_user, which is what fills these in
 # with one person's own tokens.
 SETTINGS = SimpleNamespace(configured=True, trakt_configured=True, simkl_configured=False)
 

@@ -217,7 +217,7 @@ def for_tracker_ports(prefs, linked, settings) -> list[tuple[Source, SyncPort]]:
       - the SOURCE can answer at all (private data, and a port to read it with);
       - the ACCOUNT wants it (`prefs.admits_tracker`, given what it has linked);
       - the CREDENTIAL is there (`is_configured` against a Settings carrying that
-        account's own tokens — see app/distrakt/routes.py's _distrakt_settings).
+        account's own tokens — see app/distrakt/viewer.py's settings_for_user).
 
     THE ORDER HERE IS REGISTRY ORDER, WHICH IS NOT THE ORDER THE TRACKER USES.
     This function knows which sources are ELIGIBLE; it has no account context

@@ -62,7 +62,7 @@ def youtube_id(url: object) -> str | None:
 templates.env.filters["youtube_id"] = youtube_id
 
 
-def details_url(base: str, media, ids, season) -> str:
+def details_url(base: str, media, ids, season, key: str = "") -> str:
     """Where a card asks for its details panel, built by the SERVER.
 
     ONE PARAMETER PER SOURCE, NAMED FOR THAT SOURCE — `?trakt=203330&simkl=2601798`
@@ -97,7 +97,44 @@ def details_url(base: str, media, ids, season) -> str:
                if (value := str((ids or {}).get(f"{source}_slug") or ""))]
     if season not in (None, ""):
         params.append(("season", str(season)))
+    # AND THE CARD'S SHARED IDENTITY, where the surface asking has one. The
+    # service ids above say who can DESCRIBE the title; this says which title it
+    # is in the id space nobody here owns (app/providers/base.py's MATCH_SOURCES),
+    # which is what the tracker files a person's watched episodes under. A
+    # calendar card sends it so its panel can draw the same ticks the tracker
+    # does for the same show; the public share page sends none, because there is
+    # no viewer whose viewing it could be.
+    if key:
+        params.append(("key", str(key)))
     return f"{base}?{urlencode(params)}"
 
 
 templates.env.globals["details_url"] = details_url
+
+
+def details_query_names(*, names: bool = True) -> tuple[str, ...]:
+    """Every parameter name `details_url` can put on a details request.
+
+    THE SAME WALK OVER `Source`, so the two cannot disagree about what a details
+    request is made of — a third service registers once and both the builder and
+    this answer it. `season` and `key` are not here: the first is what a season
+    tab REPLACES, and the second is an identity a route validates for itself
+    rather than copying.
+
+    It exists because a fragment that carries a request's parameters forward has
+    to carry the ones it NAMES rather than the ones it was sent. Copying a query
+    string wholesale means a value a caller invented is rendered back into the
+    page — inert in an attribute, but it is still the owner's page echoing a
+    stranger's text, which is the rule the poster and the outbound links already
+    follow.
+
+    `names` is the `{source}_slug` half, and it is separable because it is the
+    half that only decides how an outbound LINK IS SPELLED. A surface whose links
+    come from somewhere other than the request reads none of them — the public
+    share page builds its links from the month it has read — so it asks for the
+    ids alone and a stranger's spelling is not carried forward.
+    """
+    ids = ("media",) + tuple(str(source) for source in Source)
+    if not names:
+        return ids
+    return ids + tuple(f"{source}_slug" for source in Source)

@@ -816,3 +816,63 @@ class StatingWhichTrackerDecidesTests(RouteTestCase):
     def test_an_unknown_service_is_refused(self):
         self.assertEqual(self.client.post(
             "/api/me/tracker-order", json={"order": ["letterboxd"]}).status_code, 400)
+
+
+class PublishingWatchMarksOnASharedCalendarTests(RouteTestCase):
+    """POST /api/me/share-watch-history — the one switch over a public fact.
+
+    IT IS THE ACCOUNT'S ANSWER, NOT A LINK'S, and that is what this file can
+    prove: the value is stored against the user, so every link that account has
+    already handed out changes with it. That is the whole reason it lives here
+    and not beside the per-link view options in the Share panel — somebody who
+    changes their mind about publishing a viewing history needs it to reach the
+    links they shared months ago, not just the next one.
+
+    Tested over HTTP because that is the only thing that proves the control is
+    WIRED, which is the lesson the retired-services tests above record.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.setup_account()
+
+    def _stored(self) -> bool:
+        user = asyncio.run(auth.find_user_by_username("josh"))
+        return bool(asyncio.run(auth.get_user_prefs(user["id"]))["share_watch_history"])
+
+    def test_it_starts_on(self):
+        """ON BY DEFAULT, which is only defensible because it can be turned off
+        in the same change that turned it on."""
+        self.assertTrue(self._stored())
+
+    def test_turning_it_off_is_stored(self):
+        resp = self.client.post("/api/me/share-watch-history", json={"enabled": False})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertFalse(self._stored())
+
+    def test_turning_it_back_on_is_stored(self):
+        self.client.post("/api/me/share-watch-history", json={"enabled": False})
+        self.client.post("/api/me/share-watch-history", json={"enabled": True})
+        self.assertTrue(self._stored())
+
+    def test_it_refuses_anything_that_is_not_a_boolean(self):
+        """A string that happens to be truthy must not decide whether a viewing
+        history is published."""
+        for value in ("false", 0, None, "yes"):
+            with self.subTest(value=value):
+                resp = self.client.post(
+                    "/api/me/share-watch-history", json={"enabled": value})
+                self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertTrue(self._stored())
+
+    def test_it_needs_a_session(self):
+        self.client.cookies.clear()
+        resp = self.client.post("/api/me/share-watch-history", json={"enabled": False})
+        self.assertIn(resp.status_code, (401, 403))
+
+    def test_the_account_page_draws_the_switch_in_its_stored_state(self):
+        self.assertIn('id="shareWatchHistoryBox"', self.client.get("/me").text)
+        self.client.post("/api/me/share-watch-history", json={"enabled": False})
+        page = self.client.get("/me").text
+        box = page[page.index('id="shareWatchHistoryBox"'):][:200]
+        self.assertNotIn("checked", box)

@@ -73,7 +73,7 @@ async def get_user_prefs(user_id: int) -> dict:
         "network_filter_json, tv_genres, tv_countries, movie_genres, "
         "movie_countries, show_certifications, "
         "movie_certifications, movie_release_countries, movie_release_types, "
-        "filters_paused "
+        "filters_paused, share_watch_history "
         "FROM user_prefs WHERE user_id = ?",
         (user_id,),
     )
@@ -86,6 +86,11 @@ async def get_user_prefs(user_id: int) -> dict:
             "show_certifications": "", "movie_certifications": "",
             "movie_release_countries": "", "movie_release_types": "",
             "filters_paused": False,
+            # ON where the row is missing, which is the same default the column
+            # carries: a fallback that quietly published less than the account
+            # asked for would be a different bug from the one this branch exists
+            # to avoid.
+            "share_watch_history": True,
         }
     return {
         "endpoint": row["endpoint"],
@@ -102,6 +107,11 @@ async def get_user_prefs(user_id: int) -> dict:
         "movie_release_countries": row["movie_release_countries"] or "",
         "movie_release_types": row["movie_release_types"] or "",
         "filters_paused": bool(row["filters_paused"]),
+        # WHETHER THIS ACCOUNT'S SHARE LINKS PUBLISH ITS WATCH HISTORY. Read here
+        # rather than from share_links because it is not a view option a link may
+        # override — see migration 42 — and because the share page already reads
+        # the owner's prefs for its filters, so this costs no second query.
+        "share_watch_history": bool(row["share_watch_history"]),
     }
 
 
@@ -113,6 +123,7 @@ _USER_PREF_FIELDS = frozenset({
     "network_filter", "tv_genres", "tv_countries", "movie_genres",
     "movie_countries", "show_certifications", "movie_certifications",
     "movie_release_countries", "movie_release_types", "filters_paused",
+    "share_watch_history",
 })
 
 
@@ -126,7 +137,7 @@ async def update_user_prefs(user_id: int, **fields) -> None:
     columns: list[str] = []
     params: list = []
     for key, value in updates.items():
-        if key in ("hide_not_watching", "filters_paused"):
+        if key in ("hide_not_watching", "filters_paused", "share_watch_history"):
             columns.append(f"{key} = ?")
             params.append(int(bool(value)))
         elif key == "network_filter":

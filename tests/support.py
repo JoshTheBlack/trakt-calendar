@@ -317,3 +317,35 @@ class DetailsPanel:
                 # press goes to and not how an attribute spells an ampersand.
                 found[tick.group("source")] = unescape(url.group("url"))
         return found
+
+    _TAB = re.compile(
+        r'<input type="radio" name="detailsSeason" class="ep-season-radio"\s*'
+        r'id="epSeason-(?P<number>\d+)"(?P<attrs>[^>]*)>', re.S)
+    _TAB_GET = re.compile(r'hx-get="(?P<url>[^"]*)"')
+
+    @property
+    def season_tabs(self) -> list[int]:
+        """The seasons the picker offers, in the order it draws them. Empty where
+        there is nothing to pick between — one season draws no strip."""
+        return [int(tab.group("number")) for tab in self._TAB.finditer(self.html)]
+
+    @property
+    def open_tab(self) -> int | None:
+        """The season whose rows came with the panel."""
+        for tab in self._TAB.finditer(self.html):
+            if "checked" in tab.group("attrs"):
+                return int(tab.group("number"))
+        return None
+
+    @property
+    def tab_urls(self) -> dict[int, str]:
+        """{season: where its tab fetches its rows}, omitting the open one — that
+        tab carries no request at all, because its rows are already here."""
+        found: dict[int, str] = {}
+        for tab in self._TAB.finditer(self.html):
+            url = self._TAB_GET.search(tab.group("attrs"))
+            if url:
+                # Unescaped, because what is asserted is the ADDRESS a press goes
+                # to and not how an attribute spells an ampersand.
+                found[int(tab.group("number"))] = unescape(url.group("url"))
+        return found

@@ -670,7 +670,7 @@ class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
     """The five actions an account signed in with Simkl alone could not take.
 
     THE FAULT AND WHY IT LOOKED LIKE A CONFIGURATION PROBLEM.
-    `_distrakt_settings` swaps every source's credential for THIS account's own,
+    `viewer.settings_for_user` swaps every source's credential for THIS account's own,
     which is what makes the tracker read the viewer's history rather than the
     operator's. `settings.trakt_configured` therefore stops meaning "this
     instance has Trakt set up" and starts meaning "this VIEWER linked Trakt" —

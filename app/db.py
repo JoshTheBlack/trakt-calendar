@@ -3095,6 +3095,27 @@ ALTER TABLE login_attempts_new RENAME TO login_attempts;
 CREATE INDEX ix_login_attempts_lookup ON login_attempts(key_type, key_value, attempted_at);
 """
 
+
+# Migration 42 — whether a share link publishes the owner's watch history.
+#
+# A PER-ACCOUNT PREFERENCE RATHER THAN A PER-LINK ONE, and that is the whole
+# reason it is here and not on `share_links`. Every other public view option —
+# card style, packing, hide-not-watching, the endpoint — is something a link may
+# override, so a visitor's query string can name one. This may not be: it decides
+# whether a viewing history is published at all, and an answer that a URL could
+# change would not be an answer. Keeping it on user_prefs also makes turning it
+# off take effect on links that were handed out months ago, which is the point of
+# switching it from the account page rather than from the Share panel.
+#
+# ON BY DEFAULT, deliberately and with the cost stated: the marks are already
+# visible to anybody holding the link on every other thing that page publishes —
+# what is airing, which titles the owner has turned away — and the value of the
+# feature is that a shared calendar shows how far along its owner is. The switch
+# ships in the same change, which is what makes the default recoverable.
+MIGRATION_42 = """
+ALTER TABLE user_prefs ADD COLUMN share_watch_history INTEGER NOT NULL DEFAULT 1;
+"""
+
 MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (1, MIGRATION_1),
     (2, MIGRATION_2),
@@ -3137,6 +3158,7 @@ MIGRATIONS: list[tuple[int, str | Callable[[sqlite3.Connection], None]]] = [
     (39, MIGRATION_39),
     (40, MIGRATION_40),
     (41, MIGRATION_41),
+    (42, MIGRATION_42),
 ]
 
 

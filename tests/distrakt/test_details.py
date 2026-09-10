@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 from app import db, distrakt as distrakt_store
@@ -572,3 +573,78 @@ class TheChecklistsMarksComeFromTheMacroTests(_DetailsRouteTestCase):
                     panel.html,
                     r'class="ep-check svc-%s[^"]*"[^>]*>\s*<img class="source-logo ep-mark"'
                     % source)
+
+
+class SeasonTabsOnARosterRowTests(_DetailsRouteTestCase):
+    """Paging back through the seasons of a show from its roster row.
+
+    THE ROW IT IS AUTHORIZED BY IS NOT THE SEASON IT DESCRIBES, and that is the
+    only thing this surface has to get right that the calendar's does not. A
+    roster row is a title AND a season, and the seasons worth paging back through
+    are exactly the ones somebody who started tracking a show at season 4 has no
+    row for. So a tab's address pins the season the panel was opened from and
+    asks about another one: the permission stays "this title is on your roster",
+    which is a thing the caller could already see.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._settle(_month_back(0), season=4)
+
+    def _open(self, season: int = 4) -> DetailsPanel:
+        client = _CatalogueClient({
+            "shows/7": SHOW, "shows/7/people": PEOPLE,
+            f"shows/7/seasons/{season}": EPISODES,
+        })
+        with patch.object(transport, "shared_client", return_value=client):
+            resp = self.client.get(
+                f"/distrakt/fragments/details?key={KEY}&season={season}")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return DetailsPanel(resp.text)
+
+    def _press(self, url: str) -> DetailsPanel:
+        season = int(parse_qs(urlsplit(url).query)["season"][0])
+        client = _CatalogueClient({f"shows/7/seasons/{season}": EPISODES})
+        with patch.object(transport, "shared_client", return_value=client):
+            resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return DetailsPanel(resp.text)
+
+    def test_the_rows_season_is_how_many_tabs_there_are(self):
+        panel = self._open()
+        self.assertEqual(panel.season_tabs, [1, 2, 3, 4])
+        self.assertEqual(panel.open_tab, 4)
+
+    def test_a_tab_pins_the_row_it_was_opened_from(self):
+        """Without this the roster search would be run for the season being
+        asked about, and every earlier season of a show tracked from part-way
+        through would answer "Not on your roster"."""
+        url = self._open().tab_urls[1]
+        self.assertEqual(parse_qs(urlsplit(url).query),
+                         {"key": [KEY], "row": ["4"], "season": ["1"]})
+
+    def test_a_season_the_roster_has_no_row_for_still_opens(self):
+        """The case the picker exists for. Season 1 was never tracked; the title
+        is on the roster and that is what the tab is allowed by."""
+        rows = self._press(self._open().tab_urls[1])
+        self.assertIn("Season 1 Episodes", rows.html)
+        self.assertEqual(rows.episodes, list(range(1, 11)))
+
+    def test_a_tab_for_a_title_that_is_not_on_the_roster_is_still_refused(self):
+        """Widening the season did not widen the title, which is the half that
+        keeps this route answering only about rows this account can see."""
+        resp = self.client.get(
+            "/distrakt/fragments/details/season?key=show:tmdb:999&row=4&season=1")
+        self.assertIn("Not on your roster", resp.text)
+
+    def test_the_ticks_are_the_ticks_of_the_season_that_was_asked_for(self):
+        """The rows and the viewing arrive together, because they are one answer
+        about one season."""
+        self._progress("trakt", {1: "2026-08-01"})           # season 4's own
+        asyncio.run(db.execute(
+            "INSERT OR REPLACE INTO distrakt_show_progress "
+            "(user_id, media, match_source, match_id, season, source, "
+            "watched_episodes_json, trakt_id) VALUES (?,?,?,?,?,?,?,?)",
+            (self.user_id, "show", "tmdb", "1", 1, "trakt",
+             json.dumps({"6": "2026-08-01T00:00:00Z"}), 7)))
+        self.assertEqual(self._press(self._open().tab_urls[1]).watched, [6])

@@ -29,6 +29,7 @@ from unittest.mock import AsyncMock, patch
 
 from app import db
 from app.distrakt import routes as distrakt_routes
+from app.distrakt import viewer as distrakt_viewer
 from app.distrakt import store, watch_history
 from app.providers.base import ItemKey
 
@@ -110,7 +111,7 @@ class _RosterAddCase(DistraktTestCase):
         # refuses outright without a catalogue, and that refusal is not what any
         # of these tests is about; a stand-in built from scratch would have to
         # grow an attribute every time anything the month payload touches does.
-        real = distrakt_routes._distrakt_settings
+        real = distrakt_viewer.settings_for_user
 
         class _WithCatalogue:
             trakt_catalogue_configured = True
@@ -125,7 +126,7 @@ class _RosterAddCase(DistraktTestCase):
             return _WithCatalogue(await real(user_id))
 
         season = dict(self.SEASON) if detail is None else dict(detail)
-        with patch("app.distrakt.routes._distrakt_settings", _settings), \
+        with patch("app.distrakt.viewer.settings_for_user", _settings), \
              patch("app.distrakt.live.season_detail",
                    AsyncMock(return_value=season)), \
              patch("app.distrakt.routes._season_lookup",

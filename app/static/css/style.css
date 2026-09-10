@@ -1311,6 +1311,69 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .cast-member .headshot.placeholder { display: flex; align-items: center; justify-content: center; font-size: 1.6rem; color: var(--text-faint); }
 .cast-member .c-name { font-size: 0.78rem; font-weight: 700; line-height: 1.2; }
 .cast-member .c-char { font-size: 0.72rem; color: var(--text-faint); line-height: 1.2; }
+/* THE SEASON PICKER, AND IT IS A RADIO GROUP RATHER THAN A WIDGET. Each season
+   is <input type=radio> + <label> + its pane, in that order, and the flex `order`
+   below lifts every label into a strip along the top while the panes fall
+   underneath at full width. That is what lets the markup keep each pane ADJACENT
+   to the tab that owns it — `:checked + label + pane` is the whole switching
+   mechanism, so the browser does the one-at-a-time part and no script has to.
+   The radios stay in the document and focusable (an off-screen clip rather than
+   display:none) so the strip can be walked with the arrow keys. */
+/* POSITIONED, AND THAT IS NOT DECORATION. The radios below are taken out of
+   flow, so without this their containing block is whatever is positioned
+   further up — the modal — and focusing one (by click OR by arrow key) made
+   the browser scroll to wherever it had put them, jumping the panel down to
+   the season description on every tab change. Scoping them to the strip puts
+   them where they already are, so focus scrolls nowhere. */
+.ep-seasons { display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+              margin-top: 14px; position: relative; }
+.ep-season-radio { position: absolute; top: 0; left: 0;
+                   width: 1px; height: 1px; opacity: 0; }
+.ep-season-tab {
+    order: 1; cursor: pointer; font-size: 0.76rem; font-weight: 700;
+    color: var(--text-dim); background: rgba(255,255,255,0.05);
+    border: 1px solid transparent; border-radius: 999px; padding: 4px 11px;
+    font-variant-numeric: tabular-nums; user-select: none;
+}
+.ep-season-tab:hover { color: var(--text); background: rgba(255,255,255,0.1); }
+.ep-season-radio:checked + .ep-season-tab {
+    color: var(--accent-blue); background: rgba(33,150,243,0.14); border-color: var(--accent-blue);
+}
+.ep-season-radio:focus-visible + .ep-season-tab { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
+/* THREE GROUPS IN ONE FLEX CONTAINER, ordered rather than nested: the labels
+   along the top, then the title's trailer, then the panes. The trailer is not
+   the season's — neither service publishes one per season — and it lives inside
+   this container purely so that ONE copy of it can sit between the strip and the
+   swapped content. Repeating it inside each pane would put an iframe per opened
+   season on the page, all but one hidden and still loading. */
+/* SCOPED TO `.ep-seasons >`, AND THAT SCOPING IS THE RULE RATHER THAN A NICETY.
+   A title with ONE season draws no picker, so its trailer is a direct child of
+   `.modal-body` instead — which is itself `display: flex; flex-direction:
+   column`. An unscoped `order: 2` therefore applied THERE too, against siblings
+   all sitting at the default 0, and sent the trailer to the BOTTOM of the whole
+   panel, under the episode list. Read out of a browser console: parent
+   `modal-body`, order 2, laid out last of seven children. The ordering is only
+   ever meant for the picker's own container, and a one-season panel needs none
+   of it — its trailer is already written above the season's content.
+   The space below it is for the same reason the ordering exists: what follows is
+   a new subject. The modal body's own 16px gap covers the no-picker case. */
+.ep-seasons > .details-trailer { order: 2; flex: 0 0 100%; margin-bottom: 16px; }
+/* Every pane is a full-width row below that, and only the checked one is drawn.
+   A pane that has never been opened holds its loading line and nothing else, so
+   an unopened season costs a request only when it is asked for. */
+.ep-season-pane { order: 3; flex: 0 0 100%; display: none; }
+.ep-season-radio:checked + .ep-season-tab + .ep-season-pane { display: block; }
+/* The season's own description, under the trailer and visibly a caption to the
+   season rather than a second copy of the show's blurb above the picker. */
+.details-overview.season { border-left: 2px solid var(--accent-blue);
+                           padding-left: 10px; margin-bottom: 6px; }
+/* HEADINGS INSIDE A SEASON PANE GET ROOM ABOVE THEM. The shared rule is tuned
+   for a panel where every section was the title's; here each one starts a new
+   subject — this season's description, then its cast, then its episodes — and
+   4px ran them together. The first heading in the pane keeps the tighter gap,
+   because the picker is directly above it and already separates them. */
+.ep-season-pane .details-section-title { margin-top: 24px; }
+.ep-season-pane > .details-section-title:first-child { margin-top: 4px; }
 .ep-list { display: flex; flex-direction: column; gap: 2px; max-height: 320px; overflow-y: auto; }
 .ep-row { display: flex; align-items: baseline; gap: 10px; padding: 8px 10px; border-radius: 8px; }
 .ep-row:nth-child(odd) { background: rgba(255,255,255,0.02); }
@@ -1768,6 +1831,15 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
    only what the tracker adds to it — the watched markers on an episode row.
    The panel itself is one template on every surface, poster included. */
 .distrakt-show-row { cursor: pointer; }
+/* A SEASON'S OWN NAME, beside the number rather than instead of it. An anthology
+   titles its seasons properly (Murder House, Night Country) and the number is
+   still how somebody navigates, so the heading carries both. Drawn only where
+   the name is a name — the provider drops "Season 3", which restates the
+   number. */
+.ep-season-name {
+    font-size: 0.78rem; font-weight: 600; color: var(--text-dim);
+    font-style: italic; margin-left: 6px;
+}
 .ep-watched-count {
     font-size: 0.72rem; font-weight: 700; color: var(--green);
     background: rgba(76,175,80,0.12); border-radius: 999px; padding: 2px 8px; margin-left: 8px;

@@ -1351,7 +1351,7 @@ async def tracker_ports(settings, user_id: int) -> list:
 
     WHICH SERVICES COUNT AS LINKED, FOR THE TRACKER, IS WHICH ONES THIS SETTINGS
     OBJECT CARRIES A USABLE CREDENTIAL FOR. That is not a shortcut around auth:
-    `_distrakt_settings` builds this object by replacing every source's token
+    `viewer.settings_for_user` builds this object by replacing every source's token
     with THIS account's own, so a source configured on it is a source this
     account has an identity for, and a source it has not linked comes through
     empty. The tracker's half of "linked" and "can be asked" are the same fact

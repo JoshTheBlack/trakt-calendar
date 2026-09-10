@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -67,12 +68,20 @@ async def fetch_tile_info(settings: Settings, media: str, trakt_id: str, season:
     return {"season": season, **_summarize_season(episodes, tz)}
 
 
+# TWENTY, BECAUSE THE GRID IS FIVE WIDE. The cap is this app's own — a season's
+# cast runs to 118 on some titles and the panel is not a filmography — and it was
+# 16, which left the last row three short of full at the default width. Four rows
+# of five fills the grid; anything under a full row reads as the list having been
+# cut off mid-thought rather than deliberately bounded.
+_CAST_SHOWN = 20
+
+
 def _cast_from(people: dict) -> list[dict]:
-    """The modal's cast list from a /people response: top-billed 16, name +
-    character + headshot. `characters` (a list) is Trakt's newer shape and
-    `character` (a string) the older one; both still arrive."""
+    """The modal's cast list from a /people response: the top-billed
+    `_CAST_SHOWN`, name + character + headshot. `characters` (a list) is Trakt's
+    newer shape and `character` (a string) the older one; both still arrive."""
     cast = []
-    for member in (people.get("cast") or [])[:16]:
+    for member in (people.get("cast") or [])[:_CAST_SHOWN]:
         person = member.get("person") or {}
         character = member.get("character") or (member.get("characters") or [""])[0]
         cast.append({
@@ -126,9 +135,35 @@ async def fetch_title_payload(settings: Settings, media: str, trakt_id: str,
     return payload if isinstance(payload, dict) else None
 
 
+# "Season 3" and its translations are the NUMBER restated, not a name. Only the
+# English form is dropped here because that is the form this app asks for; a
+# localized catalogue would need its own reading, and rendering a real name that
+# happened to look like this one is the harmless direction of the error.
+_NUMBERED_SEASON = re.compile(r"(?i)season\s+\d+")
+
+
 async def fetch_details(settings: Settings, media: str, trakt_id: str, season: int | None,
                         cache_only: bool = False) -> dict:
     """Full detail payload for the modal: overview, cast, episode list.
+
+    ASKED ABOUT A SEASON, IT ANSWERS ABOUT THAT SEASON TOO. Where a season is
+    named, the CAST is that season's rather than the title's, and the season's own
+    name and its own description travel BESIDE the title's rather than replacing
+    them — `overview` stays the show's and `season_overview` is the season's, so a
+    panel can show the premise and then what this particular run of it is. That is a correction rather than an
+    embellishment, and it was measured before it was built: the panel used to
+    draw the show's cast whatever season it was open on, and across 14 seasons of
+    six titles only 85 of the 224 people it listed were actually in the season
+    being viewed — 37%. On an anthology it is worse and it is visible: the
+    `true-detective` season 1 panel listed Jodie Foster and Kali Reis, who are in
+    Night Country, four seasons later. Trakt states all of it per season, and
+    every one of the 40 seasons probed had its own overview differing from the
+    show's.
+
+    WHAT STAYS SHOW-LEVEL, and the split is deliberate: genres, network,
+    certification, status, trailer, country, language and the rating are facts
+    about the TITLE, and Trakt has no per-season answer for most of them. So the
+    chip row describes the show and the season pane describes the season.
 
     `cache_only=True` serves purely from cache and never calls Trakt — the mode a
     public share page uses so a visitor's click reuses what the owner's own views
@@ -137,19 +172,47 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
     tz = ZoneInfo(settings.timezone)
     base = "movies" if media == "movie" else "shows"
     client = transport.shared_client()
+    per_season = media != "movie" and season is not None
     tasks = {
         "info": transport.cached_get(
             client, settings, f"{base}/{trakt_id}", {"extended": "full"}, cache_only=cache_only),
+        # THE CAST OF THE SEASON WHERE ONE WAS NAMED, and of the title otherwise.
+        # Both answer the same shape, so only the path differs; a season that
+        # answers nothing falls back to the show's below rather than drawing an
+        # empty grid.
         "people": transport.cached_get(
-            client, settings, f"{base}/{trakt_id}/people", {"extended": "full"}, cache_only=cache_only),
+            client, settings,
+            f"shows/{trakt_id}/seasons/{season}/people" if per_season
+            else f"{base}/{trakt_id}/people",
+            {"extended": "full"}, cache_only=cache_only),
     }
-    if media != "movie" and season is not None:
+    if per_season:
         tasks["episodes"] = transport.cached_get(
             client, settings, f"shows/{trakt_id}/seasons/{season}", {"extended": "full"},
+            cache_only=cache_only)
+        # EVERY SEASON IN ONE CALL, which is where the season's own name and
+        # overview come from and how many seasons the picker offers.
+        #
+        # THE SAME URL `fetch_show_seasons` ALREADY ASKS, deliberately: same path,
+        # same params, so the same cache key, so a title the tracker's add flow or
+        # the calendar search has been through answers this for free. It is also
+        # small — 3-13 KB across a 4-season and a 14-season show — where
+        # `extended=full,episodes` would carry every episode of every season
+        # (348 KB for one long-running title) and defeat the point of loading a
+        # season's rows only when somebody opens that season.
+        tasks["seasons"] = transport.cached_get(
+            client, settings, f"shows/{trakt_id}/seasons", {"extended": "full"},
             cache_only=cache_only)
     results = dict(zip(tasks.keys(), await asyncio.gather(*tasks.values())))
 
     info = results.get("info") or {}
+    seasons = results.get("seasons")
+    this_season = _season_object(seasons, season)
+    cast = _cast_from(results.get("people") or {})
+    if per_season and not cast:
+        cast = _cast_from(await transport.cached_get(
+            client, settings, f"{base}/{trakt_id}/people", {"extended": "full"},
+            cache_only=cache_only) or {})
 
     # Deferred so this module stays importable from calendar.py's side of the
     # package: the poster reading lives there because that is where the feed's
@@ -162,6 +225,13 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "title": info.get("title") or "",
         "year": info.get("year") or "",
         "overview": (info.get("overview") or "").strip(),
+        # THE SEASON'S OWN WORDS, BESIDE THE TITLE'S RATHER THAN INSTEAD OF THEM.
+        # They answer different questions — "what is this show" and "what is this
+        # season about" — and an anthology needs both on screen at once: the
+        # premise, and then what THIS run of it is. Empty where the season has no
+        # separate blurb, which is the panel's signal to draw nothing rather than
+        # to repeat the paragraph above it.
+        "season_overview": (this_season.get("overview") or "").strip(),
         "status": (info.get("status") or "").replace("_", " ").title(),
         # THE COUNTRY, UPPERCASED, "" when the service does not say. It has
         # always been in this response and this projection dropped it, which
@@ -240,9 +310,58 @@ async def fetch_details(settings: Settings, media: str, trakt_id: str, season: i
         "first_aired": info.get("first_aired") or "",
         "homepage": info.get("homepage") or "",
         "season": season,
-        "cast": _cast_from(results.get("people") or {}),
+        # WHAT THIS SEASON IS CALLED, where that is a name rather than a number.
+        # Trakt titles an anthology's seasons properly — Murder House, Asylum,
+        # Coven, Night Country, Candle Cove — and calls the rest "Season 3",
+        # which says nothing the number does not. `_season_name` drops the latter,
+        # so a caller can render this whenever it is non-empty without having to
+        # know the difference.
+        "season_title": _season_name(this_season),
+        # HOW MANY SEASONS THIS TITLE HAS, for the panel's season picker. Counted
+        # from the same one call the season's own words come from. 0 where nothing
+        # was asked about a season, which is the film case and the case of a show
+        # nobody named a season for.
+        "season_count": _usable_season_count(seasons),
+        "cast": cast,
         "episodes": _episodes_from(results.get("episodes") or [], tz),
     }
+
+
+def _season_object(seasons, number: int | None) -> dict:
+    """The one season `number` names, out of `shows/{id}/seasons`, or {}."""
+    if number is None or not isinstance(seasons, list):
+        return {}
+    for entry in seasons:
+        if isinstance(entry, dict) and entry.get("number") == number:
+            return entry
+    return {}
+
+
+def _season_name(season: dict) -> str:
+    """A season's own name, or "" where Trakt only restates the number.
+
+    "Season 3" is not a name — it is the number spelled out, and rendering it
+    beside the number gives a reader nothing. Anthologies are where this field
+    earns its place, and there it holds the real thing.
+    """
+    title = " ".join(str(season.get("title") or "").split())
+    if not title or _NUMBERED_SEASON.fullmatch(title):
+        return ""
+    return title
+
+
+def _usable_season_count(seasons) -> int:
+    """How many seasons a picker should offer.
+
+    SPECIALS ARE NOT A SEASON somebody pages back through, and a season with no
+    episodes is one Trakt is holding a place for — both are excluded, which is
+    the same filter `fetch_show_seasons` applies for the same reason.
+    """
+    if not isinstance(seasons, list):
+        return 0
+    return sum(1 for entry in seasons
+               if isinstance(entry, dict) and (entry.get("number") or 0) > 0
+               and (entry.get("episode_count") or 0) > 0)
 
 
 # ---------------------------------------------------------------------------

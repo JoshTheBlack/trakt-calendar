@@ -385,6 +385,34 @@
     </div>
     {% endif %}
 
+    {# WHAT A SHARED CALENDAR SAYS ABOUT YOUR VIEWING.
+
+       ON THIS PAGE RATHER THAN IN THE SHARE PANEL, and the difference is not
+       cosmetic: every option in that panel is a view option a link may override,
+       and this one decides whether a viewing history is published at all. It is
+       one answer for the account, so turning it off reaches links handed out
+       months ago — which is what somebody changing their mind actually needs.
+
+       ON BY DEFAULT, with the switch shipping in the same change that turned it
+       on. A default nobody can change is the part that would be hard to take
+       back. #}
+    <div class="auth-list" id="shareWatchHistory">
+      <div class="row">
+        <span class="label">Shared calendars</span>
+        <div class="row-main">
+          <label>
+            <input type="checkbox" id="shareWatchHistoryBox"
+                   {% if share_watch_history %}checked{% endif %}>
+            <span>Show which episodes you have watched</span>
+          </label>
+          <p class="auth-sub">Anyone holding one of your links sees the same
+            watched marks your own calendar shows. Turning this off applies to
+            every link you have already shared, straight away.</p>
+          <span class="auth-error" id="shareWatchHistoryError" role="alert"></span>
+        </div>
+      </div>
+    </div>
+
     {# WHOSE NUMBERS STILL COUNT. Unlinking a service stops it being ASKED, but
        the numbers it already contributed stay in the watch history and go on
        being shown — correctly flagged as belonging to a service nobody asked,
@@ -607,6 +635,41 @@ reorderableList('trackerPriorityList', 'trackerPriorityError',
                 '/api/me/tracker-order', 'Could not save that order.');
 reorderableList('metadataOrderList', 'metadataOrderError',
                 '/api/me/metadata-order', 'Could not save that order.');
+
+// WHETHER A SHARED CALENDAR PUBLISHES THIS ACCOUNT'S WATCH MARKS. One box, one
+// account-wide answer; a failed save puts the box back rather than leaving it
+// claiming a state nobody stored, which is the same rule the retired-services
+// list below follows and for the same reason.
+const shareWatchBox = document.getElementById('shareWatchHistoryBox');
+if (shareWatchBox) {
+  const err = document.getElementById('shareWatchHistoryError');
+  shareWatchBox.addEventListener('change', async () => {
+    err.textContent = '';
+    try {
+      const resp = await fetch('/api/me/share-watch-history', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({enabled: shareWatchBox.checked}),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data.ok) {
+        err.textContent = data.error || 'Could not save that.';
+        shareWatchBox.checked = !shareWatchBox.checked;
+      } else {
+        // SAY IT SAVED. This one writes something the viewer cannot see the
+        // effect of from here — it changes what a link they handed out months
+        // ago publishes — so a silent success is indistinguishable from a box
+        // that just moved.
+        toast(shareWatchBox.checked
+          ? 'Shared calendars will show your watched episodes.'
+          : 'Shared calendars will no longer show your watched episodes.', true);
+      }
+    } catch (_e) {
+      err.textContent = 'Could not reach the server.';
+      shareWatchBox.checked = !shareWatchBox.checked;
+    }
+  });
+}
 
 // WHOSE STORED NUMBERS STILL COUNT. Each box is one service; unchecked means
 // "I have moved off this one, stop counting what it left behind". The whole set

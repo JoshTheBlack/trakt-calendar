@@ -406,7 +406,7 @@ class TestTrackerPort:
 
     def test_an_unconfigured_source_is_never_asked(self):
         """Admitted by the preference and linked, but with no credential on this
-        request's settings, is not something to call — see _distrakt_settings,
+        request's settings, is not something to call — see app/distrakt/viewer.py's settings_for_user,
         which is what puts an account's own tokens there."""
         ports = providers.for_tracker_ports(
             _ALL_SOURCES, _ALL_NAMES, Settings(trakt_client_id="c", trakt_access_token="t"))
