@@ -7,10 +7,9 @@
 
    TWO AXES OF VARIATION, AND NOTHING ELSE.
 
-     `poster` — a URL, or nothing. The calendar and the share page draw the
-     picture the card was drawn with; the tracker identifies a show by its network
-     logo and its payload carries no image at all, so it gets the text-only hero
-     rather than a large grey placeholder.
+     `poster` — the picture the CARD was drawn with, where the surface has a
+     card. Empty is not "no picture": the answer carries the describing service's
+     own and the hero falls back to it, so every surface draws one.
 
      `progress` — this viewer's own record of the season, or nothing. Given one,
      every episode row grows a tick per service the account syncs, the heading
@@ -41,13 +40,15 @@
    title="{{ label }}">{{ body }}</a>{% else %}<span class="{{ css }}" title="{{ label }}">{{ body }}</span>{% endif %}
 {%- endmacro -%}
 
-{# `poster` IS none WHERE THE SURFACE HAS NO PICTURE AT ALL and "" where it has
-   one it does not know yet — two different things, so a title whose artwork has
-   not been resolved still gets the placeholder the card beside it draws, while
-   the tracker gets the text-only hero it asked for. #}
-<div class="details-hero{% if poster is none %} no-poster{% endif %}">
-    {% if poster is not none %}<img src="{{ poster or '/static/images/nopostertv.png' }}"
-         alt="{{ title }} poster">{% endif %}
+{# THE CARD'S PICTURE, THEN THE ANSWER'S, THEN THE PLACEHOLDER — one rule, and
+   every surface draws a poster. A surface with a card in front of the reader
+   passes its own, because that is the picture they are already looking at and it
+   is the one this viewer's field order picked. A surface with no card passes
+   nothing and gets the describing service's own, which costs nothing: it rode in
+   on the lookup that was made anyway. #}
+{% set artwork = poster or d.poster %}
+<div class="details-hero">
+    <img src="{{ artwork or '/static/images/nopostertv.png' }}" alt="{{ title }} poster">
     <div class="d-meta">
         <div class="d-chips">
             {%- if d.status %}<span class="chip">{{ d.status }}</span>{% endif -%}
@@ -115,15 +116,18 @@
 {% if d.episodes %}
 <div class="ep-list">
     {%- for ep in d.episodes %}
-    {%- set recorders = progress.recorded_by(ep.number) if progress else () %}
     <div class="ep-row{% if progress and progress.watched(ep.number) %} watched{% endif %}">
         {%- if progress %}<span class="ep-checks">
             {%- for t in progress.ticks(ep.number) %}{{ tick(t, progress.single) }}{% endfor -%}
         </span>{% endif %}
         <span class="ep-num">E{{ '%02d' | format(ep.number | int) }}</span>
         <span class="ep-title">{{ ep.title }}</span>
-        {%- if recorders %}<span class="ep-source">
-            {%- for name in recorders %}{{ src.label(name) }}{% if not loop.last %} · {% endif %}{% endfor -%}
+        {#- WHO WAS ASKED, on every row. The ticks beside it say who answered
+            yes; without this, "the other service does not have this episode" and
+            "the other service was never asked" look the same. -#}
+        {%- if progress and progress.checked_by %}<span class="ep-source">
+            {%- for name in progress.checked_by %}{{ src.label(name) }}
+            {%- if not loop.last %} · {% endif %}{% endfor -%}
         </span>{% endif %}
         {%- if ep.rating %}<span class="ep-rating">⭐ {{ ep.rating }}</span>{% endif %}
         <span class="ep-date">{{ ep.air_display or 'TBA' }}</span>

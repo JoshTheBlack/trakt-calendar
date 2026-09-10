@@ -14,7 +14,7 @@ function openCalendarSearch() {
 }
 
 function closeCalendarSearch() {
-    document.getElementById('searchModal').classList.remove('open');
+    closeModal('searchModal');
 }
 
 // WHERE A JUMP WAS AIMED, and STAYING there while the month finishes arriving.

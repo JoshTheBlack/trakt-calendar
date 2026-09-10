@@ -52,7 +52,7 @@ function openAddShow() {
 }
 
 function closeAddShow() {
-    document.getElementById('addShowModal').classList.remove('open');
+    closeModal('addShowModal');
 }
 
 // Everything one pick put on screen, taken back down: the season panel and the
@@ -337,7 +337,7 @@ function setRewatchFrom(which) {
 
 function closeRewatchPrompt() {
     pendingRewatch = null;
-    document.getElementById('rewatchModal').classList.remove('open');
+    closeModal('rewatchModal');
 }
 
 async function answerRewatch(fresh) {
@@ -400,7 +400,7 @@ function openAddMovie() {
 }
 
 function closeAddMovie() {
-    document.getElementById('addMovieModal').classList.remove('open');
+    closeModal('addMovieModal');
 }
 
 async function addPickedMovie(row) {

@@ -30,7 +30,7 @@ function closeFilters() {
     const form = document.getElementById('filtersForm');
     form.querySelectorAll('.fchip.is-added').forEach(chip => chip.remove());
     form.reset();
-    document.getElementById('filtersModal').classList.remove('open');
+    closeModal('filtersModal');
 }
 
 // Grey -> only these -> not these -> grey. The three radios are the answer; this

@@ -59,7 +59,9 @@ class _Response:
 
 SHOW = {"title": "The Agency", "year": 2026, "overview": "Spies.",
         "status": "returning series", "network": "Paramount+", "runtime": 50,
-        "genres": ["drama"], "rating": 8.0, "certification": "tv-ma"}
+        "genres": ["drama"], "rating": 8.0, "certification": "tv-ma",
+        # Trakt publishes these without a scheme; its own reader adds one.
+        "images": {"poster": ["walter.trakt.tv/agency.jpg"]}}
 PEOPLE = {"cast": [{"person": {"name": "Michael"}, "character": "Martian"}]}
 EPISODES = [{"number": n, "title": f"Ep {n}", "first_aired": "2026-08-01T20:00:00.000Z"}
             for n in range(1, 11)]
@@ -264,6 +266,82 @@ class WhoseTicksTheseAreTests(_DetailsRouteTestCase):
         self.assertEqual(panel.by_source, {})
         self.assertEqual(panel.episodes, list(range(1, 11)))
         self.assertEqual(panel.services, ["trakt"])
+
+
+class ThePanelIsTheSameOneEverywhereTests(_DetailsRouteTestCase):
+    """What this surface does NOT vary, and used to.
+
+    The tracker drew a text-only hero because a roster row carries no picture of
+    its own — which was true and was the wrong conclusion: the DESCRIBING SERVICE
+    answers with one, on the same lookup this route already makes, so there was
+    never a call to be saved by leaving it out. One panel means one panel.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._settle(_month_back(0))
+
+    def test_a_roster_row_gets_the_describing_services_own_poster(self):
+        self.assertIn('src="https://walter.trakt.tv/agency.jpg"', self._panel().html)
+
+    def test_and_not_the_text_only_hero_it_used_to_get(self):
+        """The class that laid the hero out without a picture. Its stylesheet rule
+        is gone too, so a template still emitting this would draw a broken box."""
+        self.assertNotIn("no-poster", self._panel().html)
+
+
+class WhoWasASKEDTests(_DetailsRouteTestCase):
+    """Every row names the services that were LOOKED AT, not the ones that
+    happened to answer yes.
+
+    THE TWO FACTS ARE DIFFERENT AND ONLY ONE OF THEM WAS ON SCREEN. A tick says a
+    service recorded an episode; this says a service was asked about the season at
+    all. Naming only the recorders made "Simkl has this and Trakt does not" and
+    "only Simkl was ever asked" render identically — and on a season where one
+    service lists episodes the other has not published yet, that is the whole
+    question somebody opens the list to answer.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
+    def setUp(self):
+        super().setUp()
+        self._settle(_month_back(0))
+
+    def _sources_per_row(self, panel):
+        import re
+        return re.findall(r'<span class="ep-source">(.*?)</span>', panel.html, re.S)
+
+    def test_both_services_are_named_on_every_row_even_where_they_agree(self):
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self._progress("trakt", {1: "2026-08-01"})
+        self._progress("simkl", {1: "2026-08-01"})
+        panel = self._panel()
+        labels = self._sources_per_row(panel)
+        self.assertEqual(len(labels), 10, "every row names who was asked")
+        for text in labels:
+            self.assertIn("Trakt", text)
+            self.assertIn("Simkl", text)
+
+    def test_a_row_nobody_recorded_still_says_who_was_asked(self):
+        """The case the old rule could not express: hollow ticks with no names
+        beside them read as "nothing looked", which is not what happened."""
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self._progress("trakt", {1: "2026-08-01"})
+        panel = self._panel()
+        self.assertEqual(panel.by_source, {"trakt": [1]})
+        # Row 5 was recorded by nobody and is still attributed.
+        self.assertIn("Simkl", self._sources_per_row(panel)[4])
+
+    def test_one_service_names_nobody(self):
+        """With one service there is nothing to disambiguate, and a name on every
+        row of a one-service checklist is noise — the same rule that stops a
+        single tick wearing a mark."""
+        self._progress("trakt", {1: "2026-08-01"})
+        self.assertEqual(self._sources_per_row(self._panel()), [])
 
 
 class ATickPerServiceTests(_DetailsRouteTestCase):

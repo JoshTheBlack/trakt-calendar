@@ -1748,10 +1748,10 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
 @keyframes ttscroll { from { transform: translateX(0); } to { transform: translateX(calc(-1 * var(--scroll, 0px))); } }
 .distrakt-season { flex: 0 0 auto; width: 3em; text-align: right; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 /* Details modal -------------------------------------------------------------
-   The layout comes from style.css (.modal, .details-hero, .ep-list); these are
-   only the tracker's additions: no poster, and a watched marker per episode. */
+   The layout comes from style.css (.modal, .details-hero, .ep-list); this is
+   only what the tracker adds to it — the watched markers on an episode row.
+   The panel itself is one template on every surface, poster included. */
 .distrakt-show-row { cursor: pointer; }
-.details-hero.no-poster { display: block; }
 .ep-watched-count {
     font-size: 0.72rem; font-weight: 700; color: var(--green);
     background: rgba(76,175,80,0.12); border-radius: 999px; padding: 2px 8px; margin-left: 8px;

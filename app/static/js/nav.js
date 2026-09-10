@@ -45,14 +45,10 @@ async function openChangelog() {
     }
 }
 
-function closeChangelog() {
-    const modal = document.getElementById('changelogModal');
-    if (modal) modal.classList.remove('open');
-}
-
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeChangelog();
-});
+// The site header's own overlay. Closing is `closeModal`'s to define — see
+// static/js/ui.js for what that means beyond hiding the box — and Escape is
+// handled there too, for every overlay on the page at once.
+function closeChangelog() { closeModal('changelogModal'); }
 
 async function signOut() {
     try {

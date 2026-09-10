@@ -5,11 +5,15 @@ All notable changes to this project are documented here. Format loosely follows 
 ## 🏷️ [1.2.4] - 2026-09-09
 
 ### Changed
-- 🎬 **The panel a card opens shows the same things wherever you open it.** The age rating was missing from shared calendars and the IMDb score from everywhere but your own calendar — not because those pages had nothing to say, but because each page drew that panel for itself and a field added to one never reached the others. There is one panel now, so anything it learns to show it shows everywhere at once.
+- 🎬 **The panel a card opens shows the same things wherever you open it.** The age rating was missing from shared calendars, the IMDb score from everywhere but your own calendar, and the poster from one of the three — not because those pages had nothing to say, but because each page drew that panel for itself and a field added to one never reached the others. There is one panel now, so anything it learns to show it shows everywhere at once.
 - 🔍 **A shared calendar fills in a card's details even when you are the first person to open it.** A link used to show only what its owner had already looked at themselves, so most cards opened on an empty panel with a title and nothing else. The page looks the title up now, and because that description is the same for everybody, one look-up serves every person who opens the link. It can only ever look up something the calendar in front of you is already showing — a link can never be used to make an account go and ask about anything else.
 
+### Fixed
+- 🎬 **A trailer stops when you close the panel, however you close it.** Pressing Escape hid the box and left the video playing behind it — audible, with nothing on screen to stop it. Every way of dismissing any panel in the app now goes through the same shutdown, so this cannot come back for one of them and not the others. Escape also closes panels on pages where it previously did nothing.
+
 ### 🥚
-- What a row opens is the same panel the rest of the app opens, drawn by the same thing, so a score it never had room to show is simply there. The marks beside each episode, and where pressing one takes you, are unchanged.
+- What a row opens is the same panel the rest of the app opens, drawn by the same thing, so a score it never had room to show is simply there, and a picture with it.
+- Every episode line now says which of them were asked, not only which of them said yes. A line where one has the episode and the other has not published it yet used to look exactly like a line only one of them was ever consulted about.
 
 ### Under the hood
 - 🖼️ **One panel, built once, instead of three that had quietly stopped matching.** The same box of details was assembled separately for each of the three places it opens, in the browser, from the same answer — so two of them had drifted apart in what they showed and nobody could see it from any one page. It is built on the server now, in one place, and each page says only what makes it different: whether there is a picture, and whether it has your own viewing marked on it.

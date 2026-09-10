@@ -83,9 +83,10 @@ class SeasonProgress:
     once, so an episode either service saw is an episode this person watched —
     anything narrower under-reports what they actually did. But the two records
     really do differ (one service scrobbles, the other was linked last week), so
-    each service keeps its own tick and the two are named wherever their totals
-    disagree. A tick with no attribution turns that disagreement into what looks
-    like a bug in the count.
+    each service keeps its own tick and every row names the services that were
+    ASKED. A tick with no attribution turns that disagreement into what looks like
+    a bug in the count; the per-service TOTALS above the list are the narrower
+    claim and stay behind a real disagreement.
 
     EACH SERVICE'S OWN SLUG, AND NOTHING ELSE. Trakt and Simkl both call a
     title's readable name `slug` and disagree on what it is — `the-traitors-2023`
@@ -144,14 +145,22 @@ class SeasonProgress:
     def watched(self, number) -> bool:
         return _as_number(number) in self._watched
 
-    def recorded_by(self, number) -> tuple[str, ...]:
-        """Which services recorded this episode, and EMPTY where they agree
-        overall — the same rule `counts` follows."""
-        if not self._disagree:
-            return ()
-        n = _as_number(number)
-        return tuple(name for name in self._services
-                     if n in self._by_source.get(name, ()))
+    @property
+    def checked_by(self) -> tuple[str, ...]:
+        """Every service that was ASKED about this season — which is every service
+        this account syncs, whatever any of them had to say.
+
+        NAMED ON EVERY ROW RATHER THAN ONLY WHERE THEY DISAGREE, and the reason is
+        that the two facts a reader needs are different: the ticks say who
+        RECORDED an episode, and this says who was LOOKED AT. Naming only the
+        recorders made "Simkl has this and Trakt does not" and "only Simkl was
+        asked" render identically, which is exactly the question somebody opens
+        this list to answer.
+
+        EMPTY WITH ONE SERVICE, because there is then nothing to disambiguate —
+        the same rule that stops a single tick wearing a mark.
+        """
+        return () if self.single else self._services
 
     def ticks(self, number) -> tuple[Tick, ...]:
         n = _as_number(number)

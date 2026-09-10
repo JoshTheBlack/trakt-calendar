@@ -186,7 +186,7 @@ async function openShare() {
 }
 
 function closeShare() {
-    document.getElementById('shareModal').classList.remove('open');
+    closeModal('shareModal');
 }
 
 // One link at a time: this publishes the chosen form and retires the other two,

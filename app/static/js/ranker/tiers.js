@@ -95,7 +95,7 @@ function openTierModal(uid) {
     document.getElementById('tierModal').classList.add('open');
 }
 
-function closeTierModal() { document.getElementById('tierModal').classList.remove('open'); }
+function closeTierModal() { closeModal('tierModal'); }
 
 function saveTierSettings() {
     const modal = document.getElementById('tierModal');

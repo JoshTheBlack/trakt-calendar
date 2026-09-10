@@ -39,7 +39,7 @@ function openExportModal() {
 }
 
 function closeExportModal() {
-    document.getElementById('exportModal').classList.remove('open');
+    closeModal('exportModal');
     clearTimeout(previewTimer);
 }
 

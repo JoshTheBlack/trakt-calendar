@@ -1425,13 +1425,13 @@ async def details_fragment(request: Request):
         slugs={"trakt": str(ids.get("trakt_slug") or ""),
                "simkl": str(ids.get("simkl_slug") or "")},
         season=season)
-    # THE PICTURE IS DELIBERATELY ABSENT. The tracker identifies a show by its
-    # network logo and this payload carries no image, so the panel draws its
-    # text-only hero rather than a large grey placeholder — the one axis of the
-    # shared template this surface varies, beside the ticks.
+    # NO POSTER IS PASSED AND ONE IS STILL DRAWN. A roster row identifies a show
+    # by its network logo and carries no picture of its own, so there is nothing
+    # better to hand over than what the describing service already answered with —
+    # which the panel falls back to on its own.
     return details_panel.panel(request, details, media=str(Media.SHOW), season=season,
                                title=str(placed.record.get("title") or ""),
-                               poster=None, progress=progress)
+                               progress=progress)
 
 
 @guard.get("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)

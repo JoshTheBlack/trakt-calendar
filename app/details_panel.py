@@ -23,7 +23,7 @@ from .templating import templates
 
 
 def panel(request: Request, details: dict, *, media: str, season: int | None,
-          title: str = "", poster: str | None = "", progress: object | None = None):
+          title: str = "", poster: str = "", progress: object | None = None):
     """The panel's contents for one title.
 
     `title` and `poster` are the CARD's, not the answer's, and the surfaces that
@@ -32,11 +32,10 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     what this viewer's own field order picked — so the panel is drawn with what
     the reader is already looking at.
 
-    `poster=None` MEANS THIS SURFACE HAS NO PICTURE AT ALL, and "" means it has
-    one it does not know yet. The tracker identifies a show by its network logo
-    and its payload carries no image, so it passes None and gets the text-only
-    hero; a card whose artwork has not resolved passes "" and gets the same
-    placeholder the card beside it drew.
+    A SURFACE WITH NO CARD PASSES NO POSTER and still gets one: the template
+    falls back to the describing service's own, which rode in on the lookup that
+    was made anyway. Only a surface showing a card has a better answer than that
+    — the picture already on screen, picked by this viewer's own field order.
 
     `progress` is this viewer's own record of the season or None, and it is the
     tracker's `episode_progress.SeasonProgress`. Passed rather than built: the

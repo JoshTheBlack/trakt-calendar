@@ -7,7 +7,7 @@ function openImportModal() {
     refreshImportYears();
 }
 
-function closeImportModal() { document.getElementById('importModal').classList.remove('open'); }
+function closeImportModal() { closeModal('importModal'); }
 
 // Only the years this account actually has data for — the answer comes from the
 // sources endpoint, which is the only thing that knows.

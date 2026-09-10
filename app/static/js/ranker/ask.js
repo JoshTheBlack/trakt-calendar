@@ -34,7 +34,7 @@ function ask(options) {
 }
 
 function closeAsk(answer) {
-    document.getElementById('askModal').classList.remove('open');
+    closeModal('askModal');
     const resolve = askResolve;
     askResolve = null;
     if (resolve) resolve(answer);

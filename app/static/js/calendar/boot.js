@@ -6,14 +6,14 @@
 // (defer preserves it), and the init below runs the moment this file executes —
 // so everything it calls has to be declared already.
 
-// Escape closes whichever overlay is open. Driven off the class rather than a
-// list of close functions: the Settings modal is only rendered for admins, so
-// calling closeSettings() unconditionally threw for everybody else — which took
-// the rest of the handler down with it and left Escape doing nothing at all.
+// CLOSING IS NOT THIS FILE'S BUSINESS ANY MORE — static/js/ui.js closes every
+// open overlay on Escape, for every page at once, through the one function that
+// knows what closing means (a playing trailer has to be torn down, not hidden).
+// What is left here is the part that is the CALENDAR's: dismissing the Settings
+// panel mid-handshake abandons it, so the polling that handshake started has to
+// stop with it.
 document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
-    stopDeviceAuthPolling();
-    document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
+    if (e.key === 'Escape') stopDeviceAuthPolling();
 });
 
 // ---- One idempotent page init, run on first load AND after every boosted swap ----

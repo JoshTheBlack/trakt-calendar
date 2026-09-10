@@ -193,6 +193,29 @@ function closeModal(id) {
     });
 }
 
+// EVERY OVERLAY THAT IS OPEN, CLOSED PROPERLY. Driven off the class rather than a
+// list of close functions, which is the shape the calendar's Escape handler was
+// written in and for a good reason: the Settings modal is only rendered for
+// admins, so calling closeSettings() unconditionally threw for everybody else and
+// took the rest of the handler down with it. What that shape LOST was the
+// teardown — it stripped the class by hand, so a trailer went on playing behind a
+// box that had disappeared. Going through closeModal keeps the reason and fixes
+// the omission, and it is the only place that has to know what closing means.
+function closeOpenModals() {
+    document.querySelectorAll('.modal-overlay.open').forEach(m => closeModal(m.id));
+}
+
+// ESCAPE IS ONE RULE FOR THE WHOLE APP, so it is stated once, here, beside the
+// function that defines what closing is. It used to be four listeners — the
+// calendar's, the site header's, the share page's and the ranker's — of which
+// three closed a different subset and only one of them tore anything down. A page
+// with something else to do on Escape still adds its own listener for THAT (the
+// calendar stops its device-authorization polling, the ranker resolves the
+// question it was asking); none of them has to close anything any more.
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeOpenModals();
+});
+
 
 /* ---- The details panel ----
  *

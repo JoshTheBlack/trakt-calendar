@@ -198,7 +198,7 @@ async function loadArrOptions(kind) {
 
 function closeSettings() {
     stopDeviceAuthPolling();
-    document.getElementById('settingsModal').classList.remove('open');
+    closeModal('settingsModal');
 }
 
 // The PUBLIC_BASE_URL environment variable WINS over the saved base URL, because

@@ -20,7 +20,7 @@ function openBackupModal() {
 }
 
 function closeBackupModal() {
-    document.getElementById('backupModal').classList.remove('open');
+    closeModal('backupModal');
 }
 
 async function onBackupFileChosen(input) {

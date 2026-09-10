@@ -30,10 +30,3 @@ function openShareDetails(card, event) {
     }
     openDetailsPanel(card.dataset.detailsUrl, card.dataset.title || 'Details');
 }
-
-// This page has no boot script of its own, and the panel is the only overlay it
-// has — so Escape is wired up here rather than in a page-wide key handler like
-// the calendar's.
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeDetailsPanel();
-});
