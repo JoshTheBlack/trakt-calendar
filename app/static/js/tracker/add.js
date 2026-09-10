@@ -336,9 +336,12 @@ function setRewatchFrom(which) {
 }
 
 function closeRewatchPrompt() {
-    pendingRewatch = null;
     closeModal('rewatchModal');
 }
+
+// The choice this prompt was asking about is not one to keep hold of once it has
+// gone unanswered.
+onModalClose('rewatchModal', () => { pendingRewatch = null; });
 
 async function answerRewatch(fresh) {
     if (!pendingRewatch) { return; }

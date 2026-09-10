@@ -11,13 +11,20 @@
    click sets, so a page including this file needs to know nothing else about how
    the panel is filled — see `openDetailsPanel` in static/js/ui.js.
 
+   NOTHING HERE SAYS HOW IT CLOSES. The backdrop click, Escape and the button
+   all go through `closeModal` in static/js/ui.js, which is the one place that
+   knows what closing means — a playing trailer has to be torn down rather than
+   hidden, and that was a property of one call site until it became a property of
+   closing. This markup used to carry its own `onclick` for the backdrop, as
+   seven other overlays did and six did not.
+
    `detailsActions` IS ALWAYS HERE AND USUALLY EMPTY. The add-to-library buttons
    are the calendar's, they are admin-only, and they are built from state only the
    browser holds (which services are reachable, what is already in the library) —
    so they are the one part of this panel that stays in JavaScript. Reserving the
    slot on every page is what stops a second shell being drawn the day another
    surface wants one. #}
-<div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeDetailsPanel()">
+<div id="detailsModal" class="modal-overlay">
     <div class="modal wide">
         <div class="modal-head">
             <h2 id="detailsTitle">Details</h2>

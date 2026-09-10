@@ -197,9 +197,12 @@ async function loadArrOptions(kind) {
 }
 
 function closeSettings() {
-    stopDeviceAuthPolling();
     closeModal('settingsModal');
 }
+
+// Dismissing the panel mid-handshake abandons it, so the polling that handshake
+// started stops with it — however the panel was dismissed.
+onModalClose('settingsModal', () => stopDeviceAuthPolling());
 
 // The PUBLIC_BASE_URL environment variable WINS over the saved base URL, because
 // the lockout it exists to rescue is a saved value that no longer matches where

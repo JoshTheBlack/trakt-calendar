@@ -27,11 +27,19 @@ function openFilters() {
 // Chips added by typing are not part of that: reset cannot remove an element, so
 // they are dropped here.
 function closeFilters() {
-    const form = document.getElementById('filtersForm');
-    form.querySelectorAll('.fchip.is-added').forEach(chip => chip.remove());
-    form.reset();
     closeModal('filtersModal');
 }
+
+// Whatever this panel was left holding is not an answer anybody saved: chips
+// added but not submitted go, and the form returns to what the server rendered.
+// Registered rather than done inside closeFilters, so dismissing the panel any
+// other way does it too.
+onModalClose('filtersModal', () => {
+    const form = document.getElementById('filtersForm');
+    if (!form) return;
+    form.querySelectorAll('.fchip.is-added').forEach(chip => chip.remove());
+    form.reset();
+});
 
 // Grey -> only these -> not these -> grey. The three radios are the answer; this
 // only advances which of them is checked.

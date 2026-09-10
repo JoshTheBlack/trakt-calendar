@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from unittest.mock import patch
 
 from app import db, distrakt as distrakt_store
@@ -291,15 +292,21 @@ class ThePanelIsTheSameOneEverywhereTests(_DetailsRouteTestCase):
 
 
 class WhoWasASKEDTests(_DetailsRouteTestCase):
-    """Every row names the services that were LOOKED AT, not the ones that
-    happened to answer yes.
+    """Every row names the services that could actually be ASKED about this
+    title, not the ones that happened to answer yes.
 
     THE TWO FACTS ARE DIFFERENT AND ONLY ONE OF THEM WAS ON SCREEN. A tick says a
-    service recorded an episode; this says a service was asked about the season at
-    all. Naming only the recorders made "Simkl has this and Trakt does not" and
-    "only Simkl was ever asked" render identically — and on a season where one
-    service lists episodes the other has not published yet, that is the whole
-    question somebody opens the list to answer.
+    service recorded an episode; this says the season was looked up there at all.
+    Naming only the recorders made "Simkl has this and Trakt has not published it
+    yet" and "only Simkl was ever consulted" render identically — and on a season
+    where one service lists episodes the other has not, that is the whole question
+    somebody opens the list to settle.
+
+    SYNCING A SERVICE IS NOT BEING ABLE TO ASK IT ABOUT THIS TITLE, which is the
+    correction the last class of these tests was written against. A record
+    carrying no Simkl id cannot be looked up at Simkl however thoroughly the
+    account syncs it, and a row saying otherwise reads as a service that checked
+    and found nothing.
     """
 
     def make_settings(self):
@@ -309,38 +316,65 @@ class WhoWasASKEDTests(_DetailsRouteTestCase):
 
     def setUp(self):
         super().setUp()
-        self._settle(_month_back(0))
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+
+    def _settle_with(self, ids: dict):
+        """A roster row carrying exactly the ids given, so "which services can be
+        asked" is the thing under test rather than a side effect of a fixture."""
+        record = _settled(distrakt_store.RecordKind.COMPLETED)
+        record["ids"] = ids
+        asyncio.run(distrakt_store.add_month_record(
+            self.user_id, _month_back(0), record))
 
     def _sources_per_row(self, panel):
-        import re
         return re.findall(r'<span class="ep-source">(.*?)</span>', panel.html, re.S)
 
     def test_both_services_are_named_on_every_row_even_where_they_agree(self):
-        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+        self._settle_with({"trakt": 7, "simkl": 55512, "tmdb": 1})
         self._progress("trakt", {1: "2026-08-01"})
         self._progress("simkl", {1: "2026-08-01"})
-        panel = self._panel()
-        labels = self._sources_per_row(panel)
-        self.assertEqual(len(labels), 10, "every row names who was asked")
+        labels = self._sources_per_row(self._panel())
+        self.assertEqual(len(labels), 10, "every row names who could be asked")
         for text in labels:
             self.assertIn("Trakt", text)
             self.assertIn("Simkl", text)
 
-    def test_a_row_nobody_recorded_still_says_who_was_asked(self):
-        """The case the old rule could not express: hollow ticks with no names
-        beside them read as "nothing looked", which is not what happened."""
-        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
+    def test_a_row_nobody_recorded_still_says_who_could_be_asked(self):
+        """The case the recorders-only rule could not express: hollow ticks with
+        no names beside them read as "nothing looked", which is not what
+        happened."""
+        self._settle_with({"trakt": 7, "simkl": 55512, "tmdb": 1})
         self._progress("trakt", {1: "2026-08-01"})
         panel = self._panel()
         self.assertEqual(panel.by_source, {"trakt": [1]})
-        # Row 5 was recorded by nobody and is still attributed.
+        # Row 5 was recorded by nobody and is still attributed to both.
         self.assertIn("Simkl", self._sources_per_row(panel)[4])
 
-    def test_one_service_names_nobody(self):
+    def test_a_title_only_one_service_has_an_id_for_names_nobody(self):
+        """THE ROW THAT CAUGHT THE FALSE CLAIM, and it is the ordinary shape: a
+        season added from one service keeps that service's id and no other, for
+        ever, on an account that syncs both. Simkl cannot be asked about it, so
+        saying it was would be a service reported as having checked and found
+        nothing. The roster row's own counts note says "(Trakt)" for the same
+        reason, and the two now agree."""
+        self._settle_with({"trakt": 7, "tmdb": 1})
+        self._progress("trakt", {1: "2026-08-01"})
+        panel = self._panel()
+        self.assertEqual(self._sources_per_row(panel), [])
+        # The ticks are unchanged — every service the account syncs still gets
+        # one, and Simkl's is drawn as text because there is nowhere to send it.
+        self.assertEqual(panel.services, ["simkl", "trakt"])
+        self.assertNotIn("simkl", panel.tick_links)
+
+    def test_one_linked_service_names_nobody_either(self):
         """With one service there is nothing to disambiguate, and a name on every
         row of a one-service checklist is noise — the same rule that stops a
         single tick wearing a mark."""
-        self._progress("trakt", {1: "2026-08-01"})
+        user_id = self.make_user("solo", distrakt_approved=True, calendar_approved=True)
+        self.link_identity(user_id, "trakt", 905, "user-token")
+        self.sign_in_as(user_id)
+        asyncio.run(distrakt_store.add_month_record(
+            user_id, _month_back(0), _settled(distrakt_store.RecordKind.COMPLETED)))
         self.assertEqual(self._sources_per_row(self._panel()), [])
 
 

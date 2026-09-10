@@ -376,7 +376,7 @@
 
 {% if is_admin %}
 <!-- Settings modal -->
-<div id="settingsModal" class="modal-overlay" onclick="if(event.target===this) closeSettings()">
+<div id="settingsModal" class="modal-overlay">
     <div class="modal settings-modal">
         <div class="modal-head">
             <h2>⚙️ Settings</h2>
@@ -782,7 +782,7 @@
    cache (app/calendar/filter.py), which is what lets two people filter the same
    cached month differently — the UI was the only piece missing. #}
 <!-- Calendar search: where a title is, and where it should be if it is not here. -->
-<div id="searchModal" class="modal-overlay" onclick="if(event.target===this) closeCalendarSearch()">
+<div id="searchModal" class="modal-overlay">
     <div class="modal">
         <div class="modal-head">
             <h2>🔍 Find a title</h2>
@@ -871,7 +871,7 @@
    form's own reset, and the save serializes the form rather than reading fields
    out by id. #}
 {% import '_filter_fields.html' as ff with context %}
-<div id="filtersModal" class="modal-overlay" onclick="if(event.target===this) closeFilters()">
+<div id="filtersModal" class="modal-overlay">
     <div class="modal filters-modal" id="filtersPanel">
         <div class="modal-head">
             <h2>🎚️ Filters</h2>
@@ -1046,7 +1046,7 @@
 </div>
 
 <!-- Share modal: publish a read-only, no-login copy of this calendar. -->
-<div id="shareModal" class="modal-overlay" onclick="if(event.target===this) closeShare()">
+<div id="shareModal" class="modal-overlay">
     <div class="modal">
         <div class="modal-head">
             <h2>🔗 Share this calendar</h2>

@@ -181,9 +181,29 @@ function confirmInline(trigger, message, onConfirm, opts) {
 // because dropping the attribute does not tear down the document already loaded.
 // Removing the ELEMENT does. The modal body is rebuilt from the payload every
 // time one opens, so there is nothing here worth keeping.
+// WHAT ONE MODAL NEEDS DOING BESIDES CLOSING, registered by the file that owns
+// it. Five of them have something: a form to reset, a handshake to stop, a timer
+// to clear, a question to answer, a pending choice to forget.
+//
+// A REGISTRY RATHER THAN A LIST OF CLOSE FUNCTIONS, and the difference is which
+// side knows. A list here would have to name functions that may not exist on the
+// page being looked at — the Settings panel is admin-only, and calling its close
+// function unconditionally is what used to throw for everybody else. A hook is
+// registered BY the file that defines it, so it exists exactly when its modal
+// does, and every way of dismissing that modal runs it without having to know it
+// is there.
+const modalCloseHooks = new Map();
+
+function onModalClose(id, fn) {
+    modalCloseHooks.set(id, fn);
+}
+
 function closeModal(id) {
     const modal = document.getElementById(id);
     if (!modal) return;
+    // BEFORE the class comes off, so a hook can still read what is on screen.
+    const hook = modalCloseHooks.get(id);
+    if (hook) hook();
     modal.classList.remove('open');
     modal.querySelectorAll('iframe').forEach(frame => frame.remove());
     // Native media, for anything that grows one later: pausing is enough, and
@@ -214,6 +234,24 @@ function closeOpenModals() {
 // question it was asking); none of them has to close anything any more.
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeOpenModals();
+});
+
+// CLICKING THE BACKDROP CLOSES THE MODAL, ON EVERY MODAL. Eight of the fourteen
+// carried an inline click handler on the overlay that compared the event's target
+// with the element itself, and six carried nothing — so whether a stray click
+// dismissed a panel depended on which panel it was. That is not a behaviour
+// anybody chose; it is one that was remembered eight times and forgotten six.
+//
+// THE TARGET IS THE OVERLAY ITSELF, which is what distinguishes the backdrop from
+// the box: a click inside the dialog has one of its children as the target and
+// only reaches the overlay by bubbling. That is the same test each of the eight
+// inline copies was making, stated once.
+document.addEventListener('click', (e) => {
+    const overlay = e.target;
+    if (overlay instanceof Element && overlay.classList.contains('modal-overlay')
+        && overlay.classList.contains('open')) {
+        closeModal(overlay.id);
+    }
 });
 
 

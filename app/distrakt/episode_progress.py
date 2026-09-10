@@ -147,20 +147,32 @@ class SeasonProgress:
 
     @property
     def checked_by(self) -> tuple[str, ...]:
-        """Every service that was ASKED about this season — which is every service
-        this account syncs, whatever any of them had to say.
+        """Every service that could actually be ASKED about this title, in
+        declared order — and empty unless there are at least two of them.
 
-        NAMED ON EVERY ROW RATHER THAN ONLY WHERE THEY DISAGREE, and the reason is
-        that the two facts a reader needs are different: the ticks say who
-        RECORDED an episode, and this says who was LOOKED AT. Naming only the
-        recorders made "Simkl has this and Trakt does not" and "only Simkl was
-        asked" render identically, which is exactly the question somebody opens
-        this list to answer.
+        NAMED ON EVERY ROW RATHER THAN ONLY WHERE THEY DISAGREE, because the two
+        facts a reader needs are different: the ticks say who RECORDED an episode,
+        and this says who was LOOKED AT. Naming only the recorders made "Simkl has
+        this and Trakt has not published it yet" and "only Simkl was ever
+        consulted" render identically, which is exactly the question somebody
+        opens this list to settle.
 
-        EMPTY WITH ONE SERVICE, because there is then nothing to disambiguate —
-        the same rule that stops a single tick wearing a mark.
+        SYNCING A SERVICE IS NOT THE SAME AS BEING ABLE TO ASK IT ABOUT THIS
+        TITLE, and reading it as such is what made this claim false. A record
+        carries an id per service and frequently carries only one — a season added
+        from one service keeps that service's id and no other, for ever, on an
+        account that syncs both. The other service was never asked about it and
+        has no way to be, so naming it here said something that had not happened.
+        THIS IS THE SAME SET WHOSE TICKS ARE LINKS: a tick with nowhere to go is a
+        service this title cannot be looked up at, which is the same fact.
+        `live.named_sources` is the roster row's own spelling of it — the note
+        that reads "(Trakt)" beside the counts — and the two now agree.
+
+        EMPTY BELOW TWO, because there is then nothing to disambiguate — the same
+        rule that stops a single tick wearing a mark.
         """
-        return () if self.single else self._services
+        askable = tuple(name for name in self._services if self._ids[name])
+        return askable if len(askable) > 1 else ()
 
     def ticks(self, number) -> tuple[Tick, ...]:
         n = _as_number(number)

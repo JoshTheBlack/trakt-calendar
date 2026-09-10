@@ -34,11 +34,22 @@ function ask(options) {
 }
 
 function closeAsk(answer) {
-    closeModal('askModal');
+    // CLEARED BEFORE THE CLOSE, so the hook below sees an unanswered question as
+    // already answered and does not resolve it a second time with a cancel.
     const resolve = askResolve;
     askResolve = null;
+    closeModal('askModal');
     if (resolve) resolve(answer);
 }
+
+// DISMISSED IS AN ANSWER, and it is the same one Cancel gives. A caller is
+// awaiting this promise; leaving it unresolved because the panel was closed by
+// the backdrop rather than the button would hang whatever asked.
+onModalClose('askModal', () => {
+    const resolve = askResolve;
+    askResolve = null;
+    if (resolve) resolve(null);
+});
 
 function submitAsk() {
     const wantsText = !document.getElementById('askField').hidden;

@@ -40,8 +40,11 @@ function openExportModal() {
 
 function closeExportModal() {
     closeModal('exportModal');
-    clearTimeout(previewTimer);
 }
+
+// The preview redraw is queued behind a debounce; a panel that is gone has
+// nothing to redraw into.
+onModalClose('exportModal', () => clearTimeout(previewTimer));
 
 function defaultExportTitle() {
     const scope = state.board.media_scope;

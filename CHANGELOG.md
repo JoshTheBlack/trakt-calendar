@@ -9,11 +9,12 @@ All notable changes to this project are documented here. Format loosely follows 
 - 🔍 **A shared calendar fills in a card's details even when you are the first person to open it.** A link used to show only what its owner had already looked at themselves, so most cards opened on an empty panel with a title and nothing else. The page looks the title up now, and because that description is the same for everybody, one look-up serves every person who opens the link. It can only ever look up something the calendar in front of you is already showing — a link can never be used to make an account go and ask about anything else.
 
 ### Fixed
-- 🎬 **A trailer stops when you close the panel, however you close it.** Pressing Escape hid the box and left the video playing behind it — audible, with nothing on screen to stop it. Every way of dismissing any panel in the app now goes through the same shutdown, so this cannot come back for one of them and not the others. Escape also closes panels on pages where it previously did nothing.
+- 🎬 **A trailer stops when you close the panel, however you close it.** Pressing Escape hid the box and left the video playing behind it — audible, with nothing on screen to stop it. Every way of dismissing any panel in the app now goes through the same shutdown, so this cannot come back for one of them and not the others.
+- 🪟 **Every panel now closes the same three ways: the button, a click outside it, and Escape.** Which of those worked depended on which panel you had open — some ignored a click outside, and on one page Escape did nothing at all. There was no reason behind the differences; they were simply written down one panel at a time.
 
 ### 🥚
 - What a row opens is the same panel the rest of the app opens, drawn by the same thing, so a score it never had room to show is simply there, and a picture with it.
-- Every episode line now says which of them were asked, not only which of them said yes. A line where one has the episode and the other has not published it yet used to look exactly like a line only one of them was ever consulted about.
+- Every episode line now says which of them can be asked about that title, not only which of them said yes. A line where one has the episode and the other has not published it yet used to look exactly like a line only one of them was ever consulted about. Where only one of them knows the title at all, it says nothing — there is nothing to tell apart.
 
 ### Under the hood
 - 🖼️ **One panel, built once, instead of three that had quietly stopped matching.** The same box of details was assembled separately for each of the three places it opens, in the browser, from the same answer — so two of them had drifted apart in what they showed and nobody could see it from any one page. It is built on the server now, in one place, and each page says only what makes it different: whether there is a picture, and whether it has your own viewing marked on it.
