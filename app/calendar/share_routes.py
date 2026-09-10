@@ -1288,6 +1288,7 @@ class _Described(NamedTuple):
     source: Source
     details: dict
     poster: str
+    links: list
 
 
 def _ids_this_view_shows(items: Sequence[Item], media: str,
@@ -1361,7 +1362,13 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     details = await detail_source.describe(settings, chosen, media, season)
     if details is None:
         return None
-    return _Described(chosen.source, details, _poster_this_view_shows(visible, bound))
+    # THE BOUND IDS AND WHAT THE ANSWER ADDED, never the raw request: an outbound
+    # button is built from an id, and an id a stranger spelled has no more business
+    # in a rendered link than in a rendered picture.
+    return _Described(chosen.source, details,
+                      _poster_this_view_shows(visible, bound),
+                      detail_source.outbound_links(
+                          {**bound, **(details.get("ids") or {})}, media))
 
 
 def _poster_this_view_shows(items: Sequence[Item], bound: dict[str, str]) -> str:
@@ -1410,7 +1417,7 @@ async def _details(request: Request, share_row) -> Response:
         # is alt text and nothing else — the heading above it is set from the card
         # the visitor clicked, before this request is even made.
         title=str(described.details.get("title") or ""),
-        poster=described.poster)
+        poster=described.poster, links=described.links)
 
 
 # What a public request is told when it may not be told anything. Named once

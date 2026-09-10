@@ -1431,6 +1431,10 @@ async def details_fragment(request: Request):
     # which the panel falls back to on its own.
     return details_panel.panel(request, details, media=str(Media.SHOW), season=season,
                                title=str(placed.record.get("title") or ""),
+                               # THE ROW'S OWN IDS, learned ones included — the
+                               # same map the ticks are addressed by, so a service
+                               # with a working tick has a working button.
+                               links=detail_source.outbound_links(ids, Media.SHOW),
                                progress=progress)
 
 

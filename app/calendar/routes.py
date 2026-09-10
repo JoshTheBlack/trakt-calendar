@@ -1225,7 +1225,8 @@ async def details_fragment(request: Request):
     params = request.query_params
     settings = load_settings()
     media = params.get("media", "show")
-    chosen = detail_source.choose(settings, detail_source.ids_from_query(params))
+    asked = detail_source.ids_from_query(params)
+    chosen = detail_source.choose(settings, asked)
     if chosen is None:
         return details_panel.gap(request, "Nothing here can describe this item.")
     try:
@@ -1251,7 +1252,11 @@ async def details_fragment(request: Request):
     return details_panel.panel(
         request, details, media=media,
         season=route_params.season(params.get("season")),
-        title=params.get("title", ""), poster=params.get("poster", ""))
+        title=params.get("title", ""), poster=params.get("poster", ""),
+        # THE IDS THE CARD CARRIED, not the answer's: a Trakt-described title's
+        # payload holds no Simkl id, so building these from `details` would offer
+        # one button for a card that legitimately has two.
+        links=detail_source.outbound_links({**asked, **(details.get("ids") or {})}, media))
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

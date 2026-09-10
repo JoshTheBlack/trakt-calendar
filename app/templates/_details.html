@@ -22,7 +22,7 @@
    Context it reads: `d` (one source's detail answer, whose key set is the same
    whoever gave it — see DetailPort in app/providers/base.py), `media`, `season`
    (the season the rows below it are), `title` (the card's own, for the poster's
-   alt text), `poster` and `progress`. #}
+   alt text), `poster`, `progress` and `links`. #}
 {% import '_source_logo.html' as src with context %}
 
 {# ONE TICK. A link where the row carries an id for that service and plain text
@@ -67,6 +67,19 @@
         {%- else %}<div class="d-empty">No overview available.</div>{% endif %}
     </div>
 </div>
+
+{# WHERE THIS TITLE LIVES, one button per service that knows it, wearing that
+   service's own name. Both services ask that their data be linked back to the
+   page for the specific item; a calendar card has drawn these since it existed
+   and this panel is the only way to reach them from the tracker, whose rows
+   carry a network logo and no service link at all.
+
+   THE SAME MACRO THE CARDS USE, so a third service is one edit there. #}
+{% if links %}
+<div class="links-row details-links">
+    {%- for out in links %}{{ src.link(out.source, out.url) }}{% endfor -%}
+</div>
+{% endif %}
 
 {# THE TRAILER. Trakt exposes it through extended=full and Simkl carries a bare
    YouTube id its provider builds into a URL, so by the time it is here the field

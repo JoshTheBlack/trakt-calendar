@@ -140,8 +140,21 @@ def poster(media: dict) -> str | None:
     return None
 
 
-def _detail_url(media: Media, ids: dict) -> str:
+def title_url(media: Media, ids: dict) -> str:
     """The canonical Trakt page for a title, named the way Trakt prefers.
+
+    PUBLIC, AND ANSWERED FOR AN ID MAP FROM ANYWHERE. A calendar record is not
+    the only thing that has to link back here: the details panel draws an
+    outbound button per service, from the union of ids a card carried, and both
+    services ask that their data be linked to the page for the specific item
+    rather than to a homepage. One reading of "where does this title live" per
+    service, called by whoever needs it.
+
+    THE NAMESPACED SLUG, NEVER THE SHARED ONE. Trakt and Simkl both call a
+    title's readable name `slug` and disagree about it, so in a map holding both
+    services' ids the bare `slug` is whichever wrote last — handing that to this
+    function builds a Trakt URL for a name only Simkl uses. `normalize` writes
+    `trakt_slug` for every Trakt payload, so nothing is lost by reading only it.
 
     THE SLUG WHEN TRAKT GAVE ONE, THE NUMERIC ID WHEN IT DID NOT. Both reach the
     same page — `trakt.tv/shows/<id>` redirects to the slugged form — so the
@@ -156,7 +169,7 @@ def _detail_url(media: Media, ids: dict) -> str:
     wrong-looking URL is still the right page; the homepage never is.
     """
     kind = "movies" if media == Media.MOVIE else "shows"
-    name = ids.get("slug") or ids.get("trakt")
+    name = ids.get("trakt_slug") or ids.get("trakt")
     return f"https://trakt.tv/{kind}/{name}" if name else "https://trakt.tv"
 
 
@@ -216,7 +229,9 @@ def to_record(entry: dict, kind: Media) -> Record | None:
         # have it. What this replaced sent every slug-less entry to the Trakt
         # HOMEPAGE, which is a link that looks like it worked and goes nowhere near
         # the title the viewer clicked.
-        detail_url=_detail_url(kind, ids),
+        # Normalized first, because `title_url` reads the namespaced spelling
+        # and a raw Trakt block carries the bare one.
+        detail_url=title_url(kind, _ids.normalize(ids)),
         title=media.get("title") or "Untitled",
         year=media.get("year") or "",
         network=media.get("network") or "",

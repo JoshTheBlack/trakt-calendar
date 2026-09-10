@@ -529,6 +529,8 @@ class SharePageDetailsModalTests(SharePageTestCase):
         # would pass a message check on its own.
         self.assertNotIn("Full overview.", resp.text)
         self.assertNotIn("Fetched live.", resp.text)
+        # A refusal publishes no link either — there is no title to link to.
+        self.assertNotIn("trakt.tv/shows", resp.text)
 
     def test_the_page_wires_cards_to_the_modal(self):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7").text
@@ -556,6 +558,11 @@ class SharePageDetailsModalTests(SharePageTestCase):
         # has already read rather than off the query string — a public endpoint
         # does not render back an address a stranger spelled.
         self.assertIn("<img src=", resp.text)
+        # AND THE OUTBOUND BUTTON IS BUILT FROM THE BOUND IDS, for the same
+        # reason: a link is an id rendered into the page.
+        # By ID, because this window's record carries only the old shared `slug`
+        # and that one is nobody's in particular — see the panel's own tests.
+        self.assertIn('href="https://trakt.tv/shows/123"', resp.text)
 
     # -- the bound ---------------------------------------------------------
 

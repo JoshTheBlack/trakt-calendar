@@ -23,7 +23,8 @@ from .templating import templates
 
 
 def panel(request: Request, details: dict, *, media: str, season: int | None,
-          title: str = "", poster: str = "", progress: object | None = None):
+          title: str = "", poster: str = "", progress: object | None = None,
+          links=()):
     """The panel's contents for one title.
 
     `title` and `poster` are the CARD's, not the answer's, and the surfaces that
@@ -36,6 +37,12 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     falls back to the describing service's own, which rode in on the lookup that
     was made anyway. Only a surface showing a card has a better answer than that
     — the picture already on screen, picked by this viewer's own field order.
+
+    `links` is where this title lives at each service that knows it
+    (`detail_source.outbound_links`). Passed rather than derived: the panel is
+    handed one source's ANSWER, and which services know the title is a fact about
+    the CARD — a Trakt-described title's payload carries no Simkl id, so a panel
+    working it out for itself could only ever offer one of the two buttons.
 
     `progress` is this viewer's own record of the season or None, and it is the
     tracker's `episode_progress.SeasonProgress`. Passed rather than built: the
@@ -54,7 +61,7 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     return templates.TemplateResponse(request, "_details.html", {
         "request": request, "d": details, "media": media,
         "season": season if answered is None else answered,
-        "title": title, "poster": poster, "progress": progress,
+        "title": title, "poster": poster, "progress": progress, "links": links,
     })
 
 

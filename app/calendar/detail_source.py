@@ -31,7 +31,7 @@ from __future__ import annotations
 from typing import NamedTuple
 
 from .. import providers
-from ..providers.base import Source
+from ..providers.base import Media, Source
 
 
 def ports():
@@ -62,6 +62,47 @@ def ids_from_query(params) -> dict[str, str]:
     return {str(source): value.strip()
             for source, _port in ports()
             if (value := params.get(str(source)) or "")}
+
+
+class Outbound(NamedTuple):
+    """One service's own page for a title, and which service it is."""
+    source: Source
+    url: str
+
+
+# The per-source page builders, reached through the MODULE rather than by
+# importing the functions off them, so a test double installed on a provider's
+# calendar module is the one this calls (see CLAUDE.md's rule about names bound
+# at import time).
+def outbound_links(ids, media) -> list[Outbound]:
+    """Where a title lives at every registered service that knows it, in declared
+    order — the outbound buttons a card and the details panel both draw.
+
+    BOTH SERVICES REQUIRE THIS AND ONE OF THEM SAYS SO IN WRITING. Simkl's API
+    rules ask that wherever their data appears it link back to the page for that
+    specific item rather than to a homepage, and the tracker had nowhere at all
+    to do it from — its rows carry a network logo and its panel carried no link
+    to either service. A calendar card has had these since it existed; this is
+    the same answer, asked once, for the surfaces that have only an id map.
+
+    ONE ENTRY PER SERVICE THE MAP NAMES, so a title only one service knows gets
+    one button rather than a dead second. The URL shape is each package's own
+    (`title_url`), because where a service's titles live is that service's fact.
+    """
+    from ..providers.simkl import calendar as simkl_calendar
+    from ..providers.trakt import calendar as trakt_calendar
+
+    builders = {Source.TRAKT: trakt_calendar, Source.SIMKL: simkl_calendar}
+    out = []
+    for source, _port in ports():
+        if not str((ids or {}).get(str(source)) or "").strip():
+            continue
+        package = builders.get(source)
+        if package is None:
+            continue  # a source registered without a page builder links nowhere
+        if url := package.title_url(Media(media), ids):
+            out.append(Outbound(source, url))
+    return out
 
 
 class Answerer(NamedTuple):

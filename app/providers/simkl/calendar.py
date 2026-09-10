@@ -305,9 +305,36 @@ def poster_url(path) -> str | None:
 _SITE_PATHS = {Media.SHOW: "tv", Media.MOVIE: "movies"}
 
 
+def title_url(media: Media, ids: dict) -> str:
+    """The Simkl page for a title, built from an id map from anywhere.
+
+    PUBLIC FOR THE REASON THE TRAKT PACKAGE'S IS: the details panel draws an
+    outbound button per service and has only ids to build it from, and Simkl's
+    API rules require that wherever their data appears it links "back to the
+    Simkl page for that specific item — not just a generic homepage link". One
+    reading of that address, called by whoever needs it.
+
+    THE NAMESPACED SLUG, NEVER THE SHARED ONE — see the Trakt package's own
+    `title_url`. `normalize` writes `simkl_slug` for every Simkl payload.
+
+    The slug is optional in the same way Trakt's is: the numeric form reaches the
+    same page, so a title with no slug still gets a real link rather than a
+    homepage. With no usable id there is genuinely nowhere item-specific to point
+    and "" is the honest answer — `Record.detail_url` is already optional
+    everywhere it is read, and app/calendar/resolve.py's `source_links` skips a
+    record without one.
+    """
+    simkl_id = ids.get("simkl")
+    if not simkl_id:
+        return ""
+    slug = str(ids.get("simkl_slug") or "").strip()
+    path = f"{_SITE_PATHS[media]}/{simkl_id}"
+    return f"https://simkl.com/{path}/{slug}" if slug else f"https://simkl.com/{path}"
+
+
 def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
-    """The Simkl page for THIS title: the entry's own `url` when it carries one,
-    otherwise the same address rebuilt from the ids it does carry.
+    """The Simkl page for one CALENDAR ENTRY: the entry's own `url` when it
+    carries one, otherwise the address `title_url` builds from its ids.
 
     THE ENTRY'S OWN URL IS PREFERRED AND USED AS GIVEN, because a percent-encoded
     slug is already correctly encoded there and re-deriving one risks spelling it
@@ -330,12 +357,9 @@ def _detail_url(media: Media, entry_url, raw_ids: dict) -> str:
     """
     if entry_url:
         return str(entry_url)
-    simkl_id = raw_ids.get("simkl_id") or raw_ids.get("simkl")
-    if not simkl_id:
-        return ""
-    slug = str(raw_ids.get("slug") or "").strip()
-    path = f"{_SITE_PATHS[media]}/{simkl_id}"
-    return f"https://simkl.com/{path}/{slug}" if slug else f"https://simkl.com/{path}"
+    # Normalized first, because `title_url` reads the namespaced spellings and a
+    # raw Simkl block carries the bare ones.
+    return title_url(media, _ids.normalize(raw_ids))
 
 
 def _simkl_ids(raw: dict) -> dict:

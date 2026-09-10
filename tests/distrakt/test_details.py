@@ -291,6 +291,65 @@ class ThePanelIsTheSameOneEverywhereTests(_DetailsRouteTestCase):
         self.assertNotIn("no-poster", self._panel().html)
 
 
+class LinkingBackToTheSourceTests(_DetailsRouteTestCase):
+    """The panel carries an outbound button per service that knows the title.
+
+    NOT DECORATION: both services ask that their data be linked back to the page
+    for the specific item rather than to a homepage, and Simkl's API rules say so
+    in writing. A calendar card has drawn these since it existed; the tracker's
+    rows carry a network logo and nothing else, so this panel is the only place
+    one of its titles can be reached from at all.
+    """
+
+    def make_settings(self):
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
+    def setUp(self):
+        super().setUp()
+        self._settle(_month_back(0))
+
+    def _relink(self, ids: dict):
+        record = _settled(distrakt_store.RecordKind.COMPLETED)
+        record["ids"] = ids
+        asyncio.run(distrakt_store.add_month_record(
+            self.user_id, _month_back(0), record))
+
+    def test_a_title_one_service_knows_gets_one_button(self):
+        """The fixture row carries only the old SHARED `slug`, which is nobody's
+        in particular — so the link is built from the id, which reaches the same
+        page. That is the rule, not a shortfall: handing a name only one service
+        uses to the other one produced live 404s."""
+        html = self._panel().html
+        self.assertIn('href="https://trakt.tv/shows/7"', html)
+        self.assertNotIn("simkl.com", html)
+
+    def test_a_title_both_services_know_gets_one_button_each(self):
+        self._relink({"trakt": 7, "trakt_slug": "the-agency", "tmdb": 1,
+                      "simkl": 55512, "simkl_slug": "the-agency"})
+        html = self._panel().html
+        self.assertIn('href="https://trakt.tv/shows/the-agency"', html)
+        self.assertIn('href="https://simkl.com/tv/55512/the-agency"', html)
+
+    def test_the_readable_name_is_used_where_it_is_that_services_own(self):
+        """The id is the FALLBACK. Both services ask that the readable name be
+        sent when it is known, because resolving the numeric id costs them a
+        lookup and a redirect they need not have done."""
+        self._relink({"trakt": 7, "trakt_slug": "the-agency", "tmdb": 1})
+        self.assertIn('href="https://trakt.tv/shows/the-agency"', self._panel().html)
+
+    def test_a_name_only_the_other_service_uses_is_never_borrowed(self):
+        """The shared column holds whichever service wrote last. A Simkl-only
+        name handed to the Trakt link builder is a URL for a title Trakt has
+        never heard of — measured as live 404s, which is why it is not read."""
+        self._relink({"trakt": 7, "tmdb": 1, "slug": "shingeki-no-kyojin-oad",
+                      "simkl_slug": "shingeki-no-kyojin-oad"})
+        html = self._panel().html
+        self.assertIn('href="https://trakt.tv/shows/7"', html)
+        self.assertNotIn("shingeki", html)
+
+
 class WhoWasASKEDTests(_DetailsRouteTestCase):
     """Every row names the services that could actually be ASKED about this
     title, not the ones that happened to answer yes.
