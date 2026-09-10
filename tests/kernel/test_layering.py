@@ -79,7 +79,8 @@ GROUPS: dict[str, str] = {
     # The kernel: configuration, storage, HTTP plumbing, rendering. Depends on
     # no feature, which is what makes it safe for every feature to depend on it.
     "assets": KERNEL, "cache": KERNEL, "changelog": KERNEL, "chrome": KERNEL,
-    "clock": KERNEL, "config": KERNEL, "db": KERNEL, "endpoints": KERNEL, "http_pool": KERNEL,
+    "clock": KERNEL, "config": KERNEL, "db": KERNEL, "details_panel": KERNEL,
+    "endpoints": KERNEL, "http_pool": KERNEL,
     "perftrace": KERNEL, "route_params": KERNEL, "secrets_box": KERNEL,
     "templating": KERNEL, "timezones": KERNEL,
 
@@ -162,9 +163,12 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
 
     # --- the value-type contract, which everything may name ----------------
     (KERNEL, PROVIDER_TYPES): Edge(
-        "endpoints.py names Media to declare what each calendar endpoint is FOR. "
-        "It is a value type that imports nothing at run time, so this does not "
-        "make the kernel depend on any source"),
+        "endpoints.py names Media to declare what each calendar endpoint is FOR, "
+        "and templating.py walks Source to build the details panel's query — one "
+        "parameter per service, from the enum rather than from a list, so a third "
+        "service is a registration and not an edit in a template. Both are value "
+        "types that import nothing at run time, so this does not make the kernel "
+        "depend on any source"),
     (PROVIDERS, PROVIDER_TYPES): Edge("a source produces Items and declares Capabilities"),
     (MEDIA, PROVIDER_TYPES): Edge("artwork is keyed by ItemKey"),
     (CALENDAR, PROVIDER_TYPES): Edge("the cache stores and replays Items"),

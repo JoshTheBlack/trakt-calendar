@@ -44,7 +44,7 @@ from app.config import (TRUSTED_PROXY_IPS_DEFAULT, Settings, load_settings,
                         save_settings)
 from app.media import user_images
 from app.main import app
-from tests.support import AppTestCase
+from tests.support import AppTestCase, DetailsPanel
 
 PASSWORD = "correct-horse-battery"
 LOCK = {"max_attempts": auth.LOGIN_MAX_ATTEMPTS, "window_seconds": auth.LOGIN_WINDOW_SECONDS}
@@ -772,10 +772,14 @@ class PerUserEmojiMapTests(RegressionTestCase):
 
 
 class DistraktDetailsTests(RegressionTestCase):
-    """The tracker's own details modal. A separate route from /api/details because
-    that one is CALENDAR_APPROVED — a tracker user need not be calendar approved —
-    and because this one answers a question the calendar has no business knowing:
-    which episodes THIS person has watched."""
+    """The tracker's own details panel. A separate route from the calendar's
+    because that one is CALENDAR_APPROVED — a tracker user need not be calendar
+    approved — and because this one answers a question the calendar has no
+    business knowing: which episodes THIS person has watched.
+
+    It answers with the panel itself (templates/_details.html), so what is
+    asserted below is what the viewer is shown; tests.support.DetailsPanel reads
+    the ticks and the links back out of the markup."""
 
     DETAILS = {
         "title": "Silo", "year": 2026, "overview": "o", "status": "Returning",
@@ -824,57 +828,63 @@ class DistraktDetailsTests(RegressionTestCase):
                 (self.user_id, "show", "tmdb", "1", 3, watched, 7)))
         self.login("josh")
         with patch("app.providers.trakt.detail.fetch_details", return_value=self.DETAILS):
-            return self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3")
+            return DetailsPanel(self.client.get(
+                f"/distrakt/fragments/details?key={self.KEY}&season=3").text)
 
     def test_it_returns_the_episodes_and_this_users_watched_set(self):
-        body = self.details().json()
-        self.assertTrue(body["ok"])
-        self.assertEqual(len(body["episodes"]), 5)
-        self.assertEqual(body["watched_episodes"], [1, 2, 3])
+        panel = self.details()
+        self.assertEqual(panel.episodes, [1, 2, 3, 4, 5])
+        self.assertEqual(panel.watched, [1, 2, 3])
 
     def test_a_pre_dates_progress_row_still_reads(self):
         """Rows written before episodes carried dates hold a bare list. They are
         read as dates-unknown everywhere else; this route is not an exception."""
-        self.assertEqual(self.details(watched="[1,2,3]").json()["watched_episodes"],
-                         [1, 2, 3])
+        self.assertEqual(self.details(watched="[1,2,3]").watched, [1, 2, 3])
 
-    def test_the_slug_comes_from_the_roster_not_the_caller(self):
-        """The Trakt links are built from it, so a caller must not be able to
-        point them somewhere else."""
-        body = self.details().json()
-        self.assertEqual(body["slug"], "silo")
+    def test_the_links_are_built_from_the_roster_and_not_from_the_caller(self):
+        """A tick opens the service holding the record, and the caller must not
+        be able to point it somewhere else: everything a link is built from comes
+        off the row this account can already see."""
+        self.assertEqual(
+            self.details().tick_links["trakt"],
+            "https://app.trakt.tv/shows/7?season=3&view=episode&episode=1")
         self.login("josh")
         with patch("app.providers.trakt.detail.fetch_details", return_value=self.DETAILS):
-            spoofed = self.client.get(
-                f"/api/distrakt/details?key={self.KEY}&season=3&slug=evil").json()
-        self.assertEqual(spoofed["slug"], "silo")
+            spoofed = DetailsPanel(self.client.get(
+                f"/distrakt/fragments/details?key={self.KEY}&season=3&slug=evil").text)
+        self.assertNotIn("evil", spoofed.html)
+        self.assertEqual(spoofed.tick_links["trakt"],
+                         "https://app.trakt.tv/shows/7?season=3&view=episode&episode=1")
 
     def test_one_users_watched_set_is_invisible_to_another(self):
         self.details()
         self.client.post("/logout", json={})
-        other = self.tracker("other")
+        self.tracker("other")
         self.login("other")
         with patch("app.providers.trakt.detail.fetch_details", return_value=self.DETAILS):
-            body = self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").json()
-        self.assertEqual(body["watched_episodes"], [])
+            panel = DetailsPanel(self.client.get(
+                f"/distrakt/fragments/details?key={self.KEY}&season=3").text)
+        self.assertEqual(panel.watched, [])
 
     def test_no_progress_row_is_an_empty_set_not_an_error(self):
-        body = self.details(watched=None).json()
-        self.assertTrue(body["ok"])
-        self.assertEqual(body["watched_episodes"], [])
+        panel = self.details(watched=None)
+        self.assertEqual(panel.episodes, [1, 2, 3, 4, 5])
+        self.assertEqual(panel.watched, [])
 
     def test_it_needs_the_tracker_grant(self):
         self.client.post("/logout", json={})
         self.make_user("plain", calendar_approved=True)
         self.login("plain")
         self.assertIn(
-            self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").status_code,
+            self.client.get(
+                f"/distrakt/fragments/details?key={self.KEY}&season=3").status_code,
             (401, 403))
 
     def test_a_missing_season_is_refused(self):
+        """DRAWN rather than signalled with a status, like every fragment here."""
         self.login("josh")
-        self.assertEqual(
-            self.client.get(f"/api/distrakt/details?key={self.KEY}").status_code, 400)
+        self.assertIn("Missing season", self.client.get(
+            f"/distrakt/fragments/details?key={self.KEY}").text)
 
 
 class SiteHeaderTests(RegressionTestCase):

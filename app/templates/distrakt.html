@@ -203,16 +203,9 @@
 
 {% include "_footer.html" %}
 
-<!-- Show details modal: the calendar's, plus this user's watched episodes. -->
-<div id="distraktDetailsModal" class="modal-overlay" onclick="if(event.target===this) closeDistraktDetails()">
-    <div class="modal wide">
-        <div class="modal-head">
-            <h2 id="distraktDetailsTitle">Details</h2>
-            <button type="button" class="modal-close" onclick="closeDistraktDetails()">&times;</button>
-        </div>
-        <div class="modal-body" id="distraktDetailsBody"></div>
-    </div>
-</div>
+{# The details panel, the same shell every surface opens — here with this
+   viewer's own record of the season drawn onto its episode rows. #}
+{% include "_details_modal.html" %}
 
 <!-- Add-film modal: a film is a play on a day, not a roster entry, so this asks
      for the date and nothing else — the month it lands in follows from it. -->
@@ -392,17 +385,6 @@
     // to these emoji for any network with no logo, on the first paint.
     window.NETWORK_EMOJIS = {{ network_emojis | tojson }};
     window.DEFAULT_NETWORK_EMOJI = {{ default_network_emoji | tojson }};
-    // EACH SERVICE'S MARK, RENDERED BY THE MACRO THAT OWNS THE FILENAMES rather
-    // than spelled again in JavaScript. The episode checklist draws one tick per
-    // service and every tick is a link to that service, so a mark there is part
-    // of a control — which is the test _source_logo.html sets for drawing one at
-    // all. Markup rather than a path, so the class list and the alt text come
-    // from the same macro as everywhere else.
-    window.SOURCE_MARKS = {
-        {% for name in ("trakt", "simkl") %}
-        {{ name | tojson }}: {{ src.mark(name, "ep-mark") | string | tojson }},
-        {% endfor %}
-    };
 </script>
 </body>
 </html>

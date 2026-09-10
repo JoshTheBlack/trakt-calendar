@@ -1192,19 +1192,7 @@
     </div>
 </div>
 
-<!-- Details modal -->
-<div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeDetails()">
-    <div class="modal wide">
-        <div class="modal-head">
-            <h2 id="detailsTitle">Details</h2>
-            <div class="modal-head-right">
-                <div id="detailsActions"></div>
-                <button type="button" class="modal-close" onclick="closeDetails()">&times;</button>
-            </div>
-        </div>
-        <div class="modal-body" id="detailsBody"></div>
-    </div>
-</div>
+{% include "_details_modal.html" %}
 
 <script>
     // Server-resolved from the session. Purely a rendering hint: every route the

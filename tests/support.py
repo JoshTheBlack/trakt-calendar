@@ -18,8 +18,10 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import re
 import shutil
 import unittest
+from html import unescape
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -244,3 +246,74 @@ class AppTestCase(unittest.TestCase):
         session_id = asyncio.run(auth.create_session(user_id))
         self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
         return session_id
+
+
+# ---------------------------------------------------------------------------
+# The details panel, read back out of its own markup.
+# ---------------------------------------------------------------------------
+class DetailsPanel:
+    """What a rendered details fragment (templates/_details.html) says.
+
+    THE ROUTES THAT DRAW IT ANSWER WITH THE PANEL RATHER THAN WITH A PAYLOAD, so
+    a test asserting what a viewer is told has to read the markup. Three test
+    files need the same handful of readings — which episodes carry a tick, whose
+    tick it is, where it points — and a copy of these patterns in each of them
+    would be three things to fix the day a class name changes.
+
+    Deliberately not an HTML parser: what is asserted here is the panel's own
+    class names, which ARE the contract between the template and the stylesheet,
+    so a reading that stopped matching is a change worth noticing.
+    """
+
+    _ROW = re.compile(r'<div class="ep-row(?P<flags>[^"]*)">(?P<body>.*?)</div>', re.S)
+    _NUM = re.compile(r'<span class="ep-num">E(\d+)</span>')
+    _TICK = re.compile(
+        r'<(?:a|span) class="ep-check svc-(?P<source>[a-z]+)(?P<flags>[^"]*)"'
+        r'(?P<attrs>[^>]*)>', re.S)
+    _HREF = re.compile(r'href="(?P<url>[^"]*)"')
+
+    def __init__(self, html: str):
+        self.html = html
+
+    def _rows(self):
+        for match in self._ROW.finditer(self.html):
+            number = self._NUM.search(match.group("body"))
+            if number:
+                yield int(number.group(1)), match.group("flags"), match.group("body")
+
+    @property
+    def episodes(self) -> list[int]:
+        return [number for number, _flags, _body in self._rows()]
+
+    @property
+    def watched(self) -> list[int]:
+        return [number for number, flags, _body in self._rows() if "watched" in flags]
+
+    @property
+    def by_source(self) -> dict[str, list[int]]:
+        """{service: the episodes its tick is drawn FILLED on}, which is the
+        rendered form of what each service recorded."""
+        found: dict[str, list[int]] = {}
+        for number, _flags, body in self._rows():
+            for tick in self._TICK.finditer(body):
+                if "unseen" not in tick.group("flags"):
+                    found.setdefault(tick.group("source"), []).append(number)
+        return found
+
+    @property
+    def services(self) -> list[str]:
+        """Every service a tick is drawn for, filled or hollow."""
+        return sorted({tick.group("source") for tick in self._TICK.finditer(self.html)})
+
+    @property
+    def tick_links(self) -> dict[str, str]:
+        """{service: where its first tick points}, omitting a service whose ticks
+        are drawn as plain text because the title carries no id for it."""
+        found: dict[str, str] = {}
+        for tick in self._TICK.finditer(self.html):
+            url = self._HREF.search(tick.group("attrs"))
+            if url and tick.group("source") not in found:
+                # Unescaped, because what is being asserted is the ADDRESS a
+                # press goes to and not how an attribute spells an ampersand.
+                found[tick.group("source")] = unescape(url.group("url"))
+        return found

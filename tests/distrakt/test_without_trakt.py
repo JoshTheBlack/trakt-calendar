@@ -32,7 +32,7 @@ from app.distrakt import live, routes as distrakt_routes
 from app.providers.base import PlayCounts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
-from tests.support import AppTestCase, ORIGIN, migrated_db
+from tests.support import AppTestCase, DetailsPanel, ORIGIN, migrated_db
 
 # THE INSTANCE'S CATALOGUE CREDENTIALS, WHICH ARE NOT ANYBODY'S TOKEN. Whether a
 # season's episode count can be looked up is a client id and nothing else (see
@@ -97,7 +97,7 @@ def _quiet_sources():
 
 
 class DetailsWithoutATraktTokenTests(AppTestCase):
-    """GET /api/distrakt/details for an account that signed in with Simkl.
+    """The tracker's details panel for an account that signed in with Simkl.
 
     The row it asks about carries a Trakt id — a title Simkl alone knows is
     Phase-8 work and is deliberately still a 404 here. What this covers is the
@@ -137,25 +137,28 @@ class DetailsWithoutATraktTokenTests(AppTestCase):
             "shows/7": SHOW, "shows/7/people": PEOPLE, "shows/7/seasons/3": EPISODES,
         })
         with patch.object(transport, "shared_client", return_value=self.client_double):
-            return self.client.get(f"/api/distrakt/details?key={self.KEY}&season=3").json()
+            resp = self.client.get(
+                f"/distrakt/fragments/details?key={self.KEY}&season=3")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return DetailsPanel(resp.text)
 
-    def test_the_modal_opens_at_all(self):
-        """It used to 400 "Not configured" for this whole configuration, which is
-        what the viewer saw as "Could not load details from Trakt" on every row."""
-        self.assertTrue(self._details()["ok"])
+    def test_the_panel_opens_at_all(self):
+        """It used to refuse "Not configured" for this whole configuration, which
+        is what the viewer saw as "Could not load details from Trakt" on every
+        row."""
+        self.assertIn("Down the silo.", self._details().html)
 
     def test_the_public_catalogue_fields_are_all_there(self):
-        body = self._details()
-        self.assertEqual(body["title"], "Silo")
-        self.assertEqual(body["overview"], "Down the silo.")
-        self.assertEqual([c["character"] for c in body["cast"]], ["Juliette"])
-        self.assertEqual([e["number"] for e in body["episodes"]], [1, 2, 3, 4, 5])
+        panel = self._details()
+        self.assertIn("Down the silo.", panel.html)
+        self.assertIn("Juliette", panel.html)
+        self.assertEqual(panel.episodes, [1, 2, 3, 4, 5])
 
     def test_this_accounts_own_watched_episodes_come_back_with_them(self):
         """From local storage, where whichever service this account DOES sync
-        wrote them — the modal is the one place the public half and the private
+        wrote them — the panel is the one place the public half and the private
         half are shown side by side."""
-        self.assertEqual(self._details()["watched_episodes"], [1, 2])
+        self.assertEqual(self._details().watched, [1, 2])
 
     def test_nothing_it_asked_trakt_carried_an_authorization_header(self):
         """The proof that the answer really was tokenless rather than quietly
@@ -177,17 +180,15 @@ class DetailsWithoutATraktTokenTests(AppTestCase):
         }))
         with patch.object(transport, "shared_client",
                           return_value=_RecordingClient({})):
-            resp = self.client.get("/api/distrakt/details?key=show:tmdb:2&season=1")
-        self.assertEqual(resp.status_code, 404)
-        self.assertEqual(resp.json()["error"], "Nothing here can describe this item.")
+            resp = self.client.get("/distrakt/fragments/details?key=show:tmdb:2&season=1")
+        self.assertIn("Nothing here can describe this item.", resp.text)
 
     def test_a_row_that_is_not_on_the_roster_at_all_still_says_that(self):
         """The other refusal, kept apart from the one above: these are different
         facts and only one of them is something the reader can do anything
         about."""
-        resp = self.client.get("/api/distrakt/details?key=show:tmdb:404404&season=1")
-        self.assertEqual(resp.status_code, 404)
-        self.assertEqual(resp.json()["error"], "Not on your roster")
+        resp = self.client.get("/distrakt/fragments/details?key=show:tmdb:404404&season=1")
+        self.assertIn("Not on your roster", resp.text)
 
 
 class _CatalogueFailureTestCase(unittest.IsolatedAsyncioTestCase):
@@ -812,33 +813,32 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
             return dict(self.SIMKL_DETAIL)
 
         with patch("app.providers.simkl.detail.fetch_details", _fetch):
-            return self.client.get("/api/distrakt/details?key=show:tmdb:55&season=1")
+            return self.client.get(
+                "/distrakt/fragments/details?key=show:tmdb:55&season=1")
 
-    def test_the_modal_opens(self):
-        """It used to 404 "Not on your roster" about a row that plainly is."""
-        resp = self._details()
-        self.assertTrue(resp.json()["ok"])
+    def test_the_panel_opens(self):
+        """It used to refuse "Not on your roster" about a row that plainly is."""
+        self.assertIn("A show only one service lists.", self._details().text)
 
     def test_simkl_is_the_one_asked_and_it_is_asked_by_its_own_id(self):
         """A service cannot look a title up by an id it does not issue, so the
         chooser hands each one its own namespace."""
         asked: list = []
-        body = self._details(asked).json()
+        html = self._details(asked).text
         self.assertEqual(asked, [("2735483", 1)])
-        self.assertEqual(body["source"], "simkl")
+        self.assertIn("A show only one service lists.", html)
 
     def test_it_carries_the_fields_the_panel_draws(self):
-        body = self._details().json()
-        self.assertEqual(body["title"], "Simkl Only")
-        self.assertEqual(body["overview"], "A show only one service lists.")
-        self.assertEqual([e["number"] for e in body["episodes"]], [1, 2, 3, 4])
+        panel = DetailsPanel(self._details().text)
+        self.assertIn("A show only one service lists.", panel.html)
+        self.assertEqual(panel.episodes, [1, 2, 3, 4])
 
     def test_this_accounts_own_watched_episodes_come_with_it(self):
         """The watched half was never Trakt's to answer — it is read out of this
         app's own storage, written by whichever services the account syncs."""
-        body = self._details().json()
-        self.assertEqual(body["watched_episodes"], [1, 2])
-        self.assertEqual(body["watched_by_source"], {"simkl": [1, 2]})
+        panel = DetailsPanel(self._details().text)
+        self.assertEqual(panel.watched, [1, 2])
+        self.assertEqual(panel.by_source, {"simkl": [1, 2]})
 
     def test_a_row_both_services_know_is_still_trakt_s_to_describe(self):
         """The regression half. Declared source order decides, so nothing moves
@@ -860,9 +860,10 @@ class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
 
         with patch("app.providers.trakt.detail.fetch_details", _trakt), \
                 patch("app.providers.simkl.detail.fetch_details", _simkl):
-            body = self.client.get("/api/distrakt/details?key=show:tmdb:56&season=1").json()
+            resp = self.client.get(
+                "/distrakt/fragments/details?key=show:tmdb:56&season=1")
         self.assertEqual(trakt_asked, ["7"])
-        self.assertEqual(body["source"], "trakt")
+        self.assertEqual(resp.status_code, 200, resp.text)
 
 
 class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):

@@ -36,7 +36,7 @@ from . import (cache as calendar_cache, detail_source, enrich as calendar_enrich
                filter as calendar_filter, resolve as calendar_resolve,
                search as calendar_search, share_links, state as calendar_state,
                vocab)
-from .. import auth, authz, chrome, clock, db, route_params
+from .. import auth, authz, chrome, clock, db, details_panel, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
@@ -1147,8 +1147,8 @@ async def api_tile(request: Request):
     """Compact season info for a card's own line — how many episodes, what aired
     last, what airs next.
 
-    THE CALLER HANDS OVER IDS, NOT A SERVICE, exactly as /api/details below
-    does, and this route did not used to. It took a bare `id`, read it as a
+    THE CALLER HANDS OVER IDS, NOT A SERVICE, exactly as the details fragment
+    below does, and this route did not used to. It took a bare `id`, read it as a
     TRAKT id and refused outright unless the instance held Trakt catalogue
     credentials — so the line appeared on a card only when the title happened to
     carry a Trakt id, and a Simkl-only card could never show it. That read as
@@ -1192,10 +1192,15 @@ async def api_tile(request: Request):
                          **season_rules.tile_summary(detail, clock.today())})
 
 
-@guard.get("/api/details", AuthLevel.CALENDAR_APPROVED)
-async def api_details(request: Request):
-    """Full detail payload for the modal, from whichever service can describe
-    the title.
+@guard.get("/calendar/fragments/details", AuthLevel.CALENDAR_APPROVED)
+async def details_fragment(request: Request):
+    """The details panel's contents for one card.
+
+    A VIEW, NOT AN API. It answers with the panel itself — templates/_details.html,
+    the one this app has — so the calendar, the tracker and the public share page
+    show the same fields without three renderers being kept in step. This used to
+    answer JSON that a JavaScript builder turned into markup, and the two other
+    builders beside it had drifted twice over.
 
     THE CALLER HANDS OVER IDS, NOT A SERVICE. The query carries one parameter per
     id namespace the card was drawn with — `trakt=`, `simkl=` — and
@@ -1206,37 +1211,47 @@ async def api_details(request: Request):
     thing, and a second route would be a second gate, a second refusal shape and
     a second place the client decides who to ask.
 
+    THE PICTURE AND THE NAME COME FROM THE CARD, not from the answer, and they
+    are the two parameters the browser adds rather than the template: the
+    source-flip control can change either after the card was rendered. Both are
+    echoed back into the viewer's own page from the viewer's own request, which is
+    why they may be query parameters here and may not be on the public share
+    route — see share_routes._Described for that half.
+
     Catalogue credentials only, for the same reason as /api/tile: everything this
-    returns — overview, cast, the episode list — is public and shared. What
-    changed is that "catalogue" is now a question per SOURCE. It used to gate on
-    Trakt's, which refuses a title that needs no Trakt credential at all.
+    returns — overview, cast, the episode list — is public and shared, and
+    "catalogue" is a question per SOURCE rather than Trakt's alone.
     """
+    params = request.query_params
     settings = load_settings()
-    media = request.query_params.get("media", "show")
-    chosen = detail_source.choose(
-        settings, detail_source.ids_from_query(request.query_params))
+    media = params.get("media", "show")
+    chosen = detail_source.choose(settings, detail_source.ids_from_query(params))
     if chosen is None:
-        # 404 rather than 400: the request was well formed and there is simply
-        # nobody who can answer it. The modal says so in its own words.
-        return JSONResponse({"ok": False, "error": "No source can describe this title"},
-                            status_code=404)
+        return details_panel.gap(request, "Nothing here can describe this item.")
     try:
         # NO SOURCE REACHABLE MEANS DRAW WHAT IS ALREADY HELD, which `describe`
         # decides: reading the store back needs no credential and makes no
         # request, and refusing instead threw away a description this instance
         # had already fetched once. None is the genuinely empty case.
         details = await detail_source.describe(
-            settings, chosen, media,
-            route_params.season(request.query_params.get("season")))
-    except SourceUnavailable as exc:
+            settings, chosen, media, route_params.season(params.get("season")))
+    except SourceUnavailable:
         # The shared degradation contract rather than one service's error type:
-        # this route can now be answered by either of two sources and catching
-        # only Trakt's would let Simkl's escape as a 500.
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
+        # this route can be answered by either of two sources and catching only
+        # Trakt's would let Simkl's escape as a 500. A failure is something the
+        # server DRAWS — a non-200 is not swapped (see boost.js's noSwap), so a
+        # status code here would leave the panel on its loading line for ever.
+        # The service's own words are logged rather than shown: a rate-limit
+        # message from an upstream is not something the reader can act on, and
+        # this is the sentence the panel has always shown for a failed lookup.
+        logger.warning("Detail lookup failed for %s", chosen.source, exc_info=True)
+        return details_panel.gap(request, "⚠️ Could not load details for this item.")
     if details is None:
-        return JSONResponse({"ok": False, "error": "No source can describe this title"},
-                            status_code=404)
-    return JSONResponse({"ok": True, "source": str(chosen.source), **details})
+        return details_panel.gap(request, "Nothing here can describe this item.")
+    return details_panel.panel(
+        request, details, media=media,
+        season=route_params.season(params.get("season")),
+        title=params.get("title", ""), poster=params.get("poster", ""))
 
 
 @guard.get("/api/state", AuthLevel.CALENDAR_APPROVED)

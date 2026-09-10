@@ -194,6 +194,64 @@ function closeModal(id) {
 }
 
 
+/* ---- The details panel ----
+ *
+ * ONE PANEL AND ONE WAY OF OPENING IT. templates/_details_modal.html is included
+ * by the calendar, the tracker and the public share page, and what goes inside it
+ * is a fragment the server renders (templates/_details.html). Three pages each
+ * built that markup for themselves, from the same payload, and the three copies
+ * had drifted twice over — so what is left on this side is only the part a
+ * fragment cannot do.
+ *
+ * WHICH IS THE HEADING, AND IT IS NOT AN OVERSIGHT THAT IT IS STILL HERE. The
+ * panel opens the instant it is clicked and the answer arrives afterwards, so the
+ * name at the top has to be right while the request is still in flight — it comes
+ * from the card on screen, which is also the only thing that knows it: which
+ * service answers decides what is in the payload, and one of them stores its
+ * catalogue records without a title at all.
+ *
+ * THE TWO STATES WITH NO RESPONSE BEHIND THEM ARE CLONED, not built. They are
+ * <template> elements in the shell, so every piece of markup this panel can show
+ * is written in a template and none of it is assembled from strings here.
+ */
+function detailsPanelState(id) {
+    const source = document.getElementById(id);
+    return source ? source.content.cloneNode(true) : document.createDocumentFragment();
+}
+
+function openDetailsPanel(url, heading) {
+    const body = document.getElementById('detailsBody');
+    if (!body) return;
+    document.getElementById('detailsTitle').textContent = heading;
+    body.replaceChildren(detailsPanelState('detailsPending'));
+    document.getElementById('detailsModal').classList.add('open');
+    htmx.ajax('GET', url, { target: '#detailsBody', swap: 'innerHTML' });
+}
+
+function closeDetailsPanel() { closeModal('detailsModal'); }
+
+// A REQUEST THAT ENDED WITHOUT PUTTING ANYTHING THERE left the panel on its
+// loading line for ever, and that covers every failure the server could not draw
+// for itself: a dropped connection, a session that lapsed into a redirect, the
+// public page's rate limit. Everything the server CAN state it states as a
+// fragment at 200, because a non-200 is never swapped (static/js/boost.js's
+// `noSwap`).
+//
+// THE TEST IS WHETHER THE PLACEHOLDER SURVIVED, not what the request context
+// says, and that is a measured correction rather than a preference: htmx runs
+// its swap STEP for a no-swap response as well, so the context comes back
+// reading "swapped" for a 404 whose swap was a no-op. Asking the DOM what is
+// actually on the page is one question with one answer, and it does not depend
+// on how the library spells its own progress.
+document.addEventListener('htmx:finally:request', (event) => {
+    const ctx = event.detail && event.detail.ctx;
+    const body = document.getElementById('detailsBody');
+    if (!ctx || !body || ctx.target !== body) return;
+    if (!body.querySelector('[data-details-pending]')) return;
+    body.replaceChildren(detailsPanelState('detailsUnreachable'));
+});
+
+
 // A SELECT WHOSE VALUE IS PART OF THE URL MUST NOT SURVIVE A RESTORE SAYING
 // OTHERWISE. `autocomplete="off"` in the markup handles the browser reapplying a
 // control's value over a freshly parsed page; it has nothing to say about the

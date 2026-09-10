@@ -16,6 +16,12 @@ The rules asserted here, each of which can break silently:
   - a card carrying no id any source recognises is refused, and the refusal names
     no service.
 
+THE ROUTE ANSWERS WITH THE PANEL, NOT WITH A PAYLOAD (templates/_details.html),
+so what a source said is asserted through what the reader is shown. That is the
+stronger claim of the two — a field the provider fills in and the template never
+draws is a field nobody sees — and the one place it cannot reach is the KEY SET
+itself, which is asserted against the ports directly below.
+
 No network: both providers' transports are replaced with stubs that answer from
 a dict, so a path nobody stubbed fails loudly rather than reaching out.
 """
@@ -102,7 +108,7 @@ def _simkl_answers(bodies: dict):
 
 
 class DetailModalSourceTests(AppTestCase):
-    """One HTTP call each, against /api/details as the modal really calls it."""
+    """One HTTP call each, against the details fragment as a card really asks it."""
 
     def make_settings(self):
         # BOTH catalogue credentials, and neither private one. That is the live
@@ -121,7 +127,7 @@ class DetailModalSourceTests(AppTestCase):
         with patch.object(trakt_transport, "shared_client", return_value=trakt_client), \
              patch.object(simkl_transport, "cached_get",
                           new=_simkl_answers(simkl if simkl is not None else {})):
-            return self.client.get(f"/api/details?{query}")
+            return self.client.get(f"/calendar/fragments/details?{query}")
 
     # -- a title both services listed --------------------------------------
 
@@ -141,19 +147,20 @@ class DetailModalSourceTests(AppTestCase):
         larger one — a cast, a per-episode air date, a per-episode rating — and a
         merged card must not lose those because the other service also had a
         page for it."""
-        body = self._both().json()
-        self.assertEqual(body["source"], "trakt")
-        self.assertEqual(body["overview"], "Trakt's words.")
-        self.assertEqual(body["cast"][0]["name"], "A Voice")
-        self.assertEqual(body["episodes"][0]["title"], "Longing for Sea Bream!")
-        self.assertEqual(body["episodes"][0]["rating"], 8.1)
+        html = self._both().text
+        self.assertIn("Trakt&#39;s words.", html)
+        self.assertIn("A Voice", html)
+        self.assertIn("Longing for Sea Bream!", html)
+        self.assertIn("⭐ 8.1", html)
 
     def test_the_preference_is_trakts_id_and_not_the_cards_attribution(self):
         """The card the author tested against is a Simkl-attributed card for a
         title Trakt also lists. Nothing about which service the CARD wears
         reaches this route — only the ids do — so a flip on the page cannot
         change who answers the modal."""
-        self.assertEqual(self._both().json()["source"], "trakt")
+        html = self._both().text
+        self.assertIn("Trakt&#39;s words.", html)
+        self.assertNotIn("Simkl&#39;s words.", html)
 
     # -- a title only Simkl listed -----------------------------------------
 
@@ -164,31 +171,48 @@ class DetailModalSourceTests(AppTestCase):
     def test_a_simkl_only_title_opens_on_simkls_answer(self):
         resp = self._simkl_only()
         self.assertEqual(resp.status_code, 200, resp.text)
-        body = resp.json()
-        self.assertEqual(body["source"], "simkl")
-        self.assertEqual(body["overview"], "Simkl's words.")
-        self.assertEqual(body["network"], "CBC")
-        self.assertEqual(body["rating"], 7.2)
-        self.assertEqual(body["status"], "Airing")
+        self.assertIn("Simkl&#39;s words.", resp.text)
+        self.assertIn("📡 CBC", resp.text)
+        self.assertIn("⭐ 7.2", resp.text)
+        self.assertIn("Airing", resp.text)
 
     def test_it_renders_without_a_cast_and_without_erroring(self):
         """The whole point of the brief. Simkl publishes no cast anywhere this
         app can reach, so the key is present and empty — which is the same thing
         the renderer already handles for a Trakt title served from a cold
         cache — rather than absent, which would read as a template bug."""
-        body = self._simkl_only().json()
-        self.assertEqual(body["cast"], [])
-        self.assertIn("cast", body)
+        html = self._simkl_only().text
+        self.assertNotIn("Cast", html)
+        self.assertIn("Simkl&#39;s words.", html)
 
     def test_every_key_the_renderer_reads_is_present(self):
-        """One client-side renderer draws both sources' answers. A key only one
-        of them sends is the failure this pins, and it is invisible until
-        somebody opens the right card."""
-        trakt_body = self._both().json()
-        simkl_body = self._simkl_only().json()
+        """ONE template draws both sources' answers, so a key only one of them
+        sends is a field that silently never appears on the other's cards.
+
+        Asked of the PORTS rather than through the route, because this is the one
+        claim in this file the rendered panel cannot carry: a key the template
+        happens not to draw today would go unmissed, and the point is that the two
+        answers have the same shape whatever is drawn from it. It is the same rule
+        tests/providers/test_protocol_conformance.py holds for an EMPTY answer;
+        what this adds is a pair of answers with real data in them, where a source
+        can leave out a key it has nothing to say for."""
+        from app.calendar import detail_source
+        from app.config import load_settings
+        from app.providers.base import Source
+
+        trakt_client = _TraktClient({"shows/203330": TRAKT_SHOW,
+                                     "shows/203330/people": TRAKT_PEOPLE,
+                                     "shows/203330/seasons/2": TRAKT_EPISODES})
+        with patch.object(trakt_transport, "shared_client", return_value=trakt_client), \
+             patch.object(simkl_transport, "cached_get",
+                          new=_simkl_answers({"tv/3204421": SIMKL_TITLE,
+                                              "tv/episodes/3204421": SIMKL_EPISODES})):
+            settings = load_settings()
+            trakt_body = asyncio.run(detail_source.fetch(
+                settings, Source.TRAKT, "show", "203330", 2))
+            simkl_body = asyncio.run(detail_source.fetch(
+                settings, Source.SIMKL, "show", "3204421", 1))
         for key in trakt_body:
-            if key in ("ok", "source"):
-                continue
             with self.subTest(key=key):
                 self.assertIn(key, simkl_body)
 
@@ -196,21 +220,36 @@ class DetailModalSourceTests(AppTestCase):
         """The stored extraction slugs a genre so one filter spec matches both
         services; the modal draws chips a person reads, so they come back as
         words."""
-        self.assertEqual(self._simkl_only().json()["genres"],
-                         ["Documentary", "Game Show"])
+        html = self._simkl_only().text
+        self.assertIn(">Documentary</span>", html)
+        self.assertIn(">Game Show</span>", html)
 
     def test_a_bare_youtube_id_arrives_as_a_watchable_url(self):
         """Trakt sends a finished URL and Simkl sends an id. Reconciling that in
-        the provider is what lets `trailer` mean one thing to the renderer."""
-        self.assertEqual(self._simkl_only().json()["trailer"],
-                         "https://www.youtube.com/watch?v=simklone")
+        the provider is what lets `trailer` mean one thing to the panel.
+
+        THE MEASURED FIXTURE'S ID IS NOT ELEVEN CHARACTERS, so it takes the panel's
+        other branch — a link out rather than an embed — and that is the honest
+        thing to assert about it. The embed is asserted beside it, on an id of the
+        length YouTube really issues, because "which branch" is decided by the
+        same test the browser's copy used to make."""
+        self.assertIn('href="https://www.youtube.com/watch?v=simklone"',
+                      self._simkl_only().text)
+        real = {**SIMKL_TITLE,
+                "trailers": [{"name": "Trailer", "youtube": "dQw4w9WgXcQ"}]}
+        html = self._get("media=show&simkl=3204421&season=1",
+                         simkl={"tv/3204421": real,
+                                "tv/episodes/3204421": SIMKL_EPISODES}).text
+        self.assertIn("https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ", html)
 
     def test_the_episode_list_is_this_season_without_its_specials(self):
-        body = self._simkl_only().json()
-        self.assertEqual([ep["number"] for ep in body["episodes"]], [1, 2])
-        self.assertEqual(body["episodes"][0]["air_display"], "10 Aug 2026")
-        # Simkl publishes no per-episode rating; the key is still there.
-        self.assertIsNone(body["episodes"][0]["rating"])
+        html = self._simkl_only().text
+        self.assertIn("E01", html)
+        self.assertIn("E02", html)
+        self.assertNotIn("A Special", html)
+        self.assertIn("10 Aug 2026", html)
+        # Simkl publishes no per-episode rating, so no row carries a star.
+        self.assertNotIn("ep-rating", html)
 
     def test_a_listing_with_no_season_is_answered_with_the_only_one_there_is(self):
         """Simkl's calendar files omit the season on anime — 69 of 690 Simkl-only
@@ -218,28 +257,28 @@ class DetailModalSourceTests(AppTestCase):
         season leaves nothing to choose between. The season that was ANSWERED
         comes back, because the modal draws its heading from it."""
         one_season = [ep for ep in SIMKL_EPISODES if ep["season"] == 1]
-        resp = self._get("media=show&simkl=3204421",
+        html = self._get("media=show&simkl=3204421",
                          simkl={"tv/3204421": SIMKL_TITLE,
-                                "tv/episodes/3204421": one_season})
-        body = resp.json()
-        self.assertEqual(body["season"], 1)
-        self.assertEqual([ep["number"] for ep in body["episodes"]], [1, 2])
+                                "tv/episodes/3204421": one_season}).text
+        self.assertIn("Season 1 Episodes", html)
+        self.assertIn("E01", html)
+        self.assertIn("E02", html)
 
     def test_a_listing_with_no_season_and_several_to_choose_from_picks_none(self):
         """The other half, and the reason the rule above is a reading rather than
         a guess: with two seasons in the list there IS something to choose
         between, so nothing is chosen and the modal draws no episode section."""
-        body = self._get("media=show&simkl=3204421",
+        html = self._get("media=show&simkl=3204421",
                          simkl={"tv/3204421": SIMKL_TITLE,
-                                "tv/episodes/3204421": SIMKL_EPISODES}).json()
-        self.assertIsNone(body["season"])
-        self.assertEqual(body["episodes"], [])
+                                "tv/episodes/3204421": SIMKL_EPISODES}).text
+        self.assertNotIn("Episodes", html)
+        self.assertIn("Simkl&#39;s words.", html)
 
     def test_a_movie_costs_no_episode_lookup(self):
-        body = self._get("media=movie&simkl=3207691",
-                         simkl={"movies/3207691": {**SIMKL_TITLE, "type": "movie"}}).json()
-        self.assertEqual(body["episodes"], [])
-        self.assertEqual(body["overview"], "Simkl's words.")
+        html = self._get("media=movie&simkl=3207691",
+                         simkl={"movies/3207691": {**SIMKL_TITLE, "type": "movie"}}).text
+        self.assertNotIn("Episodes", html)
+        self.assertIn("Simkl&#39;s words.", html)
 
     # -- the gate ----------------------------------------------------------
 
@@ -253,10 +292,10 @@ class DetailModalSourceTests(AppTestCase):
         """A merged title on an instance with no Trakt client id falls through to
         the service that CAN answer, rather than refusing on the preferred one."""
         save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid"))
-        body = self._get("media=show&trakt=203330&simkl=3204421&season=1",
+        html = self._get("media=show&trakt=203330&simkl=3204421&season=1",
                          simkl={"tv/3204421": SIMKL_TITLE,
-                                "tv/episodes/3204421": SIMKL_EPISODES}).json()
-        self.assertEqual(body["source"], "simkl")
+                                "tv/episodes/3204421": SIMKL_EPISODES}).text
+        self.assertIn("Simkl&#39;s words.", html)
 
     def test_nothing_configured_still_draws_what_this_instance_already_holds(self):
         """A CREDENTIAL IS NEEDED TO FETCH A DESCRIPTION, NOT TO READ ONE BACK.
@@ -272,7 +311,7 @@ class DetailModalSourceTests(AppTestCase):
         save_settings(Settings(public_base_url=ORIGIN))
         resp = self._simkl_only()
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["source"], "simkl")
+        self.assertIn("Simkl&#39;s words.", resp.text)
 
     def test_nothing_configured_and_nothing_stored_is_a_refusal_naming_no_service(self):
         """The other half, and the reason the fallback is not simply "always
@@ -281,19 +320,20 @@ class DetailModalSourceTests(AppTestCase):
         is still the honest refusal it always was."""
         save_settings(Settings(public_base_url=ORIGIN))
         resp = self._get("media=show&simkl=3204421&season=1", simkl={})
-        self.assertEqual(resp.status_code, 404)
-        self.assertNotIn("Trakt", resp.json()["error"])
-        self.assertNotIn("Simkl", resp.json()["error"])
+        self.assertIn("Nothing here can describe this item.", resp.text)
+        self.assertNotIn("Trakt", resp.text)
+        self.assertNotIn("Simkl", resp.text)
 
     def test_a_card_carrying_no_id_at_all_is_refused(self):
-        resp = self._get("media=show&season=1")
-        self.assertEqual(resp.status_code, 404)
+        self.assertIn("Nothing here can describe this item.",
+                      self._get("media=show&season=1").text)
 
     def test_a_namespace_no_source_issues_is_not_looked_up(self):
         """`?tmdb=` is a real id and no registered source can be asked by it.
         Reading only the names the registry knows is what stops a query string
         naming a lookup this app does not have."""
-        self.assertEqual(self._get("media=show&tmdb=222623").status_code, 404)
+        self.assertIn("Nothing here can describe this item.",
+                      self._get("media=show&tmdb=222623").text)
 
 
 # The window the public tests below share: one Simkl-only airing, in a month a
@@ -363,10 +403,8 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
         with self._no_network():
             resp = self._details("media=show&simkl=3204421&season=1")
         self.assertEqual(resp.status_code, 200, resp.text)
-        body = resp.json()
-        self.assertEqual(body["source"], "simkl")
-        self.assertEqual(body["overview"], "Simkl's words.")
-        self.assertEqual(body["cast"], [])
+        self.assertIn("Simkl&#39;s words.", resp.text)
+        self.assertNotIn("Cast", resp.text)
 
     def test_an_unknown_id_beside_a_known_one_is_dropped_rather_than_preferred(self):
         """WHAT A HAND-EDITED URL ACTUALLY DOES, and it is the case a bound that
@@ -400,8 +438,7 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
              patch.object(trakt_transport, "shared_client", return_value=_Boom()):
             resp = self._details("media=show&trakt=999999&simkl=3204421&season=1")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["source"], "simkl")
-        self.assertEqual(resp.json()["overview"], "Simkl's words.")
+        self.assertIn("Simkl&#39;s words.", resp.text)
 
     def test_a_simkl_title_this_link_does_not_show_is_never_looked_up(self):
         """An id nobody put on the owner's calendar, asked of the other service's
@@ -409,5 +446,5 @@ class SimklOnlyOnAPublicShareLinkTests(AppTestCase):
         would go and ask — which is exactly what the stand-in fails on."""
         with self._no_network():
             resp = self._details("media=show&simkl=999999&season=1")
-        self.assertEqual(resp.status_code, 404)
-        self.assertFalse(resp.json()["ok"])
+        self.assertIn("No source can describe this title", resp.text)
+        self.assertNotIn("Simkl&#39;s words.", resp.text)

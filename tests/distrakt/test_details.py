@@ -1,4 +1,4 @@
-"""The modal behind a tracker row: GET /api/distrakt/details.
+"""The panel behind a tracker row: GET /distrakt/fragments/details.
 
 WHAT THIS FILE IS FOR is the one row the route could not answer about. A season
 the month under way has already SETTLED — finished, or given up on — is drawn on
@@ -12,22 +12,25 @@ the settled walk starts one month earlier.
 That is not a two-service problem and never was. Any season completed in the
 month being looked at has always had it.
 
+THE ROUTE ANSWERS WITH THE PANEL, not with a payload — the same
+templates/_details.html the calendar and the share page open, plus the ticks only
+this surface draws — so what is asserted below is what a viewer is shown.
+tests.support.DetailsPanel is what reads those back out of the markup.
+
 No network: the transport's pooled client is replaced with a stub that answers
-every catalogue path, exactly as the modal's other tests do.
+every catalogue path, exactly as the panel's other tests do.
 """
 from __future__ import annotations
 
 import asyncio
 import json
-import re
-from datetime import date
 from unittest.mock import patch
 
 from app import db, distrakt as distrakt_store
 from app.clock import today
 from app.config import Settings
 from app.providers.trakt import transport
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, DetailsPanel, ORIGIN
 
 
 class _CatalogueClient:
@@ -113,7 +116,13 @@ class _DetailsRouteTestCase(AppTestCase):
             f"shows/7/seasons/{season}": EPISODES,
         })
         with patch.object(transport, "shared_client", return_value=client):
-            return self.client.get(f"/api/distrakt/details?key={KEY}&season={season}")
+            return self.client.get(
+                f"/distrakt/fragments/details?key={KEY}&season={season}")
+
+    def _panel(self, season: int = 2) -> DetailsPanel:
+        resp = self._details(season)
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return DetailsPanel(resp.text)
 
     def _progress(self, source: str, watched: dict) -> None:
         asyncio.run(db.execute(
@@ -130,35 +139,35 @@ class ASeasonSettledInTheMonthBeingViewedTests(_DetailsRouteTestCase):
 
     def test_a_season_this_month_completed_opens(self):
         """The report, exactly: a season finished while the month was under way,
-        answering 404 with the modal reading "Could not load details from
-        Trakt"."""
+        answering with the panel reading "Could not load details from Trakt"."""
         self._settle(_month_back(0))
-        resp = self._details()
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["title"], "The Agency")
+        self.assertIn("Spies.", self._panel().html)
 
     def test_a_season_this_month_was_given_up_on_opens_too(self):
         """The same row from the other verdict. Both are drawn by the page and
         both were unreachable for the same reason."""
         self._settle(_month_back(0), distrakt_store.RecordKind.ABANDONED)
-        self.assertEqual(self._details().status_code, 200)
+        self.assertIn("Spies.", self._panel().html)
 
     def test_a_season_an_earlier_month_settled_still_opens(self):
         """What already worked has to go on working: the search it was already
         doing is still the first thing asked."""
         self._settle(_month_back(1))
-        self.assertEqual(self._details().status_code, 200)
+        self.assertIn("Spies.", self._panel().html)
 
     def test_a_season_still_on_the_viewers_list_still_opens(self):
         asyncio.run(distrakt_store.add_user_record(self.user_id, {
             **_settled(distrakt_store.RecordKind.KEEPUP), "watched": 3}))
-        self.assertEqual(self._details().status_code, 200)
+        self.assertIn("Spies.", self._panel().html)
 
-    def test_a_season_nothing_anywhere_knows_about_is_still_a_404(self):
+    def test_a_season_nothing_anywhere_knows_about_is_still_refused(self):
         """The refusal is the honest answer for a row this account cannot see,
         and it is what keeps the route from answering about somebody else's
-        roster."""
-        self.assertEqual(self._details().status_code, 404)
+        roster. DRAWN rather than signalled with a status, like every fragment
+        here: a non-200 is never swapped into the page."""
+        resp = self._details()
+        self.assertIn("Not on your roster", resp.text)
+        self.assertNotIn("Spies.", resp.text)
 
     def test_the_watched_episodes_come_back_with_it(self):
         """The private half of the modal, read from this app's own storage — the
@@ -166,7 +175,9 @@ class ASeasonSettledInTheMonthBeingViewedTests(_DetailsRouteTestCase):
         where somebody looks to see what they watched."""
         self._settle(_month_back(0))
         self._progress("trakt", {1: "2026-08-01", 2: "2026-08-02"})
-        self.assertEqual(self._details().json()["watched_episodes"], [1, 2])
+        panel = self._panel()
+        self.assertEqual(panel.watched, [1, 2])
+        self.assertIn("2 watched", panel.html)
 
 
 class WhoseTicksTheseAreTests(_DetailsRouteTestCase):
@@ -185,47 +196,74 @@ class WhoseTicksTheseAreTests(_DetailsRouteTestCase):
     disagree.
     """
 
+    def make_settings(self):
+        # BOTH SERVICES SET UP BY THE OPERATOR, because a tick is only drawn for a
+        # service this account can actually be asked about — an instance question
+        # before it is an account one. The tests that are about a ONE-service
+        # account simply do not link the second.
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
+
     def setUp(self):
         super().setUp()
         self._settle(_month_back(0))
+
+    def _link_simkl(self):
+        self.link_identity(self.user_id, "simkl", 901, "simkl-token")
 
     def test_simkls_ticks_are_rendered_at_all(self):
         """Reported from a browser: an account whose only progress rows came from
         Simkl saw an empty checklist. The read is now per source, so the one row
         there is answers."""
+        self._link_simkl()
         self._progress("simkl", {1: "2026-08-01", 3: "2026-08-03"})
-        body = self._details().json()
-        self.assertEqual(body["watched_episodes"], [1, 3])
-        self.assertEqual(body["watched_by_source"], {"simkl": [1, 3]})
+        panel = self._panel()
+        self.assertEqual(panel.watched, [1, 3])
+        self.assertEqual(panel.by_source, {"simkl": [1, 3]})
 
     def test_two_services_are_a_union_and_not_a_coin_flip(self):
         """The decision, asserted rather than left implicit: neither service's
         list alone is the answer, and which row the database happened to return
         first decides nothing."""
+        self._link_simkl()
         self._progress("trakt", {1: "2026-08-01", 2: "2026-08-02"})
         self._progress("simkl", {2: "2026-08-02", 3: "2026-08-03"})
-        body = self._details().json()
-        self.assertEqual(body["watched_episodes"], [1, 2, 3])
+        self.assertEqual(self._panel().watched, [1, 2, 3])
 
     def test_each_services_own_list_travels_with_it(self):
         """Without these the union would be a number nobody could account for.
         They are what the modal names a tick's recorder from."""
+        self._link_simkl()
         self._progress("trakt", {1: "2026-08-01", 2: "2026-08-02"})
         self._progress("simkl", {2: "2026-08-02", 3: "2026-08-03"})
-        self.assertEqual(self._details().json()["watched_by_source"],
-                         {"simkl": [2, 3], "trakt": [1, 2]})
+        panel = self._panel()
+        self.assertEqual(panel.by_source, {"simkl": [2, 3], "trakt": [1, 2]})
+        # And the disagreement is CAPTIONED, which is what those lists are for.
+        self.assertIn("Trakt recorded 2", panel.html)
+        self.assertIn("Simkl recorded 2", panel.html)
 
     def test_one_service_alone_still_says_which_one(self):
         """A single-service account gets the same shape rather than a special
-        case — the modal decides on its own whether there is a disagreement worth
-        captioning, and it can only do that if the attribution is always there."""
-        self._progress("trakt", {1: "2026-08-01"})
-        self.assertEqual(self._details().json()["watched_by_source"], {"trakt": [1]})
+        case — the panel decides on its own whether there is a disagreement worth
+        captioning, and it can only do that if the attribution is always there.
 
-    def test_a_season_nobody_watched_is_an_empty_pair_rather_than_a_missing_key(self):
-        body = self._details().json()
-        self.assertEqual(body["watched_episodes"], [])
-        self.assertEqual(body["watched_by_source"], {})
+        WITH ONE SERVICE THE TICK WEARS NO MARK, because there is nothing to
+        disambiguate; that is the same rule the caption follows."""
+        self._progress("trakt", {1: "2026-08-01"})
+        panel = self._panel()
+        self.assertEqual(panel.by_source, {"trakt": [1]})
+        self.assertNotIn("ep-mark", panel.html)
+        self.assertNotIn("recorded 1", panel.html)
+
+    def test_a_season_nobody_watched_still_draws_its_rows_and_its_ticks(self):
+        """The empty case is a hollow tick per service, not a missing checklist:
+        the ticks are how a reader asks "has anything recorded this at all"."""
+        panel = self._panel()
+        self.assertEqual(panel.watched, [])
+        self.assertEqual(panel.by_source, {})
+        self.assertEqual(panel.episodes, list(range(1, 11)))
+        self.assertEqual(panel.services, ["trakt"])
 
 
 class ATickPerServiceTests(_DetailsRouteTestCase):
@@ -265,7 +303,7 @@ class ATickPerServiceTests(_DetailsRouteTestCase):
     def test_every_service_the_account_syncs_is_named(self):
         self.link_identity(self.user_id, "simkl", 901, "simkl-token")
         self._progress("trakt", {1: "2026-08-01"})
-        self.assertEqual(sorted(self._details().json()["services"]), ["simkl", "trakt"])
+        self.assertEqual(self._panel().services, ["simkl", "trakt"])
 
     def test_a_service_that_recorded_nothing_is_still_named(self):
         """The case the watched lists cannot express. Simkl has a row for this
@@ -273,28 +311,37 @@ class ATickPerServiceTests(_DetailsRouteTestCase):
         rather than left off."""
         self.link_identity(self.user_id, "simkl", 901, "simkl-token")
         self._progress("trakt", {1: "2026-08-01"})
-        body = self._details().json()
-        self.assertNotIn("simkl", body["watched_by_source"])
-        self.assertIn("simkl", body["services"])
+        panel = self._panel()
+        self.assertNotIn("simkl", panel.by_source)
+        self.assertIn("simkl", panel.services)
 
     def test_one_linked_service_names_only_itself(self):
         """A one-service account must come out of this unchanged: one service
         named, so the checklist draws exactly the single tick it always did with
         no attribution on it."""
         self._progress("trakt", {1: "2026-08-01"})
-        self.assertEqual(self._details().json()["services"], ["trakt"])
+        self.assertEqual(self._panel().services, ["trakt"])
 
     def test_each_service_travels_with_the_id_it_knows_the_title_by(self):
         """What a tick's link is built from. A service cannot look a title up
         under a namespace it does not issue, so one id is not enough."""
         self.link_identity(self.user_id, "simkl", 901, "simkl-token")
-        self.assertEqual(self._details().json()["source_ids"], {"trakt": "7"})
+        links = self._panel().tick_links
+        # Trakt is addressable down to the EPISODE, and by the id where no
+        # service-specific slug has been learned for the row yet — the shared
+        # `slug` beside it is not a safe fallback, because the two services do
+        # not agree on what a title's readable name is.
+        self.assertEqual(
+            links["trakt"],
+            "https://app.trakt.tv/shows/7?season=2&view=episode&episode=1")
 
     def test_a_service_the_row_has_no_id_for_gets_none(self):
         """Rather than a blank or a guess: the checklist draws that tick as plain
         text instead of as a link somewhere unhelpful."""
         self.link_identity(self.user_id, "simkl", 901, "simkl-token")
-        self.assertNotIn("simkl", self._details().json()["source_ids"])
+        panel = self._panel()
+        self.assertNotIn("simkl", panel.tick_links)
+        self.assertIn("simkl", panel.services)
 
     def test_an_id_the_roster_row_lacks_is_taken_off_the_progress_row(self):
         """WHERE THE MISSING HALF OF THE LINKS WAS. A season added from Trakt
@@ -310,8 +357,8 @@ class ATickPerServiceTests(_DetailsRouteTestCase):
             "watched_episodes_json, trakt_id, simkl_id) VALUES (?,?,?,?,?,?,?,?,?)",
             (self.user_id, "show", "tmdb", "1", 2, "simkl",
              json.dumps({"1": "2026-08-01T00:00:00Z"}), 7, 55512)))
-        self.assertEqual(self._details().json()["source_ids"],
-                         {"trakt": "7", "simkl": "55512"})
+        self.assertEqual(self._panel().tick_links["simkl"],
+                         "https://simkl.com/tv/55512")
 
     def test_the_roster_row_wins_where_both_hold_an_id(self):
         """The progress rows fill gaps; they do not overrule the record. A row's
@@ -323,41 +370,34 @@ class ATickPerServiceTests(_DetailsRouteTestCase):
             "watched_episodes_json, trakt_id) VALUES (?,?,?,?,?,?,?,?)",
             (self.user_id, "show", "tmdb", "1", 2, "trakt",
              json.dumps({"1": "2026-08-01T00:00:00Z"}), 999999)))
-        self.assertEqual(self._details().json()["source_ids"]["trakt"], "7")
+        self.assertNotIn("999999", self._panel().html)
 
 
-class TheChecklistsMarksAreServedToItTests(AppTestCase):
-    """The tracker page hands the checklist each service's mark.
+class TheChecklistsMarksComeFromTheMacroTests(_DetailsRouteTestCase):
+    """Where the mark on a two-service tick comes from.
 
-    RENDERED BY THE MACRO THAT OWNS THE FILENAMES rather than spelled again in
-    JavaScript, which is the rule that file states — a third service is one edit
-    there and the checklist picks it up. This asserts the wiring, because a
-    missing map degrades silently to ticks with no marks on them.
+    RENDERED BY THE MACRO THAT OWNS THE FILENAMES (templates/_source_logo.html),
+    which is the rule that file states — a third service is one edit there and
+    the checklist picks it up. The page used to serialize those marks into a
+    JavaScript map because the checklist was built in the browser; the panel is a
+    template now, so it calls the macro directly and there is no map to keep in
+    step. What is asserted is that each service's tick arrived carrying a mark,
+    not what its file is called.
     """
 
     def make_settings(self):
-        return Settings(public_base_url=ORIGIN, trakt_client_id="cid")
+        return Settings(public_base_url=ORIGIN, trakt_client_id="cid",
+                        simkl_client_id="scid", simkl_client_secret="ssecret",
+                        simkl_access_token="operator-simkl-token")
 
-    def test_the_page_carries_a_mark_for_each_service(self):
-        user_id = self.make_user("marks_viewer", distrakt_approved=True,
-                                 calendar_approved=True)
-        self.link_identity(user_id, "trakt", 902, "user-token")
-        self.sign_in_as(user_id)
-        # With no month named, /distrakt draws the month PICKER rather than a
-        # tracker — the checklist lives on the month page.
-        today = date.today()
-        html = self.client.get(f"/distrakt?year={today.year}&month={today.month}").text
-        block = re.search(r"window\.SOURCE_MARKS = \{(.*?)\};", html, re.S)
-        self.assertIsNotNone(block, "the checklist was sent no service marks")
-        # Parsed rather than pattern-matched, because what the checklist needs is
-        # a map the browser can read — a block that looked right and did not
-        # parse would fail there and nowhere else.
-        marks = json.loads("{" + block.group(1).strip().rstrip(",") + "}")
-        self.assertEqual(sorted(marks), ["simkl", "trakt"])
-        for source, markup in marks.items():
+    def test_a_tick_for_each_service_carries_that_services_mark(self):
+        self.link_identity(self.user_id, "simkl", 903, "simkl-token")
+        self._settle(_month_back(0))
+        panel = self._panel()
+        self.assertEqual(panel.services, ["simkl", "trakt"])
+        for source in panel.services:
             with self.subTest(source=source):
-                # The macro's own markup, so a third service appears here by
-                # being added there. What is asserted is that each one arrived
-                # and is a mark, not what its file is called.
-                self.assertIn("<img", markup)
-                self.assertIn("source-logo", markup)
+                self.assertRegex(
+                    panel.html,
+                    r'class="ep-check svc-%s[^"]*"[^>]*>\s*<img class="source-logo ep-mark"'
+                    % source)

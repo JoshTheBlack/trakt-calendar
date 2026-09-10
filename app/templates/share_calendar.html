@@ -137,19 +137,27 @@
             </div>
             <div class="grid">
                 {% for item in group['items'] %}
-                {# Clicking opens the same details modal as the calendar page —
-                   cast, trailer, episodes — fetched from the owner's token-scoped
-                   details endpoint (see share.js). The card carries only the
-                   identity the fetch needs plus a title/poster to show instantly
-                   while it loads. A JS enhancement: with it off, the poster's own
-                   Trakt link still reaches the full details. #}
+                {# Clicking opens the same details panel the calendar page opens
+                   — literally the same template, rendered by this link's own
+                   token-scoped endpoint. A JS enhancement: with it off, the
+                   poster's own outbound link still reaches the full details.
+
+                   THE REQUEST CARRIES THIS PAGE'S OWN VIEW as well as the card's
+                   ids, and that is not decoration. What may be looked up is bound
+                   to what THIS view shows (share_routes._describe_shared_title),
+                   and "what this view shows" cannot be evaluated without the
+                   view — so the month, the calendar, the timezone and the rest
+                   ride along, exactly as they were spelled in the address bar.
+                   The id params and the view params share no names.
+
+                   NO POSTER RIDES ALONG, unlike the signed-in calendar's card.
+                   This endpoint is public, and the server reads the picture out
+                   of the month it has already read rather than rendering back an
+                   address a stranger spelled. #}
                 <div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}"
-                     data-trakt-id="{{ item.ids.get('trakt') or '' }}"
-                     data-simkl-id="{{ item.ids.get('simkl') or '' }}"
                      data-media="{{ item.media }}"
-                     data-season="{{ item.season if item.season is not none else '' }}"
                      data-title="{{ item.title }}"
-                     data-poster="{{ item.poster or '/static/images/nopostertv.png' }}"
+                     data-details-url="{{ details_url(details_base, item.media, item.ids, item.season) }}{{ view_query }}"
                      onclick="openShareDetails(this, event)">
                     <div class="poster-wrap">
                         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
@@ -210,21 +218,11 @@
 
 {% with note = 'A read-only shared calendar — no sign-in required.' %}{% include "_footer.html" %}{% endwith %}
 
-<!-- Details modal — same content as the calendar page (cast, trailer, episodes).
-     What may be looked up is bound to the titles THIS month shows; see
-     share_routes._describe_shared_title for why a public page is allowed to
-     look anything up at all. -->
-<div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeShareDetails()">
-    <div class="modal wide">
-        <div class="modal-head">
-            <h2 id="detailsTitle">Details</h2>
-            <div class="modal-head-right">
-                <button type="button" class="modal-close" onclick="closeShareDetails()">&times;</button>
-            </div>
-        </div>
-        <div class="modal-body" id="detailsBody"></div>
-    </div>
-</div>
+{# The details panel, the same shell every surface opens. What may be looked up
+   here is bound to the titles THIS month shows; see
+   share_routes._describe_shared_title for why a public page is allowed to look
+   anything up at all. #}
+{% include "_details_modal.html" %}
 
 </body>
 </html>

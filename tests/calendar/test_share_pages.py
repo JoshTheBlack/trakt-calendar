@@ -403,8 +403,19 @@ class SharePageViewControlsTests(SharePageTestCase):
 
 
 class SharePageDetailsModalTests(SharePageTestCase):
-    """Clicking a card on a public page opens the SAME details modal as the
-    calendar page (cast, trailer, episodes).
+    """Clicking a card on a public page opens the SAME details panel as the
+    calendar page (cast, trailer, episodes) — literally the same template,
+    rendered by this route.
+
+    A REFUSAL IS DRAWN, NOT SIGNALLED, so the assertions below read the sentence
+    the visitor is shown rather than a status code. That is the same rule every
+    fragment in this app follows: a non-200 is never swapped into the page, so a
+    status here would leave the panel on its loading line for ever. The refusal
+    is ALSO one sentence for two different facts — "nobody can describe this" and
+    "this link does not show that" — because a public page that told them apart
+    would answer, for any id a stranger cared to try, whether the owner's
+    calendar contains it. Every test below therefore asserts BOTH that the
+    sentence came back and that the title's own words did not.
 
     THE ENDPOINT MAY SPEND A LOOKUP, AND ONLY ON A TITLE THIS LINK ALREADY
     SHOWS. A per-title answer is the same for every viewer and is cached
@@ -509,11 +520,25 @@ class SharePageDetailsModalTests(SharePageTestCase):
         return patch("app.providers.trakt.transport.shared_client",
                      return_value=_Client()), called
 
+    REFUSED = "No source can describe this title"
+
+    def assertRefused(self, resp):
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn(self.REFUSED, resp.text)
+        # The other half of the claim: a refusal that still leaked the answer
+        # would pass a message check on its own.
+        self.assertNotIn("Full overview.", resp.text)
+        self.assertNotIn("Fetched live.", resp.text)
+
     def test_the_page_wires_cards_to_the_modal(self):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7").text
         self.assertIn('onclick="openShareDetails(this, event)"', body)
         self.assertIn('id="detailsModal"', body)
         self.assertIn("/static/js/share.js", body)
+        # THE ADDRESS IS MARKUP, and it carries the page's own view as well as
+        # the card's ids — the bound cannot be evaluated without the view.
+        self.assertIn(f"/s/{self.token}/details?media=show&amp;trakt=123", body)
+        self.assertIn("year=2026&amp;month=7", body)
 
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
         """The common case: the owner has opened this title, so the shared cache
@@ -522,13 +547,15 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with self._no_network():
             resp = self._details("media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
-        d = resp.json()
-        self.assertTrue(d["ok"])
-        self.assertEqual(d["overview"], "Full overview.")
-        self.assertEqual(d["status"], "Returning Series")  # normalized like the calendar
-        self.assertEqual(d["cast"][0]["name"], "A Actor")
-        self.assertTrue(d["trailer"])
-        self.assertEqual(d["episodes"][0]["number"], 5)
+        self.assertIn("Full overview.", resp.text)
+        self.assertIn("Returning Series", resp.text)  # normalized like the calendar
+        self.assertIn("A Actor", resp.text)
+        self.assertIn("Trailer", resp.text)
+        self.assertIn("E05", resp.text)
+        # THE PICTURE IS THE ONE THE GRID DREW, read out of the month this route
+        # has already read rather than off the query string — a public endpoint
+        # does not render back an address a stranger spelled.
+        self.assertIn("<img src=", resp.text)
 
     # -- the bound ---------------------------------------------------------
 
@@ -538,40 +565,35 @@ class SharePageDetailsModalTests(SharePageTestCase):
         up would turn any id on the internet into a call on the owner's
         credential, enumerable at the per-IP limit."""
         with self._no_network():
-            resp = self._details("media=show&trakt=999&season=2")
-        self.assertEqual(resp.status_code, 404)
-        self.assertFalse(resp.json()["ok"])
+            self.assertRefused(self._details("media=show&trakt=999&season=2"))
 
     def test_the_medium_is_part_of_the_bound(self):
         """`movies/123` and `shows/123` are two different upstream calls, so an
         id the calendar shows as a show may not be asked about as a film."""
         with self._no_network():
-            resp = self._details("media=movie&trakt=123")
-        self.assertEqual(resp.status_code, 404)
+            self.assertRefused(self._details("media=movie&trakt=123"))
 
     def test_the_season_is_part_of_the_bound(self):
         """Each season is another call, so a bound that stopped at the title
         would still let one shown title be turned into as many calls as there are
         integers."""
         with self._no_network():
-            resp = self._details("media=show&trakt=123&season=9")
-        self.assertEqual(resp.status_code, 404)
+            self.assertRefused(self._details("media=show&trakt=123&season=9"))
 
     def test_a_month_the_link_does_not_show_does_not_carry_the_title(self):
         """The bound is per VIEW, not per owner: the same id in a month whose
         cards do not include it is refused exactly like an unknown one."""
         with self._no_network():
-            resp = self.client.get(
-                f"/s/{self.token}/details?media=show&trakt=123&season=2&year=2026&month=9")
-        self.assertEqual(resp.status_code, 404)
+            self.assertRefused(self.client.get(
+                f"/s/{self.token}/details?media=show&trakt=123&season=2&year=2026&month=9"))
 
     def test_a_request_naming_no_month_falls_back_rather_than_widening(self):
         """A details URL with no view on it resolves to today's month like every
         other share request, and today is not the month this window holds — so
         the omission narrows to nothing instead of skipping the check."""
         with self._no_network():
-            resp = self.client.get(f"/s/{self.token}/details?media=show&trakt=123&season=2")
-        self.assertEqual(resp.status_code, 404)
+            self.assertRefused(
+                self.client.get(f"/s/{self.token}/details?media=show&trakt=123&season=2"))
 
     def test_a_made_up_id_does_not_ride_along_with_a_real_one(self):
         """A request carries one id per service and the server picks between
@@ -582,7 +604,7 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with self._no_network(), \
              patch("app.providers.simkl.transport.cached_get") as simkl_get:
             resp = self._details("media=show&trakt=999&simkl=888&season=2")
-        self.assertEqual(resp.status_code, 404)
+        self.assertRefused(resp)
         simkl_get.assert_not_called()
 
     # -- and the permission it grants --------------------------------------
@@ -600,7 +622,7 @@ class SharePageDetailsModalTests(SharePageTestCase):
         with stub:
             resp = self._details("media=show&trakt=123&season=2")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["overview"], "Fetched live.")
+        self.assertIn("Fetched live.", resp.text)
         self.assertIn("shows/123", called)
 
     def test_details_reach_through_the_username_url_form_too(self):
@@ -610,13 +632,15 @@ class SharePageDetailsModalTests(SharePageTestCase):
             resp = self.client.get(
                 f"/u/modalowner/details?media=show&trakt=123&season=2&{self.VIEW}")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["cast"][0]["name"], "A Actor")
+        self.assertIn("A Actor", resp.text)
 
-    def test_a_bad_token_details_request_is_a_404(self):
+    def test_a_link_that_does_not_resolve_refuses_in_the_same_words(self):
+        """A token nobody issued must not be told apart from a title the link
+        does not show: the two are separate facts and answering either of them
+        specifically hands a stranger a way to ask about the other."""
         with self._no_network():
-            resp = self.client.get(
-                f"/s/not-a-real-token/details?media=show&trakt=123&season=2&{self.VIEW}")
-        self.assertEqual(resp.status_code, 404)
+            self.assertRefused(self.client.get(
+                f"/s/not-a-real-token/details?media=show&trakt=123&season=2&{self.VIEW}"))
 
 
 class ShareEmbedTextTests(SharePageTestCase):

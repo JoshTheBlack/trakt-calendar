@@ -27,8 +27,8 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from . import (backfill, counts, discord_fmt, lifecycle, live, slug_repair,
-               unsettled, watch_history)
+from . import (backfill, counts, discord_fmt, episode_progress, lifecycle, live,
+               slug_repair, unsettled, watch_history)
 # The catalogue-search merge (app/distrakt/search.py) — imported as `catalogue_search`
 # rather than bare `search` so a call site reads which module it is, the same
 # reason the six modules above are imported by name rather than star-imported.
@@ -38,7 +38,7 @@ from . import search as catalogue_search
 # are defined in: a route handler has no business knowing which half of the
 # tracker `load_month` or `compute_live_shows` lives in.
 from .. import distrakt as distrakt_store
-from .. import auth, authz, chrome, clock, db, providers, route_params
+from .. import auth, authz, chrome, clock, db, details_panel, providers, route_params
 from ..auth import simkl_routes, trakt_routes
 from ..auth import AuthLevel
 from ..calendar import detail_source
@@ -1250,13 +1250,17 @@ def _source_ids(services: list[str], ids: dict, progress_rows) -> dict[str, str]
     return found
 
 
-@guard.get("/api/distrakt/details", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_details(request: Request):
-    """The calendar's detail payload for one roster show, plus what THIS user has
-    watched of that season.
+@guard.get("/distrakt/fragments/details", AuthLevel.DISTRAKT_APPROVED)
+async def details_fragment(request: Request):
+    """The details panel for one roster show, drawn with THIS user's own record of
+    that season.
 
-    A separate route from /api/details rather than a parameter on it: that one is
-    CALENDAR_APPROVED, and a distrakt-approved account need not be calendar
+    A VIEW, NOT AN API: it answers with the same panel the calendar and the share
+    page open — templates/_details.html — plus the per-service ticks only this
+    route can supply. What varies is a parameter, not a copy of the markup.
+
+    A separate route from the calendar's rather than a parameter on it: that one
+    is CALENDAR_APPROVED, and a distrakt-approved account need not be calendar
     approved. It also answers a different question — which episodes this
     particular person has seen — that the calendar has no business knowing.
 
@@ -1311,9 +1315,9 @@ async def api_distrakt_details(request: Request):
     try:
         key = parse_item_key(request.query_params.get("key"))
     except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return details_panel.gap(request, str(exc))
     if season is None:
-        return JSONResponse({"ok": False, "error": "Missing season"}, status_code=400)
+        return details_panel.gap(request, "Missing season")
 
     # Searched over everywhere the page can draw a row from — the viewer's own
     # list, this month's premieres, what this month settled, and back over what
@@ -1328,12 +1332,11 @@ async def api_distrakt_details(request: Request):
     placed = await lifecycle.find_shown_season(
         user_id, key, season, month=distrakt_store.month_key(today.year, today.month))
     if placed is None:
-        return JSONResponse({"ok": False, "error": "Not on your roster"}, status_code=404)
+        return details_panel.gap(request, "Not on your roster")
     ids = placed.record.get("ids") or {}
     chosen = detail_source.choose(settings, ids)
     if chosen is None:
-        return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
-                            status_code=404)
+        return details_panel.gap(request, "Nothing here can describe this item.")
     source = chosen.source
     try:
         # See the calendar's own modal: with nobody reachable, what this
@@ -1341,16 +1344,17 @@ async def api_distrakt_details(request: Request):
         # it holds nothing either.
         details = await detail_source.describe(settings, chosen, Media.SHOW, season)
         if details is None:
-            return JSONResponse({"ok": False, "error": "Nothing here can describe this item."},
-                                status_code=404)
-    except TraktError as exc:
-        # Trakt's own error type carries a status worth passing on; every other
-        # source raises something this route has no special reading of, and a
-        # failure to describe a title must not take the modal down with it.
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
+            return details_panel.gap(request, "Nothing here can describe this item.")
     except Exception:
+        # A FAILURE IS SOMETHING THE SERVER DRAWS. A non-200 is not swapped
+        # (static/js/boost.js's `noSwap`), so a status code here would leave the
+        # panel on its loading line; and the service's own words are logged
+        # rather than shown, because an upstream rate-limit message is not
+        # something the reader can act on. Every source's failure is one case
+        # now: this route can be answered by either of two of them, and passing
+        # one service's status on meant catching one service's error type.
         logger.warning("Detail lookup failed for %s", source, exc_info=True)
-        return JSONResponse({"ok": False, "error": "Could not load details."}, status_code=502)
+        return details_panel.gap(request, "⚠️ Could not load details for this item.")
     # THE ANSWER CARRIES THE SERVICE'S OWN NAME FOR THE TITLE, and a record short
     # of it is being looked at from a payload that has it. This used to render
     # the stored value and throw the fresh one away, so a row written without a
@@ -1398,48 +1402,36 @@ async def api_distrakt_details(request: Request):
             episodes = []
         if episodes:
             by_source[str(row["source"])] = episodes
-    # THE UNION IS THE ANSWER, AND EACH SERVICE'S OWN LIST TRAVELS BESIDE IT.
-    # Watching happens once; two services holding a record of it are two
-    # RECORDINGS of one act, so an episode either service saw is an episode this
-    # person watched — anything narrower under-reports what they actually did, and
-    # picking one service to believe is the arbitrary choice this replaced. The
-    # per-service lists are sent because the two genuinely disagree (one service
-    # scrobbles and the other was linked last week), and a tick with no
-    # attribution turns that disagreement into what looks like a bug in the count.
-    watched = sorted({episode for episodes in by_source.values() for episode in episodes})
     # EVERY SERVICE THIS ACCOUNT SYNCS, not only the ones with something to say
     # about this season. A tick per service is only readable if a service that
     # recorded NOTHING still gets one — that hollow mark is the whole answer to
     # "which of them is missing it", and a service that dropped out of the list
     # for having no episodes would leave the reader unable to tell "Simkl has
     # not seen this" from "this account has no Simkl".
-    services = [str(source) for source, _port in
+    services = [str(name) for name, _port in
                 await watch_history.tracker_ports(settings, user_id)]
-    return JSONResponse({
-        "ok": True,
-        **details,
-        # WHO ANSWERED, told to the client the same way the calendar's modal
-        # tells it, because the panel renders a service's name and its links.
-        "source": str(source),
-        # EACH SERVICE'S OWN SLUG, because they do not agree on one. A single
-        # `slug` held whichever service wrote last, which made the Trakt link
-        # land nowhere whenever the value had come from Simkl. `slug` still
-        # travels as the fallback for rows written before the two were told
-        # apart — see store.ID_COLUMNS.
-        "slug": str(ids.get("slug") or ""),
-        "trakt_slug": str(ids.get("trakt_slug") or ""),
-        "simkl_slug": str(ids.get("simkl_slug") or ""),
-        "season": season,
-        "watched_episodes": watched,
-        "watched_by_source": by_source,
-        "services": services,
+    progress = episode_progress.SeasonProgress(
+        services, by_source,
         # WHAT EACH SERVICE'S TICK LINKS TO. A tick is where you go to correct a
         # record, so it has to open the service that holds the wrong one — every
         # one of them pointing at Trakt was the reported fault. Only the ids this
         # row actually carries travel; a service with none gets no link and its
         # tick is drawn as plain text.
-        "source_ids": _source_ids(services, ids, rows),
-    })
+        source_ids=_source_ids(services, ids, rows),
+        # EACH SERVICE'S OWN SLUG, because they do not agree on one. A single
+        # `slug` holds whichever service wrote last, which made the Trakt link
+        # land nowhere whenever the value had come from Simkl — so it is not read
+        # here at all. See store.ID_COLUMNS.
+        slugs={"trakt": str(ids.get("trakt_slug") or ""),
+               "simkl": str(ids.get("simkl_slug") or "")},
+        season=season)
+    # THE PICTURE IS DELIBERATELY ABSENT. The tracker identifies a show by its
+    # network logo and this payload carries no image, so the panel draws its
+    # text-only hero rather than a large grey placeholder — the one axis of the
+    # shared template this surface varies, beside the ticks.
+    return details_panel.panel(request, details, media=str(Media.SHOW), season=season,
+                               title=str(placed.record.get("title") or ""),
+                               poster=None, progress=progress)
 
 
 @guard.get("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)

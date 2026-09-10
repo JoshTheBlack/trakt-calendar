@@ -1,7 +1,7 @@
 """Which service answers the detail modal for one card, and whether it can.
 
-TWO ROUTES ASK THIS and they must agree: the signed-in calendar's /api/details
-and the public share pages' own details endpoint. They differ in exactly one
+TWO ROUTES ASK THIS and they must agree: the signed-in calendar's details
+fragment and the public share pages' own. They differ in exactly one
 thing — the public one never makes an outbound call — and everything else about
 "who describes this title" is the same question. Written out at both, the two
 would drift the first time either was touched, and the drift would be invisible:

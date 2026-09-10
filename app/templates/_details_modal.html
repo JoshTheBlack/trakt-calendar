@@ -1,0 +1,53 @@
+{# THE DETAILS PANEL'S SHELL, AND THERE IS ONE OF IT.
+
+   The calendar, the tracker and the public share page each drew this box for
+   themselves, with their own element ids and their own close function, and the
+   layout inside was the same three times over. Two of the copies had drifted
+   apart in what they carried; the third had no room reserved for the actions bar
+   at all. A shell is not something a page has an opinion about, so it is here.
+
+   THE ids ARE THE CONTRACT WITH THE FRAGMENT. `detailsBody` is what every
+   details fragment is swapped into and `detailsTitle` is the heading the opening
+   click sets, so a page including this file needs to know nothing else about how
+   the panel is filled — see `openDetailsPanel` in static/js/ui.js.
+
+   `detailsActions` IS ALWAYS HERE AND USUALLY EMPTY. The add-to-library buttons
+   are the calendar's, they are admin-only, and they are built from state only the
+   browser holds (which services are reachable, what is already in the library) —
+   so they are the one part of this panel that stays in JavaScript. Reserving the
+   slot on every page is what stops a second shell being drawn the day another
+   surface wants one. #}
+<div id="detailsModal" class="modal-overlay" onclick="if(event.target===this) closeDetailsPanel()">
+    <div class="modal wide">
+        <div class="modal-head">
+            <h2 id="detailsTitle">Details</h2>
+            <div class="modal-head-right">
+                <div id="detailsActions"></div>
+                <button type="button" class="modal-close" onclick="closeDetailsPanel()">&times;</button>
+            </div>
+        </div>
+        <div class="modal-body" id="detailsBody"></div>
+    </div>
+</div>
+
+{# THE TWO STATES THE SERVER CANNOT RENDER, AS MARKUP RATHER THAN AS STRINGS IN A
+   SCRIPT. One is shown before the request has been answered and the other when it
+   could not be answered at all — a dropped connection, a lapsed session, a limit —
+   which are exactly the cases where there is no response to swap in. Both are
+   CLONED by static/js/ui.js rather than built there, so every piece of markup this
+   panel can show is written in a template, including the two that arrive without a
+   round trip.
+
+   `data-details-pending` IS WHAT SAYS "NOTHING HAS LANDED HERE YET", and it is
+   read rather than inferred for a measured reason: htmx runs its swap step for a
+   response on the no-swap list too, marking the request swapped, and the swap
+   itself is then a no-op — so the request context reports success for a 404 that
+   put nothing on the page. Whether this marker is still here afterwards is the
+   only reliable answer, and it is a fact about the DOM rather than about the
+   library.
+
+   Every refusal the server CAN state renders as a fragment of its own
+   (_details_gap.html), because the server is the only side that knows which
+   refusal it is. #}
+<template id="detailsPending"><div class="details-loading" data-details-pending>⏳ Loading details…</div></template>
+<template id="detailsUnreachable"><div class="d-empty">⚠️ Could not load details for this item.</div></template>

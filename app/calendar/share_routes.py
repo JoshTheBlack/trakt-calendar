@@ -44,7 +44,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse,
 from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
                state as calendar_state, vocab)
-from .. import auth, authz, chrome, clock, perftrace, route_params
+from .. import auth, authz, chrome, clock, details_panel, perftrace, route_params
 from ..auth import AuthLevel
 from ..authz import Guard
 from ..config import load_settings
@@ -536,6 +536,17 @@ async def _render(request: Request, share_row) -> Response:
         "source": view.source,
         "as_of": as_of_label,
         "query_extra": _carry_query(request),
+        # WHERE A CARD ASKS FOR ITS DETAILS PANEL, and what it has to say about
+        # the view to be allowed an answer. The endpoint lives beside whichever
+        # share URL this page was reached by (/s/<token>, /u/<name>, /c/<slug>),
+        # so it is derived from the path rather than named three times; and the
+        # page's own query string rides along verbatim because the bound is to
+        # what THIS view shows and that cannot be evaluated without the view.
+        # Verbatim rather than picked apart: a view option added later then needs
+        # no second edit here, and a `?p=` code has already been expanded by the
+        # redirect on arrival, so what is echoed is the plain form either way.
+        "details_base": request.url.path.rstrip("/") + "/details",
+        "view_query": ("&" + request.url.query) if request.url.query else "",
         # The visitor's own view controls. Everything they drive is a GET with
         # the same whitelisted params a hand-edited URL already carries, so they
         # add no write surface and need no session — they just save the visitor
@@ -1263,9 +1274,20 @@ def _season_param(value) -> int | None:
 
 
 class _Described(NamedTuple):
-    """A public answer about one title: who gave it, and what they said."""
+    """A public answer about one title: who gave it, what they said, and the
+    picture this link is already showing for it.
+
+    THE POSTER COMES FROM THE MONTH, NOT FROM THE REQUEST, and that is the one
+    place this differs from the signed-in calendar's panel. There a card's own
+    picture rides on the query string, because the page is echoing its own value
+    back into its own view; here the caller is a stranger, and an address a
+    stranger spelled has no business being rendered into a response served from
+    the owner's origin. The month has been read by the time this is decided
+    anyway, and it holds exactly the picture the grid drew.
+    """
     source: Source
     details: dict
+    poster: str
 
 
 def _ids_this_view_shows(items: Sequence[Item], media: str,
@@ -1339,24 +1361,62 @@ async def _describe_shared_title(request: Request, share_row, settings) -> _Desc
     details = await detail_source.describe(settings, chosen, media, season)
     if details is None:
         return None
-    return _Described(chosen.source, details)
+    return _Described(chosen.source, details, _poster_this_view_shows(visible, bound))
+
+
+def _poster_this_view_shows(items: Sequence[Item], bound: dict[str, str]) -> str:
+    """The picture the grid drew for the title `bound` names, or "".
+
+    Read out of the same airings the bound was taken from, so the panel and the
+    card behind it cannot show different artwork for one title — the property
+    CLAUDE.md already requires of the preview picture, for the same reason.
+    """
+    for item in items:
+        ids = item.ids or {}
+        if any(str(ids.get(namespace) or "") == value for namespace, value in bound.items()):
+            return str(item.poster or "")
+    return ""
 
 
 async def _details(request: Request, share_row) -> Response:
+    """The details panel for one card on a shared calendar.
+
+    A VIEW, NOT AN API: the same panel the owner's own calendar opens
+    (templates/_details.html), so a visitor is shown what the owner is shown and
+    there is no second renderer for a public surface to drift away in. WITHOUT
+    THE TICKS — whose progress would they be? A visitor has no account here, and
+    the owner's watch record is not part of what a share link publishes.
+    """
     settings = load_settings()
+    params = _effective_params(request)
     if await _share_rate_limited(request, settings):
         return _too_many_requests()
     if share_row is None:
-        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+        return details_panel.gap(request, _NO_DESCRIPTION)
     described = await _describe_shared_title(request, share_row, settings)
     if described is None:
         # ONE REFUSAL FOR BOTH CASES, deliberately. "No source can describe this"
         # and "this link does not show that title" are different facts, and a
         # public page that told them apart would answer, for any id a stranger
-        # cared to try, whether the owner's calendar contains it.
-        return JSONResponse({"ok": False, "error": "No source can describe this title"},
-                            status_code=404)
-    return JSONResponse({"ok": True, "source": str(described.source), **described.details})
+        # cared to try, whether the owner's calendar contains it. A LINK THAT DOES
+        # NOT RESOLVE AT ALL answers the same way for the same reason.
+        return details_panel.gap(request, _NO_DESCRIPTION)
+    return details_panel.panel(
+        request, described.details,
+        media=str(parse_media(params.get("media"), Media.SHOW)),
+        season=_season_param(params.get("season")),
+        # THE NAME THE PANEL'S POSTER IS DESCRIBED BY comes from the answer here
+        # rather than from the request, for the same reason the picture does. It
+        # is alt text and nothing else — the heading above it is set from the card
+        # the visitor clicked, before this request is even made.
+        title=str(described.details.get("title") or ""),
+        poster=described.poster)
+
+
+# What a public request is told when it may not be told anything. Named once
+# because two callers must not be able to word it differently — see the refusal
+# note in `_details`.
+_NO_DESCRIPTION = "No source can describe this title"
 
 
 @guard.get("/s/{token}/details", AuthLevel.PUBLIC)
