@@ -424,27 +424,6 @@ class PageScriptTests(unittest.TestCase):
                 self.assertEqual(boots, [scripts[-1]],
                                  f"{page}: boot.js must be the last script")
 
-    def test_a_page_loading_one_of_a_pair_loads_the_other(self):
-        """A script calling a function another file declares needs that file on
-        every page it appears on, and nothing about a list of filenames says so.
-
-        `season-tiles.js` asks `detailsQuery` — declared in `details-modal.js` —
-        which ids a card carries, deliberately, because that is the same
-        question the modal asks and two answers to it would drift. The cost is
-        this dependency, which is invisible until a page ships one file without
-        the other and a card's season line quietly stops appearing.
-        """
-        pairs = (("season-tiles.js", "details-modal.js"),)
-        for page, scripts in assets.PAGE_SCRIPTS.items():
-            names = [s.rsplit("/", 1)[-1] for s in scripts]
-            for needs, needed in pairs:
-                if needs not in names:
-                    continue
-                with self.subTest(page=page, script=needs):
-                    self.assertIn(
-                        needed, names,
-                        f"{page} loads {needs}, which calls into {needed}")
-
     def test_typing_in_the_calendar_search_cannot_reach_a_service(self):
         """WHAT SPENDS A REQUEST MUST BE A DELIBERATE ACT, and this is the
         markup rule that keeps it one.
@@ -582,37 +561,40 @@ class PageScriptTests(unittest.TestCase):
 
 
 class LateArrivingDayBlockTests(unittest.TestCase):
-    """What a day block that fetches itself in gets, and how.
+    """What a day block that fetches itself in gets from the page, and why it is so
+    little.
 
     The calendar's swap handler splits on purpose: a boosted arrival re-runs the
     page init, a CONTENT swap must not — re-running it would re-arm listeners and
-    redo one-time setup. So everything a late block needs has to be named in the
-    content-swap branch explicitly, and anything it names has to be able to work
-    on one subtree rather than the whole document.
+    redo one-time setup. What a late block still needs from script is only what
+    the server could not draw onto it: a mark this page made whose save had not
+    landed when the day's request read the marks. Everything else — is-new, the
+    day's packing, each library button's state — is in the block's own markup,
+    and tests/calendar holds that.
     """
 
     def setUp(self):
         self.boot = js_source("static/js/calendar/boot.js")
-        self.arr = js_source("static/js/calendar/arr-buttons.js")
 
     def content_swap_branch(self) -> str:
         return self.boot.split("function applyViewStateTo(root)")[1].split("\n}")[0]
 
-    def test_a_swapped_in_block_gets_its_sonarr_radarr_seerr_marks(self):
-        """Without this the buttons on a late day showed as plain Adds — for a
-        title already in the library as much as for one that is not — until the
-        60s poll's next whole-document sweep happened to catch up."""
-        self.assertIn("applyArrStateTo(root)", self.content_swap_branch())
+    def test_a_swapped_in_block_is_reconciled_against_marks_still_being_saved(self):
+        self.assertIn("pendingMarks", self.content_swap_branch())
 
     def test_the_content_swap_does_not_reach_for_the_page_init(self):
         self.assertNotIn("initCalendarPage", self.content_swap_branch())
 
-    def test_the_arr_appliers_walk_from_a_root_rather_than_the_document(self):
-        """Hard-wired to `document`, neither could be pointed at the block that
-        just landed, which is the only cheap way to mark it."""
-        self.assertIn("function applyLibraryStatus(root = document)", self.arr)
-        self.assertIn("function applyArrStatus(root = document)", self.arr)
-        self.assertNotIn("document.querySelectorAll('.arr-btn')", self.arr)
+    def test_nothing_the_server_draws_is_redrawn_by_the_content_swap(self):
+        """Each of these used to be put back onto a late block by the page — and
+        for a while none of them were, silently, because the swap handler was
+        handed a text node. They are the server's to draw now, so the handler
+        naming any of them again would be a second copy of the server's answer."""
+        branch = self.content_swap_branch()
+        for drawn_by_the_server in ("newIds", "is-new", "applyArrStateTo", "arr-btn",
+                                    "notWatching"):
+            with self.subTest(name=drawn_by_the_server):
+                self.assertNotIn(drawn_by_the_server, branch)
 
 
 class BundledStylesheetTests(unittest.TestCase):

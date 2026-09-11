@@ -1,150 +1,83 @@
-// ---- Sonarr / Radarr / Seerr integration ----
-let arrStatus = { sonarr: { configured: false, reachable: false }, radarr: { configured: false, reachable: false }, seer: { configured: false, reachable: false } };
-let libraryIds = { sonarr: new Set(), radarr: new Set(), seer: new Set() };
+// ---- Adding a title to Sonarr / Radarr / Seerr ----
+//
+// WHAT A BUTTON SHOWS IS THE SERVER'S. Whether its service can be reached and
+// whether the title is already in that library are drawn with the button — on a
+// card, on a day that arrives late, and in the details panel's header — from the
+// two caches app/integrations/routes.py keeps (its LibraryView). This file used
+// to hold a copy of both, poll for them every minute, and mark every button after
+// the page had painted, including the buttons on cards the server had just
+// rendered. What is left is the press, which only the page can make.
 
-async function refreshArrStatus() {
-    try {
-        const res = await fetch('/api/integrations/status', { cache: 'no-store' });
-        arrStatus = await res.json();
-    } catch (e) { /* keep last-known status */ }
-    applyArrStatus();
-}
-
-async function refreshLibrary() {
-    try {
-        const res = await fetch('/api/integrations/library', { cache: 'no-store' });
-        const d = await res.json();
-        libraryIds = {
-            sonarr: new Set((d.sonarr || []).map(String)),
-            radarr: new Set((d.radarr || []).map(String)),
-            seer: new Set((d.seer || []).map(String)),
-        };
-    } catch (e) { /* keep last-known library */ }
-    applyLibraryStatus();
-}
-
-// The id each service matches on: Sonarr = TVDB, Radarr/Seerr = TMDB.
-function libIdFor(kind, ds) {
-    return kind === 'sonarr' ? ds.tvdb : ds.tmdb;
-}
-
-function markInLibrary(btn, titleText) {
-    btn.classList.add('in-library');
-    btn.classList.remove('busy');
-    btn.dataset.added = '1';
-    btn.dataset.busy = '';
-    btn.disabled = false;
-    if (titleText) btn.title = titleText;
-}
-
-// The two appliers below RE-RENDER FROM STATE ALREADY IN MEMORY — no request —
-// so they are cheap to run again over one newly arrived subtree. `root` is what
-// to walk: the whole document after a refresh, or just the block that landed.
-function applyLibraryStatus(root = document) {
-    root.querySelectorAll('.arr-btn').forEach(btn => {
-        if (btn.dataset.busy === '1') return;
-        const kind = btn.dataset.arr;
-        const card = btn.closest('.card');
-        const id = libIdFor(kind, card ? card.dataset : btn.dataset);
-        if (id && libraryIds[kind] && libraryIds[kind].has(String(id))) {
-            markInLibrary(btn, 'Already in ' + kind.charAt(0).toUpperCase() + kind.slice(1));
-        }
-    });
-}
-
-function applyArrStatus(root = document) {
-    root.querySelectorAll('.arr-btn').forEach(btn => {
-        if (btn.dataset.busy === '1' || btn.dataset.added === '1') return;
-        const st = arrStatus[btn.dataset.arr] || {};
-        const ok = st.configured && st.reachable;
-        btn.disabled = !ok;
-        btn.classList.toggle('unreachable', !ok);
-        const name = btn.dataset.arr.charAt(0).toUpperCase() + btn.dataset.arr.slice(1);
-        btn.title = ok ? ('Add to ' + name) : (name + ' is unreachable');
-    });
-}
-
-async function addToArr(el, event) {
-    if (event) event.stopPropagation();
-    if (el.disabled) return;
-    const src = el.dataset.media ? el.dataset : (el.closest('.card') ? el.closest('.card').dataset : {});
-    const payload = { target: el.dataset.arr, media: src.media, tvdb: src.tvdb || null, tmdb: src.tmdb || null, title: src.title || '' };
+// One add, from what the button carries. On success every button on the page for
+// the same title in the same library is marked: the card's and the panel's are
+// separate buttons, and one title can air on several days of a month. They are
+// found by `data-library-id`, the id that service matches on, which the server
+// wrote so this file never has to know which id each service uses.
+async function addToArr(el) {
+    if (el.disabled || el.classList.contains('busy')) return;
     const original = el.innerHTML;
-    el.dataset.busy = '1'; el.disabled = true; el.classList.add('busy'); el.innerHTML = '⏳';
+    el.disabled = true;
+    el.classList.add('busy');
+    el.innerHTML = '⏳';
+    let answer;
     try {
         const res = await fetch('/api/integrations/add', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({
+                target: el.dataset.arr, media: el.dataset.media,
+                tvdb: el.dataset.tvdb || null, tmdb: el.dataset.tmdb || null,
+                title: el.dataset.title || '',
+            }),
         });
-        const d = await res.json();
-        if (d.ok) {
-            el.innerHTML = original;
-            markInLibrary(el, d.message || 'Added');
-            const id = libIdFor(el.dataset.arr, el.dataset.media ? el.dataset : (el.closest('.card') || { dataset: {} }).dataset);
-            if (id && libraryIds[el.dataset.arr]) libraryIds[el.dataset.arr].add(String(id));
-            // `el` is not always the calendar tile's own button: the details modal
-            // (buildDetailsActions in details-modal.js) builds a SEPARATE arr-btn
-            // for the same title, so marking only `el` leaves the tile behind the
-            // modal showing a plain Add button until the next 60s poll or a full
-            // refresh. applyLibraryStatus() re-renders every arr-btn on the page
-            // from the libraryIds state just updated above — no request, so it is
-            // cheap to run again for one add.
-            applyLibraryStatus();
-            toast(d.message || 'Added', true);
-        } else {
-            el.innerHTML = original; el.classList.remove('busy'); el.dataset.busy = ''; el.disabled = false;
-            toast(d.error || 'Could not add', false);
-        }
+        answer = await res.json();
     } catch (e) {
-        el.innerHTML = original; el.classList.remove('busy'); el.dataset.busy = ''; el.disabled = false;
-        toast('Request failed', false);
+        answer = { ok: false, error: 'Request failed' };
     }
-}
-
-// Add every *watching* item on this page to Sonarr/Radarr. Each add runs via the
-// same per-item path (so it toasts individually) with limited concurrency.
-async function addAllToArr(event) {
-    // Only the Sonarr/Radarr buttons (not Seerr) — this month's endpoint is TV-only or movie-only.
-    const btns = [...document.querySelectorAll('.card:not(.not-watching) .arr-btn')]
-        .filter(b => b.dataset.arr !== 'seer' && !b.disabled && b.dataset.added !== '1' && b.dataset.busy !== '1');
-    if (!btns.length) {
-        toast('Nothing to add — check items are watching and Sonarr/Radarr are reachable.', false);
+    el.innerHTML = original;
+    el.classList.remove('busy');
+    el.disabled = false;
+    if (!answer.ok) {
+        toast(answer.error || 'Could not add', false);
         return;
     }
-    confirmInline(event.currentTarget,
-        `Add ${btns.length} watching item${btns.length === 1 ? '' : 's'} to your library?`,
-        async () => {
-            toast(`Adding ${btns.length} item${btns.length === 1 ? '' : 's'}…`, true);
-            let i = 0;
-            const worker = async () => { while (i < btns.length) { await addToArr(btns[i++]); } };
-            await Promise.all([worker(), worker(), worker()]);  // 3 concurrent
-        });
+    if (el.dataset.libraryId) markAdded(el.dataset.arr, [el.dataset.libraryId], answer.message);
+    else markAdded(null, [], answer.message, [el]);
+    toast(answer.message || 'Added', true);
 }
 
-// Cards that arrived after the page initialised — a day block that fetched
-// itself in as it was scrolled to. Its buttons are laid out by the same template
-// as the shell's, but nothing had visited them: both appliers walk from a root,
-// and between an insertion and the next 60s poll tick that root was never the
-// document. So a late day showed plain Add buttons for up to a minute, whether
-// or not the title was already in the library. Marked from the status and
-// library sets this page already holds, which is why it costs no request.
-function applyArrStateTo(root) {
-    if (!window.IS_ADMIN || !root || !root.querySelectorAll) return;
-    applyArrStatus(root);
-    applyLibraryStatus(root);
+// Every button on the page for the given titles in one library, marked as held.
+function markAdded(kind, libraryIds, message, also = []) {
+    const buttons = [...also];
+    libraryIds.forEach(id => buttons.push(...document.querySelectorAll(
+        `.arr-btn[data-arr="${CSS.escape(kind)}"][data-library-id="${CSS.escape(String(id))}"]`)));
+    buttons.forEach(btn => {
+        btn.classList.add('in-library');
+        btn.classList.remove('unreachable');
+        btn.title = message || 'Added';
+    });
 }
 
-// The add/request buttons and the health state behind them only exist for an
-// administrator, so nobody else polls for them. Re-run on each (re)init so cards
-// swapped in by a boosted nav get their in-library / reachability marks; the 60s
-// poll is armed only once, since a boosted nav must not stack a second interval.
-let arrPollArmed = false;
-function initArrIntegrations() {
-    if (!window.IS_ADMIN) return;
-    refreshArrStatus();
-    refreshLibrary();
-    if (!arrPollArmed) {
-        arrPollArmed = true;
-        setInterval(() => { refreshArrStatus(); refreshLibrary(); }, 60000);
+// Add every WATCHING title in this MONTH to Sonarr or Radarr. The month is the
+// server's to read (calendar/routes.py's add_month_to_library): days fetch
+// themselves as they scroll in, so the cards on screen are not the month, and
+// only the server applies this viewer's filters to the whole of it. The page's
+// own query string names which month, so both read it by the same rules. Asked
+// twice — how many, for the confirmation, then do it — and what was added is
+// marked on whatever buttons for those titles the page has drawn.
+async function addAllToArr(event) {
+    const trigger = event.currentTarget;
+    const post = (body) => fetch('/calendar/library/add-month' + window.location.search, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    }).then(res => res.json()).catch(() => ({ ok: false, error: 'Request failed' }));
+    const plan = await post({ dry_run: true });
+    if (!plan.ok || !plan.count) {
+        toast(plan.message || plan.error || 'Could not read this month', false);
+        return;
     }
+    confirmInline(trigger, plan.message, async () => {
+        toast(`Adding ${plan.count}…`, true);
+        const done = await post({});
+        markAdded(done.service, done.added || [], 'Added');
+        toast(done.message || done.error || 'Could not add', !!done.ok);
+    });
 }

@@ -1315,6 +1315,13 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .season-info .si { display: inline-flex; align-items: center; gap: 4px; }
 .season-info .si b { color: var(--text-dim); font-weight: 600; }
 .season-info .si.next b { color: var(--green); }
+/* The slot a card's season line fetches itself into (_card.html). OUT OF THE CARD
+   BODY'S FLOW, because that body is a flex column with a gap and an in-flow empty
+   slot would open one under every card until its answer landed — or for good,
+   where the answer is nothing. Zero height and still observed: an
+   IntersectionObserver reports an element with no area once it lies inside the
+   root, which is what `intersect` waits for. */
+.season-line-slot { position: absolute; width: 1px; height: 0; pointer-events: none; }
 
 /* ---- Details modal content ---- */
 .details-loading { color: var(--text-faint); font-size: 0.9rem; padding: 8px 0; }

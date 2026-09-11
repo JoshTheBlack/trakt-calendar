@@ -341,26 +341,43 @@ class TheCardAgreesWithTheResolutionVocabularyTests(unittest.TestCase):
         self.assertNotIn("card_style", CARD)
 
 
-class TheIdsTheModalIsOpenedWithTests(unittest.TestCase):
-    """A card carries EVERY service's own id, not just Trakt's.
+class TheIdsThePanelIsOpenedWithTests(unittest.TestCase):
+    """A card asks for its panel with EVERY service's own id, not just Trakt's.
 
-    The modal hands them all to the server, which picks who to ask — so a missing
-    attribute here is a card that opens on an apology instead of on the one
-    service that could describe it. The failure is invisible from the calendar
-    page, which renders identically either way.
+    The server picks who to ask from what the card's details address names — so
+    an id missing from it is a card that opens on an apology instead of on the
+    one service that could describe it. The failure is invisible from the
+    calendar page, which renders identically either way.
     """
 
-    def test_a_merged_card_carries_both_services_ids(self):
-        html = _card_html(_record(Source.TRAKT), _record(Source.SIMKL))
-        self.assertIn('data-trakt-id="trakt-id"', html)
-        self.assertIn('data-simkl-id="simkl-id"', html)
+    def _address(self, html: str) -> str:
+        found = re.search(r'data-details-open="([^"]+)"', html)
+        self.assertIsNotNone(found, "the card carries no details address")
+        return found.group(1).replace("&amp;", "&")
 
-    def test_a_simkl_only_card_carries_simkls_and_an_empty_trakt_slot(self):
-        """The empty slot matters: the script tests each attribute for a value,
-        so an absent one and a blank one have to mean the same thing."""
-        html = _card_html(_record(Source.SIMKL))
-        self.assertIn('data-simkl-id="simkl-id"', html)
-        self.assertIn('data-trakt-id=""', html)
+    def test_a_merged_card_asks_with_both_services_ids(self):
+        address = self._address(_card_html(_record(Source.TRAKT), _record(Source.SIMKL)))
+        self.assertIn("trakt=trakt-id", address)
+        self.assertIn("simkl=simkl-id", address)
+
+    def test_a_card_whose_services_disagree_about_its_description_sends_it(self):
+        """The panel draws the description on the card, flipped or not, and it can
+        only do that if the address carries it."""
+        address = self._address(_card_html(
+            _record(Source.TRAKT), _record(Source.SIMKL, overview="Another overview.")))
+        self.assertIn("overview=", address)
+
+    def test_a_card_with_one_description_sends_none(self):
+        """Nothing to disagree about, so the answer's own is drawn and every card
+        is spared a second copy of its description in an attribute."""
+        self.assertNotIn("overview=", self._address(_card_html(_record(Source.SIMKL))))
+
+    def test_a_simkl_only_card_asks_with_simkls_alone(self):
+        """A service the card has no id for is left off the address rather than
+        sent blank, and the server reads the two the same way."""
+        address = self._address(_card_html(_record(Source.SIMKL)))
+        self.assertIn("simkl=simkl-id", address)
+        self.assertNotIn("trakt=", address)
 
 
 class ThePosterOnlyWallRendersAMergedCardTests(unittest.TestCase):

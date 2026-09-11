@@ -1,0 +1,36 @@
+{# ONE ADD-TO-LIBRARY BUTTON — Sonarr, Radarr or Seerr — for a calendar card's
+   links row and for the details panel's header, drawn by one macro so the two
+   cannot come to disagree about what a button says.
+
+   `b` is app/integrations/routes.py's LibraryButton: whether that service can be
+   reached and whether the title is already in that library, both decided by the
+   server as it renders. So the button arrives in the state it should be in and
+   nothing marks it afterwards — the page used to poll for both facts every
+   minute and mark every card after it painted, the server's own cards included.
+
+   It carries what an add sends (static/js/calendar/arr-buttons.js), and
+   `data-library-id`: the one of the title's ids that service matches on. That is
+   what lets an add mark every other button for the same title in the same
+   library without the browser knowing which id each service uses.
+
+   `wide` is the panel's spelling — "Add to Sonarr" — where a card has room for
+   the service's name alone. #}
+{% set LIBRARY_NAMES = {'sonarr': 'Sonarr', 'radarr': 'Radarr', 'seer': 'Seerr'} %}
+{#- What each service matches a title on, as a reader knows it — the names of
+    app/integrations/routes.py's LIBRARY_ID_KEYS. A title without that id cannot
+    be added however many times the button is pressed, so its button arrives
+    disabled and says why, rather than offering an add the service will refuse. -#}
+{% set ID_NAMES = {'sonarr': 'TVDB', 'radarr': 'TMDB', 'seer': 'TMDB'} %}
+
+{% macro button(b, media, ids, title, wide=False) -%}
+{%- set name = LIBRARY_NAMES[b.kind] -%}
+{%- set verb = 'Request on' if b.kind == 'seer' else 'Add to' -%}
+<button type="button" class="arr-btn {{ b.kind }}{% if b.in_library %} in-library{% elif not b.reachable %} unreachable{% endif %}"
+        data-arr="{{ b.kind }}" data-library-id="{{ b.library_id }}" data-media="{{ media }}"
+        data-tvdb="{{ ids.get('tvdb') or '' }}" data-tmdb="{{ ids.get('tmdb') or '' }}" data-title="{{ title }}"
+        {%- if b.in_library %} title="Already in {{ name }}"
+        {%- elif not b.library_id %} disabled title="No {{ ID_NAMES[b.kind] }} id, so {{ name }} can't add this"
+        {%- elif not b.reachable %} disabled title="{{ name }} is unreachable"
+        {%- else %} title="{{ verb }} {{ name }}"{% endif %}
+        onclick="addToArr(this)"><img src="/static/icons/{{ b.kind }}.png" alt="">{% if wide %} {{ verb }} {{ name }}{% else %}<span>{{ name }}</span>{% endif %}</button>
+{%- endmacro %}

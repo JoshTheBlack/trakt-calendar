@@ -1,0 +1,7 @@
+{# THE DETAILS PANEL'S ADD-TO-LIBRARY BUTTONS, for an administrator. Rendered by
+   the calendar's details route and handed to the panel as its header actions,
+   which _details.html delivers out-of-band into the shell's #detailsActions.
+   The same macro as a card's own buttons, so the panel and the card behind it
+   say the same thing about the same title. #}
+{% import '_library_button.html' as library %}
+{%- for b in buttons %}{{ library.button(b, media, ids, title, wide=True) }}{% endfor -%}

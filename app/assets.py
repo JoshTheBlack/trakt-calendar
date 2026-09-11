@@ -76,8 +76,6 @@ PAGE_SCRIPTS = {
         "static/js/calendar/view.js",
         "static/js/calendar/layout.js",
         "static/js/calendar/arr-buttons.js",
-        "static/js/calendar/season-tiles.js",
-        "static/js/calendar/details-modal.js",
         "static/js/calendar/source-swap.js",
         "static/js/calendar/cert-picker.js",
         "static/js/calendar/filters.js",
@@ -136,7 +134,9 @@ PAGE_SCRIPTS = {
     "pick": ("static/js/ui.js", "static/js/nav.js"),
     "sign-in": ("static/js/plex-auth.js",),
     "register": ("static/js/plex-auth.js",),
-    "share": ("static/js/ui.js", "static/js/share.js"),
+    # ui.js alone: a card opens the details panel through its delegated
+    # listener, so the page carries no opener of its own.
+    "share": ("static/js/ui.js",),
 }
 
 # Every stylesheet and script served to a browser: the pages' own scripts, plus

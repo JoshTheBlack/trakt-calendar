@@ -5,9 +5,14 @@
    entry), `not_watching` and `new_ids` (sets, tested by membership rather than
    queried per card), `is_admin` and `settings` (which action buttons exist).
 
-   ONE data- ATTRIBUTE PER SERVICE'S OWN ID, and both are drawn whenever the
-   group carried them. A card carrying only `data-simkl-id` is a title no other
-   service listed, and it opens on Simkl's own answer rather than refusing.
+   THE PANEL'S ADDRESS NAMES EVERY SERVICE'S OWN ID the group carried, and a
+   card naming only Simkl's is a title no other service listed — it opens on
+   Simkl's own answer rather than refusing. The address also carries the name
+   and the picture on screen, which are the two things calendar/source-swap.js
+   can change after render (it rewrites them there), and for an administrator
+   the two ids the panel's add-to-library buttons post. The card itself is the
+   opener: static/js/ui.js's delegated listener opens `data-details-open` and
+   leaves a click on any control inside the card to that control.
 
    THE TWO URLs A CARD ASKS ITS OWN QUESTIONS AT ARE BUILT HERE, by
    `details_url` (app/templating.py) — the details panel and the season line. The
@@ -75,7 +80,7 @@
    with no script, provided the element is in the document when it parses — and
    the route ships this card's whole day inline for exactly that reason. The
    `scroll-margin` that centres it lives in style.css. #}
-<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if highlight is defined and highlight and item.mark_key == highlight %} jump-target{% endif %}"{% if highlight is defined and highlight and item.mark_key == highlight %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-trakt-id="{{ item.ids.get('trakt') or '' }}" data-simkl-id="{{ item.ids.get('simkl') or '' }}" data-media="{{ item.media }}" data-season="{{ item.season if item.season is not none else '' }}" data-title="{{ item.title }}" data-poster="{{ item.poster or '/static/images/nopostertv.png' }}" data-tvdb="{{ item.ids.get('tvdb') or '' }}" data-tmdb="{{ item.ids.get('tmdb') or '' }}" data-details-url="{{ details_url('/calendar/fragments/details', item.media, item.ids, item.season, item.mark_key) }}" data-tile-url="{{ details_url('/api/tile', item.media, item.ids, item.season) }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %} onclick="openDetails(this, event)">
+<div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}{% if item.mark_key in new_ids %} is-new{% endif %}{% if item.episode_number == 1 and item.season == 1 %} is-series-premiere{% endif %}{% if highlight is defined and highlight and item.mark_key == highlight %} jump-target{% endif %}"{% if highlight is defined and highlight and item.mark_key == highlight %} id="jump-target"{% endif %} data-id="{{ item.mark_key }}" data-media="{{ item.media }}" data-details-open="{{ details_url('/calendar/fragments/details', item.media, item.ids, item.season, item.mark_key) }}&amp;{{ {'title': item.title, 'poster': item.poster or '/static/images/nopostertv.png'} | urlencode }}{% if 'overview' in item.alternatives %}&amp;{{ {'overview': item.overview} | urlencode }}{% endif %}{% if library %}&amp;{{ {'tvdb': item.ids.get('tvdb') or '', 'tmdb': item.ids.get('tmdb') or ''} | urlencode }}{% endif %}" data-details-heading="{{ item.title }}"{% if item.alternatives %} data-alternatives='{{ item.alternatives | tojson }}'{% endif %}>
     <div class="poster-wrap">
         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
         <div class="new-badge">✨ NEW</div>
@@ -179,8 +184,18 @@
             {% if item.imdb_rating %}<span class="imdb-rating" title="IMDb score"><span class="imdb-mark">IMDb</span>{{ item.imdb_rating }}</span>{% endif %}
             <span class="time">{{ item.air_time }}</span>
         </div>
+        {# THE SEASON LINE ASKS FOR ITSELF as the card scrolls into view, and is
+           replaced by whatever the server draws for it (_season_line.html) —
+           nothing at all where there is nothing to say. `intersect once` for the
+           reason _day_skeleton.html gives, with a margin so the line is usually
+           there before the card is. `hx-indicator="this"` because the page-wide
+           progress bar is for something a person is waiting through, and a line
+           per card as a month scrolls past is not that. The slot sits out of the
+           card body's flow (style.css), so one still waiting adds no gap. #}
         {% if item.media != 'movie' and item.season is not none %}
-        <div class="season-info" data-role="season-info" hidden></div>
+        <div class="season-line-slot"
+             hx-get="{{ details_url('/calendar/fragments/season-line', item.media, item.ids, item.season) }}"
+             hx-trigger="intersect once rootMargin:200px" hx-swap="outerHTML" hx-indicator="this"></div>
         {% endif %}
         <div class="links-row">
             {# ONE BUTTON PER SERVICE THAT HAS A PAGE FOR THIS TITLE, each wearing
@@ -195,16 +210,14 @@
             {% for name, url in (item.source_links or {item.source|string: item.detail_url}).items() %}
             {{ src.link(name, url) }}
             {% endfor %}
-            {% if is_admin %}
-            {% if item.media == 'movie' and settings.radarr_configured %}
-            <button type="button" class="arr-btn radarr" data-arr="radarr" onclick="addToArr(this, event)" title="Add to Radarr"><img src="/static/icons/radarr.png" alt=""><span>Radarr</span></button>
-            {% elif item.media != 'movie' and settings.sonarr_configured %}
-            <button type="button" class="arr-btn sonarr" data-arr="sonarr" onclick="addToArr(this, event)" title="Add to Sonarr"><img src="/static/icons/sonarr.png" alt=""><span>Sonarr</span></button>
-            {% endif %}
-            {% if settings.seer_configured %}
-            <button type="button" class="arr-btn seer" data-arr="seer" onclick="addToArr(this, event)" title="Request on Seerr"><img src="/static/icons/seer.png" alt=""><span>Seerr</span></button>
-            {% endif %}
-            {% endif %}
+            {#- THE ADD-TO-LIBRARY BUTTONS, for an administrator, drawn in the
+                state they are in. `library` is app/integrations/routes.py's
+                LibraryView — the server's own record of which services can be
+                reached and what each library holds — and it is absent for
+                everybody else, who gets no buttons rather than buttons that would
+                be refused. -#}
+            {% if library %}{% import '_library_button.html' as library_button %}
+            {%- for b in library.buttons(item.media, item.ids) %}{{ library_button.button(b, item.media, item.ids, item.title) }}{% endfor %}{% endif %}
         </div>
     </div>
 </div>

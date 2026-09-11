@@ -19,11 +19,12 @@
    seven other overlays did and six did not.
 
    `detailsActions` IS ALWAYS HERE AND USUALLY EMPTY. The add-to-library buttons
-   are the calendar's, they are admin-only, and they are built from state only the
-   browser holds (which services are reachable, what is already in the library) —
-   so they are the one part of this panel that stays in JavaScript. Reserving the
-   slot on every page is what stops a second shell being drawn the day another
-   surface wants one. #}
+   are the calendar's and admin-only; its details route draws them from the
+   server's own record of which services are reachable and what each library
+   holds, and _details.html delivers them here out-of-band. Opening the panel
+   empties the slot (static/js/ui.js), so one title's buttons never sit over the
+   next one's panel. Reserving the slot on every page is what stops a second shell
+   being drawn the day another surface wants one. #}
 <div id="detailsModal" class="modal-overlay">
     <div class="modal wide">
         <div class="modal-head">

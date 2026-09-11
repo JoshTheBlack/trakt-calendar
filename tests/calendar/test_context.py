@@ -255,18 +255,19 @@ class ViewDataTests(unittest.TestCase):
         assembly = calendar_routes.MonthAssembly(
             new_ids={"b", "a"}, show_counts={"a": 2, "b": 1},
             watching=2, not_watching_count=1)
-        data = calendar_routes._view_data(assembly, {"a"})
-        self.assertEqual(data["newIds"], ["a", "b"])  # sorted, so the JSON is stable
+        data = calendar_routes._view_data(assembly)
         self.assertEqual(data["showCounts"], {"a": 2, "b": 1})
         self.assertEqual(data["watching"], 2)
         self.assertEqual(data["notWatchingCount"], 1)
 
-    def test_marks_for_shows_not_in_this_month_are_left_out(self):
-        """A viewer's marks are their whole set, but the tiles only count this
-        month — so a mark on something that does not air here must not be sent."""
-        assembly = calendar_routes.MonthAssembly(show_counts={"a": 1})
-        data = calendar_routes._view_data(assembly, {"a", "elsewhere"})
-        self.assertEqual(data["notWatching"], ["a"])
+    def test_it_carries_numbers_and_nothing_the_server_draws(self):
+        """The is-new ids and the viewer's marks used to ride here so the page
+        could put them back onto days that arrived late. The server draws both
+        onto a late day now, so a copy here would be a second answer to keep in
+        step with the first."""
+        assembly = calendar_routes.MonthAssembly(new_ids={"a"}, show_counts={"a": 1})
+        self.assertEqual(set(calendar_routes._view_data(assembly)),
+                         {"showCounts", "watching", "notWatchingCount"})
 
 
 class DayChipTests(unittest.TestCase):

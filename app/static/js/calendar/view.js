@@ -28,16 +28,19 @@ function readPageContext() {
 // counted off the DOM. Counting cards only ever described the cards the page
 // happened to be holding; these describe the whole month, which is what the
 // stats tiles claim to be about.
-let notWatching = new Set();
-// The ids this load decided were new, computed over the WHOLE month by the page
-// that shipped the shell. Days that arrive afterwards are marked from this one
-// answer: a late request cannot recompute it, because the baseline it would diff
-// against is the one the shell already committed.
-let newIds = new Set();
 let showCounts = {};
 let watchingCount = 0;
 let notWatchingCount = 0;
 let lastKnownStats = { total: null, watching: null, notWatching: null };
+
+// MARKS THIS PAGE HAS MADE AND NOT YET FINISHED SAVING: show id -> the state it
+// was set to. The server draws every card from the marks it has stored, a day
+// block that arrives late included, so the one thing it cannot draw is a mark
+// whose save was still in flight when that day's request read them. Only this
+// page knows those, and calendar/boot.js reconciles a late block against them.
+// An entry leaves the moment its save settles, because from then on the server
+// knows — so a mark made in another tab is never overruled by this page.
+const pendingMarks = new Map();
 
 // ---- State storage ----
 // A DELTA endpoint: a toggle sends only the one item that changed, and the
@@ -60,12 +63,11 @@ function setSyncStatus(ok, message) {
     if (!ok) toast('⚠️ ' + (message || 'Storage error') + ' — changes may not be saved.', false);
 }
 
-// The month's counts, this viewer's marks and the ids this load called new are
-// all computed server-side and shipped with the page, so there is nothing to
-// fetch on load and nothing to re-mark after paint. This reads those numbers
-// back so a toggle can keep the tiles honest without asking the DOM how many
-// cards it currently holds — a question whose answer stops being the month's
-// answer as soon as the page renders anything less than all of it.
+// The month's counts are computed server-side and shipped with the page, so there
+// is nothing to fetch on load. This reads them back so a toggle can keep the
+// tiles honest without asking the DOM how many cards it currently holds — a
+// question whose answer stops being the month's answer as soon as the page
+// renders anything less than all of it.
 function readViewData() {
     let data = {};
     const el = document.getElementById('calendarViewData');
@@ -76,8 +78,6 @@ function readViewData() {
             console.error(e);
         }
     }
-    notWatching = new Set(data.notWatching || []);
-    newIds = new Set(data.newIds || []);
     showCounts = data.showCounts || {};
     watchingCount = data.watching || 0;
     notWatchingCount = data.notWatchingCount || 0;
@@ -101,13 +101,12 @@ function cardsForShow(id) {
     return document.querySelectorAll(`.card[data-id="${CSS.escape(id)}"]`);
 }
 
-async function toggleWatch(btn, event) {
-    if (event) event.stopPropagation();
+async function toggleWatch(btn) {
     const card = btn.closest('.card');
     const id = card.getAttribute('data-id');
     const isNotWatching = !card.classList.contains('not-watching');
     cardsForShow(id).forEach(c => setCardState(c, isNotWatching));
-    if (isNotWatching) notWatching.add(id); else notWatching.delete(id);
+    pendingMarks.set(id, isNotWatching);
     // A show can air on a dozen days of one month, and the mark applies to all of
     // them. Move the tiles by the month's count for this show rather than by the
     // cards on screen, which is the same number today and won't be once days
@@ -130,10 +129,13 @@ async function toggleWatch(btn, event) {
         // correctly saw a title that was never marked. A refusal has to undo the
         // thing it refused, or the screen is lying about what is saved.
         cardsForShow(id).forEach(c => setCardState(c, !isNotWatching));
-        if (isNotWatching) notWatching.delete(id); else notWatching.add(id);
         notWatchingCount -= isNotWatching ? cards : -cards;
         watchingCount += isNotWatching ? cards : -cards;
         updateStats();
+    } finally {
+        // Unless a later press on the same show has replaced this one, whose own
+        // save will settle it.
+        if (pendingMarks.get(id) === isNotWatching) pendingMarks.delete(id);
     }
 }
 

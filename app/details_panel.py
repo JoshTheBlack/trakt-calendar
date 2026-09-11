@@ -87,7 +87,7 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
           title: str = "", poster: str = "", progress: object | None = None,
           links=(), season_count: int = 0, picker: bool = True,
           carry: Sequence[str] = (), pinned: dict[str, str] | None = None,
-          note: str = ""):
+          note: str = "", actions: str = "", overview: str = ""):
     """The panel's contents for one title.
 
     `title` and `poster` are the CARD's, not the answer's, and the surfaces that
@@ -136,12 +136,22 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     have been, rather than opening blank or not opening at all. The rankings
     board is the surface that needs it: a board row stores enough to be worth
     showing and may carry no id any service issues.
+
+    `actions` is markup for the shell's header slot, delivered out-of-band with
+    this answer: the calendar's add-to-library buttons, for an administrator. The
+    panel does not know what they are — the surface that has some renders them and
+    hands them over — so a surface with none passes nothing, and the slot stays as
+    opening the panel left it, empty.
+
+    `overview` is the CARD's description where it has one worth sending — a card
+    whose services described it differently sends the one on screen, flipped or
+    not — and the template prefers it to the answer's, by the poster's rule.
     """
     shown = answered_season(details, season)
     return templates.TemplateResponse(request, "_details.html", {
         "request": request, "d": details, "media": media, "season": shown,
         "title": title, "poster": poster, "progress": progress, "links": links,
-        "note": note,
+        "note": note, "actions": actions, "overview": overview,
         # `shown` rather than the asked-for season, so the tab that reads as
         # current is the one whose rows are actually below it.
         #

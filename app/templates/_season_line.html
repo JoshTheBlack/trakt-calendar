@@ -1,0 +1,14 @@
+{# THE LINE UNDER A CARD: how many episodes its season has, what aired last and
+   what airs next. Rendered by /calendar/fragments/season-line from `line`
+   (app/providers/season.py's `tile_summary`) and swapped in over the slot the
+   card drew for it — so where there is nothing to say this renders nothing, and
+   the slot simply goes.
+
+   `season` is the one the CARD asked about, because this is that card's line. #}
+{% if line and (line.episode_count or line.last_aired or line.next_aired) %}
+<div class="season-info">
+    {%- if line.episode_count %}<span class="si">📋 <b>{{ line.episode_count }}</b> ep{{ '' if line.episode_count == 1 else 's' }} · S{{ season }}</span>{% endif -%}
+    {%- if line.last_aired %}<span class="si">🏁 Latest: <b>{{ line.last_aired }}</b></span>{% endif -%}
+    {%- if line.next_aired %}<span class="si next">📡 Next: <b>{{ line.next_aired }}</b></span>{% endif -%}
+</div>
+{% endif %}

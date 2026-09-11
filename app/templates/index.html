@@ -315,19 +315,10 @@
    descendants — a catcher inside it would slide off-screen along with it. #}
 <div class="day-chips-peek" aria-hidden="true"></div>
 <nav class="day-chips" aria-label="Jump to a day">
-    {# WHICH ELEMENT a chip is renders from `count` — what the day HOLDS — and
-       never from `shown`, which is what this viewer sees of it. `shown` follows
-       hide-not-watching and a not-watching mark, both of which the header
-       changes client-side with no reload, and calendar/layout.js answers by
-       adding and removing a class. A class cannot turn a <span> back into an
-       <a>, so a day baked as a span while it was hidden could never become a
-       destination again. A day with items is therefore always an anchor, greyed
-       by `unreachable` when the viewer would see none of them; only a day
-       holding nothing at all — a fact no toggle can change — is a span. #}
-    {% for chip in day_chips %}
-    {% if chip.count %}<a class="day-chip{% if not chip.shown %} unreachable{% endif %}" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}">{{ chip.day }}</a>
-    {% else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="Nothing on this day">{{ chip.day }}</span>{% endif %}
-    {% endfor %}
+    {# One partial per chip, shared with a day that arrives late, which draws its
+       own chip again once it has read what this viewer sees of it.
+       _day_chip.html says why a chip with items always stays an anchor. #}
+    {% for chip in day_chips %}{% include "_day_chip.html" %}{% endfor %}
 </nav>
 
 {% if error %}
@@ -820,10 +811,20 @@
                      land after the service answer for "severance" and overwrite
                      the better result with the staler one. #}
                   hx-sync="#searchResults:replace">
+                {# `input`, NOT `keyup`, BECAUSE TEXT ARRIVES WITHOUT KEYS. A paste
+                   from the mouse, a cut from the context menu and a browser's own
+                   clear button all change the value and press nothing, so a box
+                   listening for keyup sat on its old results — measured in Firefox,
+                   where a pasted title searched for nothing. `input` fires for
+                   every way the value changes and for nothing else, and `changed`
+                   still ignores the keys that move the caret. The non-standard
+                   `search` event that used to ride beside it is gone with it:
+                   Firefox never fires it, and everywhere else it only repeated a
+                   request `input` had already made. #}
                 <input type="text" id="searchInput" name="q" autocomplete="off" spellcheck="false"
                        placeholder="Title…"
                        hx-get="/calendar/search"
-                       hx-trigger="keyup changed delay:180ms, search"
+                       hx-trigger="input changed delay:180ms"
                        hx-target="#searchResults"
                        hx-include="#searchEndpoint"
                        hx-sync="#searchResults:replace">

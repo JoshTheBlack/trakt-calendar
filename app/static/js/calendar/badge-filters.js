@@ -49,14 +49,9 @@ async function saveBadgeFilter(badge, mode) {
     }
 }
 
-// THE ONE LISTENER THE BROWSER CANNOT REPLACE, and it exists only because the card
-// carries an inline onclick that opens the details modal. An inline handler on an
-// ancestor runs while the event BUBBLES, so it fires long before anything bound at
-// the document — which is why this captures: pressing a badge must not also open
-// the modal behind it. It goes when the inline handlers do.
-document.addEventListener('click', (event) => {
-    if (event.target.closest('.filter-badge')) event.stopPropagation();
-}, true);
+// PRESSING A BADGE DOES NOT OPEN THE CARD'S PANEL, and nothing here has to stop it:
+// the badge's <summary> and radios are controls inside the card, and the card's
+// opener leaves a click on a control inside it alone (static/js/ui.js).
 
 // One offer open at a time. `toggle` does not bubble, so it is captured too.
 document.addEventListener('toggle', (event) => {

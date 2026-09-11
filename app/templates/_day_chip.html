@@ -1,0 +1,19 @@
+{# ONE DAY'S CHIP IN THE JUMP-TO STRIP. The shell draws the strip from it, and a
+   day that fetches itself in late draws its own chip again from it, out-of-band,
+   because by then the server can know something the shell did not: a mark saved
+   after the page loaded may leave that day with nothing this viewer sees, and a
+   chip still offering to scroll to a collapsed day goes nowhere.
+
+   WHICH ELEMENT a chip is renders from `count` — what the day HOLDS — and never
+   from `shown`, which is what this viewer sees of it. `shown` follows
+   hide-not-watching and a not-watching mark, both of which the header changes
+   client-side with no reload, and calendar/layout.js answers by adding and
+   removing a class. A class cannot turn a <span> back into an <a>, so a day baked
+   as a span while it was hidden could never become a destination again. A day
+   with items is therefore always an anchor, greyed by `unreachable` when the
+   viewer would see none of them; only a day holding nothing at all — a fact no
+   toggle can change — is a span.
+
+   `oob` is the late day's copy: htmx swaps it in over the chip with the same id. #}
+{% if chip.count %}<a class="day-chip{% if not chip.shown %} unreachable{% endif %}" data-date="{{ chip.date }}" href="#day-{{ chip.date }}" title="{{ chip.count }} item{{ '' if chip.count == 1 else 's' }}" id="day-chip-{{ chip.date }}"{% if oob %} hx-swap-oob="true"{% endif %}>{{ chip.day }}</a>
+{%- else %}<span class="day-chip empty" data-date="{{ chip.date }}" title="Nothing on this day" id="day-chip-{{ chip.date }}"{% if oob %} hx-swap-oob="true"{% endif %}>{{ chip.day }}</span>{% endif %}

@@ -19,6 +19,7 @@ from __future__ import annotations
 # The STDLIB calendar, not the package around this module. Absolute imports mean
 # the bare name resolves to the stdlib either way — this package is app.calendar,
 # not calendar — but standing in app/calendar/ it reads as though it might not.
+import asyncio
 import calendar as _calendar
 import dataclasses
 import logging
@@ -31,6 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from markupsafe import Markup
 
 from . import (cache as calendar_cache, enrich as calendar_enrich,
                filter as calendar_filter, resolve as calendar_resolve,
@@ -622,43 +624,49 @@ def _view_preferences(prefs: dict, settings) -> dict:
     }
 
 
-def _view_data(assembly: MonthAssembly, not_watching: set[str]) -> dict:
+def _view_data(assembly: MonthAssembly) -> dict:
     """The shell's numbers again as DATA rather than markup, so the client can keep
-    the stats tiles honest through a toggle without asking the DOM — and so a day
-    that arrives later can mark is-new from the whole month's answer instead of
-    recomputing a diff it cannot see all of."""
+    the stats tiles honest through a toggle without asking the DOM.
+
+    ONLY NUMBERS. It used to carry the month's is-new ids and this viewer's marks
+    as well, for the page to put back onto days that arrived late. The server
+    draws both onto a late day itself now — the marks from storage, and is-new
+    from the answer the shell writes onto that day's own request (`_day_url`) — so
+    the only marks the page keeps are the ones it has not finished saving."""
     return {
-        "newIds": sorted(assembly.new_ids),
         "showCounts": dict(assembly.show_counts),
-        "notWatching": sorted(nw for nw in not_watching if nw in assembly.show_counts),
         "watching": assembly.watching,
         "notWatchingCount": assembly.not_watching_count,
     }
 
 
-def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
-               not_watching: set[str], hide_not_watching: bool) -> list[dict]:
-    """One chip per day of the month for the jump-to strip.
+def _day_chip(day: date, items: list, not_watching: set[str],
+              hide_not_watching: bool) -> dict:
+    """One day's chip for the jump-to strip.
 
     `count` is what the day holds; `shown` is what THIS viewer will see of it, and
     a day showing nothing has no section to scroll to, so its chip renders inert.
     With hide-not-watching on, a day whose every item is marked renders nothing at
-    all, so its chip must not offer to scroll somewhere blank. calendar/layout.js
-    keeps this in step when the viewer toggles hiding or marks a show without
-    reloading.
+    all, so its chip must not offer to scroll somewhere blank.
+
+    ONE RULE, TWO DRAWERS. The shell draws every chip from it, and a day that
+    arrives late draws its own chip again from it (_day_fragment.html), having read
+    the marks after the shell did — which is how a mark saved since reaches the
+    chip. calendar/layout.js keeps chips in step with toggles made without a
+    reload.
     """
-    counts = {group["date"]: len(group["items"]) for group in assembly.grouped}
-    shown = {
-        group["date"]: sum(1 for item in group["items"]
-                           if item.mark_key not in not_watching)
-        for group in assembly.grouped
-    } if hide_not_watching else counts
-    chips = []
-    for day in range(1, days + 1):
-        iso = f"{year}-{month:02d}-{day:02d}"
-        chips.append({"day": day, "date": iso,
-                      "count": counts.get(iso, 0), "shown": shown.get(iso, 0)})
-    return chips
+    count = len(items)
+    shown = (sum(1 for item in items if item.mark_key not in not_watching)
+             if hide_not_watching else count)
+    return {"day": day.day, "date": day.isoformat(), "count": count, "shown": shown}
+
+
+def _day_chips(assembly: MonthAssembly, year: int, month: int, days: int,
+               not_watching: set[str], hide_not_watching: bool) -> list[dict]:
+    """One chip per day of the month for the jump-to strip — see `_day_chip`."""
+    items_on = {group["date"]: group["items"] for group in assembly.grouped}
+    return [_day_chip(on, items_on.get(on.isoformat(), []), not_watching, hide_not_watching)
+            for on in (date(year, month, day) for day in range(1, days + 1))]
 
 
 @guard.get("/", AuthLevel.CALENDAR_APPROVED)
@@ -697,7 +705,6 @@ async def calendar_page(request: Request):
     of cards exists, and a day nobody scrolls to is never built at all."""
     settings = load_settings()
     user = await auth.current_user(request)
-    is_admin = bool(user and user.is_admin)
     prefs = await auth.get_user_prefs(user.user_id)
     today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
@@ -759,8 +766,14 @@ async def calendar_page(request: Request):
                 inline_groups = inline_groups + [skeleton_groups.pop(index)]
                 break
     for group in skeleton_groups:
-        group["url"] = _day_url(endpoint.key, date.fromisoformat(group["date"]),
-                                source=request.query_params.get("source"))
+        # THE SHELL'S IS-NEW ANSWER FOR THAT DAY RIDES ON ITS OWN REQUEST. The
+        # diff above has already committed this load as the baseline, so a day
+        # fetched afterwards could never work it out again; handed the answer,
+        # the day route draws the marks itself.
+        group["url"] = _day_url(
+            endpoint.key, date.fromisoformat(group["date"]),
+            source=request.query_params.get("source"),
+            new=sorted({item.mark_key for item in group["items"]} & month_view.new_ids))
 
     context = {
         "request": request,
@@ -824,10 +837,10 @@ async def calendar_page(request: Request):
                   "not_watching": month_view.not_watching_count},
         "delta": month_view.delta,
         "history": month_view.history,
+        "view_data": _view_data(month_view),
         # EVERY CONSUMER GETS THE EXPANDED SET, not the raw stored one. Mixing
         # the two is how a mark hides a card but not its day's chip: the card
         # asks about `mark_key` and the chip would be counting raw ids.
-        "view_data": _view_data(month_view, month_view.not_watching_keys),
         "day_chips": _day_chips(month_view, year, month, days,
                                 month_view.not_watching_keys,
                                 view["hide_not_watching"]),
@@ -854,11 +867,6 @@ async def calendar_page(request: Request):
         "coverage_gap": month_view.coverage_gap,
         "switch_url": month_view.switch_url,
         "generated": datetime.now().strftime("%H:%M"),
-        # Sonarr/Radarr/Seerr writes land in the operator's own shared libraries
-        # and Seerr's requests all carry one app-wide API key, so they are an
-        # administrator's affordance. The buttons and health state are left out
-        # of the page entirely for everyone else rather than rendered into a
-        # guaranteed 403.
         # is_admin, calendar_available, ranker_available, version, build
         # for the shared header.
         **chrome.page_context(user),
@@ -869,7 +877,9 @@ async def calendar_page(request: Request):
         # something to be allowed into. Note this gates the REVEAL, not the menu
         # item — see _nav.html.
         "distrakt_available": bool(user and user.distrakt_approved and user.has_tracker_identity),
-        "integrations": integrations_routes.INTEGRATION_HEALTH if is_admin else {},
+        # THE ADD-TO-LIBRARY BUTTONS' STATE, drawn onto every card — see
+        # `_library`.
+        "library": _library(user, settings),
     }
     # Jinja renders eagerly when the response is built, so this span is the cost of
     # turning the shell's cards into HTML — the other half of the server's blocking
@@ -902,7 +912,51 @@ def _month_date(value, year: int, month: int) -> date | None:
     return parsed
 
 
-def _day_url(endpoint_key: str, day: date, *, source: str | None = None) -> str:
+def _library(user, settings) -> integrations_routes.LibraryView | None:
+    """The add-to-library buttons' state for this viewer, or None, and None means
+    no buttons at all rather than buttons that would be refused.
+
+    ADMIN ONLY because Sonarr/Radarr/Seerr writes land in the operator's own shared
+    libraries and Seerr's requests all carry one app-wide API key. ONE FUNCTION for
+    that rule, because the shell, a day that arrives late and the details panel
+    all draw these buttons, and three copies of "who gets them" would be three
+    places for somebody else to start seeing them."""
+    return integrations_routes.LibraryView(settings) if user and user.is_admin else None
+
+
+# How many is-new keys one day's request may carry. The busiest calendar lists a
+# few hundred titles on a day, so this never cuts a real answer short, and it
+# bounds what a hand-built address can make the day route read.
+_MAX_NEW_ON_A_DAY = 1000
+
+
+def _new_marks(values: list[str]) -> list[str]:
+    """The is-new keys a day's request may carry forward: each shaped like a card's
+    identity — an item key, or a source and its id for a title the identity
+    waterfall cannot key (`Item.mark_key`) — deduplicated and bounded.
+
+    The day's cards only ever ask "is my key among these", so a value naming no
+    card on the day marks nothing whatever it says. What the shape check guards is
+    the RETRY: a day that fails draws a button re-requesting its own address, which
+    is built from these, and nothing a hand-edited address invents should be
+    written back into the page."""
+    sources = {str(source) for source in Source}
+    kept: dict[str, None] = {}
+    for value in values:
+        try:
+            parse_item_key(value)
+        except ValueError:
+            prefix, _, rest = value.partition(":")
+            if prefix not in sources or not rest:
+                continue
+        kept[value] = None
+        if len(kept) == _MAX_NEW_ON_A_DAY:
+            break
+    return sorted(kept)
+
+
+def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
+             new: list[str] | tuple[str, ...] = ()) -> str:
     """The content request for one day. Built in one place because the shell's
     placeholder and the retry button on a day that failed must ask for exactly the
     same thing.
@@ -911,11 +965,20 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None) -> str:
     one, so a day fetched after the fact reads from the same source selection
     the shell resolved the month with — the shell never puts one in a
     placeholder's URL for a viewer who never overrode anything, so the common
-    case is unchanged."""
+    case is unchanged.
+
+    `new` is the shell's is-new answer for THIS day: the mark keys of the cards on
+    it that were missing from the viewer's baseline. The shell's diff commits the
+    load it made as the next baseline, so a day fetched afterwards could never
+    work that out again; the answer rides on the day's own request instead, and
+    the day route draws the marks from it. Only that day's keys, so an address
+    carries a handful and usually none — and it is the address the placeholder
+    fetches, never one in the address bar."""
     url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
           f"&year={day.year}&month={day.month}&date={day.isoformat()}")
     if source:
         url += f"&source={quote(source)}"
+    url += "".join(f"&new={quote(key, safe='')}" for key in new)
     return url
 
 
@@ -1008,11 +1071,13 @@ async def calendar_day(request: Request):
     unfiltered day. The query only says WHICH day of WHICH calendar, and both are
     validated before they reach a cache key.
 
-    is-new is deliberately NOT computed here. The diff and its baseline commit are
-    a whole-month decision the shell already made and wrote; re-reading the
-    baseline from a fragment would see the shell's own commit and conclude nothing
-    is new. The shell embeds the ids it decided were new and the page marks these
-    cards from that one answer."""
+    is-new is NOT COMPUTED HERE, BUT IT IS DRAWN HERE. The diff and its baseline
+    commit are a whole-month decision the shell already made and wrote; re-reading
+    the baseline from a fragment would see the shell's own commit and conclude
+    nothing is new. So the shell writes this day's share of its answer onto the
+    day's own request (`_day_url`'s `new`) and the cards are marked from that. It
+    is the one thing read from the query that is not the day's address, and a
+    value naming no card on the day marks nothing."""
     settings = load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
@@ -1034,15 +1099,20 @@ async def calendar_day(request: Request):
 
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
+    new = _new_marks(request.query_params.getlist("new"))
     context = {
         "request": request, "not_watching": not_watching,
         # Same as the shell's — a day that arrives late offers the same badges.
         "can_filter": True,
-        # Empty on purpose: see the docstring — the shell owns the is-new answer.
-        "new_ids": set(),
+        # The shell's is-new answer for this day — see the docstring.
+        "new_ids": set(new),
         "settings": settings, "is_admin": bool(user and user.is_admin),
+        # And the same add-to-library buttons, in the state they are in.
+        "library": _library(user, settings),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
-        "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source")),
+        # The retry asks for exactly what the placeholder did, answer included.
+        "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source"),
+                              new=new),
         "partial": False,
     }
     try:
@@ -1064,6 +1134,11 @@ async def calendar_day(request: Request):
         _apply_day_layout(grouped, not_watching=meta["not_watching_keys"],
                           hide_not_watching=prefs["hide_not_watching"],
                           card_style=prefs["card_style"] or settings.card_style)
+        # And its chip in the jump-to strip, drawn by the rule the shell's came
+        # from, so a day that arrives collapsed stops being a destination there.
+        if grouped:
+            context["chip"] = _day_chip(day, grouped[0]["items"], meta["not_watching_keys"],
+                                        prefs["hide_not_watching"])
     except TraktError as exc:
         # The shell is already on screen with the month's real numbers, so one day
         # failing is a gap in the month, not a broken page. It replaces itself with
@@ -1143,19 +1218,118 @@ async def jump_to_a_searched_title(request: Request):
     return RedirectResponse(destination, status_code=303)
 
 
-@guard.get("/api/tile", AuthLevel.CALENDAR_APPROVED)
-async def api_tile(request: Request):
-    """Compact season info for a card's own line — how many episodes, what aired
-    last, what airs next.
+@guard.post("/calendar/library/add-month", AuthLevel.ADMIN)
+async def add_month_to_library(request: Request):
+    """The calendar's Add all: every title this month shows and this viewer is
+    watching, added to Sonarr (a TV calendar) or Radarr (a film one).
+
+    THE MONTH, NOT THE PAGE. Days fetch themselves as they are scrolled to, so the
+    cards on screen are an accident of how far somebody has scrolled; the button
+    says "this month" and this is what makes that true. The month is read by the
+    page's own rules from the page's own query string — its year, month, calendar
+    and `?source=` — through the same assembly, so this viewer's filters apply and
+    not-watching titles are left out, exactly as they are on screen.
+
+    ONE ADD PER TITLE: a show airing on a dozen days is one Sonarr series. A title
+    already held, or carrying no id that service matches on, is skipped rather
+    than sent to be refused.
+
+    `{"dry_run": true}` counts and adds nothing, so the confirmation can say how
+    many. It does NOT commit the is-new baseline: that is the page load's decision
+    alone (`assemble_month`), and a button press is not a visit."""
+    data = await authz.json_body(request)
+    settings = load_settings()
+    user = await auth.current_user(request)
+    prefs = await auth.get_user_prefs(user.user_id)
+    today = clock.today()
+    year = route_params.valid_year(request.query_params.get("year"), today.year)
+    month = route_params.valid_month(request.query_params.get("month"), today.month)
+    endpoint = _requested_endpoint(request, prefs, settings)
+    target = "radarr" if endpoint.media == Media.MOVIE else "sonarr"
+    service = integrations_routes.LIBRARY_NAMES[target]
+    if not integrations_routes.configured(target, settings):
+        return JSONResponse({"ok": False, "error": f"{service} isn't configured."}, status_code=400)
+    if not integrations_routes.INTEGRATION_HEALTH[target].get("reachable"):
+        return JSONResponse({"ok": False, "error": f"{service} can't be reached right now."},
+                            status_code=503)
+
+    not_watching = await calendar_state.not_watching_ids(user.user_id)
+    try:
+        grouped, meta = await calendar_cache.assemble_range(
+            endpoint, settings, tz=_resolve_viewer_tz(user, settings),
+            start_date=date(year, month, 1),
+            end_date=date(year, month, _calendar.monthrange(year, month)[1]),
+            **vocab.active_specs(prefs, endpoint.media, honour_pause=True),
+            not_watching_ids=not_watching,
+            prefs=await _viewer_source_selection(request, user, endpoint.media),
+        )
+    except TraktError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+
+    library = integrations_routes.LibraryView(settings)
+    wanted: dict[str, tuple] = {}
+    held = 0
+    for item in (item for group in grouped for item in group["items"]):
+        if item.mark_key in meta["not_watching_keys"]:
+            continue
+        for button in library.buttons(item.media, item.ids):
+            if button.kind != target or not button.library_id:
+                continue
+            if button.in_library:
+                held += 1
+            else:
+                wanted.setdefault(button.library_id, (item.media, item.ids, item.title))
+    already = f" {held} already there." if held else ""
+
+    if data.get("dry_run"):
+        message = (f"Add {len(wanted)} watching title{'' if len(wanted) == 1 else 's'} "
+                   f"from this month to {service}?{already}" if wanted else
+                   f"Nothing to add — every watching title this month is already in {service} "
+                   f"or has no id {service} can use.")
+        return JSONResponse({"ok": True, "count": len(wanted), "service": target, "message": message})
+
+    # Three at a time, as the page's own button-by-button add always was: these
+    # are writes into a service this app does not control and cannot hurry.
+    gate = asyncio.Semaphore(3)
+
+    async def add(library_id: str, media, ids, title) -> tuple[str, dict]:
+        async with gate:
+            return library_id, await integrations_routes.add_title(settings, target, media, ids, title)
+
+    results = await asyncio.gather(*(add(key, *title) for key, title in wanted.items()))
+    added = [key for key, result in results if result.get("ok")]
+    failed = len(results) - len(added)
+    message = (f"Added {len(added)} to {service}."
+               + (f" {failed} could not be added." if failed else "") + already)
+    return JSONResponse({"ok": not failed or bool(added), "service": target,
+                         "added": added, "message": message})
+
+
+@guard.get("/calendar/fragments/season-line", AuthLevel.CALENDAR_APPROVED)
+async def season_line_fragment(request: Request):
+    """The line under a card — how many episodes, what aired last, what airs
+    next — drawn for the card that asked.
+
+    THE CARD FETCHES IT FOR ITSELF as it scrolls into view: _card.html draws a
+    slot carrying `hx-trigger="intersect once"`, the house pattern
+    _day_skeleton.html already uses, and this answer replaces the slot. It used to
+    be JSON that a script turned into markup behind a hand-held
+    IntersectionObserver — one that had to be disconnected and rebuilt on every
+    boosted navigation and never saw the cards on a day that arrived late. htmx
+    processes a late day's slots as they land, so there is nothing to re-arm.
 
     THE CALLER HANDS OVER IDS, NOT A SERVICE, exactly as the details fragment
-    below does, and this route did not used to. It took a bare `id`, read it as a
-    TRAKT id and refused outright unless the instance held Trakt catalogue
-    credentials — so the line appeared on a card only when the title happened to
-    carry a Trakt id, and a Simkl-only card could never show it. That read as
-    missing source data and was not: Simkl answers this perfectly well, and
-    `DetailPort.fetch_season_summary` is what makes asking it the same act. One
-    question, one source-picking rule, whichever services an instance has.
+    below does. `detail_source.choose` picks who can answer, so a Simkl-only card
+    gets its line as readily as one Trakt listed, and
+    `DetailPort.fetch_season_summary` is what makes asking either the same act.
+
+    NOTHING TO SAY IS AN EMPTY ANSWER AT 200, which removes the slot the way an
+    empty day removes its placeholder. That covers a title nobody can describe,
+    a request naming no season, and a service that could not be reached — caught
+    as the shared degradation contract rather than one service's error type, so a
+    rate limit never renders as "no episodes": a line that is not drawn states
+    nothing. A non-200 would not be swapped at all (static/js/boost.js's
+    `noSwap`), leaving an empty slot behind for a trigger that fires once.
 
     Gated on the CATALOGUE credential per source, never on an access token: a
     season's episode list is public, globally cached and the same for everybody,
@@ -1165,32 +1339,25 @@ async def api_tile(request: Request):
     from ..providers import season as season_rules
 
     settings = load_settings()
-    media = request.query_params.get("media", "show")
-    season = route_params.season(request.query_params.get("season"))
-    chosen = detail_source.choose(
-        settings, detail_source.ids_from_query(request.query_params))
-    if chosen is None or season is None:
-        # 404 rather than 400: the request is well formed and there is simply
-        # nobody who can answer it, or nothing seasonal to answer about. The
-        # card leaves its line blank, which is what it does before this returns
-        # anyway.
-        return JSONResponse({"ok": False, "error": "No source can describe this title"},
-                            status_code=404)
-    provider = providers.get(chosen.source)
-    if provider is None or provider.detail_port is None:
-        return JSONResponse({"ok": False, "error": "No source can describe this title"},
-                            status_code=404)
-    try:
-        detail = await provider.detail_port.fetch_season_summary(
-            settings, chosen.source_id, season, Media(media))
-    except SourceUnavailable as exc:
-        # THE SHARED DEGRADATION CONTRACT, not one service's error type. A
-        # transport failure raises rather than answering an empty season, so a
-        # rate-limit cannot render as "no episodes"; catching only Trakt's would
-        # now let Simkl's escape as a 500.
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    return JSONResponse({"ok": True, "source": str(chosen.source),
-                         **season_rules.tile_summary(detail, clock.today())})
+    params = request.query_params
+    season = route_params.season(params.get("season"))
+    chosen = detail_source.choose(settings, detail_source.ids_from_query(params))
+    provider = providers.get(chosen.source) if chosen is not None else None
+    line = None
+    if season is not None and provider is not None and provider.detail_port is not None:
+        try:
+            detail = await provider.detail_port.fetch_season_summary(
+                settings, chosen.source_id, season, Media(params.get("media", "show")))
+        except SourceUnavailable as exc:
+            logger.info("No season line from %s: %s", chosen.source, exc)
+        except ValueError:
+            # A medium this app does not have, which only a hand-built address
+            # can name. Nothing to describe, and nothing worth a 500.
+            pass
+        else:
+            line = season_rules.tile_summary(detail, clock.today())
+    return templates.TemplateResponse(request, "_season_line.html", {
+        "request": request, "line": line, "season": season})
 
 
 @guard.get("/calendar/fragments/details", AuthLevel.CALENDAR_APPROVED)
@@ -1240,7 +1407,7 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     why they may be query parameters here and may not be on the public share
     route — see share_routes._Described for that half.
 
-    Catalogue credentials only, for the same reason as /api/tile: everything this
+    Catalogue credentials only, for the same reason as the season line: everything this
     returns — overview, cast, the episode list — is public and shared, and
     "catalogue" is a question per SOURCE rather than Trakt's alone. THE WATCHED
     TICKS ARE NOT PART OF THAT and are fetched from nowhere: they are read out of
@@ -1292,8 +1459,10 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     return details_panel.panel(
         request, details, media=media, season=season,
         title=params.get("title", ""), poster=params.get("poster", ""),
+        overview=params.get("overview", ""),
         links=detail_source.outbound_links(ids, media),
         progress=progress,
+        actions=await _library_actions(request, settings, media, params),
         # THE CARD'S OWN SEASON IS THE COUNT, because a card for season 4 is a
         # card for a title with three earlier ones behind it. Nothing has to be
         # looked up to know that, which is what lets the picker be offered here at
@@ -1305,6 +1474,27 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
         # addressed by it. Nothing else does — a parameter this route does not
         # read has no business being rendered back into the page.
         carry=details_query_names() + ("key",))
+
+
+async def _library_actions(request: Request, settings, media: str, params) -> str:
+    """The panel header's add-to-library buttons for this card, as markup, or ""
+    for anybody but an administrator (see `_library`) and for a title no
+    configured service would take.
+
+    FROM THE CARD'S OWN IDS, which its details address carries for an
+    administrator (_card.html), rather than from the describing service's answer:
+    the card's buttons behind the panel were drawn from those ids, and a button
+    here marked from a different answer could disagree with them about the same
+    title. The panel delivers what this returns out-of-band into its header."""
+    library = _library(await auth.current_user(request), settings)
+    if library is None:
+        return ""
+    ids = {"tvdb": params.get("tvdb", ""), "tmdb": params.get("tmdb", "")}
+    buttons = library.buttons(media, ids)
+    if not buttons:
+        return ""
+    return Markup(templates.get_template("_library_actions.html").render(
+        buttons=buttons, media=media, ids=ids, title=params.get("title", "")))
 
 
 async def _viewer_progress(request: Request, key: str | None, season: int | None,

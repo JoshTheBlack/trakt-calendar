@@ -34,32 +34,24 @@ function pageBusy(busy) {
     bar.classList.toggle('is-busy', pageBusyDepth > 0);
 }
 
-// REQUESTS THAT SAY NOTHING ABOUT WHETHER THE PAGE IS BUSY, and the only two.
-// A card's season summary fires once per card as the calendar is scrolled, and
-// the integrations status polls on a timer; neither is anybody waiting on, and
-// a bar that lit for them would be up for most of a scroll. Everything else is
-// something a person asked for and is now waiting through.
-const QUIET_REQUESTS = [/^\/api\/tile\b/, /^\/api\/integrations\//];
-
 // EVERY FETCH, IN ONE PLACE, because the rule is about all of them. Wrapping the
 // call sites instead means each new one has to remember — which is exactly what
 // happened: the bar was added for adding a show and then missing from removing
 // one, from adding a film, and from the month load an ordinary refresh runs.
 // A rule that every caller must uphold cannot live in the callers.
 //
+// NO FETCH IS EXEMPT ANY MORE. Two used to be: a card's season line, one per
+// card as a month scrolled past, and the Sonarr/Radarr/Seerr status poll on its
+// timer — neither something a person was waiting through. The line is an htmx
+// request now that names itself as its own indicator (_card.html), and the
+// server draws the library marks with the page, so nothing polls. Every fetch
+// left is something somebody asked for.
+//
 // htmx REQUESTS DO NOT COME THROUGH HERE. It uses XMLHttpRequest and marks the
 // bar itself through `hx-indicator`, so the two never double-count.
 const nativeFetch = window.fetch.bind(window);
 
 window.fetch = function (input, init) {
-    let path = '';
-    try {
-        const raw = typeof input === 'string' ? input : (input && input.url) || '';
-        path = new URL(raw, window.location.href).pathname;
-    } catch (e) { /* a shape we cannot read is not a reason to refuse the call */ }
-    if (QUIET_REQUESTS.some(pattern => pattern.test(path))) {
-        return nativeFetch(input, init);
-    }
     pageBusy(true);
     // `finally` so a refused request releases the bar exactly as a served one
     // does — a failure is still the end of the waiting.
@@ -68,17 +60,6 @@ window.fetch = function (input, init) {
 
 function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-}
-
-// The 11-character video id out of any of the URL shapes Trakt returns. Three
-// details modals embed a trailer — the calendar's, the tracker's and the share
-// page's — and each carried its own copy of this regex, one of them renamed only
-// to avoid a name clash. Now that a page's scripts stay loaded and a later page's
-// are added beside them, two copies of one function under one name is the last
-// one loaded quietly winning.
-function youTubeId(url) {
-    const m = String(url).match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|v\/)|youtu\.be\/)([\w-]{11})/);
-    return m ? m[1] : null;
 }
 
 function toast(message, ok) {
@@ -285,6 +266,12 @@ function openDetailsPanel(url, heading) {
     if (!body) return;
     document.getElementById('detailsTitle').textContent = heading;
     body.replaceChildren(detailsPanelState('detailsPending'));
+    // WHAT AN EARLIER ANSWER PUT IN THE HEADER GOES WITH IT. The calendar's
+    // answer fills this slot out-of-band with the add-to-library buttons for its
+    // own title; left standing, one card's buttons would sit over the next
+    // card's panel while it loads, and over a refusal that has none.
+    const actions = document.getElementById('detailsActions');
+    if (actions) actions.replaceChildren();
     document.getElementById('detailsModal').classList.add('open');
     htmx.ajax('GET', url, { target: '#detailsBody', swap: 'innerHTML' });
 }
@@ -293,14 +280,28 @@ function closeDetailsPanel() { closeModal('detailsModal'); }
 
 // A CONTROL THAT ONLY OPENS THE PANEL IS MARKUP. `data-details-open` is the
 // address the server built and `data-details-heading` the name to show while it
-// loads, so an element carrying both needs no handler of its own — a rankings
-// board row's details button is exactly that. The calendar's card and the share
-// page's still keep a few lines each, and not by oversight: the calendar's adds
-// the name and picture the viewer may have flipped since the card was drawn, and
-// both cards hold links that must go where they point rather than open the panel.
+// loads, so an element carrying both needs no handler of its own. Every opener in
+// the app is one: a rankings board row's ⓘ button, a calendar card and a share
+// page's card.
+//
+// A CONTROL INSIDE AN OPENER ACTS FOR ITSELF. A card is an opener that also holds
+// controls of its own — an outbound link, the watch toggle, a source flip, a
+// badge's filter offer (a <details> with radios in it) — and a click on one of
+// those is a click on THAT, which must not also open the panel behind it. So the
+// click opens nothing when it landed on such a control inside the opener; the
+// opener being a control itself, like the board row's button, still opens. This
+// is the one statement of that rule: the cards used to carry their own opener
+// functions, each re-stating it, and the badge a capture listener stopping the
+// click before the card's inline handler could see it.
+const ACTS_FOR_ITSELF = 'a, button, summary, label, input, select, textarea';
+
 document.addEventListener('click', (e) => {
-    const opener = e.target instanceof Element ? e.target.closest('[data-details-open]') : null;
-    if (opener) openDetailsPanel(opener.dataset.detailsOpen, opener.dataset.detailsHeading || 'Details');
+    if (!(e.target instanceof Element)) return;
+    const opener = e.target.closest('[data-details-open]');
+    if (!opener) return;
+    const control = e.target.closest(ACTS_FOR_ITSELF);
+    if (control && control !== opener && opener.contains(control)) return;
+    openDetailsPanel(opener.dataset.detailsOpen, opener.dataset.detailsHeading || 'Details');
 });
 
 // A REQUEST THAT ENDED WITHOUT PUTTING ANYTHING THERE left the panel on its

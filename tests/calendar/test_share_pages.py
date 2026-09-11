@@ -557,13 +557,19 @@ class SharePageDetailsModalTests(_ShareDetailsTestCase):
 
     def test_the_page_wires_cards_to_the_modal(self):
         body = self.client.get(f"/s/{self.token}?year=2026&month=7").text
-        self.assertIn('onclick="openShareDetails(this, event)"', body)
         self.assertIn('id="detailsModal"', body)
-        self.assertIn("/static/js/share.js", body)
-        # THE ADDRESS IS MARKUP, and it carries the page's own view as well as
-        # the card's ids — the bound cannot be evaluated without the view.
-        self.assertIn(f"/s/{self.token}/details?media=show&amp;trakt=123", body)
-        self.assertIn("year=2026&amp;month=7", body)
+        # THE CARD IS THE OPENER, AS MARKUP. ui.js's delegated listener opens any
+        # element carrying the address, so the page ships no opener of its own
+        # and no card carries a handler.
+        opener = re.search(r'<div class="card[^"]*"\s+data-details-open="([^"]+)"\s+'
+                           r'data-details-heading="([^"]*)"', body)
+        self.assertIsNotNone(opener, "a share card carries no details address")
+        self.assertNotIn("openShareDetails", body)
+        self.assertNotIn("/static/js/share.js", body)
+        # THE ADDRESS CARRIES the page's own view as well as the card's ids — the
+        # bound cannot be evaluated without the view.
+        self.assertIn(f"/s/{self.token}/details?media=show&amp;trakt=123", opener.group(1))
+        self.assertIn("year=2026&amp;month=7", opener.group(1))
 
     def test_details_serve_the_owners_cached_data_without_calling_trakt(self):
         """The common case: the owner has opened this title, so the shared cache

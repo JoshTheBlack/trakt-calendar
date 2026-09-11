@@ -167,7 +167,7 @@ class UnauthenticatedTests(GatingTestCase):
         self.assertEqual(resp.json()["reason"], "login_required")
 
     def test_calendar_level_is_refused(self):
-        for path in ("/", "/calendar", "/api/state", "/api/tile",
+        for path in ("/", "/calendar", "/api/state", "/calendar/fragments/season-line",
                      "/calendar/fragments/details",
                      "/api/network-logo?name=HBO"):
             with self.subTest(path=path):
@@ -195,13 +195,13 @@ class UnauthenticatedTests(GatingTestCase):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
 
     def test_admin_level_is_refused(self):
-        for path in ("/api/settings", "/api/integrations/status",
-                     "/api/integrations/library"):
+        for path in ("/api/settings", "/api/admin/encryption"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/settings", "/api/auth/device/start",
                      "/api/auth/device/poll", "/api/auth/refresh",
                      "/api/integrations/options", "/api/integrations/add",
+                     "/calendar/library/add-month",
                      "/api/network-logo/regenerate"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.post(path, json={}).status_code, 401)
@@ -227,7 +227,7 @@ class ApprovalTests(GatingTestCase):
         self.sign_in_as(self._make_user("viewer", calendar_approved=True))
         self.assertEqual(self.client.get("/").status_code, 200)
         self.assertEqual(self.client.get("/api/settings").status_code, 403)
-        self.assertEqual(self.client.get("/api/integrations/status").status_code, 403)
+        self.assertEqual(self.client.get("/api/admin/encryption").status_code, 403)
         self.assertEqual(self.client.get("/distrakt").status_code, 403)
 
     def test_distrakt_needs_a_linked_trakt_identity_as_well_as_approval(self):
@@ -253,7 +253,7 @@ class ApprovalTests(GatingTestCase):
     def test_admin_reaches_the_admin_routes(self):
         self.sign_in_as(self.admin_id)
         self.assertEqual(self.client.get("/api/settings").status_code, 200)
-        self.assertEqual(self.client.get("/api/integrations/status").status_code, 200)
+        self.assertEqual(self.client.get("/api/admin/encryption").status_code, 200)
 
 
 class CalendarTemplateTests(GatingTestCase):

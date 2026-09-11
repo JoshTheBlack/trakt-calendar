@@ -1,34 +1,28 @@
-// The calendar page's wiring: one idempotent init, what a late-arriving day
-// block needs, and the document-level keys.
+// The calendar page's wiring: one idempotent init, and the one thing a day block
+// that arrives late needs from the page.
 //
 // LOADED LAST of the page's scripts, deliberately. These files are ordinary
 // scripts sharing one global scope, executed in the order the <head> lists them
 // (defer preserves it), and the init below runs the moment this file executes —
 // so everything it calls has to be declared already.
 
-// CLOSING IS NOT THIS FILE'S BUSINESS ANY MORE — static/js/ui.js closes every
-// open overlay on Escape, for every page at once, through the one function that
-// knows what closing means (a playing trailer has to be torn down, not hidden).
-// What is left here is the part that is the CALENDAR's: dismissing the Settings
-// panel mid-handshake abandons it, so the polling that handshake started has to
-// stop with it.
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') stopDeviceAuthPolling();
-});
+// NOTHING HERE LISTENS FOR ESCAPE. static/js/ui.js closes every open overlay on
+// Escape through closeModal, and the Settings panel's handshake polling stops
+// through the close hook calendar/settings.js registers — so a listener of this
+// file's own stopping it too would be a second statement of one rule, and the
+// polling cannot outlive the panel it runs in.
 
 // ---- One idempotent page init, run on first load AND after every boosted swap ----
 // hx-boost swaps the <body>'s children in place without re-running this script, so
 // everything that used to hang off its own DOMContentLoaded is gathered here and
 // re-run on every boosted arrival as well. Document-level delegated listeners (the
-// hover-flip in calendar/layout.js, the Konami code in calendar/easter-egg.js, and
-// Escape above) are bound once as their file loads and survive swaps, so they
-// deliberately stay OUT of this function.
+// hover-flip in calendar/layout.js and the Konami code in calendar/easter-egg.js)
+// are bound once as their file loads and survive swaps, so they deliberately stay
+// OUT of this function.
 function initCalendarPage() {
     readPageContext();
     initCertPickers();
     updateCols();
-    initArrIntegrations();
-    initSeasonInfo();
     initDistraktNav();
     initBuildTap();
     readViewData();
@@ -43,30 +37,26 @@ function initCalendarPage() {
 }
 
 // ---- Day blocks that arrive after the page has painted ----
-// The shell renders the first few days and each later one fetches itself when it
-// is scrolled to, so cards can appear without a navigation. Those cards need three
-// things the shell's own cards got for free, and NOT a re-init: re-reading the
-// page's embedded view data here would throw away a mark the viewer made while the
-// day was still in flight.
+// A LATE DAY ARRIVES FINISHED, BUT FOR ONE THING. The server draws everything it
+// knows onto the block: each card's not-watching state from the stored marks,
+// is-new from the shell's own answer (which rides on the placeholder's request),
+// the day's column count and whether it collapses, and the state of every
+// Sonarr/Radarr/Seerr button. What it cannot know is a mark this page made whose
+// save had not landed when the day's request read the marks — calendar/view.js's
+// pendingMarks. So the block's cards are reconciled against those alone, and
+// where that moved a card the day's packing is worked out again for what is now
+// visible. NOT a re-init: re-running the page's init here would re-read its
+// embedded data and throw away the tiles' in-session counts.
 function applyViewStateTo(root) {
-    if (!root || root.nodeType !== Node.ELEMENT_NODE) return;
+    if (!root || root.nodeType !== Node.ELEMENT_NODE || !pendingMarks.size) return;
+    let moved = false;
     root.querySelectorAll('.card').forEach(card => {
         const id = card.getAttribute('data-id');
-        // is-new is the shell's whole-month answer (see newIds).
-        if (newIds.has(id)) card.classList.add('is-new');
-        // The server rendered not-watching from what was stored when it built this
-        // block. A toggle made before the block arrived exists only in memory here,
-        // so reconcile against it rather than trusting the markup — otherwise a
-        // show hidden a moment ago comes back visible on the days that loaded late.
-        setCardState(card, notWatching.has(id));
+        if (!pendingMarks.has(id)) return;
+        setCardState(card, pendingMarks.get(id));
+        moved = true;
     });
-    // Sonarr/Radarr/Seerr marks, for this subtree only. They are a re-render of
-    // state the page already holds rather than part of the init, so the swapped
-    // block can have them without the init running again.
-    applyArrStateTo(root);
-    // Column packing is per day block and counts that block's (visible) cards, so
-    // it has to run for blocks that did not exist when the page initialised.
-    updateEmptyDays();
+    if (moved) updateEmptyDays();
 }
 
 // A BOOSTED arrival is not handled here. static/js/boost.js owns those: it has to

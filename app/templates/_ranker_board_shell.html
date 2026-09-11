@@ -25,9 +25,11 @@
            the one for "severance" and overwriting it. #}
         <div class="ranker-add">
             <div class="ranker-search-row">
+                {# `input changed`, the calendar search box's trigger and for its
+                   reason (index.html): a pasted or cleared title presses no key. #}
                 <input type="search" id="searchBox" name="q" placeholder="Search for a title…"
                        autocomplete="off"
-                       hx-get="/rankings/fragments/search" hx-trigger="keyup changed delay:350ms, search"
+                       hx-get="/rankings/fragments/search" hx-trigger="input changed delay:350ms"
                        hx-include="#searchMedia" hx-target="#searchResults" hx-swap="innerHTML"
                        hx-sync="#searchResults:replace">
                 <select id="searchMedia" name="media" aria-label="What to search for"

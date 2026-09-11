@@ -22,6 +22,7 @@ import re
 import unittest
 from datetime import date
 from unittest.mock import AsyncMock, patch
+from urllib.parse import quote
 
 from fastapi.testclient import TestClient
 
@@ -553,7 +554,7 @@ class SeriesPremieresAreToldFromReturningSeasonsTests(CalendarRouteTestCase):
         for chunk in page.split('<div class="card')[1:]:
             card = '<div class="card' + chunk.split("</div>\n</div>")[0]
             for title in ("Brand New", "Long Runner", "Mid Season"):
-                if f'data-title="{title}"' in card:
+                if f'data-details-heading="{title}"' in card:
                     out[title] = card
         return out
 
@@ -997,20 +998,18 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                          json={"item_id": "show-a", "not_watching": True})
         html = self.client.get(self.PAGE).text
+        # THE MARK WAS MADE UNDER A LEGACY ID and is still honoured: it lands on
+        # the card by the mark KEY, which is what cards carry. See
+        # calendar/state.py's `marked`.
         self.assertIn("not-watching", _card_class(html, _mark_key("show-a")))
         self.assertNotIn("not-watching", _card_class(html, _mark_key("show-b")))
-        # THE MARK WAS MADE UNDER A LEGACY ID and is still honoured — what the
-        # page hands the client is the mark KEY, which is what its own cards
-        # carry. See calendar/state.py's `marked`.
-        self.assertEqual(_view_data(html)["notWatching"], [_mark_key("show-a")])
 
     def test_a_first_look_at_a_month_marks_nothing_new(self):
         """No stored baseline means this view has never been seen — which is not
         the same as every show in it having just appeared."""
         html = self.client.get(self.PAGE).text
-        for item_id in ("show-a", "show-b", "show-c"):
-            self.assertNotIn("is-new", _card_class(html, item_id), item_id)
-        self.assertEqual(_view_data(html)["newIds"], [])
+        for key in ("show-a", "show-b", "show-c"):
+            self.assertNotIn("is-new", _card_class(html, _mark_key(key)), key)
         self.assertIn("(Initial Tracking)", html)
 
     def test_only_shows_missing_from_the_stored_baseline_come_back_new(self):
@@ -1019,8 +1018,6 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self.assertNotIn("is-new", _card_class(html, _mark_key("show-a")))
         self.assertIn("is-new", _card_class(html, _mark_key("show-b")))
         self.assertIn("is-new", _card_class(html, _mark_key("show-c")))
-        self.assertEqual(_view_data(html)["newIds"],
-                         [_mark_key("show-b"), _mark_key("show-c")])
 
     def test_the_render_commits_the_servers_full_id_list_as_the_next_baseline(self):
         """The committed list has to be the month's, not a page's: anything it
@@ -1032,7 +1029,8 @@ class ServerRenderedViewTests(CalendarRouteTestCase):
         self.assertEqual(stored["last_count"], 4)
         # Committed, so a second load of an unchanged month finds nothing new.
         second = self.client.get(self.PAGE).text
-        self.assertEqual(_view_data(second)["newIds"], [])
+        for key in ("show-a", "show-b", "show-c"):
+            self.assertNotIn("is-new", _card_class(second, _mark_key(key)), key)
         self.assertIn("Perfect Match", second)
 
     def test_a_month_that_could_not_be_loaded_leaves_the_baseline_alone(self):
@@ -1244,6 +1242,35 @@ class DayLayoutTests(CalendarRouteTestCase):
         self.assertIn("--cols: 2", _section(fragment, "2026-07-15"))
         self.assertNotIn("is-empty-hidden", _section(fragment, "2026-07-15"))
 
+    def test_a_late_day_draws_its_own_chip_again_out_of_band(self):
+        """The shell drew the chip from the marks it read when the page loaded. A
+        day fetched afterwards has read them again, so its chip rides out-of-band
+        on the day's own answer and replaces the shell's."""
+        fragment = self.client.get(self.DAY).text
+        chip = re.search(r'<a class="day-chip[^"]*"[^>]*id="day-chip-2026-07-15"[^>]*>', fragment)
+        self.assertIsNotNone(chip, "the day did not draw its chip")
+        self.assertIn('hx-swap-oob="true"', chip.group(0))
+        self.assertNotIn("unreachable", chip.group(0))
+
+    def test_a_day_whose_every_show_was_marked_since_arrives_with_its_chip_greyed(self):
+        """With hiding on, a day whose shows were all marked after the page loaded
+        arrives collapsed — and its chip must stop offering to scroll to it, which
+        it went on doing when the chip was only ever drawn by the shell."""
+        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+        for show in ("show-0", "show-1", "show-2"):
+            self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                             json={"item_id": show, "not_watching": True})
+        fragment = self.client.get(self.DAY).text
+        self.assertIn("is-empty-hidden", _section(fragment, "2026-07-15"))
+        self.assertRegex(fragment, r'<a class="day-chip unreachable"[^>]*id="day-chip-2026-07-15"')
+
+    def test_a_day_with_nothing_on_it_draws_no_chip(self):
+        """Its placeholder simply goes, and the shell's chip for it already said
+        there was nothing there."""
+        empty = self.client.get(
+            "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-20").text
+        self.assertNotIn("day-chip", empty)
+
 
 class RouteSplitTests(CalendarRouteTestCase):
     """The one route that was both the front page and the calendar is now two,
@@ -1328,6 +1355,23 @@ class CalendarShellTests(CalendarRouteTestCase):
             html = self.client.get("/calendar?year=2026&month=7").text
         self.assertEqual(_day_sections(html), ["2026-07-04"])
         self.assertEqual(_day_urls(html), [])
+
+    def test_a_later_day_carries_the_shells_is_new_answer_on_its_own_request(self):
+        """The shell's diff commits this load as the next baseline, so a day that
+        fetches itself later cannot work out which of its cards are new. The shell
+        puts that day's share of the answer on the day's own request — that day's
+        keys only, so a day with nothing new asks exactly as it always did."""
+        user_id = self._make_user("shell_newcomer")
+        self.sign_in_as(user_id)
+        asyncio.run(calendar_state.set_view_state(
+            user_id, "shows", 2026, 7, last_count=9,
+            last_show_ids=[_mark_key(f"show-{day}") for day in range(1, 10)], history=[]))
+        html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
+        urls = {re.search(r"date=([\d-]+)", url).group(1): url for url in _day_urls(html)}
+        self.assertTrue(urls["2026-07-10"].endswith(
+            f"&new={quote(_mark_key('show-10'), safe='')}"), urls["2026-07-10"])
+        for day in range(calendar_routes.INITIAL_DAY_BLOCKS + 1, 10):
+            self.assertNotIn("new=", urls[f"2026-07-{day:02d}"])
 
 
 
@@ -1622,20 +1666,43 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
         self.assertIn("not-watching", _card_class(self.client.get(self.DAY).text, _mark_key("the-drama")))
 
-    def test_it_never_marks_is_new_itself(self):
-        """is-new is a whole-month diff the shell already made and committed. A
-        fragment that re-read the baseline would see that commit and mark nothing
-        — so it does not try: the shell hands the ids to the page instead."""
-        # A first look at the month commits a baseline; these shows are genuinely
-        # new relative to a DIFFERENT stored baseline.
+    def test_a_late_day_draws_is_new_from_the_answer_its_address_carries(self):
+        """is-new is a whole-month diff the shell makes and commits, so a day
+        fetched afterwards cannot make it again — re-reading the baseline would
+        find the shell's own commit and conclude nothing is new. The shell writes
+        each later day's answer onto that day's request, and the day draws it."""
+        drama = _mark_key("the-drama")
+        marked = self.client.get(f"{self.DAY}&new={quote(drama, safe='')}").text
+        self.assertIn("is-new", _card_class(marked, drama))
+        # Re-reading the baseline is not how it decides: with nothing on the
+        # address, nothing is marked, whatever the stored baseline says.
         asyncio.run(calendar_state.set_view_state(
             self.user_id, "shows", 2026, 7,
             last_count=1, last_show_ids=["something-else"], history=[]))
-        shell = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
-        self.assertIn(_mark_key("the-drama"), _view_data(shell)["newIds"])
-        # The fragment is fetched after that commit and marks nothing.
-        fragment = self.client.get(self.DAY).text
-        self.assertNotIn("is-new", _card_class(fragment, _mark_key("the-drama")))
+        self.assertNotIn("is-new", _card_class(self.client.get(self.DAY).text, drama))
+
+    def test_an_is_new_key_naming_nothing_on_the_day_marks_nothing(self):
+        """The day's cards ask whether THEIR key is among the answer, so a key for
+        a title on another day — or anything else a hand-edited address carries —
+        marks no card here."""
+        text = self.client.get(
+            f"{self.DAY}&new={quote(_mark_key('the-comedy'), safe='')}&new=nonsense").text
+        self.assertIn("The Drama", text)
+        self.assertNotIn("is-new", text)
+
+    def test_a_failed_day_keeps_its_answer_for_the_retry_and_drops_what_was_invented(self):
+        """The retry re-requests the day's own address, so the answer has to
+        survive a failure — while a value not shaped like a card's identity is not
+        written back into the page."""
+        drama = quote(_mark_key("the-drama"), safe="")
+
+        def fake(endpoint, start):
+            raise TraktError("Trakt unreachable", 503)
+
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
+            text = self.client.get(f"{self.DAY}&new={drama}&new=%3Cb%3Ehello").text
+        self.assertIn(f"&amp;new={drama}", text)
+        self.assertNotIn("hello", text)
 
     def test_a_bad_date_is_refused_before_it_reaches_the_cache(self):
         for bad in ("date=nope",

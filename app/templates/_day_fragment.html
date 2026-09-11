@@ -28,4 +28,10 @@
 <div class="warning-banner">⚠️ Some calendar data couldn't be loaded — showing what we have.</div>
 {% endif %}
 {% include "_day_block.html" %}
+{#- THE DAY'S CHIP, DRAWN AGAIN, out-of-band over the one the shell drew. The
+    shell drew it from the marks it read when the page loaded, and this day has
+    just read them afresh — so a mark saved since, in this page or in another tab,
+    that leaves this viewer nothing to see here is on the chip as well, and the
+    chip stops offering to scroll to a day that arrived collapsed. -#}
+{% with oob = True %}{% include "_day_chip.html" %}{% endwith %}
 {% endif %}

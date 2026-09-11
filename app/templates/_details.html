@@ -61,7 +61,11 @@
             different question from the season's own description below the picker —
             the premise against what this particular run of it is about — and an
             anthology wants both on screen at once. -#}
-        {% if d.overview %}<div class="details-overview">{{ d.overview }}</div>
+        {#- THE CARD'S DESCRIPTION, THEN THE ANSWER'S — the poster's rule. A card
+            whose services wrote different descriptions sends the one on screen,
+            flipped or not, because that is what the reader just read. -#}
+        {% set description = overview or d.overview %}
+        {% if description %}<div class="details-overview">{{ description }}</div>
         {%- else %}<div class="d-empty">No overview available.</div>{% endif %}
     </div>
 </div>
@@ -173,3 +177,11 @@
     would have been, so an item nobody here can describe explains its missing
     season list in place rather than looking like a list that failed to load. -#}
 {% if note %}<div class="d-empty details-note">{{ note }}</div>{% endif %}
+
+{#- THE HEADER'S ACTIONS, where the surface has any — the calendar's add-to-library
+    buttons, for an administrator. They go out-of-band into the shell's
+    #detailsActions (_details_modal.html), which sits outside the body this answer
+    is swapped into and which opening the panel emptied. Riding on this answer
+    rather than asked for separately is what keeps one title's buttons from ever
+    arriving beside another title's panel. -#}
+{% if actions %}<div id="detailsActions" hx-swap-oob="innerHTML">{{ actions }}</div>{% endif %}

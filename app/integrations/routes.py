@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from typing import Any, Mapping, NamedTuple
 
 import httpx
 from fastapi import APIRouter, Request
@@ -189,22 +190,67 @@ def invalidate_library_cache() -> None:
         seen.clear()
 
 
-@guard.get("/api/integrations/status", AuthLevel.ADMIN)
-async def integrations_status():
-    """Cached Sonarr/Radarr health (refreshed by the heartbeat + on save)."""
-    return JSONResponse(INTEGRATION_HEALTH)
+# ---- What an add-to-library button shows ------------------------------------
+# WHICH OF A TITLE'S IDS EACH SERVICE MATCHES ON, stated once. The add route files
+# an addition under it and every button is marked in-library by it, so the two
+# cannot come to disagree about which id Sonarr would recognise.
+LIBRARY_ID_KEYS = {"sonarr": "tvdb", "radarr": "tmdb", "seer": "tmdb"}
 
 
-@guard.get("/api/integrations/library", AuthLevel.ADMIN)
-async def integrations_library():
-    """Ids already in each library, so the UI can mark added items.
+class LibraryButton(NamedTuple):
+    """One add-to-library button, as it should be drawn right now."""
+    kind: str
+    # The one of the title's ids this service matches on; "" when it has none.
+    library_id: str
+    reachable: bool
+    in_library: bool
 
-    Answers from cache immediately and refreshes behind the response when it has
-    aged out — this route is polled on a timer by every open calendar page, so a
-    caller that WAITED for the refresh would hand one unlucky poll in each cycle
-    the full cost of reading three services.
+
+class LibraryView:
+    """The add-to-library buttons for every title one response draws, from ONE
+    read of the two caches this module keeps.
+
+    THE SERVER DRAWS A BUTTON'S STATE, AND NOTHING POLLS FOR IT. Both facts a
+    button shows — whether its service can be reached, and whether the title is
+    already in that library — were always this module's; the calendar page used to
+    fetch copies of them every minute and mark each button after paint, including
+    the buttons on cards the server had just rendered. Drawn here, a card, a day
+    that arrives late and the details panel's header all arrive right. What that
+    gives up is a live refresh: a service going down, or a title added in Sonarr by
+    hand, shows on the next page load rather than within a minute — and an add to
+    a service that has gone down since still says so when it fails.
+
+    BUILT ONCE PER RESPONSE, not per card: a month draws hundreds of cards and a
+    library holds thousands of ids, so the sets are made here and each card asks
+    them.
     """
-    return JSONResponse(library_snapshot())
+
+    def __init__(self, settings) -> None:
+        self._configured = {kind: bool(getattr(settings, f"{kind}_configured"))
+                            for kind in LIBRARY_ID_KEYS}
+        held = library_snapshot()
+        self._held = {kind: frozenset(str(value) for value in held[kind])
+                      for kind in LIBRARY_ID_KEYS}
+
+    def buttons(self, media: str, ids: Mapping[str, Any]) -> list[LibraryButton]:
+        """A title's buttons, in the order they are drawn: the service for its
+        medium, then Seerr — each only where it is configured."""
+        drawn = []
+        for kind in ("radarr" if media == "movie" else "sonarr", "seer"):
+            if not self._configured[kind]:
+                continue
+            library_id = str(ids.get(LIBRARY_ID_KEYS[kind]) or "")
+            drawn.append(LibraryButton(
+                kind, library_id,
+                reachable=bool(INTEGRATION_HEALTH[kind].get("reachable")),
+                in_library=bool(library_id) and library_id in self._held[kind]))
+        return drawn
+
+
+# NO ROUTE HANDS OUT EITHER CACHE. The calendar page used to poll two JSON
+# routes for copies of INTEGRATION_HEALTH and the library sets and mark every
+# button itself; the server draws each button's state now (LibraryView), so
+# those routes lost their only caller and went with the poll.
 
 
 @guard.post("/api/integrations/options", AuthLevel.ADMIN)
@@ -244,33 +290,46 @@ async def integrations_add(request: Request):
     settings = load_settings()
     title = data.get("title") or "This title"
 
-    if target == "seer":
-        if not seer.is_configured(settings):
-            return JSONResponse({"ok": False, "error": "Seerr isn't configured."}, status_code=400)
-        result = await seer.add_media(settings, media, data.get("tmdb"), title)
-    elif target in ("sonarr", "radarr"):
-        if not arr.is_configured(target, settings):
-            return JSONResponse({"ok": False, "error": f"{target.title()} isn't configured."}, status_code=400)
-        ids = {"tvdb": data.get("tvdb"), "tmdb": data.get("tmdb")}
-        result = await arr.add_media(target, settings, ids, title)
-    else:
+    if target not in LIBRARY_ID_KEYS:
         return JSONResponse({"ok": False, "error": "Unknown target."}, status_code=400)
-
-    # Keep the library cache consistent so the button stays marked on the next load.
-    # THE MEMORY IS STAMPED TOO, not just the served list: the served list is
-    # rebuilt from the memory on every successful read, so an id appended here and
-    # nowhere else would survive exactly until the next refresh and then vanish —
-    # the button un-marking itself minutes after a successful add.
-    if result.get("ok"):
-        lib_id = data.get("tvdb") if target == "sonarr" else data.get("tmdb")
-        if lib_id is not None:
-            try:
-                lib_id = int(lib_id)
-            except (TypeError, ValueError):
-                pass
-            else:
-                _seen_at[target][lib_id] = time.time()
-                if lib_id not in LIBRARY_CACHE[target]:
-                    LIBRARY_CACHE[target].append(lib_id)
-
+    if not configured(target, settings):
+        return JSONResponse({"ok": False, "error": f"{LIBRARY_NAMES[target]} isn't configured."},
+                            status_code=400)
+    ids = {"tvdb": data.get("tvdb"), "tmdb": data.get("tmdb")}
+    result = await add_title(settings, target, media, ids, title)
     return JSONResponse(result, status_code=200 if result.get("ok") else 502)
+
+
+LIBRARY_NAMES = {"sonarr": "Sonarr", "radarr": "Radarr", "seer": "Seerr"}
+
+
+def configured(target: str, settings) -> bool:
+    """Whether `target` — sonarr, radarr or seer — has what an add needs."""
+    return seer.is_configured(settings) if target == "seer" else arr.is_configured(target, settings)
+
+
+async def add_title(settings, target: str, media: str, ids: Mapping[str, Any], title: str) -> dict:
+    """Add one title to a CONFIGURED Sonarr, Radarr or Seerr, and remember it as
+    held. Answers the service client's own {ok, message | error}.
+
+    ONE IMPLEMENTATION for the add a button makes and for a whole month added at
+    once (the calendar's Add all), so the two cannot come to remember an addition
+    differently.
+
+    THE MEMORY IS STAMPED, not just the served list: the served list is rebuilt
+    from the memory on every successful read, so an id appended there and nowhere
+    else would survive exactly until the next refresh and then vanish — the button
+    un-marking itself minutes after a successful add."""
+    if target == "seer":
+        result = await seer.add_media(settings, media, ids.get("tmdb"), title)
+    else:
+        result = await arr.add_media(target, settings, dict(ids), title)
+    if result.get("ok"):
+        try:
+            lib_id = int(ids.get(LIBRARY_ID_KEYS[target]))
+        except (TypeError, ValueError):
+            return result
+        _seen_at[target][lib_id] = time.time()
+        if lib_id not in LIBRARY_CACHE[target]:
+            LIBRARY_CACHE[target].append(lib_id)
+    return result

@@ -139,8 +139,13 @@
                 {% for item in group['items'] %}
                 {# Clicking opens the same details panel the calendar page opens
                    — literally the same template, rendered by this link's own
-                   token-scoped endpoint. A JS enhancement: with it off, the
-                   poster's own outbound link still reaches the full details.
+                   token-scoped endpoint. THE CARD IS THE OPENER AND CARRIES NO
+                   HANDLER: `data-details-open` is the address and
+                   `data-details-heading` the name shown while it loads, and
+                   static/js/ui.js's one delegated listener does the rest — which
+                   includes leaving a click on the outbound link to go where it
+                   points. With script off, that link still reaches the full
+                   details.
 
                    THE REQUEST CARRIES THIS PAGE'S OWN VIEW as well as the card's
                    ids, and that is not decoration. What may be looked up is bound
@@ -155,10 +160,8 @@
                    of the month it has already read rather than rendering back an
                    address a stranger spelled. #}
                 <div class="card{% if item.mark_key in not_watching %} not-watching{% endif %}"
-                     data-media="{{ item.media }}"
-                     data-title="{{ item.title }}"
-                     data-details-url="{{ details_url(details_base, item.media, item.ids, item.season) }}{{ view_query }}"
-                     onclick="openShareDetails(this, event)">
+                     data-details-open="{{ details_url(details_base, item.media, item.ids, item.season) }}{{ view_query }}"
+                     data-details-heading="{{ item.title }}">
                     <div class="poster-wrap">
                         <div class="ribbon-wrap"><div class="ribbon-text">NOT WATCHING</div></div>
                         {% if item.rating %}<div class="rating-badge">⭐ {{ item.rating }}</div>{% endif %}

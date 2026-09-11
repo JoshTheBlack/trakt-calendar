@@ -15,16 +15,14 @@
  *
  * No listener registration, deliberately: the buttons carry their own onclick, so
  * a day block that fetches itself in long after the page loaded works the moment
- * it lands, with nothing to re-arm.
+ * it lands, with nothing to re-arm. The flip is a button inside the card, so the
+ * card's own click — opening the details panel — leaves it alone (static/js/ui.js).
  */
 
 // The elements a flip touches for one field: the one showing the value, and the
 // button's logos. Kept together because the two must never disagree about which
 // service is on screen — that is the whole content of the control.
-function swapCardField(button, event) {
-    // The card itself opens the details modal on click, so a flip has to stop
-    // short of it; the point of the control is to change one value in place.
-    event.stopPropagation();
+function swapCardField(button) {
     const card = button.closest('.card');
     const field = button.dataset.field;
     if (!card || !field) return;
@@ -47,16 +45,13 @@ function swapCardField(button, event) {
     const value = values[next];
     if (target.tagName === 'IMG') {
         target.src = value;
-        // The details modal reads the card's own copy of the poster, so it
-        // follows the flip rather than opening on the picture you just replaced.
-        card.dataset.poster = value;
     } else {
         // textContent, never innerHTML: this is a title or an overview as some
         // service wrote it, and it is not markup.
         target.textContent = value;
-        if (field === 'title') card.dataset.title = value;
     }
     target.dataset.source = next;
+    followInDetailsAddress(card, field, value);
 
     let label = next;
     button.querySelectorAll('.swap-logo').forEach((logo) => {
@@ -64,4 +59,18 @@ function swapCardField(button, event) {
         if (logo.dataset.source === next) label = logo.dataset.label || next;
     });
     button.title = 'From ' + label + ' — click to see the other';
+}
+
+// THE PANEL OPENS ON WHAT IS ON SCREEN. The card's details address was drawn with
+// the name, the picture and — where the services disagree about it — the
+// description the server picked (_card.html), and those are the things on it a
+// flip can change afterwards. So a flip rewrites that value on the address, and a
+// flip of the name the heading shown while the panel loads too. Left alone, the
+// panel would open on the picture or the words just replaced.
+function followInDetailsAddress(card, field, value) {
+    if (!['title', 'poster', 'overview'].includes(field)) return;
+    const address = new URL(card.dataset.detailsOpen, window.location.href);
+    address.searchParams.set(field, value);
+    card.dataset.detailsOpen = address.pathname + address.search;
+    if (field === 'title') card.dataset.detailsHeading = value;
 }
