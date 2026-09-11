@@ -41,7 +41,7 @@ import anyio.to_thread
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, detail_source, resolve as calendar_resolve,
+from . import (cache as calendar_cache, resolve as calendar_resolve,
                share_card, share_card_cache, share_code, share_links,
                state as calendar_state, vocab)
 from .. import auth, authz, chrome, clock, details_panel, perftrace, route_params
@@ -51,6 +51,7 @@ from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, Endpoint, endpoint_choices, get_endpoint
 from ..media import posters, user_images
 from ..perftrace import span
+from ..providers import detail_source
 from ..providers.base import (Item, Media, Source, parse_item_key,
                               parse_media)
 from ..sources import prefs as source_prefs

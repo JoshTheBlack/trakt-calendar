@@ -17,6 +17,7 @@ deleting a board sends `{}` rather than nothing at all.
 from __future__ import annotations
 
 import functools
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -25,17 +26,25 @@ from urllib.parse import quote
 import anyio
 import anyio.to_thread
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from . import (core as ranker, exports as ranker_export, grid_builder,
                imports as ranker_import, sources as ranker_sources)
 from .sources import Media
-from .. import auth, authz, chrome
+from .. import auth, authz, chrome, details_panel, route_params
 from ..auth import AuthLevel
 from ..config import load_settings
 from ..media import posters, user_images
 from ..perftrace import span
+from ..providers import detail_source
+# THE DETAIL PORTS' failure type, which is not `ranker_sources.SourceUnavailable`:
+# that one is this feature's own translation for the search and ratings seams,
+# while a details panel asks the shared detail ports directly (see
+# app/providers/detail_source.py) and they raise the app-wide one.
+from ..providers.base import SourceUnavailable
 from ..templating import templates
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 guard = authz.Guard(router)
@@ -236,6 +245,10 @@ def _rows_url(board_uid: str, category_uid: str) -> str:
             f"&tier={quote(category_uid)}")
 
 
+def _removals_url(board_uid: str) -> str:
+    return f"/rankings/fragments/removed?board={quote(board_uid)}"
+
+
 def _pool_context(board: dict, page: int) -> dict:
     """One page of the pool, plus the sentinel that asks for the one after it.
     The last page carries no sentinel, which is what ends the chain."""
@@ -244,10 +257,32 @@ def _pool_context(board: dict, page: int) -> dict:
     remaining = len(board["pool"]) - (start + len(items))
     return {
         "items": items,
+        # Every row names its board, because its details button asks for a title
+        # by board and key and a key is only unique within one board.
+        "board_uid": board["uid"],
         "next_url": _pool_url(board["uid"], page + 1) if remaining > 0 else None,
         # The sentinel reserves the height its page will take, so arriving cards
         # slot into space already made for them instead of shoving the page down.
         "next_rows": min(remaining, POOL_PAGE_SIZE),
+    }
+
+
+async def _removals_context(user_id: int, board_uid: str) -> dict:
+    """The removal history as _ranker_removed.html draws it. One builder for the
+    page and the fragment that redraws it, so the two cannot disagree about what
+    a board could put back — or about the caps the page states beside it."""
+    try:
+        removals = await ranker.fetch_removals(user_id, board_uid)
+    except ranker.RankerError:
+        # A board that went away in another tab has nothing to put back, and the
+        # history is not where that should be discovered.
+        removals = []
+    return {
+        "removals": removals,
+        # Each Restore button posts to its board, so the list has to know which.
+        "board_uid": board_uid,
+        "removal_cap": ranker.REMOVAL_HISTORY_PER_BOARD,
+        "removal_days": ranker.REMOVAL_HISTORY_DAYS,
     }
 
 
@@ -283,8 +318,26 @@ async def rankings_page(request: Request):
     swap that leaves the stylesheet, the scripts and the drag machinery resident.
     """
     user = await auth.current_user(request)
+    return await _rankings_response(request, user, request.query_params.get("board"))
+
+
+async def _rankings_response(request: Request, user, wanted: str | None, *,
+                             notice: str = "", notice_ok: bool = True,
+                             removals_open: bool = False):
+    """The rankings page for the board `wanted`, or for the account's first.
+
+    ONE BUILDER FOR EVERY ANSWER THAT IS THE WHOLE PAGE: opening it, and putting a
+    removed title back, which answers with the board redrawn. A second builder
+    would be a second idea of what the page carries, and the version a save echoes
+    is exactly the kind of thing two of them would disagree about.
+
+    `notice` is a sentence about what the request that drew this page did, and
+    `notice_ok` whether it is good news or a refusal, which only decides its
+    colour; `removals_open` draws the removal history already open. All three are
+    for the restore, whose button sits inside that history.
+    """
     boards = await ranker.fetch_boards(user.user_id)
-    wanted = request.query_params.get("board") or (boards[0]["uid"] if boards else None)
+    wanted = wanted or (boards[0]["uid"] if boards else None)
     board = None
     if wanted:
         # A board may hold a thousand titles, and this reads all of them plus
@@ -323,9 +376,14 @@ async def rankings_page(request: Request):
         "rows_open": tiered <= EAGER_ROW_LIMIT,
         "export_limits": _export_limits(),
         "tier_template": ranker.TIER_TEMPLATE,
+        "notice": notice,
+        "notice_ok": notice_ok,
+        "removals_open": removals_open,
     }
     if board:
         context.update(_pool_context(board, 0))
+        context.update(await _removals_context(user.user_id, board["uid"]))
+        context["removals_url"] = _removals_url(board["uid"])
     return templates.TemplateResponse(request, "ranker.html", context)
 
 
@@ -366,8 +424,189 @@ async def category_rows_fragment(request: Request):
         return _fragment_failure(request, "No such tier.", retry, "ranker-rows")
     return templates.TemplateResponse(
         request, "_ranker_category_rows.html",
-        {"request": request, "items": found[0]["items"]},
+        {"request": request, "items": found[0]["items"], "board_uid": board["uid"]},
     )
+
+
+@guard.get("/rankings/fragments/row", AuthLevel.RANKER_APPROVED)
+async def row_fragment(request: Request):
+    """One title's row, exactly as the shell draws it inline.
+
+    EVERY TITLE THAT ARRIVES AFTER FIRST PAINT IS DRAWN FROM THIS: a search
+    result clicked or dragged in, and a removed title put back. All of them reach
+    the page only once the title is on the board, so the server renders every
+    row there is and the page carries no second builder of one — what lands is
+    _ranker_row.html, byte for byte.
+
+    A TITLE THE BOARD DOES NOT HOLD DRAWS AS NOTHING, at 200 like every fragment
+    here. The one way to ask about one is a row still on its way when another tab
+    took the title off, and nothing is the honest row for that: the placeholder
+    that asked goes away, and the version check on the next save is what says
+    the board moved.
+    """
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    try:
+        item = await ranker.fetch_item(user.user_id, board_uid, request.query_params.get("key"))
+    except ranker.RankerError:
+        return HTMLResponse("")
+    return templates.TemplateResponse(
+        request, "_ranker_row.html",
+        {"request": request, "item": item, "board_uid": board_uid},
+    )
+
+
+@guard.get("/rankings/fragments/removed", AuthLevel.RANKER_APPROVED)
+async def removals_fragment(request: Request):
+    """What this board could put back, redrawn after something was removed or
+    restored. The history's own container asks for it (see
+    _ranker_board_shell.html), so the page's script names an event and never
+    this address."""
+    user = await auth.current_user(request)
+    board_uid = request.query_params.get("board") or ""
+    return templates.TemplateResponse(
+        request, "_ranker_removed.html",
+        {"request": request, **await _removals_context(user.user_id, board_uid)},
+    )
+
+
+# ---------------------------------------------------------------------------
+# a title's details panel
+# ---------------------------------------------------------------------------
+
+# THE SEASON A BOARD TITLE'S PANEL OPENS ON. A board holds a TITLE, not a season,
+# so there is no season of its own to open on — and asking with none at all is
+# not an option: a Trakt lookup naming no season answers no episode list and no
+# season count, which leaves the panel nothing to build a picker from. The first
+# season is the one every show with seasons has, and it is where the title
+# begins; the picker reaches the rest.
+_OPENING_SEASON = 1
+
+
+@guard.get("/rankings/fragments/details", AuthLevel.RANKER_APPROVED)
+async def item_details_fragment(request: Request):
+    """The details panel for one title on a board."""
+    return await _item_details(request, season_only=False)
+
+
+@guard.get("/rankings/fragments/details/season", AuthLevel.RANKER_APPROVED)
+async def item_details_season_fragment(request: Request):
+    """One season of a board title's panel — what a season tab fetches. The same
+    question as the panel, asked about another season, and a route of its own
+    for the reason the calendar's twin gives: the tab's address is this panel's
+    address with `/season` on the end (details_panel.season_tabs)."""
+    return await _item_details(request, season_only=True)
+
+
+async def _item_details(request: Request, *, season_only: bool) -> Response:
+    """The details panel for one board title, or one season of it.
+
+    THE SAME PANEL EVERY OTHER SURFACE OPENS — templates/_details.html, drawn by
+    app/details_panel.py — so a title reads the same here as on the calendar.
+
+    A TITLE IS NAMED BY ITS BOARD AND ITS KEY, AND EVERYTHING ELSE COMES FROM THE
+    ROW. The ids that decide who is asked, the medium, the name and the picture
+    are read off the stored tier_items row the caller's own board holds, which is
+    the tracker's rule for its roster and for the same reason: a request cannot
+    point the lookup at a title the board does not have. A season tab carries
+    those two names and the season (`carry`), and nothing else a caller spelled is
+    rendered back.
+
+    THE STRIP IS THE WIDEST OF THREE COUNTS, each a floor: the row's own (for a
+    title imported from finished viewing that is the seasons WATCHED, not the
+    seasons there are), the season opened, and the describing service's.
+
+    NO WATCH MARKS. This page does not know the tracker exists —
+    tests/ranker/test_standalone.py holds that — so nobody's viewing is drawn on
+    it.
+
+    The instance's catalogue credential, for the reason a board search uses it:
+    everything this draws is public, shared and cached for every viewer.
+    """
+    user = await auth.current_user(request)
+    params = request.query_params
+    try:
+        item = await ranker.fetch_item(user.user_id, params.get("board") or "", params.get("key"))
+    except ranker.RankerError:
+        return details_panel.gap(request, "That title is no longer on this board.")
+    media = item["media"]
+    season = (None if media == Media.MOVIE
+              else route_params.season(params.get("season")) or _OPENING_SEASON)
+    settings = load_settings()
+    chosen = detail_source.choose(settings, item["ids"])
+    if chosen is None:
+        return _described_by_the_board(request, item, season_only, reachable=False)
+    try:
+        details = await detail_source.describe(settings, chosen, media, season)
+    except SourceUnavailable:
+        # Drawn rather than answered with a status, like every fragment here, and
+        # in the sentence every other surface's panel uses for a failed lookup:
+        # a service's own rate-limit message is not something a reader can act on.
+        logger.warning("Detail lookup failed for %s", chosen.source, exc_info=True)
+        return details_panel.gap(request, "⚠️ Could not load details for this item.")
+    if details is None:
+        return _described_by_the_board(request, item, season_only, reachable=True)
+    if season_only:
+        return details_panel.season_pane(request, details, media=media, season=season)
+    return details_panel.panel(
+        request, details, media=media, season=season,
+        title=item["title"] or "", poster=_tile_url(item),
+        # The row's ids first and the answer's beside them: which services know a
+        # title is a fact about the row, and a Trakt-described answer carries no
+        # Simkl id to build that button from.
+        links=detail_source.outbound_links({**item["ids"], **(details.get("ids") or {})}, media),
+        season_count=item["season_count"] or 0,
+        carry=("board", "key"))
+
+
+def _described_by_the_board(request: Request, item: dict, season_only: bool, *,
+                            reachable: bool) -> Response:
+    """The panel drawn from what the board's own row knows, for a title nobody
+    here can describe.
+
+    NOT A BLANK AND NOT A REFUSAL. The row stores the title's name, network,
+    runtime and usually a picture, which is the start of what the panel shows, so
+    it opens on those — every other key the template reads is simply absent — and
+    says, where the episodes would have been, why there are none. A panel that
+    opened empty would read as a lookup that failed rather than as a title with
+    nobody to ask.
+
+    `reachable` tells the two cases apart, because a reader can act on them
+    differently: a title added with no id any service issues can never be looked
+    up, while one whose services are not set up on this instance could be.
+    """
+    if season_only:
+        # Tabs are drawn only on a panel a service described, so this is a tab
+        # whose title lost its answer between one press and the next.
+        return details_panel.gap(request, "Nothing here can describe this item.")
+    media = item["media"]
+    lead = "Nothing more to show" if media == Media.MOVIE else "No seasons or episodes to show"
+    reason = ("the services that know this title are not set up here, and nothing "
+              "about it has been looked up before" if reachable else
+              "it was added to this board without an id from any service this app "
+              "can ask, so there is nobody to ask about it")
+    facts = {"title": item["title"] or "", "network": item["network"] or "",
+             "runtime": item["runtime"]}
+    return details_panel.panel(
+        request, facts, media=media, season=None,
+        title=item["title"] or "", poster=_tile_url(item),
+        links=detail_source.outbound_links(item["ids"], media),
+        note=f"{lead}: {reason}.")
+
+
+def _tile_url(item: dict) -> str:
+    """The picture the row itself is drawn with, when there is one to show.
+
+    ONLY A TILE ALREADY ON DISK. A row's <img> hides itself when its tile turns
+    out not to exist; the panel's does not, so an address that will 404 would
+    draw a broken picture where the empty string — which the panel reads as
+    "use the describing service's own poster" — would have drawn a real one.
+    """
+    tmdb = item["tmdb"]
+    path = posters.cached_poster(item["media"], tmdb) if tmdb else None
+    if path is None or not path.exists():
+        return ""
+    return f"/api/rankings/poster?media={quote(str(item['media']))}&tmdb={tmdb}"
 
 
 def _fragment_failure(request: Request, message: str, retry_url: str, target: str):
@@ -627,45 +866,77 @@ async def list_sources(request: Request):
     return JSONResponse({"ok": True, "sources": await _sources(user.user_id)})
 
 
-@guard.post("/api/rankings/search", AuthLevel.RANKER_APPROVED)
-async def search_titles(request: Request):
-    """Find titles to add. Uses the INSTANCE credential, deliberately: this
-    grant does not imply a linked account, and what is asked for is public
-    catalogue data either way."""
-    user = await auth.current_user(request)
-    data = await authz.json_body(request)
-    query = str(data.get("query") or "").strip()
-    media = _media(data.get("media"), Media.SHOW)
-    if len(query) < MIN_SEARCH_LENGTH:
-        return authz.error(f"Type at least {MIN_SEARCH_LENGTH} characters to search.")
-    if await _search_over_budget(user.user_id):
-        return authz.error("Too many searches just now — give it a moment.", 429)
+@guard.get("/rankings/fragments/search", AuthLevel.RANKER_APPROVED)
+async def search_fragment(request: Request):
+    """Titles to add, drawn as the list under the pool's search box.
 
-    source = ranker_sources.search_source()
+    A VIEW, NOT AN API, like every fragment on this page: the box asks for this
+    as it is typed into (hx-get in _ranker_board_shell.html) and the answer is the
+    results themselves. They used to arrive as JSON that a script turned into
+    markup, and each one carried a serialized copy of its title for the add to
+    hand back.
+
+    Uses the INSTANCE credential, deliberately: this grant does not imply a linked
+    account, and what is asked for is public catalogue data either way.
+
+    EVERY REFUSAL IS DRAWN, at 200: a non-200 is not swapped, so a status would
+    leave the previous results standing under a query they no longer answer.
+    Too short a query draws nothing, which is what the box shows before anything
+    has been typed.
+    """
+    user = await auth.current_user(request)
+    query = str(request.query_params.get("q") or "").strip()
     try:
-        refs = await source.search(query, media)
+        media = ranker_sources.parse_media(request.query_params.get("media"), Media.SHOW)
+    except ValueError as exc:
+        return _search_results(request, message=str(exc))
+    if len(query) < MIN_SEARCH_LENGTH:
+        return _search_results(request)
+    if await _search_over_budget(user.user_id):
+        return _search_results(request, message="Too many searches just now — give it a moment.")
+    try:
+        refs = await ranker_sources.search_source().search(query, media)
     except ranker_sources.SourceUnavailable as exc:
-        return authz.error(str(exc), 502)
-    # The results come back in the same shape the add endpoint takes, so the
-    # client hands back exactly what the user picked rather than rebuilding it.
+        return _search_results(request, message=str(exc))
     results = [
         {**item, "key": ranker.item_key(item["media"], item["match_source"], item["match_id"])}
         for item in ranker_sources.items_from_refs(refs)
     ][:MAX_SEARCH_RESULTS]
-    return JSONResponse({"ok": True, "results": results})
+    return _search_results(request, query=query, results=results)
+
+
+def _search_results(request: Request, *, query: str = "", results=(), message: str = ""):
+    return templates.TemplateResponse(request, "_ranker_search_results.html", {
+        "request": request, "query": query, "results": results, "message": message,
+    })
 
 
 @guard.post("/api/rankings/boards/{board_uid}/items", AuthLevel.RANKER_APPROVED)
 async def add_board_items(board_uid: str, request: Request):
-    """Add chosen titles to a board's pool. Idempotent: a title the board
-    already holds — pooled or tiered — is left exactly as it is."""
+    """Add a title a search on this page found to the board's pool. Idempotent: a
+    title the board already holds — pooled or tiered — is left exactly as it is.
+
+    THE PAGE NAMES A RESULT; IT DOES NOT HAND OVER A TITLE. It sends the query it
+    searched for and the key of the result picked, and the title is read back out
+    of that search's own stored answer (`ranker_sources.title_from_search`). What
+    is stored is what the service said, not fields a page sent — a page that sends
+    a title or an id map alongside has them ignored — and the add costs no second
+    lookup. A result no longer stored is refused with a sentence rather than
+    looked up afresh, so this cannot become a search the budget does not count.
+    """
     user = await auth.current_user(request)
     data = await authz.json_body(request)
-    refs = data.get("refs")
-    if not isinstance(refs, list):
-        return authz.error("`refs` must be a list of titles.")
+    query = str(data.get("query") or "").strip()
     try:
-        added = await ranker.add_titles(user.user_id, board_uid, refs, added_from="manual")
+        wanted = ranker.parse_item_key(data.get("key"))
+        media = ranker_sources.parse_media(wanted.media)
+    except (ranker.RankerError, ValueError) as exc:
+        return authz.error(str(exc))
+    item = await ranker_sources.title_from_search(query, media, str(wanted))
+    if item is None:
+        return authz.error("That search result is out of date — search for it again.")
+    try:
+        added = await ranker.add_titles(user.user_id, board_uid, [item], added_from="manual")
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, "added": added})
@@ -685,6 +956,37 @@ async def remove_board_items(board_uid: str, request: Request):
     except ranker.RankerError as exc:
         return _refusal(exc)
     return JSONResponse({"ok": True, "removed": removed})
+
+
+@guard.post("/rankings/boards/{board_uid}/removals/restore", AuthLevel.RANKER_APPROVED)
+async def restore_board_item(board_uid: str, request: Request):
+    """Put a removed title back where it sat — see ranker.restore_removal for what
+    that means in each case — and answer with the board redrawn.
+
+    THE WHOLE PAGE, NOT JSON, AND THAT IS WHAT TAKES THE RESTORE OUT OF SCRIPT.
+    The Restore button is markup (hx-post with hx-json-enc, _ranker_removed.html)
+    and its answer is what switching to this board draws, so the page's copy of
+    the layout and the version a save echoes are read back from the server rather
+    than adjusted by a script. WHAT THAT COSTS, and it was accepted by the owner:
+    a drag made in the last moment and not saved yet is lost, and so are the
+    search results, a selection and the tiers opened by hand on a board large
+    enough to draw them closed. Switching boards already costs exactly that.
+
+    ALWAYS 200, WITH THE OUTCOME SAID ON THE PAGE (`notice`), including a refusal.
+    This answer replaces the page, and a non-200 is not swapped, so a status code
+    would leave the viewer on a page that did nothing and said nothing.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    notice_ok = True
+    try:
+        restored = await ranker.restore_removal(user.user_id, board_uid, data.get("key"))
+        notice = ("Put back on the board." if restored else
+                  "That title is already on this board, so there was nothing to put back.")
+    except ranker.RankerError as exc:
+        notice, notice_ok = str(exc), False
+    return await _rankings_response(request, user, board_uid, notice=notice,
+                                    notice_ok=notice_ok, removals_open=True)
 
 
 @guard.post("/api/rankings/boards/{board_uid}/import/tracker", AuthLevel.RANKER_APPROVED)

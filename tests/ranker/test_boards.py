@@ -15,11 +15,13 @@ decides which of two open tabs wins.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 import unittest
 from io import BytesIO
 from pathlib import Path
 from unittest import mock
+from urllib.parse import urlencode
 
 from PIL import Image
 
@@ -804,65 +806,106 @@ class RatingsSeedTests(RankerTestCase):
 
 
 class ItemRouteTests(RankerTestCase):
+    """Adding a title names a result a search already answered. What is stored is
+    that answer's record of the title, never fields the page sent with it."""
+
     def setUp(self):
         super().setUp()
         self.user_id = self.ranker_user()
         self.sign_in_as(self.user_id)
         asyncio.run(ranker.create_board(self.user_id, uid="b1"))
+        self.source = _CannedSearch()
 
-    def test_titles_are_added_and_removed_through_the_routes(self):
-        added = self.client.post("/api/rankings/boards/b1/items", json={
-            "refs": [show_ref("1"), show_ref("2")]})
-        self.assertEqual(added.json()["added"], 2)
+    def add(self, key: str, query: str = "test", **extra):
+        with patched(ranker_sources, "search_source", lambda: self.source):
+            return self.client.post("/api/rankings/boards/b1/items",
+                                    json={"query": query, "key": key, **extra})
 
+    def test_a_search_result_is_added_and_removed_through_the_routes(self):
+        self.assertEqual(self.add("show:tmdb:1").json()["added"], 1)
+        self.assertEqual(self.add("show:tmdb:2").json()["added"], 1)
         removed = self.client.request("DELETE", "/api/rankings/boards/b1/items",
                                       json={"keys": ["show:tmdb:1"]})
         self.assertEqual(removed.json()["removed"], 1)
         self.assertEqual(self.value("SELECT match_id FROM tier_items"), "2")
 
-    def test_a_malformed_add_is_refused_whole(self):
-        resp = self.client.post("/api/rankings/boards/b1/items", json={
-            "refs": [show_ref("1"), {"media": "show", "match_source": "nope", "match_id": "2"}]})
+    def test_what_is_stored_is_the_searchs_answer_and_not_what_the_page_sent(self):
+        self.add("show:tmdb:3", title="Something Else", ids={"trakt": 666}, network="Made Up")
+        row = asyncio.run(ranker.fetch_item(self.user_id, "b1", "show:tmdb:3"))
+        self.assertEqual((row["title"], row["ids"], row["network"]), ("Title 3", {"tmdb": 3}, ""))
+
+    def test_the_add_reads_the_search_back_rather_than_searching_again(self):
+        """Which is what makes it free, and what keeps it from being a search the
+        budget never counts."""
+        self.add("show:tmdb:1")
+        self.assertEqual(self.source.cached_only, [True])
+
+    def test_a_result_that_search_did_not_answer_is_refused(self):
+        resp = self.add("show:tmdb:99999")
         self.assertEqual(resp.status_code, 400)
+        self.assertIn("search for it again", resp.json()["error"])
+        self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
+
+    def test_a_malformed_key_is_refused(self):
+        self.assertEqual(self.add("nope").status_code, 400)
         self.assertEqual(self.value("SELECT COUNT(*) FROM tier_items"), 0)
 
 
 class SearchRouteTests(RankerTestCase):
+    """The search box's results, drawn by the server. Every refusal is drawn too,
+    at 200: a status is not swapped, and would leave old results under a new
+    query."""
+
     def setUp(self):
         super().setUp()
         self.user_id = self.ranker_user()
         self.sign_in_as(self.user_id)
 
-    def search(self, **body):
+    def search(self, **params):
         with patched(ranker_sources, "search_source", lambda: _CannedSearch()):
-            return self.client.post("/api/rankings/search", json=body)
+            return self.client.get("/rankings/fragments/search?" + urlencode(params))
 
-    def test_a_query_too_short_to_mean_anything_is_refused(self):
-        self.assertEqual(self.search(query="a").status_code, 400)
+    def results(self, response) -> list[str]:
+        return re.findall(r'class="ranker-result" data-key="([^"]+)"', response.text)
 
-    def test_an_unknown_media_type_is_refused(self):
-        self.assertEqual(self.search(query="test", media="album").status_code, 400)
+    def test_a_query_too_short_to_mean_anything_draws_nothing(self):
+        resp = self.search(q="a")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.text.strip(), "")
+
+    def test_an_unknown_media_type_is_refused_in_words(self):
+        resp = self.search(q="test", media="album")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("ranker-preview-hint", resp.text)
+        self.assertEqual(self.results(resp), [])
 
     def test_results_are_capped(self):
-        results = self.search(query="test").json()["results"]
-        self.assertEqual(len(results), ranker_routes.MAX_SEARCH_RESULTS)
+        self.assertEqual(len(self.results(self.search(q="test"))), ranker_routes.MAX_SEARCH_RESULTS)
+
+    def test_each_result_carries_its_key_and_its_query_and_no_copy_of_the_title(self):
+        resp = self.search(q="test")
+        self.assertIn('data-key="show:tmdb:1" data-query="test"', resp.text)
+        self.assertNotIn("data-ref", resp.text)
 
     def test_the_budget_bounds_a_script_rather_than_a_person(self):
         for _ in range(ranker_routes.SEARCH_MAX_PER_WINDOW):
-            self.assertEqual(self.search(query="test").status_code, 200)
-        self.assertEqual(self.search(query="test").status_code, 429)
+            self.assertTrue(self.results(self.search(q="test")))
+        refused = self.search(q="test")
+        self.assertEqual(refused.status_code, 200)
+        self.assertEqual(self.results(refused), [])
+        self.assertIn("Too many searches", refused.text)
 
     def test_the_budget_is_per_account(self):
         for _ in range(ranker_routes.SEARCH_MAX_PER_WINDOW + 1):
-            self.search(query="test")
+            self.search(q="test")
         self.sign_in_as(self.ranker_user("someone_else"))
-        self.assertEqual(self.search(query="test").status_code, 200)
+        self.assertTrue(self.results(self.search(q="test")))
 
     def test_the_budget_survives_a_restart(self):
         """The budget lives in `login_attempts`, not a process-local dict, so it
         is unaffected by the app restarting — a real behaviour change from the
         in-process counter this replaced, not a side effect."""
-        self.search(query="test")
+        self.search(q="test")
         self.assertEqual(
             self.value(
                 "SELECT COUNT(*) FROM login_attempts WHERE key_type = 'ranker_search' "
@@ -871,9 +914,14 @@ class SearchRouteTests(RankerTestCase):
 
 
 class _CannedSearch:
-    """More results than the route is allowed to return, so the cap is visible."""
+    """More results than the route is allowed to return, so the cap is visible —
+    and a record of whether each search was a read-back (`cached_only`)."""
 
-    async def search(self, query, media):
+    def __init__(self):
+        self.cached_only: list[bool] = []
+
+    async def search(self, query, media, *, cached_only=False):
+        self.cached_only.append(cached_only)
         return [
             TitleRef(media=media, title=f"Title {n}", ids={"tmdb": n})
             for n in range(1, ranker_routes.MAX_SEARCH_RESULTS + 10)

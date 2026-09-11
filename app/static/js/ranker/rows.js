@@ -1,49 +1,57 @@
-// One title on the board: building its row in the browser, and every way to move
-// or remove it that is not a drag.
+// One title on the board: drawing a row that arrives after first paint, every way
+// to move or remove one that is not a drag, and putting a removed one back.
 
-let undoAction = null;          // single level, cleared on reload — see UNDO below
+let undoAction = null;          // the toast's one pending action — see UNDO below
 
 // ---------------------------------------------------------------------------
-// building a row in the browser
+// a row that arrives after first paint
 // ---------------------------------------------------------------------------
-// Only for titles that arrive AFTER first paint — a search result dragged in, or
-// a removal being undone. Everything else is rendered by _ranker_row.html.
-// Titles come from a third-party catalogue and are untrusted, so every value
-// here is either escaped or assigned through .textContent.
-
-function buildRow(item) {
-    const el = document.createElement('div');
-    el.className = 'ranker-item';
-    el.tabIndex = 0;
-    el.setAttribute('role', 'listitem');
-    el.dataset.key = item.key || (item.media + ':' + item.match_source + ':' + item.match_id);
-    el.dataset.media = item.media || 'show';
-    el.dataset.tmdb = item.tmdb || '';
-    el.dataset.title = item.title || '';
-    el.dataset.ref = JSON.stringify(item);
-    const thumb = item.tmdb
-        ? '<img class="ranker-thumb" width="46" height="69" loading="lazy" alt="" src="' +
-          esc('/api/rankings/poster?media=' + el.dataset.media + '&tmdb=' + item.tmdb) +
-          '" onerror="this.classList.add(\'is-missing\'); this.removeAttribute(\'src\');">'
-        : '<span class="ranker-thumb is-missing" aria-hidden="true"></span>';
-    el.innerHTML =
-        '<span class="ranker-grip" aria-hidden="true">⠿</span>' + thumb +
-        '<span class="ranker-name"><span class="ranker-title">' +
-        esc(item.title || 'Untitled') + '</span>' +
-        (item.year ? '<span class="ranker-year">' + esc(item.year) + '</span>' : '') +
-        '</span><span class="ranker-facts">' +
-        (item.season_count ? '<span class="ranker-fact">' + esc(item.season_count) + 'S</span>' : '') +
-        (item.episode_count ? '<span class="ranker-fact">' + esc(item.episode_count) + 'E</span>' : '') +
-        (item.runtime ? '<span class="ranker-fact">' + esc(item.runtime) + 'm</span>' : '') +
-        (item.network ? '<span class="ranker-fact network">' + esc(item.network) + '</span>' : '') +
-        (item.user_rating ? '<span class="ranker-fact rating">★' + esc(item.user_rating) + '</span>' : '') +
-        '</span><span class="ranker-actions">' +
-        '<button type="button" class="ranker-act" title="Move up" aria-label="Move up" onclick="nudgeItem(this, -1)">▲</button>' +
-        '<button type="button" class="ranker-act" title="Move down" aria-label="Move down" onclick="nudgeItem(this, 1)">▼</button>' +
-        '<button type="button" class="ranker-act" title="Move to tier" aria-label="Move to tier" onclick="openMoveMenu(this)">⇄</button>' +
-        '<button type="button" class="ranker-act danger" title="Remove from board" aria-label="Remove from board" onclick="removeItem(this)">✕</button>' +
-        '</span>';
-    return el;
+// A search result clicked or dragged in. It reaches here only AFTER the server
+// holds the title, so the row is the server's as well: /rankings/fragments/row renders _ranker_row.html, the file the
+// board is drawn from, and nothing on this side builds a row's markup. A second
+// copy of that template used to live here, kept in step by hand.
+//
+// WHAT HAS TO BE SCRIPT IS WHERE IT GOES. The position is among siblings the drag
+// library owns, chosen by a drop, and only this side knows which element the row
+// belongs next to.
+//
+// A KEYED PLACEHOLDER GOES IN FIRST, which is what lets the fetch be slow. The
+// layout is read out of the DOM at save time (core.js, rule 3), so a save that
+// fires while the row is on its way still names the title, in the right place,
+// because the placeholder already carries the key. A row inserted only once the
+// fragment landed would be missing from any save that beat it there.
+//
+// FETCHED AND PARSED HERE RATHER THAN SWAPPED IN BY htmx, and that is measured
+// rather than assumed. When an outerHTML swap replaces the element it was aimed
+// at, htmx re-points the request's source at the FIRST NODE it inserted and
+// dispatches its after-swap event there — and every fragment here begins with a
+// newline, so that node is a whitespace text node. boost.js's swappedContent then
+// answers with that text node rather than with the row. Nothing would say which
+// row landed, and nothing needs to: its key, its position and every count were
+// already right when the placeholder went in, so one synchronous replace with no
+// event to interpret is all this takes.
+function insertRow(container, before, key) {
+    const slot = document.createElement('div');
+    slot.className = 'ranker-item is-arriving';
+    slot.setAttribute('role', 'listitem');
+    slot.dataset.key = key;
+    container.insertBefore(slot, before || null);
+    fetch('/rankings/fragments/row?board=' + encodeURIComponent(boardUid()) +
+          '&key=' + encodeURIComponent(key))
+        .then(res => (res.ok ? res.text() : Promise.reject(new Error(String(res.status)))))
+        .then(html => {
+            const parsed = document.createElement('template');
+            parsed.innerHTML = html;
+            const row = parsed.content.querySelector('.ranker-item');
+            // An empty answer is a title another tab took off the board while this
+            // was in flight, and no row is the right thing to draw for it.
+            if (row) slot.replaceWith(row); else slot.remove();
+        })
+        .catch(() => {
+            // Left where it is: it still carries the key, so a save stays right,
+            // and a reload draws the row the server already holds.
+        });
+    return slot;
 }
 
 // ---------------------------------------------------------------------------
@@ -65,19 +73,14 @@ function nudgeItem(button, delta) {
     scheduleSave();
 }
 
+// THE MENU'S CHOICES ARE MARKUP (ranker.html renders one per tier). What stays
+// here is what markup cannot know: which row it was opened from, and where on
+// the screen that button is — a measurement of rendered geometry.
+let movingRow = null;
+
 function openMoveMenu(button) {
-    const row = button.closest('.ranker-item');
+    movingRow = button.closest('.ranker-item');
     const menu = document.getElementById('moveMenu');
-    menu.innerHTML = '';
-    const destinations = [{ uid: null, label: 'Pool (unranked)' }].concat(
-        (state.board.categories || []).map(c => ({ uid: c.uid, label: c.label || 'Untitled' })));
-    destinations.forEach(dest => {
-        const item = document.createElement('button');
-        item.type = 'button';
-        item.textContent = dest.label;
-        item.onclick = () => { closeMoveMenu(); moveRowTo(row, dest.uid); };
-        menu.appendChild(item);
-    });
     const box = button.getBoundingClientRect();
     menu.hidden = false;
     menu.style.top = (window.scrollY + box.bottom + 4) + 'px';
@@ -87,6 +90,7 @@ function openMoveMenu(button) {
 function closeMoveMenu() {
     const menu = document.getElementById('moveMenu');
     if (menu) menu.hidden = true;
+    movingRow = null;
 }
 
 async function moveRowTo(row, categoryUid) {
@@ -126,8 +130,20 @@ async function openTierBody(categoryUid) {
 // undo — DESTRUCTIVE ACTIONS ONLY
 // ---------------------------------------------------------------------------
 // Moving a title between tiers undoes itself: drag it back. What dragging cannot
-// reverse is taking a title off the board and deleting a tier, so those two get
-// a toast with an Undo. One level, held in the browser, gone on reload.
+// reverse is taking a title off the board and deleting a tier, so both offer an
+// Undo in a toast the moment they happen.
+//
+// THE TWO UNDOS ARE NOT THE SAME KIND. A deleted tier's titles are still on the
+// board — they went to the pool — so undoing it is a re-save of what this page
+// already holds (tiers.js): one level, gone on reload. A removed title has left
+// the board, so undoing that is the server's: the board keeps a history of what
+// was taken off it (ranker/core.py), and the "Recently removed" list offers it —
+// after a reload, from another tab, or tomorrow. That list, and restoring from
+// it, is entirely markup (_ranker_removed.html).
+//
+// WHY THE TOAST STAYS SCRIPT: it is a moment's offer tied to the click that made
+// it, with no state of its own on the server to be a fragment of. Its Undo does
+// not restore anything itself — it presses the list's own Restore button.
 
 function offerUndo(message, action) {
     undoAction = action;
@@ -151,10 +167,6 @@ function offerUndo(message, action) {
 function removeItem(button) {
     const row = button.closest('.ranker-item');
     const key = row.dataset.key;
-    let ref = null;
-    try { ref = JSON.parse(row.dataset.ref); } catch (e) { ref = null; }
-    const container = row.parentElement;
-    const index = Array.from(container.children).indexOf(row);
     confirmInline(button, 'Take this title off the board?', async () => {
         try {
             const removal = await api(
@@ -165,23 +177,37 @@ function removeItem(button) {
         row.remove();
         state.board.pool = (state.board.pool || []).filter(k => k !== key);
         (state.board.categories || []).forEach(c => { c.items = c.items.filter(k => k !== key); });
+        markHeldResults();
         refreshCounts();
-        offerUndo('Removed from the board.', async () => {
-            if (!ref) { window.location.reload(); return; }
-            try {
-                const added = await api(
-                    '/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/items',
-                    'POST', { refs: [ref] });
-                if (added.added) bumpVersion();
-            } catch (e) { toast(e.message, false); return; }
-            const restored = buildRow(ref);
-            container.insertBefore(restored, container.children[index] || null);
-            refreshCounts();
-            scheduleSave();
+        removalsChanged();
+        // PRESSES THE LIST'S OWN Restore BUTTON, so a title comes back one way
+        // however it is asked for, and that way is markup. The list is redrawn the
+        // moment the removal lands, long before anybody can reach this button;
+        // should it somehow not be there, the list is where to look.
+        offerUndo('Removed from the board.', () => {
+            const restore = document.querySelector(
+                '#rankerRemoved [data-restore-key="' + CSS.escape(key) + '"]');
+            if (restore) restore.click();
+            else toast('It is under Recently removed.', true);
         });
     }, { danger: true });
 }
 
+// THE HISTORY REDRAWS ITSELF. The element beside it carries its address and
+// listens for this event (_ranker_board_shell.html), so all this side says is
+// that something changed — not where the list lives or how it is drawn.
+function removalsChanged() {
+    htmx.trigger('#rankerRemovedRefresh', 'removals-changed');
+}
+
 document.addEventListener('click', (event) => {
+    const choice = event.target.closest('#moveMenu [data-move-to]');
+    if (choice) {
+        const row = movingRow;
+        closeMoveMenu();
+        // An empty choice is the pool, which moveRowTo names as null.
+        if (row) moveRowTo(row, choice.dataset.moveTo || null);
+        return;
+    }
     if (!event.target.closest('#moveMenu') && !event.target.closest('.ranker-act')) closeMoveMenu();
 });

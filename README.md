@@ -485,7 +485,6 @@ app/
     cache.py          Global UTC window cache + the read path over it
     resolve.py        Which source answers each field of a card two services describe
     enrich.py         Filling in what a source does not publish (genres, network, …)
-    detail_source.py  Which service a detail modal asks about a given title
     filter.py         The read-time genre/country/certification/network filter
     state.py          Per-user not-watching marks (all views) + change detection
     share_routes.py   Public read-only calendars (/s/, /u/, /c/)
@@ -526,6 +525,7 @@ app/
     prefs.py          The stored preference and the vocabulary it is written in
   providers/        The calendar-source seam: the Record, capabilities, the registry
     base.py           What a source produces and what every source must implement
+    detail_source.py  Which service a details panel asks about a given title
     trakt/            transport, calendar, detail, sync, releases
     simkl/            transport, calendar, detail, sync, titles
   templates/        Jinja2 templates

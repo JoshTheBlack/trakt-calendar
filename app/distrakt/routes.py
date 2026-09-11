@@ -39,12 +39,12 @@ from . import search as catalogue_search
 from .. import distrakt as distrakt_store
 from .. import auth, authz, chrome, clock, db, details_panel, providers, route_params
 from ..auth import AuthLevel
-from ..calendar import detail_source
 from ..calendar import share_links
 from ..config import load_settings
 from ..endpoints import endpoint_choices
 from ..media import logos
 from ..perftrace import span
+from ..providers import detail_source
 from ..providers.base import (ID_KEYS, ItemKey, Media, Source, SourceUnavailable,
                               collect_ids, parse_item_key, parse_media, resolve_key)
 from ..providers.trakt import TraktError, TraktRateLimitError

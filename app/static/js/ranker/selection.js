@@ -30,22 +30,17 @@ function onPoolClick(event) {
 
 function renderSelection() {
     const chosen = new Set(selection);
-    document.querySelectorAll('#rankerPool > .ranker-item').forEach(row => {
+    // EVERY ROW ON THE BOARD, NOT ONLY THE POOL'S. A selection is made in the pool,
+    // but a bulk move carries its rows into a tier and then clears the selection —
+    // and a pool-only pass never reached the rows it had just moved, so they stayed
+    // highlighted until a reload.
+    document.querySelectorAll('#rankerBoard .ranker-item').forEach(row => {
         row.classList.toggle('is-selected', chosen.has(row.dataset.key));
     });
     const bar = document.getElementById('poolBulk');
     if (!bar) return;
     bar.hidden = selection.length === 0;
     document.getElementById('poolSelectedCount').textContent = selection.length + ' selected';
-    const target = document.getElementById('bulkTarget');
-    if (target && !target.options.length) {
-        (state.board.categories || []).forEach(cat => {
-            const option = document.createElement('option');
-            option.value = cat.uid;
-            option.textContent = cat.label || 'Untitled';
-            target.appendChild(option);
-        });
-    }
 }
 
 function clearSelection() { selection = []; lastClickedKey = null; renderSelection(); }

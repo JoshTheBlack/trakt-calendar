@@ -26,10 +26,12 @@
    for the season the panel opened on and fetched by a tab for any other.
 
    Context it reads: `d` (one source's detail answer, whose key set is the same
-   whoever gave it — see DetailPort in app/providers/base.py), `media`, `season`
-   (the season below it), `title` (the card's own, for the poster's alt text),
-   `poster`, `progress`, `links` and `tabs` (the season picker, empty where there
-   is nothing to pick between). #}
+   whoever gave it — see DetailPort in app/providers/base.py — or, where no
+   source can describe the item, the few facts the surface itself holds), `media`,
+   `season` (the season below it), `title` (the card's own, for the poster's alt
+   text), `poster`, `progress`, `links`, `tabs` (the season picker, empty where
+   there is nothing to pick between) and `note` (why the panel is short, where it
+   is). #}
 {% import '_source_logo.html' as src with context %}
 
 {# THE CARD'S PICTURE, THEN THE ANSWER'S, THEN THE PLACEHOLDER — one rule, and
@@ -166,3 +168,8 @@
     {%- endfor %}
 </div>
 {% else %}{{ trailer() }}{% include '_details_season.html' %}{% endif %}
+
+{#- WHY THE PANEL IS SHORT, where the surface knows. It sits where the episodes
+    would have been, so an item nobody here can describe explains its missing
+    season list in place rather than looking like a list that failed to load. -#}
+{% if note %}<div class="d-empty details-note">{{ note }}</div>{% endif %}

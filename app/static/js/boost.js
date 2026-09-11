@@ -176,14 +176,27 @@ document.addEventListener('DOMContentLoaded', arrived);
 //
 // IT IS NOT ONE PROPERTY, and that is the whole reason this lives in one place.
 // The swap context names the element that was AIMED AT, which is right while the
-// target survives the swap and wrong the moment it does not: a fragment replacing
-// its own placeholder leaves that name pointing at the detached placeholder,
-// while the event itself is dispatched on what replaced it. Asking whether the
-// aimed-at element is still in the document is what picks correctly between them,
-// and it is one question with one answer rather than a habit each page forms
-// separately from whichever swap style it happens to use.
+// target survives the swap — an innerHTML swap — and wrong the moment it does
+// not: a fragment replacing its own placeholder leaves that name pointing at the
+// detached placeholder.
+//
+// WHAT REPLACED IT IS WHERE htmx DISPATCHED THE EVENT, AND THAT IS A NODE, NOT
+// NECESSARILY AN ELEMENT. Measured in the browser rather than read: an outerHTML
+// swap re-points the request at the FIRST NODE IT INSERTED, and every fragment
+// this app renders begins with template whitespace, so that node is a text node —
+// a day block, a pool page and a ranker row all arrived as "\n". Answering with it
+// handed callers something that is not an element, and the calendar's day blocks
+// quietly skipped everything that is meant to happen when one arrives. So a text
+// node is stepped past to the element it precedes, which is what the fragment
+// actually drew. Where the answer inserted no element at all (the pool's last
+// page, whose rows all travel out-of-band) htmx dispatches on the container the
+// placeholder sat in, which is an element already and is answered as it is.
 function swappedContent(event) {
     const ctx = event.detail && event.detail.ctx;
     if (!ctx || ctx.target === document.body) return null;
-    return ctx.target && ctx.target.isConnected ? ctx.target : event.target;
+    if (ctx.target && ctx.target.isConnected) return ctx.target;
+    const landed = event.target;
+    if (landed instanceof Element) return landed;
+    if (landed instanceof Node) return landed.nextElementSibling || landed.parentElement;
+    return null;
 }

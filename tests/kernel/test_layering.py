@@ -191,9 +191,26 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         "apart — and so the sign-in call is covered by whatever pacing, retry "
         "and circuit-breaking that source's transport already owes the service"),
     (MEDIA, PROVIDERS): Edge("poster art is looked up per title through the source"),
-    (CALENDAR, PROVIDERS): Edge("the cache asks a source what airs in a window"),
-    (DISTRAKT, PROVIDERS): Edge("the tracker reads the viewer's own history and progress"),
-    (RANKER, PROVIDERS): Edge("ratings are imported from the viewer's source account"),
+    (CALENDAR, PROVIDERS): Edge(
+        "the cache asks a source what airs in a window, and a card's details panel "
+        "asks providers/detail_source.py which service can describe it"),
+    (DISTRAKT, PROVIDERS): Edge(
+        "the tracker reads the viewer's own history and progress. It also asks "
+        "detail_source.choose which service can describe a title it holds ids "
+        "for, rather than deciding that a second time: same ids, same declared "
+        "order, same per-port catalogue predicate — and `fetch` beside it, so "
+        "that repairing a record short of a service's own NAME for a title asks "
+        "that service through its own DetailPort. That is the pooled, "
+        "rate-limited, globally cached transport each provider already owns, "
+        "including the redirect Simkl's anime ids need; a second way to make "
+        "the same request would be a second set of those to keep correct"),
+    (RANKER, PROVIDERS): Edge(
+        "ratings are imported from the viewer's source account, and a board "
+        "title's details panel asks detail_source which service can describe it. "
+        "THAT MODULE LIVES IN providers/ RATHER THAN IN THE CALENDAR so this edge "
+        "is the whole of the dependency: the board is meant to need nothing from "
+        "the calendar, and a panel every feature opens reads the registry, not "
+        "any one feature"),
     (KERNEL, PROVIDERS): Edge(
         "config.py asks the registry which sources are configured when it "
         "validates settings. Function-local because providers/ reads config, "
@@ -268,17 +285,8 @@ DECLARED_EDGES: dict[tuple[str, str], Edge] = {
         deferred=True),
     (DISTRAKT, CALENDAR): Edge(
         "the tracker imports a month's premieres, honours 'not watching', and "
-        "links a Discord post at the viewer's own calendar. It also asks "
-        "detail_source.choose which service can describe a title it holds ids "
-        "for, rather than deciding that a second time: same ids, same declared "
-        "order, same per-port catalogue predicate — and `fetch` beside it, so "
-        "that repairing a record short of a service's own NAME for a title asks "
-        "that service through its own DetailPort. That is the pooled, "
-        "rate-limited, globally cached transport each provider already owns, "
-        "including the redirect Simkl's anime ids need; a second way to make "
-        "the same request would be a second set of those to keep correct. It "
-        "also reads the STORED "
-        "calendar windows back for the per-service slugs they already carry, so "
+        "links a Discord post at the viewer's own calendar. It also reads the "
+        "STORED calendar windows back for the per-service slugs they already carry, so "
         "a settled record can learn what a service calls a title without a "
         "request being spent on asking"),
     (RANKER, DISTRAKT): Edge(

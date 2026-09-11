@@ -196,8 +196,8 @@ class DetailModalSourceTests(AppTestCase):
         tests/providers/test_protocol_conformance.py holds for an EMPTY answer;
         what this adds is a pair of answers with real data in them, where a source
         can leave out a key it has nothing to say for."""
-        from app.calendar import detail_source
         from app.config import load_settings
+        from app.providers import detail_source
         from app.providers.base import Source
 
         trakt_client = _TraktClient({"shows/203330": TRAKT_SHOW,

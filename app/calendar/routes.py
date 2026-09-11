@@ -32,7 +32,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
-from . import (cache as calendar_cache, detail_source, enrich as calendar_enrich,
+from . import (cache as calendar_cache, enrich as calendar_enrich,
                filter as calendar_filter, resolve as calendar_resolve,
                search as calendar_search, share_links, state as calendar_state,
                vocab)
@@ -43,6 +43,7 @@ from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpo
 from ..integrations import routes as integrations_routes
 from ..media import logos
 from ..perftrace import span
+from ..providers import detail_source
 from ..providers.base import Media, Source, SourceUnavailable, parse_item_key
 from ..providers.trakt import TraktError
 from ..sources import prefs as source_prefs

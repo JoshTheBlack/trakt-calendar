@@ -19,7 +19,7 @@ function deleteTier(button, uid) {
                       '/categories/' + encodeURIComponent(uid), 'DELETE', {});
         } catch (e) { toast(e.message, false); return; }
         // Straight into the pool, keeping each row's own element — so its
-        // artwork is already loaded and its `data-ref` still describes it.
+        // artwork is already loaded and nothing has to be drawn again.
         const pool = document.getElementById('rankerPool');
         if (body && pool) {
             Array.from(body.querySelectorAll(':scope > .ranker-item'))
@@ -28,6 +28,11 @@ function deleteTier(button, uid) {
         const empty = document.getElementById('poolEmpty');
         if (empty) empty.remove();
         state.board.categories = (state.board.categories || []).filter(c => c.uid !== uid);
+        // The move menu and the bulk-move list are server markup naming every tier
+        // (ranker.html, _ranker_board_shell.html). A delete is the one tier change
+        // that does not reload the page, so its choices are taken out here.
+        document.querySelectorAll('[data-tier-choice="' + CSS.escape(uid) + '"]')
+            .forEach(choice => choice.remove());
         state.board.pool = (state.board.pool || []).concat(snapshot.items);
         bumpVersion();
         if (details) details.remove();

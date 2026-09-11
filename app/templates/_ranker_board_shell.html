@@ -15,22 +15,30 @@
             <span class="ranker-count" id="poolCount">{{ board.pool | length }}</span>
         </div>
 
-        {# The search box is a plain input driven by fetch, NOT a boosted form.
-           Every mutation and every JSON call in this feature goes through fetch
-           with an application/json body, because a boosted form would submit
-           with its native urlencoded encoding and the request-shape middleware
-           refuses that — deliberately, as CSRF defence. #}
+        {# THE SEARCH IS MARKUP. The box and the media choice each ask
+           /rankings/fragments/search for the results and swap them in — the
+           house pattern the calendar's own search box uses, debounce and all.
+           Not a form: a GET fragment needs none, and adding a result is a
+           separate JSON request (ranker/search.js).
+           ONE ANSWER AT A TIME, ACROSS BOTH CONTROLS: syncing on the results
+           rather than on each control stops a slow answer for "sev" landing after
+           the one for "severance" and overwriting it. #}
         <div class="ranker-add">
             <div class="ranker-search-row">
-                <input type="search" id="searchBox" placeholder="Search for a title…"
-                       autocomplete="off" oninput="onSearchInput()"
-                       onkeydown="if (event.key === 'Enter') runSearch()">
-                <select id="searchMedia" onchange="runSearch()" aria-label="What to search for">
+                <input type="search" id="searchBox" name="q" placeholder="Search for a title…"
+                       autocomplete="off"
+                       hx-get="/rankings/fragments/search" hx-trigger="keyup changed delay:350ms, search"
+                       hx-include="#searchMedia" hx-target="#searchResults" hx-swap="innerHTML"
+                       hx-sync="#searchResults:replace">
+                <select id="searchMedia" name="media" aria-label="What to search for"
+                        hx-get="/rankings/fragments/search" hx-trigger="change"
+                        hx-include="#searchBox" hx-target="#searchResults" hx-swap="innerHTML"
+                        hx-sync="#searchResults:replace">
                     {% if board.media_scope != 'movie' %}<option value="show">Shows</option>{% endif %}
                     {% if board.media_scope != 'show' %}<option value="movie">Movies</option>{% endif %}
                 </select>
             </div>
-            <div class="ranker-results" id="searchResults" hidden></div>
+            <div class="ranker-results" id="searchResults"></div>
 
             {# ABSENT, NOT DISABLED. GET /api/rankings/sources answers by omitting
                the keys for sources this account cannot use, and these controls
@@ -48,9 +56,33 @@
             </div>
         </div>
 
+        {# WHAT THIS BOARD COULD PUT BACK. A <details> so it costs one line until
+           somebody wants it, and opening or closing it needs no script at all.
+           Drawn open when the page is a restore's answer, because the button that
+           asked sits inside it. #}
+        <details class="ranker-removed" id="rankerRemoved"{% if removals_open %} open{% endif %}>
+            {% include "_ranker_removed.html" %}
+        </details>
+        {# THE LIST'S REDRAW LIVES BESIDE IT, NOT ON THE <details> AROUND IT. It is
+           redrawn when the page says a title was removed (`removals-changed`, fired
+           by ranker/rows.js), so the address is markup and the script names only an
+           event. It is not on the <details> because this app turns attribute
+           inheritance on (static/js/boost.js), and htmx looks a request's verb up
+           through that inheritance — a Restore button inside an element carrying
+           hx-get would send that GET instead of its own POST. #}
+        <span id="rankerRemovedRefresh" hidden
+              hx-get="{{ removals_url }}" hx-trigger="removals-changed"
+              hx-target="#rankerRemoved" hx-swap="innerHTML"></span>
+
         <div class="ranker-bulk" id="poolBulk" hidden>
             <span id="poolSelectedCount">0 selected</span>
-            <select id="bulkTarget" aria-label="Tier to move the selection into"></select>
+            {# The same tiers as the move menu in ranker.html, rendered for the same
+               reason: they are the server's to list, not the browser's to rebuild. #}
+            <select id="bulkTarget" aria-label="Tier to move the selection into">
+                {%- for category in board.categories %}
+                <option value="{{ category.uid }}" data-tier-choice="{{ category.uid }}">{{ category.label or "Untitled" }}</option>
+                {%- endfor %}
+            </select>
             <button type="button" class="btn-ghost small" onclick="moveSelectionToTier()">Move</button>
             <button type="button" class="btn-ghost small" onclick="clearSelection()">Clear</button>
         </div>

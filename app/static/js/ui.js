@@ -291,6 +291,18 @@ function openDetailsPanel(url, heading) {
 
 function closeDetailsPanel() { closeModal('detailsModal'); }
 
+// A CONTROL THAT ONLY OPENS THE PANEL IS MARKUP. `data-details-open` is the
+// address the server built and `data-details-heading` the name to show while it
+// loads, so an element carrying both needs no handler of its own — a rankings
+// board row's details button is exactly that. The calendar's card and the share
+// page's still keep a few lines each, and not by oversight: the calendar's adds
+// the name and picture the viewer may have flipped since the card was drawn, and
+// both cards hold links that must go where they point rather than open the panel.
+document.addEventListener('click', (e) => {
+    const opener = e.target instanceof Element ? e.target.closest('[data-details-open]') : null;
+    if (opener) openDetailsPanel(opener.dataset.detailsOpen, opener.dataset.detailsHeading || 'Details');
+});
+
 // A REQUEST THAT ENDED WITHOUT PUTTING ANYTHING THERE left the panel on its
 // loading line for ever, and that covers every failure the server could not draw
 // for itself: a dropped connection, a session that lapsed into a redirect, the

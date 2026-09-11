@@ -86,7 +86,8 @@ def season_tabs(request: Request, count: int, current: int | None, *,
 def panel(request: Request, details: dict, *, media: str, season: int | None,
           title: str = "", poster: str = "", progress: object | None = None,
           links=(), season_count: int = 0, picker: bool = True,
-          carry: Sequence[str] = (), pinned: dict[str, str] | None = None):
+          carry: Sequence[str] = (), pinned: dict[str, str] | None = None,
+          note: str = ""):
     """The panel's contents for one title.
 
     `title` and `poster` are the CARD's, not the answer's, and the surfaces that
@@ -128,11 +129,19 @@ def panel(request: Request, details: dict, *, media: str, season: int | None,
     honest thing is not to offer them. It is a parameter rather than something
     that surface decides in the template because the template must not know which
     surface it is on.
+
+    `note` IS WHY THE PANEL IS SHORT, where the surface drew it from less than a
+    service's answer. An item no registered source can describe still opens — on
+    what the surface itself knows about it — and says so where its episodes would
+    have been, rather than opening blank or not opening at all. The rankings
+    board is the surface that needs it: a board row stores enough to be worth
+    showing and may carry no id any service issues.
     """
     shown = answered_season(details, season)
     return templates.TemplateResponse(request, "_details.html", {
         "request": request, "d": details, "media": media, "season": shown,
         "title": title, "poster": poster, "progress": progress, "links": links,
+        "note": note,
         # `shown` rather than the asked-for season, so the tab that reads as
         # current is the one whose rows are actually below it.
         #

@@ -13,8 +13,8 @@ import unittest
 from unittest import mock
 
 from app import db
-from app.calendar import detail_source
 from app.distrakt import slug_repair
+from app.providers import detail_source
 from app.providers.base import ItemKey
 from tests.support import DatabaseTestCase
 

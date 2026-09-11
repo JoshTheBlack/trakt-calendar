@@ -109,7 +109,7 @@ class TheRouteAsksWhicheverSourceCanAnswerTests(CalendarRouteTestCase):
 
         port = SimpleNamespace(fetch_season_summary=_summary,
                                catalogue_configured=lambda settings: True)
-        with patch("app.calendar.detail_source.choose",
+        with patch("app.providers.detail_source.choose",
                    return_value=SimpleNamespace(source=source, source_id="4242")), \
              patch("app.providers.get",
                    return_value=SimpleNamespace(detail_port=port)):
@@ -136,7 +136,7 @@ class TheRouteAsksWhicheverSourceCanAnswerTests(CalendarRouteTestCase):
         """Well formed, and nobody to ask — which is not the caller's mistake,
         so it is not a 400. The card leaves its line blank, which is what it
         shows before any answer arrives anyway."""
-        with patch("app.calendar.detail_source.choose", return_value=None):
+        with patch("app.providers.detail_source.choose", return_value=None):
             resp = self.client.get("/api/tile?media=show&trakt=1&season=1")
         self.assertEqual(resp.status_code, 404)
 

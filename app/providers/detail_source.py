@@ -1,11 +1,22 @@
-"""Which service answers the detail modal for one card, and whether it can.
+"""Which service describes a title, and whether it can.
 
-TWO ROUTES ASK THIS and they must agree: the signed-in calendar's details
-fragment and the public share pages' own. They differ in exactly one
-thing — the public one never makes an outbound call — and everything else about
-"who describes this title" is the same question. Written out at both, the two
-would drift the first time either was touched, and the drift would be invisible:
-each renders a modal that looks right on its own page.
+EVERY DETAILS PANEL ASKS THIS and they must agree: the signed-in calendar, the
+public share page, the tracker's roster and the rankings board all open the same
+panel, and "who describes this title" is one question on all four. Written out at
+each, the copies would drift the first time one was touched, and the drift would
+be invisible: every surface renders a panel that looks right on its own page.
+
+IN THIS PACKAGE, BESIDE THE REGISTRY IT READS, AND NOT IN ANY FEATURE. It began
+inside the calendar because the calendar asked first; by the time four features
+asked, a feature importing it meant a feature depending on the calendar for a
+question that is not the calendar's — and the rankings board, which is meant to
+need nothing from the calendar at all, would have had to declare exactly that. Nor
+does it belong in the kernel beside app/details_panel.py: that module only
+renders, while this one walks the registry and asks a source over the network, and
+the kernel may reach this package only from inside a function. What this answers
+IS a reading of the registry — every registered detail port, in declared order,
+gated on that port's own catalogue predicate — so this package is where it lives,
+and every feature already depends on this package for its own reasons.
 
 THE CARD IS IDENTIFIED BY IDS, NOT BY A SERVICE NAME. A calendar group carries
 the UNION of every id its records had (app/calendar/resolve.py hoists it), so a
@@ -30,8 +41,11 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
+# The registry through its MODULE OBJECT rather than as names bound off it, so a
+# test double installed on app.providers is the one these functions call (see
+# CLAUDE.md's rule about names bound at import time).
 from .. import providers
-from ..providers.base import Media, Source
+from .base import Media, Source
 
 
 def ports():

@@ -36,6 +36,7 @@ from collections.abc import Mapping
 
 from .. import cache, db
 from ..config import load_settings
+from ..providers import detail_source
 from ..providers.base import ItemKey, Source
 from . import store
 
@@ -280,9 +281,6 @@ async def _ask_source_for_names(settings, user_id: int, row) -> dict[str, str]:
     Trakt can say what Trakt calls a title. A row holding both ids and short of
     both names is two questions, and a row short of one is one.
     """
-    from ..calendar import detail_source  # deferred: see this package's other
-                                          # calendar reads, same import cycle
-
     found: dict[str, str] = {}
     for id_column, slug_column in _OWED_BY_COLUMN.items():
         if _text(row, slug_column) or not (source_id := _text(row, id_column)):

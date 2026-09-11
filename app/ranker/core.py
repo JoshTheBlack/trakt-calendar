@@ -1,7 +1,8 @@
 """Tier boards: the data layer behind ranking titles into ordered tiers.
 
-One job: read and write `tier_boards`, `tier_categories` and `tier_items`. No
-HTTP, no request objects, no image work — routes parse and respond, this module
+One job: read and write `tier_boards`, `tier_categories` and `tier_items`, plus
+`tier_item_removals`, which is what a board remembers of the titles taken off it.
+No HTTP, no request objects, no image work — routes parse and respond, this module
 decides what the database ends up holding.
 
 THE ACCESS RULE, and the reason this module reads the way it does: a board or a
@@ -57,6 +58,17 @@ MAX_CATEGORIES_PER_BOARD = 30
 # pool's pagination and the poster warming are sized against.
 MAX_ITEMS_PER_BOARD = 1000
 MAX_UID_LENGTH = 64
+
+# WHAT A BOARD REMEMBERS OF THE TITLES TAKEN OFF IT: the last twenty-five, for
+# thirty days. Application constants rather than schema, so either can be tuned
+# without a migration — `tier_item_removals` carries the column and the index both
+# of them need. Twenty-five is "the last few things I removed, put that one back"
+# with room to spare for an evening of pruning a pool; thirty days is long enough
+# to notice a mistake after a weekend away and short enough that the history
+# describes this month's board rather than last year's.
+REMOVAL_HISTORY_PER_BOARD = 25
+REMOVAL_HISTORY_DAYS = 30
+REMOVAL_HISTORY_SECONDS = REMOVAL_HISTORY_DAYS * 24 * 60 * 60
 
 # Both derived from the app's one media vocabulary rather than restated. A scope
 # is "one of the media kinds, or both at once", which is a statement ABOUT that
@@ -618,6 +630,30 @@ def _optional_int(value: Any) -> int | None:
         raise ValidationError(f"Expected a whole number, got {value!r}.") from None
 
 
+async def fetch_item(user_id: int, board_uid: str, key: Any) -> dict[str, Any]:
+    """One title on one of this user's boards, as `_item_dict` projects it.
+
+    What a single row and a single title's details panel are drawn from, and
+    addressed exactly as a save addresses a title: the board is resolved against
+    its owner first, so no key a client can name reaches past it. A title the
+    board does not hold is a ValidationError, like every other unknown key here.
+    """
+    parsed = parse_item_key(key)
+
+    def _work(conn: db.Connection) -> dict[str, Any]:
+        board = _resolve_board(conn, user_id, board_uid)
+        row = conn.execute(
+            "SELECT * FROM tier_items "
+            " WHERE board_id = ? AND media = ? AND match_source = ? AND match_id = ?",
+            (int(board["id"]), parsed.media, parsed.match_source, parsed.match_id),
+        ).fetchone()
+        if row is None:
+            raise ValidationError(f"No title {str(parsed)!r} on this board.")
+        return _item_dict(row)
+
+    return await db.run(_work)
+
+
 async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
     """Delete titles from a board entirely — the only true delete in this
     module. Returns how many rows went.
@@ -625,6 +661,11 @@ async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
     Every key is resolved against THIS board before anything is deleted, and one
     unresolvable key rejects the whole request: a partial delete driven by a
     payload we did not fully understand is worse than no delete at all.
+
+    WHAT GOES IS WRITTEN INTO THE BOARD'S REMOVAL HISTORY IN THE SAME TRANSACTION
+    THAT DELETES IT, so there is no moment at which a title has left the board
+    and is not yet recoverable, and no failure that leaves one without the other.
+    `restore_removal` is the way back.
     """
     parsed = [parse_item_key(key) for key in keys]
 
@@ -637,17 +678,231 @@ async def remove_items(user_id: int, board_uid: str, keys: list[Any]) -> int:
             if str(key) not in known:
                 raise ValidationError(f"No title {str(key)!r} on this board.")
             ids.append(known[str(key)])
+        ts = db.now()
         removed = 0
         for item_id in ids:
+            _remember_removal(conn, board_id, item_id, ts)
             cur = conn.execute(
                 "DELETE FROM tier_items WHERE id = ? AND board_id = ?", (item_id, board_id)
             )
             removed += cur.rowcount
         if removed:
-            _touch(conn, board_id, user_id, db.now())
+            _trim_removals(conn, board_id)
+            _touch(conn, board_id, user_id, ts)
         return removed
 
     return await db.transaction(_work)
+
+
+# ---------------------------------------------------------------------------
+# the removal history
+# ---------------------------------------------------------------------------
+# Taking a title off a board is the one action here that destroys work, and the
+# only thing that used to remember it was the page that did it: a copy of the
+# whole title on the row's own element, read back by a single undo that a
+# reload, a second tab or nine seconds threw away. The history is kept here
+# instead, where it survives all three and can answer "the last few things I
+# removed — put that one back", which a copy on one element never could.
+
+def _remember_removal(conn: db.Connection, board_id: int, item_id: int, ts: int) -> None:
+    """Write one title into its board's removal history, just before it goes.
+
+    ONE ROW PER TITLE. A title removed, re-added by hand and removed again keeps
+    only its newest removal: restoring the older one would put it back where it
+    sat before an arrangement that has since been superseded, which is not what
+    anybody pressing Restore on it means. That is also what lets a restore be
+    addressed by the title's key rather than by a history row's integer id.
+
+    THE RECORD IS `_item_dict`'s PROJECTION, plus `created_at`: the shape every
+    reader of a board already gets, so a column added to tier_items and to that
+    projection is carried across a removal with no edit here.
+    """
+    row = conn.execute(
+        "SELECT i.*, c.uid AS category_uid FROM tier_items i "
+        "  LEFT JOIN tier_categories c ON c.id = i.category_id "
+        " WHERE i.id = ? AND i.board_id = ?",
+        (item_id, board_id),
+    ).fetchone()
+    if row is None:
+        return
+    identity = (board_id, row["media"], row["match_source"], row["match_id"])
+    _forget_removal(conn, identity)
+    conn.execute(
+        "INSERT INTO tier_item_removals (board_id, media, match_source, match_id, "
+        "category_uid, rank_in_category, removed_at, item_json) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (*identity, row["category_uid"], row["rank_in_category"], ts,
+         json.dumps({**_item_dict(row), "created_at": row["created_at"]}, sort_keys=True)),
+    )
+
+
+def _forget_removal(conn: db.Connection, identity: tuple) -> None:
+    """Drop a title's history row, by (board_id, media, match_source, match_id)."""
+    conn.execute(
+        "DELETE FROM tier_item_removals "
+        " WHERE board_id = ? AND media = ? AND match_source = ? AND match_id = ?",
+        identity,
+    )
+
+
+def _trim_removals(conn: db.Connection, board_id: int) -> None:
+    """Hold one board's history to its newest REMOVAL_HISTORY_PER_BOARD.
+
+    ENFORCED WHERE THE COUNT GROWS, rather than on the heartbeat beside the age
+    sweep: a count cap applied later is one a burst of removals can exceed in the
+    meantime, and a board is the unit it is counted over. Age is different — it
+    grows whether or not anybody removes anything — so that cap is
+    `sweep_removals`'s.
+    """
+    conn.execute(
+        "DELETE FROM tier_item_removals WHERE board_id = ? AND id NOT IN ("
+        "    SELECT id FROM tier_item_removals WHERE board_id = ?"
+        "     ORDER BY removed_at DESC, id DESC LIMIT ?)",
+        (board_id, board_id, REMOVAL_HISTORY_PER_BOARD),
+    )
+
+
+async def fetch_removals(user_id: int, board_uid: str, *,
+                         now: int | None = None) -> list[dict[str, Any]]:
+    """What this board could put back, newest first: each title's key, its name,
+    and where a restore would put it.
+
+    AGE IS CHECKED HERE AS WELL AS SWEPT. The sweep keeps the table small; this
+    keeps the promise the page makes, so a removal past REMOVAL_HISTORY_DAYS is
+    not offered in the hours before the heartbeat reaches it.
+
+    `tier_label` IS THE TIER'S LABEL NOW, read when asked rather than stored when
+    removed: a tier renamed since is shown by the name it has today, which is the
+    tier a restore puts the title back into. It is None when the title sat in a
+    tier that has since been deleted — a restore answers that with the pool —
+    and it is never read for a title that was in the pool (`category_uid` None).
+    """
+    cutoff = (db.now() if now is None else now) - REMOVAL_HISTORY_SECONDS
+
+    def _work(conn: db.Connection) -> list[dict[str, Any]]:
+        board = _resolve_board(conn, user_id, board_uid)
+        rows = conn.execute(
+            "SELECT r.media, r.match_source, r.match_id, r.category_uid, r.removed_at, "
+            "       r.item_json, c.uid AS tier_uid, c.label AS tier_label "
+            "  FROM tier_item_removals r "
+            "  LEFT JOIN tier_categories c "
+            "         ON c.board_id = r.board_id AND c.uid = r.category_uid "
+            " WHERE r.board_id = ? AND r.removed_at >= ? "
+            " ORDER BY r.removed_at DESC, r.id DESC LIMIT ?",
+            (int(board["id"]), cutoff, REMOVAL_HISTORY_PER_BOARD),
+        ).fetchall()
+        return [
+            {
+                "key": item_key(row["media"], row["match_source"], row["match_id"]),
+                "title": str(_json_object(row["item_json"]).get("title") or ""),
+                "category_uid": row["category_uid"],
+                "tier_label": None if row["tier_uid"] is None else (row["tier_label"] or ""),
+                "removed_at": row["removed_at"],
+            }
+            for row in rows
+        ]
+
+    return await db.run(_work)
+
+
+async def restore_removal(user_id: int, board_uid: str, key: Any) -> bool:
+    """Put one removed title back on this board, where it sat. True when it went
+    back, False when it was already on the board and nothing was written to it.
+
+    NOTHING ELSE IS ANSWERED, deliberately: the page a restore answers with is the
+    board redrawn from the server, so no caller needs telling where the title
+    landed.
+
+    WHAT IT DOES, each with its reason:
+      - INTO ITS TIER AT ITS OLD RANK when that tier still exists. The titles at
+        and below that rank move down one, so it lands between the neighbours it
+        had rather than tying with one of them. INTO THE POOL when the tier has
+        been deleted since, which is where that tier's other titles went too.
+      - A TITLE ALREADY ON THE BOARD IS A NO-OP THAT SAYS SO. Whoever re-added it
+        by hand has made the newer decision about it, and tier_items' UNIQUE
+        would refuse the insert anyway — so this answers False rather than
+        raising a constraint error or pretending it put something back.
+      - EITHER WAY THE HISTORY ROW GOES, in the same transaction. A title on the
+        board is not a title that can be un-removed, and leaving the row would
+        go on offering a restore that could only ever be the no-op above.
+      - A RESTORE BUMPS `version`, because it is a board mutation like any other:
+        without it the next drag would save against a board the server has moved
+        on from and earn the 409 that means "another tab changed this", for a
+        change this tab made. The no-op bumps nothing, for the reason
+        `add_titles` does not bump for a title the board already holds.
+      - THE BOARD'S CAP STILL HOLDS, and a refusal keeps the history row, so the
+        title can be put back once there is room.
+
+    THE IDENTITY WRITTEN IS THE HISTORY ROW'S OWN COLUMNS, not the stored
+    record's copy of them: those columns are what was looked up by, and a record
+    that somehow disagreed must not put a different title on the board than the
+    one the viewer asked for.
+    """
+    parsed = parse_item_key(key)
+    ts = db.now()
+
+    def _work(conn: db.Connection) -> bool:
+        board = _resolve_board(conn, user_id, board_uid)
+        board_id = int(board["id"])
+        identity = (board_id, parsed.media, parsed.match_source, parsed.match_id)
+        found = conn.execute(
+            "SELECT r.*, c.id AS category_id FROM tier_item_removals r "
+            "  LEFT JOIN tier_categories c "
+            "         ON c.board_id = r.board_id AND c.uid = r.category_uid "
+            " WHERE r.board_id = ? AND r.media = ? AND r.match_source = ? AND r.match_id = ? "
+            "   AND r.removed_at >= ?",
+            (*identity, ts - REMOVAL_HISTORY_SECONDS),
+        ).fetchone()
+        if found is None:
+            raise ValidationError("That title is no longer in this board's removal history.")
+        if str(parsed) in _item_ids(conn, board_id):
+            _forget_removal(conn, identity)
+            return False
+        held = int(conn.execute(
+            "SELECT COUNT(*) FROM tier_items WHERE board_id = ?", (board_id,)
+        ).fetchone()[0])
+        if held >= MAX_ITEMS_PER_BOARD:
+            raise ValidationError(f"A board holds at most {MAX_ITEMS_PER_BOARD} titles.")
+
+        record = _json_object(found["item_json"])
+        row = _normalize_ref({**record, "media": found["media"],
+                              "match_source": found["match_source"],
+                              "match_id": found["match_id"]})
+        category_id = found["category_id"]
+        rank = 0
+        if category_id is not None:
+            rank = max(0, int(found["rank_in_category"] or 0))
+            conn.execute(
+                "UPDATE tier_items SET rank_in_category = rank_in_category + 1 "
+                " WHERE board_id = ? AND category_id = ? AND rank_in_category >= ?",
+                (board_id, category_id, rank),
+            )
+        added_from = record.get("added_from")
+        _insert_item(conn, board_id, row,
+                     added_from if added_from in ADDED_FROM_VALUES else "manual",
+                     _optional_int(record.get("created_at")) or ts,
+                     category_id=category_id, rank=rank)
+        _forget_removal(conn, identity)
+        _touch(conn, board_id, user_id, ts)
+        return True
+
+    return await db.transaction(_work)
+
+
+async def sweep_removals(now: int | None = None) -> int:
+    """Delete removal history older than REMOVAL_HISTORY_DAYS, across every board
+    at once, and return how many rows went.
+
+    Run from the heartbeat beside the other age sweeps (app/main.py), and it is
+    what ix_tier_item_removals_sweep exists for: one indexed range delete however
+    many boards there are. The per-board count cap is not here — see
+    `_trim_removals` for why that one is enforced as a history grows.
+    """
+    ts = db.now() if now is None else now
+    result = await db.execute(
+        "DELETE FROM tier_item_removals WHERE removed_at < ?", (ts - REMOVAL_HISTORY_SECONDS,)
+    )
+    return result.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -1245,7 +1500,7 @@ def _validate_backup_item(entry: Any, category_uids: set[str]) -> dict[str, Any]
     # function expects rather than teaching it a second input shape.
     ref = dict(entry)
     if "ids" not in ref:
-        ref["ids"] = _ids_from_json(entry.get("ids_json"))
+        ref["ids"] = _json_object(entry.get("ids_json"))
     row = _normalize_ref(ref)
 
     category_uid = entry.get("category_uid")
@@ -1273,10 +1528,12 @@ def _validate_backup_item(entry: Any, category_uids: set[str]) -> dict[str, Any]
     }
 
 
-def _ids_from_json(value: Any) -> dict[str, Any]:
-    """The provenance map out of a stored `ids_json` string. A map we can no
-    longer read is dropped rather than refused: the row's own match_source and
-    match_id are what the feature ranks by, and they are validated separately."""
+def _json_object(value: Any) -> dict[str, Any]:
+    """A JSON object column read back — a stored `ids_json` provenance map, or a
+    removal's `item_json` record. One that can no longer be read is empty rather
+    than refused: a row's own identity columns are what the feature ranks by and
+    are validated separately, and whatever a caller builds from the rest goes
+    through `_normalize_ref`, which refuses what it cannot account for."""
     if not isinstance(value, str) or not value:
         return {}
     try:

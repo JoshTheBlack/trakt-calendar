@@ -43,7 +43,7 @@ from ..config import Settings, load_settings
 # `resolve_identity` comes from there too, and is CALLED here rather than
 # re-exported: the tracker keys its own rows on the same waterfall's answer, so a
 # second copy would be two definitions of what makes two titles the same one.
-from ..providers.base import Media, parse_media, resolve_identity  # noqa: F401
+from ..providers.base import Media, item_key, parse_media, resolve_identity  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +165,13 @@ class NoLinkedIdentity(SourceUnavailable):
 
 class TitleSearchSource(Protocol):
     """Find titles by name. Public catalogue data — see the credential note in
-    the module docstring."""
-    async def search(self, query: str, media: Media) -> list[TitleRef]: ...
+    the module docstring.
+
+    `cached_only` answers only from what an identical search already stored, and
+    never asks the service: an empty answer means nothing is stored, not that
+    nothing matches. `title_from_search` below is what it is for."""
+    async def search(self, query: str, media: Media, *,
+                     cached_only: bool = False) -> list[TitleRef]: ...
 
 
 class RatingsSource(Protocol):
@@ -214,9 +219,11 @@ class TraktSearchSource:
         # instance that has never held an access token.
         return bool(self._settings.trakt_catalogue_configured)
 
-    async def search(self, query: str, media: Media) -> list[TitleRef]:
+    async def search(self, query: str, media: Media, *,
+                     cached_only: bool = False) -> list[TitleRef]:
         with _translating_failures():
-            entries = await trakt_detail.search_titles(self._settings, str(media), query)
+            entries = await trakt_detail.search_titles(
+                self._settings, str(media), query, cache_only=cached_only)
         return [_ref_from_search(entry, media) for entry in entries]
 
 
@@ -307,6 +314,28 @@ async def user_trakt_settings(user_id: int) -> Settings | None:
 def search_source() -> TitleSearchSource:
     """The search seam, credentialled instance-wide."""
     return TraktSearchSource()
+
+
+async def title_from_search(query: str, media: Media, key: str) -> dict[str, Any] | None:
+    """The title a search already answered, read back out of that answer, in the
+    shape the board stores — or None when that answer is not stored any more or
+    does not contain `key`.
+
+    HOW A RESULT IS ADDED WITHOUT THE PAGE CARRYING THE TITLE. The page names the
+    query it searched for and the key of the result picked; this reads the same
+    search again from the shared response cache, where the search box's own
+    request put it moments before, and takes the title from the service's answer.
+    So what a board stores is what the service said about the title — never
+    fields a page handed back — and adding it costs no second lookup.
+
+    CACHE ONLY, AND DELIBERATELY. An answer that has aged out is refused rather
+    than fetched again: re-asking here would make adding a title a way to search
+    that the search budget never sees.
+    """
+    refs = await search_source().search(query, media, cached_only=True)
+    return next((item for item in items_from_refs(refs)
+                 if item_key(item["media"], item["match_source"], item["match_id"]) == key),
+                None)
 
 
 def ratings_source() -> RatingsSource:

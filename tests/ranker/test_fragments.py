@@ -36,6 +36,7 @@ RANKER_TEMPLATES = (
     "ranker.html", "_ranker_board_shell.html", "_ranker_pool_page.html",
     "_ranker_pool_rows.html", "_ranker_pool_sentinel.html",
     "_ranker_category_rows.html", "_ranker_row.html", "_ranker_failed.html",
+    "_ranker_removed.html", "_ranker_search_results.html",
 )
 
 # Markup that belongs to a whole page and must never appear in a fragment: a
@@ -162,6 +163,113 @@ class InlineAndLazyAgreeTests(FragmentTestCase):
         self.assertIn('id="tierBody-tier-s"', shell)
         body = re.search(r'<div class="ranker-rows" id="tierBody-tier-s".*?</div>', shell, re.S)
         self.assertNotIn("ranker-item", body.group(0))
+
+
+class RowFragmentTests(FragmentTestCase):
+    """The row every title that arrives after first paint is drawn from — a
+    search result clicked or dragged in, a removed title put back.
+
+    THE SAME CLAIM AS THE PAGINATION TESTS ABOVE, ONE ROW AT A TIME: a row that
+    lands later must be the row the shell would have drawn, byte for byte, or the
+    page shows two kinds of row and the drag machinery holds two shapes of node.
+    That used to be a JavaScript builder kept in step with the template by hand.
+    """
+
+    def row_html(self, board_uid: str, key: str) -> str:
+        response = self.client.get(f"/rankings/fragments/row?board={board_uid}&key={key}")
+        self.assertEqual(response.status_code, 200)
+        return response.text
+
+    def test_a_row_fragment_is_byte_identical_to_the_row_the_shell_drew(self):
+        board = self.board_with(pool=3, tiered=2)
+        shell = self.client.get("/rankings").text
+        # One tiered and one pooled, because the shell draws the two through
+        # different includes and both must agree with the fragment.
+        for key in ("show:tmdb:1000", "show:tmdb:1003"):
+            with self.subTest(key=key):
+                row = self.row_html(board, key)
+                self.assertIn('class="ranker-item"', row)
+                self.assertIn(row, shell)
+
+    def test_no_row_carries_a_copy_of_the_title(self):
+        board = self.board_with(pool=2, tiered=2)
+        self.assertNotIn("data-ref", self.client.get("/rankings").text)
+        self.assertNotIn("data-ref", self.row_html(board, "show:tmdb:1000"))
+
+    def test_a_title_the_board_does_not_hold_draws_as_nothing(self):
+        board = self.board_with(pool=1)
+        self.assertEqual(self.row_html(board, "show:tmdb:404"), "")
+
+    def test_another_accounts_row_draws_as_nothing(self):
+        board = self.board_with(pool=1)
+        self.sign_in_as(self.make_user("other", ranker_approved=True))
+        self.assertEqual(self.row_html(board, "show:tmdb:1000"), "")
+
+    def test_no_script_on_the_page_builds_a_row(self):
+        """Scanned rather than reviewed: the markup of a row's controls appearing
+        in a script is the second builder coming back."""
+        scripts = sorted((STATIC_DIR / "js" / "ranker").glob("*.js"))
+        self.assertTrue(scripts, "the page's scripts moved; this scans nothing")
+        for script in scripts:
+            source = script.read_text(encoding="utf-8")
+            with self.subTest(script=script.name):
+                self.assertNotIn("ranker-actions", source)
+                self.assertNotIn("buildRow", source)
+
+
+class SearchIsMarkupTests(FragmentTestCase):
+    """The search box asks for its results and the server draws them; no script
+    requests, builds or carries a result's title any more."""
+
+    def test_no_script_draws_or_requests_search_results(self):
+        source = (STATIC_DIR / "js" / "ranker" / "search.js").read_text(encoding="utf-8")
+        for fragment in ("createElement", "innerHTML", "/api/rankings/search", "dataset.ref"):
+            with self.subTest(fragment=fragment):
+                self.assertNotIn(fragment, source)
+
+    def test_the_box_and_the_media_choice_ask_for_the_results_fragment(self):
+        self.board_with(pool=1)
+        html = self.client.get("/rankings").text
+        for control in (r'<input type="search" id="searchBox"[^>]*>',
+                        r'<select id="searchMedia"[^>]*>'):
+            element = re.search(control, html, re.S).group(0)
+            with self.subTest(control=control):
+                self.assertIn('hx-get="/rankings/fragments/search"', element)
+                self.assertIn('hx-target="#searchResults"', element)
+                self.assertIn('hx-sync="#searchResults:replace"', element)
+
+
+class TierChoicesAreMarkupTests(FragmentTestCase):
+    """The move menu's destinations and the bulk-move list name the board's tiers,
+    which the server already knows — so they are rendered, in the board's own
+    order, rather than rebuilt from the page's copy of the board in the browser."""
+
+    def test_the_move_menu_offers_the_pool_and_every_tier_in_board_order(self):
+        self.board_with(tiered=1)
+        html = self.client.get("/rankings").text
+        menu = re.search(r'<div class="ranker-menu" id="moveMenu" hidden>(.*?)</div>', html, re.S).group(1)
+        self.assertEqual(re.findall(r'data-move-to="([^"]*)"', menu), ["", "tier-s"])
+        self.assertIn(">Pool (unranked)</button>", menu)
+
+    def test_the_bulk_move_list_offers_every_tier(self):
+        self.board_with(tiered=1)
+        html = self.client.get("/rankings").text
+        select = re.search(r'<select id="bulkTarget"[^>]*>(.*?)</select>', html, re.S).group(1)
+        self.assertEqual(re.findall(r'<option value="([^"]*)"', select), ["tier-s"])
+
+    def test_every_tier_choice_is_marked_so_a_deleted_tier_can_take_its_choices_away(self):
+        self.board_with(tiered=1)
+        html = self.client.get("/rankings").text
+        self.assertEqual(html.count('data-tier-choice="tier-s"'), 2)
+        tiers = (STATIC_DIR / "js" / "ranker" / "tiers.js").read_text(encoding="utf-8")
+        self.assertIn("[data-tier-choice=", tiers)
+
+    def test_no_script_builds_the_tier_choices(self):
+        selection = (STATIC_DIR / "js" / "ranker" / "selection.js").read_text(encoding="utf-8")
+        rows = (STATIC_DIR / "js" / "ranker" / "rows.js").read_text(encoding="utf-8")
+        self.assertNotIn("createElement('option')", selection)
+        menu = rows[rows.index("function openMoveMenu"):rows.index("function closeMoveMenu")]
+        self.assertNotIn("createElement", menu)
 
 
 class PoolSentinelPlacementTests(FragmentTestCase):

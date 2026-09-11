@@ -579,7 +579,8 @@ def ids_map(media: dict) -> dict:
     return _ids.normalize(media.get("ids") or {})
 
 
-async def search_titles(settings: Settings, media: str, query: str) -> list[dict]:
+async def search_titles(settings: Settings, media: str, query: str, *,
+                        cache_only: bool = False) -> list[dict]:
     """/search/{show|movie}?query=... -> [{media, ids, title, year, network,
     runtime, overview}], newest-match-first as Trakt orders it.
 
@@ -587,6 +588,11 @@ async def search_titles(settings: Settings, media: str, query: str) -> list[dict
     path segment and in which key the result object hangs under, so a second
     copy shaped for movies would drift from this one the first time either is
     touched. Empty query returns [] without a call.
+
+    `cache_only=True` reads back the answer this exact search already stored and
+    never asks Trakt. It is how a caller that searched a moment ago names one of
+    the results — by the query and the result — and gets the service's own record
+    of it again without a second request.
     """
     if media not in SEARCH_MEDIA:
         raise ValueError(f"Unknown media type {media!r}.")
@@ -595,7 +601,7 @@ async def search_titles(settings: Settings, media: str, query: str) -> list[dict
         return []
     results = await transport.cached_get(
         transport.shared_client(), settings, f"search/{media}", {"query": q, "extended": "full"},
-        raise_errors=True,
+        raise_errors=True, cache_only=cache_only,
     )
 
     out = []

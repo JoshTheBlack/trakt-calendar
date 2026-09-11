@@ -86,8 +86,37 @@
     {% endif %}
 </div>
 
-{# ---- Move-to-tier menu, opened from a row's ⇄ button ---- #}
-<div class="ranker-menu" id="moveMenu" hidden></div>
+{# ---- Move-to-tier menu, opened from a row's ⇄ button ----
+   ITS CHOICES ARE MARKUP. Which tiers a board has, and in what order, is the
+   server's to say — the same list and the same order the board is drawn in — so
+   they are rendered here rather than rebuilt in the browser each time the menu
+   opens. What is left to script (ranker/rows.js) is which row the menu was opened
+   from and where on the screen it appears, which are a click and a measurement.
+   `data-tier-choice` marks every control naming a tier, so deleting a tier
+   without a reload removes its choices in one step (ranker/tiers.js). #}
+<div class="ranker-menu" id="moveMenu" hidden>
+    {%- if board %}
+    <button type="button" data-move-to="">Pool (unranked)</button>
+    {%- for category in board.categories %}
+    <button type="button" data-move-to="{{ category.uid }}" data-tier-choice="{{ category.uid }}">{{ category.label or "Untitled" }}</button>
+    {%- endfor %}
+    {%- endif %}
+</div>
+
+{# ---- A title's details, opened from a row's ⓘ button ----
+   The one panel every surface shares, so this page adds nothing but its place in
+   the document. #}
+{% include "_details_modal.html" %}
+
+{# ---- What the request that drew this page did ----
+   A restore answers with this whole page, so what it did is said by the page —
+   in the same floating toast the page's scripts show (static/js/ui.js's toast),
+   drawn by the server and faded by the stylesheet (`.toast.is-flash`).
+   FLOATING, NOT IN THE POOL COLUMN, and that is a correction: it was first drawn
+   above the removal history and shrank itself away, which dragged everything
+   under it upward as it went. #toastHost is out of the page's flow, so the toast
+   arriving and leaving moves nothing. #}
+{% if notice %}<div id="toastHost"><div class="toast {{ 'ok' if notice_ok else 'err' }} is-flash" role="status">{{ notice }}</div></div>{% endif %}
 
 {# ---- Asking the user something ----
    ONE dialog for "type a name" and for "are you sure", so nothing on this page

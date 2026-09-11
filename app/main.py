@@ -55,6 +55,7 @@ from .distrakt import routes as distrakt_routes
 from .distrakt import slug_repair as distrakt_slug_repair
 from .integrations import routes as integrations_routes
 from .media import artwork, logos, posters
+from .ranker import core as ranker_core
 from .ranker import routes as ranker_routes
 from .auth import AuthLevel
 from .config import load_settings
@@ -149,6 +150,10 @@ async def _sweep_auth_rows() -> None:
     # tile sweep is filesystem walking, not a DB call, so it goes through a
     # worker thread rather than the event loop.
     await artwork.sweep(now)
+    # And what a rankings board remembers of the titles taken off it, past its
+    # thirty days — one indexed range delete across every board, the same shape
+    # as the poster sightings above.
+    await ranker_core.sweep_removals(now)
     await anyio.to_thread.run_sync(posters.sweep, settings.poster_cache_max_bytes)
     # And the network logos, which have no size budget of their own — there are
     # as many as there are networks — but ARE TMDB-sourced, so the same six-month

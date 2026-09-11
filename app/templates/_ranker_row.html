@@ -7,22 +7,23 @@
    rendered inline. Which of the two it looks like is the CONTAINER's business
    and lives in ranker.css.
 
+   THE ONLY BUILDER OF A ROW THERE IS. A title that arrives after first paint — a
+   search result clicked or dragged in, a removed title put back — is fetched from
+   /rankings/fragments/row, which renders this file, because every one of those
+   reaches the page only once the title is on the board. A JavaScript copy of this
+   markup used to sit beside it, kept in step by hand.
+
    `data-key` is the composite "{media}:{match_source}:{match_id}" the API names
    items by; it is what the client reads back out of the DOM when it builds a
    save. Everything interpolated here is third-party text and is escaped by the
-   template engine — nothing on this page builds a row by string concatenation
-   without going through esc().
+   template engine, which is the only thing on this page that draws a row.
 
-   `data-ref` carries the whole title, because undoing a removal has to put back
-   what was there rather than an approximation of it — the row is the only copy
-   the browser has once the database no longer holds it. The attribute is
-   SINGLE-quoted deliberately: tojson escapes the quote character it would
-   otherwise close a single-quoted attribute with, and does not escape the
-   double one. #}
-<div class="ranker-item" data-key="{{ item.key }}" data-media="{{ item.media }}"
-     data-tmdb="{{ item.tmdb or '' }}" data-title="{{ item.title }}"
-     data-ref='{{ item | tojson }}'
-     tabindex="0" role="listitem">
+   NO COPY OF THE TITLE RIDES ON THE ROW. It used to carry the whole item as a
+   JSON attribute, on every row of every board, for the single case that needed
+   one: putting back a title the database no longer held. The board's removal
+   history holds that now (ranker/core.py's `restore_removal`), where a reload or
+   a second tab cannot lose it. #}
+<div class="ranker-item" data-key="{{ item.key }}" tabindex="0" role="listitem">
     <span class="ranker-grip" aria-hidden="true">⠿</span>
     {# width/height and loading="lazy" on every poster, so the browser's own
        deferral backs up the fragment-level laziness and the row reserves its
@@ -51,6 +52,15 @@
        arrive at the same two operations, and if the library ever has to go the
        feature still works. #}
     <span class="ranker-actions">
+        {# THE DETAILS PANEL every other surface opens, asked for by board and key:
+           the route reads everything else off this row's stored record. Markup
+           and nothing more — static/js/ui.js opens any `data-details-open`.
+           A BUTTON RATHER THAN A CLICK ON THE ROW, because the row is already the
+           drag handle and a modifier-click on it selects; a control Sortable
+           filters out (`.ranker-act`) can never be read as the start of a drag. #}
+        <button type="button" class="ranker-act" title="Details" aria-label="Details"
+                data-details-open="/rankings/fragments/details?{{ {'board': board_uid, 'key': item.key} | urlencode }}"
+                data-details-heading="{{ item.title or 'Untitled' }}">ⓘ</button>
         <button type="button" class="ranker-act" title="Move up" aria-label="Move up"
                 onclick="nudgeItem(this, -1)">▲</button>
         <button type="button" class="ranker-act" title="Move down" aria-label="Move down"

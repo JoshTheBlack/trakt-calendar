@@ -61,17 +61,17 @@ def detail_source(rec: dict, settings) -> str | None:
     two of is what they have WATCHED (see counts.py), which is a fact about them
     and genuinely differs.
 
-    THROUGH THE CALENDAR'S OWN `detail_source.choose`, which is already this
+    THROUGH app/providers/detail_source.py's `choose`, which is already this
     question with this answer: the same ids, the same declared order and the same
-    per-port catalogue predicate, written for the detail modal on both the
-    signed-in and the public calendar. A second implementation here would be a
+    per-port catalogue predicate, written for the details panel every surface
+    opens. A second implementation here would be a
     second place for "who can describe this title" to drift, and the drift would
     be invisible — each side renders something plausible on its own page.
     """
     # Function-local for the name, not for a cycle: this module's own function is
     # called `detail_source` too, and a module-level import would have to be
     # aliased into something neither name means.
-    from ..calendar import detail_source as catalogue_answerer
+    from ..providers import detail_source as catalogue_answerer
     chosen = catalogue_answerer.choose(settings, rec.get("ids") or {})
     # A STORED-ONLY ANSWERER IS NOT ONE THIS CAN USE. That one means "nobody can
     # be reached, but the modal can still draw what is on disk" — and a season

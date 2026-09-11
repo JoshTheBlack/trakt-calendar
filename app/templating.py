@@ -70,7 +70,7 @@ def details_url(base: str, media, ids, season, key: str = "") -> str:
     services described has two ids and neither is "the" id; sending one plus a
     service name would put "who describes this title" on the client, which is the
     one side that cannot see whose credentials this instance has filled in (see
-    app/calendar/detail_source.py). THE NAMESPACES COME FROM `Source` rather than
+    app/providers/detail_source.py). THE NAMESPACES COME FROM `Source` rather than
     from a list here, so a third service is a registration and not an edit.
 
     This was two identical JavaScript functions — one on the calendar, one on the

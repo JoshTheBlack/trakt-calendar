@@ -83,26 +83,30 @@ function onDragEnd(evt) {
 }
 
 // A search result dropped straight into a tier: add it to the board first, then
-// replace the clone with a real row so it is a title like any other.
+// draw the server's row where the clone was dropped (rows.js's insertRow), so it
+// is a title like any other.
+//
+// THE CLONE COMES OUT BEFORE THE ADD, and the row's placeholder goes in only once
+// the add has succeeded. Turning the clone into the placeholder straight away
+// would put the key in the DOM while the board does not hold the title yet, and a
+// save firing in that gap would be refused whole — save_layout rejects a layout
+// over one key it does not know.
 async function onSearchDragEnd(evt) {
     const dropped = evt.item;
     if (!dropped || !dropped.parentElement || dropped.parentElement.id === 'searchResults') return;
-    let ref;
-    try { ref = JSON.parse(dropped.dataset.ref); } catch (e) { dropped.remove(); return; }
+    const key = dropped.dataset.key;
     const target = dropped.parentElement;
     const index = Array.from(target.children).indexOf(dropped);
     dropped.remove();
+    // The clone still carries what the result did — its key and its query — which
+    // is all an add sends (search.js's addFoundTitle).
     try {
-        const added = await api(
-            '/api/rankings/boards/' + encodeURIComponent(boardUid()) + '/items',
-            'POST', { refs: [ref] });
-        if (added.added) bumpVersion();
+        await addFoundTitle(dropped);
     } catch (e) {
         toast(e.message, false);
         return;
     }
-    const row = buildRow(ref);
-    target.insertBefore(row, target.children[index] || null);
+    insertRow(target, target.children[index], key);
     markHeldResults();
     refreshCounts();
     scheduleSave();

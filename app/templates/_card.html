@@ -15,7 +15,7 @@
    assembled by two copies of one JavaScript function, one per page, renamed only
    to dodge a clash in the shared global scope. Both send every id and let the
    SERVER pick who to ask, because only the server can see whose credentials this
-   instance has (see app/calendar/detail_source.py).
+   instance has (see app/providers/detail_source.py).
 
    The not-watching and is-new classes are decided HERE, on the server. They used
    to be added by the client after /api/state resolved, which meant hidden items

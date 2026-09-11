@@ -59,9 +59,19 @@ class FakeSearchSource:
         self.refs = refs
         self.calls: list[tuple[str, Media]] = []
 
-    async def search(self, query: str, media: Media) -> list[TitleRef]:
-        self.calls.append((query, media))
+    async def search(self, query: str, media: Media, *,
+                     cached_only: bool = False) -> list[TitleRef]:
+        self.calls.append((query, media, cached_only))
         return [ref for ref in self.refs if ref.media == media]
+
+
+def result_keys(html: str) -> list[str]:
+    """The keys of the results a search fragment drew."""
+    return re.findall(r'class="ranker-result" data-key="([^"]+)"', html)
+
+
+def result_titles(html: str) -> list[str]:
+    return re.findall(r'<span class="ranker-title">([^<]*)</span>', html)
 
 class FakeRatingsSource:
     def __init__(self, rated: list[RatedTitle]):
@@ -159,16 +169,17 @@ class JourneyTests(StandaloneTestCase):
         self.assertEqual(self.client.get("/rankings").status_code, 200)
 
         source = FakeSearchSource([a_show(1396, "Breaking Bad"), a_movie(550, "Fight Club")])
-        with mock.patch.object(ranker_sources, "search_source", lambda: source):
-            found = self.client.post("/api/rankings/search",
-                                     json={"query": "brea", "media": "show"}).json()
-        self.assertEqual([r["title"] for r in found["results"]], ["Breaking Bad"])
-        result, = found["results"]
-        self.assertEqual(result["key"], "show:tmdb:1396")
-
         self.client.post("/api/rankings/boards", json={"uid": "b1", "name": "Top 2026"})
-        added = self.client.post("/api/rankings/boards/b1/items", json={"refs": [result]})
+        with mock.patch.object(ranker_sources, "search_source", lambda: source):
+            found = self.client.get("/rankings/fragments/search?q=brea&media=show").text
+            self.assertEqual(result_titles(found), ["Breaking Bad"])
+            key, = result_keys(found)
+            self.assertEqual(key, "show:tmdb:1396")
+            added = self.client.post("/api/rankings/boards/b1/items",
+                                     json={"query": "brea", "key": key})
         self.assertEqual(added.json()["added"], 1)
+        # One real search, and the add read that search back rather than asking.
+        self.assertEqual([call[2] for call in source.calls], [False, True])
 
         saved = self.client.post("/api/rankings/boards/b1/save", json={
             "version": 1,
@@ -199,13 +210,14 @@ class JourneyTests(StandaloneTestCase):
 
     def test_a_movie_only_board_works_the_same_way(self):
         source = FakeSearchSource([a_movie(550, "Fight Club")])
-        with mock.patch.object(ranker_sources, "search_source", lambda: source):
-            found = self.client.post("/api/rankings/search",
-                                     json={"query": "figh", "media": "movie"}).json()
-        self.assertEqual([call[1] for call in source.calls], [Media.MOVIE])
         self.client.post("/api/rankings/boards",
                          json={"uid": "m1", "media_scope": "movie"})
-        self.client.post("/api/rankings/boards/m1/items", json={"refs": found["results"]})
+        with mock.patch.object(ranker_sources, "search_source", lambda: source):
+            found = self.client.get("/rankings/fragments/search?q=figh&media=movie").text
+            for key in result_keys(found):
+                self.client.post("/api/rankings/boards/m1/items",
+                                 json={"query": "figh", "key": key})
+        self.assertEqual({call[1] for call in source.calls}, {Media.MOVIE})
         self.assertEqual(self.value("SELECT media FROM tier_items"), "movie")
         self.assertEqual(self.value("SELECT match_id FROM tier_items"), "550")
 
@@ -218,8 +230,8 @@ class JourneyTests(StandaloneTestCase):
             a_show(1396, "Breaking Bad"),
         ])
         with mock.patch.object(ranker_sources, "search_source", lambda: source):
-            found = self.client.post("/api/rankings/search", json={"query": "na"}).json()
-        self.assertEqual([r["title"] for r in found["results"]], ["Breaking Bad"])
+            found = self.client.get("/rankings/fragments/search?q=na").text
+        self.assertEqual(result_titles(found), ["Breaking Bad"])
 
 
 class AbsenceTests(StandaloneTestCase):
@@ -248,7 +260,7 @@ class CredentialTests(StandaloneTestCase):
     def test_search_uses_the_instance_credential_and_never_a_per_user_token(self):
         seen = {}
 
-        async def _search(settings, media, query):
+        async def _search(settings, media, query, cache_only=False):
             seen["token"] = settings.trakt_access_token
             return []
 
@@ -257,7 +269,7 @@ class CredentialTests(StandaloneTestCase):
         with mock.patch.object(trakt_detail, "search_titles", _search), \
              mock.patch.object(trakt_routes, "access_token_for_user",
                                exploding("a search reached for the caller's token")):
-            resp = self.client.post("/api/rankings/search", json={"query": "test"})
+            resp = self.client.get("/rankings/fragments/search?q=test")
         self.assertEqual(resp.status_code, 200, resp.text)
         self.assertEqual(seen["token"], OPERATOR_TOKEN)
 
@@ -297,9 +309,9 @@ class ProtocolTests(StandaloneTestCase):
         source = FakeSearchSource([a_show(1396, "Breaking Bad")])
         with mock.patch.object(ranker_sources, "search_source", lambda: source), \
              mock.patch.object(trakt_detail, "search_titles", exploding("the provider was called")):
-            resp = self.client.post("/api/rankings/search", json={"query": "brea"})
+            resp = self.client.get("/rankings/fragments/search?q=brea")
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(source.calls, [("brea", Media.SHOW)])
+        self.assertEqual(source.calls, [("brea", Media.SHOW, False)])
 
     def test_a_fake_source_drives_the_ratings_seed_with_no_provider_call(self):
         source = FakeRatingsSource([

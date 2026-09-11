@@ -1,0 +1,28 @@
+{# Titles a search found: the inside of #searchResults under the pool's search
+   box, fetched as the box is typed into (/rankings/fragments/search). The results
+   used to arrive as JSON and be built into this markup by a script.
+
+   A RESULT CARRIES ITS KEY AND THE QUERY THAT FOUND IT, AND NOTHING ELSE ABOUT
+   THE TITLE. Adding one — by a click or by dragging it into a tier — sends those
+   two back, and the server reads the title out of this same search's stored
+   answer (ranker/sources.py's title_from_search). A result used to carry the
+   whole title serialized onto its element for the add to hand back, which let a
+   page decide what was stored.
+
+   Whether a result is already on the board is NOT decided here: that changes as
+   titles are added and removed on the page without a request, so the page marks
+   it (ranker/search.js's markHeldResults) over whatever this drew.
+
+   Nothing at all for a query too short to search, which the stylesheet reads as
+   "hide the list". #}
+{%- if message %}<span class="ranker-preview-hint">{{ message }}</span>
+{%- elif query %}
+{%- for hit in results %}
+<div class="ranker-result" data-key="{{ hit.key }}" data-query="{{ query }}"
+     title="Drag into a tier, or click to add to the pool">
+    {%- if hit.tmdb %}<img loading="lazy" alt="" src="/api/rankings/poster?media={{ hit.media }}&amp;tmdb={{ hit.tmdb }}" onerror="this.remove()">{% endif %}
+    <span class="ranker-name"><span class="ranker-title">{{ hit.title or "Untitled" }}</span><span class="ranker-year">{{ [hit.year, hit.network, (hit.runtime ~ "m") if hit.runtime else ""] | select | map("string") | join(" · ") }}</span></span>
+</div>
+{%- else %}<span class="ranker-preview-hint">Nothing found.</span>
+{%- endfor %}
+{%- endif %}

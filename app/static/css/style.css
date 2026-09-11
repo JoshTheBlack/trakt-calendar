@@ -1286,6 +1286,27 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .toast.show { opacity: 1; transform: translateY(0); }
 .toast.ok { background: linear-gradient(135deg, #1f7a4d, #22c55e); }
 .toast.err { background: linear-gradient(135deg, #8a2331, var(--crimson)); }
+/* A TOAST THE SERVER DREW, for a page that is itself the answer to what it reports
+   (a ranker restore redraws the board). No script is there to add `.show` and take
+   it away again, so one animation does both. It moves ONLY opacity and transform:
+   #toastHost is out of the page's flow, and a toast that changed its own size
+   would still jolt nothing — but the first version of this notice sat in the pool
+   column and shrank, and everything beneath it juddered upward as it went. */
+.toast.is-flash { animation: toast-flash 4.2s ease forwards; }
+/* A BUTTON INSIDE A TOAST — the rankings page's Undo. `.btn-ghost`'s own colours
+   are for the dark page, and on a toast's green or red they all but vanish, so a
+   toast's button takes the toast's white text and a white outline instead, on a
+   slightly darker fill so it still reads as something to press. */
+.toast .btn-ghost {
+    margin-left: 8px; color: #fff; font-weight: 700;
+    background: rgba(0,0,0,0.2); border-color: rgba(255,255,255,0.75);
+}
+.toast .btn-ghost:hover { background: rgba(0,0,0,0.32); border-color: #fff; }
+@keyframes toast-flash {
+    0% { opacity: 0; transform: translateY(12px); }
+    6%, 88% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(12px); visibility: hidden; }
+}
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 520px) { .two-col { grid-template-columns: 1fr; } }
 
@@ -2096,6 +2117,36 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .ranker-result .ranker-name { flex: 1; min-width: 0; }
 .ranker-result.is-held { opacity: 0.45; cursor: default; }
 
+/* ---- what a board could put back ----
+   HIDDEN WHILE IT HOLDS NOTHING, by asking whether it holds an entry. The
+   <details> outlives every redraw of its contents, so it cannot be left out of the
+   markup while the history is empty — and this is the one question about it that
+   stays true across redraws without a script to keep asking. */
+.ranker-removed {
+    margin-bottom: 10px; border: 1px solid var(--card-border); border-radius: 10px;
+    background: var(--card);
+}
+.ranker-removed:not(:has(.ranker-removed-entry)) { display: none; }
+.ranker-removed-head {
+    display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+    cursor: pointer; font-size: 0.8rem; color: var(--text-dim);
+}
+.ranker-removed-hint { font-size: 0.72rem; color: var(--text-faint); padding: 0 10px 6px; }
+.ranker-removed-list {
+    list-style: none; margin: 0; padding: 0 6px 6px; display: flex; flex-direction: column;
+    gap: 4px; max-height: 220px; overflow-y: auto;
+}
+.ranker-removed-entry {
+    display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 8px;
+    font-size: 0.8rem;
+}
+.ranker-removed-entry:hover { background: rgba(255,255,255,0.05); }
+
+/* THE SEARCH RESULTS HIDE WHILE THEY HOLD NOTHING — nothing typed yet, or a query
+   too short to search. The server draws an empty answer for both, and asking
+   whether the list has anything in it is what keeps that free of script. */
+.ranker-results:not(:has(*)) { display: none; }
+
 /* ---- bulk selection ---- */
 .ranker-bulk {
     display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;
@@ -2168,6 +2219,13 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
     background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 40px, transparent 40px 45px);
 }
 .ranker-pool-sentinel { display: flex; align-items: flex-start; justify-content: center; padding-top: 10px; }
+/* A title on its way from the server. Already a row as far as a save or a count
+   is concerned — it carries its key — so it is drawn as the space the row will
+   take, in the same skeleton a tier's rows wait in. */
+.ranker-item.is-arriving {
+    min-height: 81px; cursor: default;
+    background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03) 0 40px, transparent 40px 45px);
+}
 .ranker-sentinel-label { font-size: 0.74rem; color: var(--text-faint); }
 
 /* ---- tiers ---- */

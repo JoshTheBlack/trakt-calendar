@@ -1,0 +1,45 @@
+{# What this board could put back, newest first: the inside of the "Recently
+   removed" disclosure in _ranker_board_shell.html, rendered there inline and
+   fetched again whole whenever a title is removed.
+
+   THIS IS THE UNDO, AND ALL OF IT IS MARKUP. The history is the server's
+   (ranker/core.py), so what is on offer is rendered from it — which titles, where
+   each would go back to — and each Restore button posts itself: hx-post with
+   hx-json-enc, because every write in this app has to arrive as application/json,
+   and the key rides in hx-vals. The answer is the board redrawn
+   (ranker/routes.py's restore_board_item), so no script has to adjust the page's
+   copy of the layout or its version after a restore.
+
+   A SUMMARY AND A LIST, AND NOTHING AROUND THEM, because this is swapped INTO
+   the <details>: replacing the element itself would close a disclosure the viewer
+   had open.
+
+   AN EMPTY HISTORY IS HIDDEN BY THE STYLESHEET, not by a condition here. The
+   <details> around this outlives every redraw, so it cannot be left out of the
+   markup while the history is empty and put back once it is not. #}
+<summary class="ranker-removed-head">↩ Recently removed <span class="ranker-count">{{ removals | length }}</span></summary>
+<p class="ranker-removed-hint">Newest first. A board keeps the last {{ removal_cap }} for {{ removal_days }} days.</p>
+<ul class="ranker-removed-list">
+    {%- for removal in removals %}
+    <li class="ranker-removed-entry">
+        <span class="ranker-name">
+            <span class="ranker-title">{{ removal.title or "Untitled" }}</span>
+            {#- Where a restore puts it, said before the press rather than after.
+                A tier deleted since is the one surprise, so it is named. -#}
+            <span class="ranker-year">
+                {%- if not removal.category_uid %}from the pool
+                {%- elif removal.tier_label is none %}its tier is gone, so back to the pool
+                {%- else %}from {{ removal.tier_label or "Untitled" }}{% endif -%}
+            </span>
+        </span>
+        {#- `data-restore-key` is how the removal toast's Undo finds this button and
+            presses it (ranker/rows.js), so a title comes back one way however it is
+            asked for. hx-trigger is stated rather than left to the default so no
+            ancestor's trigger can ever be read as this button's. -#}
+        <button type="button" class="btn-ghost small" data-restore-key="{{ removal.key }}"
+                hx-post="/rankings/boards/{{ board_uid }}/removals/restore"
+                hx-json-enc hx-vals='{{ {"key": removal.key} | tojson }}'
+                hx-trigger="click" hx-target="body" hx-swap="innerHTML">Restore</button>
+    </li>
+    {%- endfor %}
+</ul>
