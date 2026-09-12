@@ -1,5 +1,5 @@
-// The tracker page's wiring: the tab strip, the easter-egg audio, and the four
-// loads that fill the page in.
+// The tracker page's wiring: the tab strip and the four loads that fill the page
+// in.
 //
 // LOADED LAST of the page's scripts, deliberately. These files are ordinary
 // scripts sharing one global scope, executed in the order the <head> lists them
@@ -12,17 +12,10 @@ function switchTab(name) {
     document.querySelectorAll('.distrakt-panel').forEach(p => { p.hidden = p.dataset.panel !== name; });
 }
 
-// ---- Konami code on the distrakt page -> play the easter-egg audio ----
-const KONAMI = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
-let konamiBuf = [];
-document.addEventListener('keydown', (e) => {
-    konamiBuf.push(e.key);
-    konamiBuf = konamiBuf.slice(-KONAMI.length);
-    if (konamiBuf.length === KONAMI.length && konamiBuf.every((k, i) => k === KONAMI[i])) {
-        konamiBuf = [];
-        new Audio('/static/audio/distrakt.mp3').play().catch(() => {});
-    }
-});
+// The Konami code is calendar/easter-egg.js's, which this page loads too: one
+// listener for both pages, reading what page it is on rather than a flag the
+// calendar left on `window`. Two copies meant that once the calendar had been
+// visited, pressing it here navigated away from the page it opens.
 
 // The emoji map first and awaited: every row's network badge falls back to it, so
 // rendering the month before it has arrived draws the fallback emoji for shows

@@ -330,6 +330,17 @@ a.day-chip:hover { background: rgba(232,181,69,0.9); color: #12151c; border-colo
 body { --card-w: 220px; }
 body.card-horizontal { --card-w: 420px; }
 
+/* HOW WIDE A PACKED DAY MAY GROW, per card style: the poster wall is compact and
+   "poster beside" cards are wide. Stated ONCE, here, and read by everything that
+   needs it — the grid's track count, the placeholder's reserved width and its
+   reserved height. It used to be three numbers in this stylesheet's own layout
+   rules, the same three in calendar/layout.js, and the same three again in
+   app/calendar/routes.py; a style whose cap changed needed all three edited and
+   half-worked until they were. */
+body { --cap: 5; }
+body.card-poster { --cap: 6; }
+body.card-horizontal { --cap: 2; }
+
 main { padding: 10px 6vw 0 6vw; }
 /* Skips layout/paint for day-blocks scrolled off-screen, so a full month costs
    about what a couple of visible days do. contain-intrinsic-size is a single
@@ -346,7 +357,42 @@ main { padding: 10px 6vw 0 6vw; }
    edge of a row is cut off while every ancestor reads `overflow: visible`. Keep
    anything that overhangs a card inside the block, rather than expecting it to
    escape. */
-.day-block { margin-top: 40px; scroll-margin-top: calc(var(--header-h, 46px) + 52px); content-visibility: auto; contain-intrinsic-size: 0 900px; }
+.day-block { margin-top: 40px; scroll-margin-top: calc(var(--header-h, 46px) + 52px); content-visibility: auto; contain-intrinsic-size: 0 900px;
+    /* HOW MANY CARDS THIS DAY SHOWS THIS VIEWER, and how many columns that comes
+       to once the style's cap is applied. The rules below work `--cols` out —
+       from the day's own cards where it has them, and from the two numbers the
+       shell wrote onto it where it has not — and this applies the cap once, so
+       nothing reading the answer has to cap it again. The 1 is the floor a day
+       with a single card lands on. */
+    --cols: 1; --packed-cols: min(var(--cols), var(--cap)); }
+/* COUNTING THE CARDS, IN CSS, because a day's width is a fact about the day's
+   own contents and the browser is the only thing that knows them at every moment
+   the answer can change — a card marked not-watching while hiding is on, a day
+   arriving late, the hide switch itself. This was a function in
+   calendar/layout.js that re-walked every day block after each of those.
+   `:nth-child(k of S)` asks "is there a k-th card matching S", so the highest
+   matching rule wins and `--cols` ends up as the count, capped by the style.
+   TWO SETS, MUTUALLY EXCLUSIVE ON THE BODY CLASS, because what counts as a
+   visible card is exactly what the hide switch changes; one set gated by
+   `:not(.hide-not-watching)` and one by `.hide-not-watching` means neither can
+   out-specify the other by accident. Six is the largest cap any style has, so
+   there is no seventh rule to write. */
+body:not(.hide-not-watching) .day-block:has(.card:nth-child(2 of .card)) { --cols: 2; }
+body:not(.hide-not-watching) .day-block:has(.card:nth-child(3 of .card)) { --cols: 3; }
+body:not(.hide-not-watching) .day-block:has(.card:nth-child(4 of .card)) { --cols: 4; }
+body:not(.hide-not-watching) .day-block:has(.card:nth-child(5 of .card)) { --cols: 5; }
+body:not(.hide-not-watching) .day-block:has(.card:nth-child(6 of .card)) { --cols: 6; }
+body.hide-not-watching .day-block:has(.card:nth-child(2 of .card:not(.not-watching))) { --cols: 2; }
+body.hide-not-watching .day-block:has(.card:nth-child(3 of .card:not(.not-watching))) { --cols: 3; }
+body.hide-not-watching .day-block:has(.card:nth-child(4 of .card:not(.not-watching))) { --cols: 4; }
+body.hide-not-watching .day-block:has(.card:nth-child(5 of .card:not(.not-watching))) { --cols: 5; }
+body.hide-not-watching .day-block:has(.card:nth-child(6 of .card:not(.not-watching))) { --cols: 6; }
+/* A DAY THAT HAS NO CARDS TO COUNT answers from the two numbers the shell wrote
+   onto it instead — see _day_skeleton.html. `max(1, …)` because a day this viewer
+   sees none of is collapsed anyway, and a zero would leave the rows arithmetic
+   below dividing by it. */
+.day-block.is-skeleton { --cols: var(--held); }
+body.hide-not-watching .day-block.is-skeleton { --cols: max(1, var(--shown)); }
 /* An announced-but-not-yet-fetched day. It has nothing to skip, so the off-screen
    skip is turned off and it reserves its own height instead — a rough one, from
    the rows of cards the server already knows are coming, which is a far better
@@ -355,7 +401,11 @@ main { padding: 10px 6vw 0 6vw; }
    rather than somewhere near it. */
 .day-block.is-skeleton { content-visibility: visible; }
 .day-placeholder {
-    min-height: calc(var(--skeleton-rows, 1) * var(--placeholder-row-h, 430px));
+    /* HOW MANY ROWS OF CARDS ARE COMING, from the count the day is holding space
+       for and the style's cap — the same arithmetic the grid above does, so the
+       space reserved and the space eventually used are one answer rather than a
+       server-side estimate of a client-side layout. */
+    min-height: calc(round(up, var(--cols) / var(--packed-cols), 1) * var(--placeholder-row-h, 430px));
     border-radius: 14px;
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015));
 }
@@ -367,8 +417,8 @@ body.card-horizontal { --placeholder-row-h: 326px; }
    beside each other and take their width from their contents — so a placeholder
    with no width would stand the day up as a bare header and shove the row around
    when its cards finally arrive. It claims the width its columns will need. */
-body.pack-packed .day-placeholder { width: calc(var(--cols, 1) * var(--card-w) + (var(--cols, 1) - 1) * 26px); }
-body.card-poster.pack-packed .day-placeholder { width: calc(var(--cols, 1) * var(--card-w) + (var(--cols, 1) - 1) * 22px); }
+body.pack-packed .day-placeholder { width: calc(var(--packed-cols) * var(--card-w) + (var(--packed-cols) - 1) * 26px); }
+body.card-poster.pack-packed .day-placeholder { width: calc(var(--packed-cols) * var(--card-w) + (var(--packed-cols) - 1) * 22px); }
 /* A day that couldn't be loaded, and the warning a partly-loaded one carries: in
    the packed layout <main> is a flex row of days, and a message about the month
    belongs across it rather than squeezed into one day's column. */
@@ -388,7 +438,7 @@ body.pack-packed main { display: flex; flex-wrap: wrap; align-items: flex-start;
    row until it scrolls in — and the skip's paint containment also clips the
    poster-only hover panels that overflow a card. Packed days render normally. */
 body.pack-packed .day-block { margin-top: 0; flex: 0 1 auto; min-width: 0; content-visibility: visible; }
-body.pack-packed .grid { grid-template-columns: repeat(var(--cols, 1), var(--card-w)); }
+body.pack-packed .grid { grid-template-columns: repeat(var(--packed-cols), var(--card-w)); }
 
 /* ============================================================================
    Card styles. Three options share ONE fixed geometry so they stay uniform:
@@ -410,7 +460,7 @@ body.card-horizontal .card-body { flex: 1 1 auto; height: 100%; }
    next card aside. */
 body.card-poster { --card-w: 200px; --poster-w: 200px; --panel-w: 300px; --card-h: 300px; }
 body.card-poster .grid { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 22px; }
-body.card-poster.pack-packed .grid { width: calc(var(--cols, 1) * var(--card-w) + (var(--cols, 1) - 1) * 22px); }
+body.card-poster.pack-packed .grid { width: calc(var(--packed-cols) * var(--card-w) + (var(--packed-cols) - 1) * 22px); }
 body.card-poster .card { flex: 0 0 auto; width: var(--card-w); flex-direction: column; overflow: visible; border: none; background: transparent; }
 body.card-poster .card:hover { z-index: 30; transform: none; box-shadow: none; }
 /* Poster rounds itself so it stays rounded with the card's overflow visible. */
@@ -515,8 +565,18 @@ body.card-horizontal .card .trakt-btn img { height: 12px; }
 .card.not-watching { opacity: 0.72; border-color: rgba(224,56,77,0.5); }
 .card.not-watching .card-body { opacity: 0.55; }
 body.hide-not-watching .card.not-watching { display: none; }
-/* In hide mode, collapse a whole day whose items are all not-watching (JS-driven). */
-.day-block.is-empty-hidden { display: none; }
+/* IN HIDE MODE, A DAY WITH NOTHING LEFT ON IT GOES TOO, header and all — a bare
+   date with no cards under it is not a day, it is a gap. Stated here rather than
+   maintained by script for the reason the column count above is: the answer
+   changes whenever a card is marked, a day arrives, or the switch is thrown, and
+   the browser is the only thing present for all three.
+   TWO SHAPES OF THE SAME DAY. A block that HAS its cards is asked about them; a
+   placeholder cannot be, so it carries the count the server already worked out
+   (`data-visible`). Left to the card query a placeholder would look empty,
+   collapse, and — being hidden — never scroll into view, so it would never load
+   its cards at all. */
+body.hide-not-watching .day-block:not(.is-skeleton):not(:has(.card:not(.not-watching))),
+body.hide-not-watching .day-block.is-skeleton[data-visible="0"] { display: none; }
 
 .poster-wrap { position: relative; width: 100%; aspect-ratio: 2/3; background: linear-gradient(135deg, #1c2130, #10131b); overflow: hidden; }
 .poster-wrap img { width: 100%; height: 100%; object-fit: cover; transition: filter .22s ease; }
@@ -868,16 +928,22 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .fchips { display: flex; flex-wrap: wrap; gap: 6px; }
 /* THE RADIOS ARE THE KEYBOARD CONTROL and are hidden rather than removed: a
    radiogroup already does arrow-key cycling and labelling properly, so they stay
-   focusable and the chip shows their focus. The button is the pointer control,
-   out of the tab order, and exists only so one press cycles three answers. */
+   focusable and the chip shows their focus. The FACE is the pointer control, and
+   it is three labels of which exactly one is ever drawn — the one belonging to
+   the answer that is checked, pointing at the NEXT answer. So a press moves the
+   radiogroup on one step and the next label takes its place, which is the whole
+   of the cycle: it was a click listener and a three-element order in
+   calendar/filters.js, and a label is what a browser already does with a press. */
 .fchip { position: relative; display: inline-block; }
 .fchip input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 .fchip-face {
+    display: none;
     font: inherit; font-size: 0.82rem; cursor: pointer;
     padding: 5px 11px; border-radius: 999px;
     background: transparent; border: 1px solid var(--card-border); color: var(--text-dim);
     transition: border-color .12s ease, color .12s ease, background .12s ease;
 }
+.fchip input:checked + .fchip-face { display: inline-block; }
 .fchip-face:hover { border-color: var(--gold-soft); color: var(--text); }
 .fchip:has(input:focus-visible) .fchip-face { outline: 2px solid var(--gold); outline-offset: 2px; }
 .fchip:has(input[value="include"]:checked) .fchip-face {
@@ -898,22 +964,34 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
    simply grows one more the day a third is registered. The tick is what says so
    — a lit pill among unlit ones reads as a chosen option instead. */
 .fsources { display: flex; gap: 6px; flex-wrap: wrap; }
-.fsource { position: relative; }
-.fsource input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
-.fsource span {
-    display: block; padding: 7px 16px; border-radius: 10px; font-size: 0.86rem;
+/* THE BOX AND ITS FACE ARE SIBLINGS, not a label wrapping an input, and that is
+   what lets the rule below be written at all: "is a second service ticked" is
+   `input:checked ~ input:checked`, and a wrapping label would bury each box
+   inside its own element where no combinator can reach across. */
+.fsources input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.fsource {
+    display: block; padding: 7px 16px; border-radius: 10px; font-size: 0.86rem; cursor: pointer;
     border: 1px solid var(--card-border); color: var(--text-dim); background: var(--card);
     transition: border-color .12s ease, color .12s ease, background .12s ease;
 }
-.fsource span::before { content: "\25CB"; margin-right: 7px; opacity: 0.55; }
-.fsource input:checked ~ span { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
-.fsource input:checked ~ span::before { content: "\2713"; opacity: 1; }
-.fsource input:focus-visible ~ span { outline: 2px solid var(--gold); outline-offset: 2px; }
-/* The last one showing. Marked rather than disabled — a disabled checkbox is
-   left out of the submission entirely, which would post an empty group and earn
-   the very refusal the lock exists to avoid. */
-.fsource.is-locked input { cursor: default; }
-.fsource.is-locked span { opacity: 0.8; }
+.fsource::before { content: "\25CB"; margin-right: 7px; opacity: 0.55; }
+.fsources input:checked + .fsource { border-color: var(--gold); color: var(--gold-soft); background: rgba(232,181,69,0.12); }
+.fsources input:checked + .fsource::before { content: "\2713"; opacity: 1; }
+.fsources input:focus-visible + .fsource { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* AN EMPTY CALENDAR WITH NO EXPLANATION READS AS A BROKEN APP, so the last
+   service showing does not offer to be switched off. `:not(:has(input:checked ~
+   input:checked))` is "no second box in this group is ticked", which makes the
+   one that is the last one — asked of the group's own boxes rather than counted
+   by script after every press and once more on first paint, which is where it
+   used to live and where it missed a boosted arrival entirely.
+   MARKED, NOT DISABLED, and the distinction is load-bearing: a disabled checkbox
+   is left out of the submission, so disabling the only ticked service would post
+   an EMPTY group and earn exactly the refusal this exists to prevent. Only the
+   POINTER is refused here; `post_me_filters` refuses the save either way, which
+   is the one statement of the rule that cannot be got round. */
+.fsources:not(:has(input:checked ~ input:checked)) input:checked + .fsource {
+    pointer-events: none; opacity: 0.8;
+}
 
 /* Filters exist but are switched off. Its own look rather than a fall back to
    plain, because "nothing set" and "set but off" both show a calendar with
@@ -1043,7 +1121,13 @@ body.card-poster .card.is-series-premiere .poster-wrap { border-color: var(--gol
 .arr-btn.sonarr:hover:not(:disabled) { border-color: #35c5f0; }
 .arr-btn.radarr:hover:not(:disabled) { border-color: #ffc230; }
 .arr-btn.seer:hover:not(:disabled) { border-color: #a78bfa; }
-.arr-btn.busy { opacity: 0.7; }
+/* WHILE THE ADD IS IN FLIGHT, and the class is htmx's own: it goes on the
+   element that made the request and comes off however the request ends, which is
+   the half a hand-rolled busy flag kept getting wrong. `pointer-events` rather
+   than `disabled`, because disabling the button that is mid-request is what makes
+   a browser drop the focus ring somewhere unrelated. */
+.arr-btn.htmx-request { opacity: 0.7; pointer-events: none; }
+.addall-confirm { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 /* Already in the library: green tint + a leading check. */
 .arr-btn.in-library { border-color: rgba(34,197,94,0.6); background: rgba(34,197,94,0.14); color: #7ee2a8; }
 .arr-btn.in-library::before { content: '✓'; font-weight: 900; color: var(--green); flex-shrink: 0; }

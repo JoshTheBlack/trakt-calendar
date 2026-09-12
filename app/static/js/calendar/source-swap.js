@@ -51,7 +51,7 @@ function swapCardField(button) {
         target.textContent = value;
     }
     target.dataset.source = next;
-    followInDetailsAddress(card, field, value);
+    followInDetailsAddress(card, field, next, value);
 
     let label = next;
     button.querySelectorAll('.swap-logo').forEach((logo) => {
@@ -61,16 +61,20 @@ function swapCardField(button) {
     button.title = 'From ' + label + ' — click to see the other';
 }
 
-// THE PANEL OPENS ON WHAT IS ON SCREEN. The card's details address was drawn with
-// the name, the picture and — where the services disagree about it — the
-// description the server picked (_card.html), and those are the things on it a
-// flip can change afterwards. So a flip rewrites that value on the address, and a
-// flip of the name the heading shown while the panel loads too. Left alone, the
-// panel would open on the picture or the words just replaced.
-function followInDetailsAddress(card, field, value) {
+// THE PANEL OPENS ON WHAT IS ON SCREEN. The card's details address names the
+// SERVICE whose name, picture and description the card is showing (_card.html),
+// and those three are exactly what a flip can change afterwards — so a flip
+// rewrites the service's name on the address, one short word per field, and the
+// route reads the value back out of that service's own row. Left alone, the panel
+// would open on the picture or the words just replaced.
+//
+// THE HEADING IS THE ONE VALUE THAT STILL TRAVELS, and it does not travel on the
+// address: it is shown while the request is still in flight, so it has to be the
+// text itself and it is only ever written into this page's own attribute.
+function followInDetailsAddress(card, field, source, value) {
     if (!['title', 'poster', 'overview'].includes(field)) return;
     const address = new URL(card.dataset.detailsOpen, window.location.href);
-    address.searchParams.set(field, value);
+    address.searchParams.set(field, source);
     card.dataset.detailsOpen = address.pathname + address.search;
     if (field === 'title') card.dataset.detailsHeading = value;
 }

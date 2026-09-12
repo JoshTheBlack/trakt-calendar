@@ -29,9 +29,11 @@ import json
 import logging
 import unicodedata
 from datetime import date, datetime, timezone
+from typing import Any
 
 from .. import db
-from ..providers.base import Media, Record, Source, epoch_moment
+from ..providers.base import (Media, Record, Source, collect_ids,
+                              epoch_moment)
 
 logger = logging.getLogger(__name__)
 
@@ -627,6 +629,96 @@ async def read_groups(endpoint_key: str, title_keys) -> list[Record]:
     sql = _BY_KEY_SQL.replace("__KEYS__", ", ".join("?" * len(keys)))
     rows = await db.fetch_all(sql, (endpoint_key, *keys))
     return _in_fetch_order(rows)
+
+
+# The fields a surface can be showing one service's answer for while another
+# service is the one describing the title — so the only three a request has any
+# business naming a service for. A closed set, checked before anything reaches a
+# query: what comes in is a query parameter.
+SHOWN_FIELDS = ("title", "poster", "overview")
+
+# Every registered source's name, which is what makes a source name a CLOSED set
+# rather than a string a caller chose. Read from the registry so a third service
+# is a registration and not an edit here.
+_SOURCE_NAMES = frozenset(str(source) for source in Source)
+
+
+async def stored_values(title_key: str, by_source: dict[str, str]) -> dict[str, str]:
+    """`{field: the value that service stored}` for each of SHOWN_FIELDS whose
+    entry in `by_source` names a source with a row for `title_key`.
+
+    WHAT IT IS FOR. A calendar card shows the name, the picture and the
+    description this viewer's own field order picked, and the details panel has to
+    open on those rather than on whatever the describing service says — a card
+    whose services wrote different descriptions must not change its words the
+    moment it is clicked. That used to be done by putting the TEXT on the card's
+    details address; a card ships one word per field now and this reads the rest
+    back out of the row it was drawn from.
+
+    ONE READER FOR THE THREE, and one query however many services are named,
+    because "which service's value is on screen" is one question asked three
+    times and three copies of it in a route is three places for the poster's rule
+    and the description's to drift apart.
+
+    A NAME THAT IS NOT A REGISTERED SOURCE NEVER REACHES THE DATABASE, and a
+    field this cannot answer for is simply absent — the caller then draws what it
+    would have drawn with no parameter at all. Both halves matter: the address is
+    something a reader can edit, and the answer is rendered into a page served
+    from the owner's origin, so a value that did not come out of the owner's own
+    store has no business being in it.
+
+    `title_key` is the SHARED identity (app/providers/base.py's `resolve_key`,
+    stringified) that every row carries and every card sends as its `key` — the
+    same indexed column `slugs_for` above reads by.
+    """
+    wanted = {field: name for field in SHOWN_FIELDS
+              if (name := str(by_source.get(field) or "")) in _SOURCE_NAMES}
+    if not title_key or not wanted:
+        return {}
+    names = sorted(set(wanted.values()))
+    rows = await db.fetch_all(
+        "SELECT source, title, poster, overview FROM calendar_titles "
+        f"WHERE title_key = ? AND source IN ({', '.join('?' * len(names))})",
+        (str(title_key), *names))
+    stored = {str(row["source"]): row for row in rows}
+    out = {}
+    for field_name, name in wanted.items():
+        row = stored.get(name)
+        if row is not None and row[field_name]:
+            out[field_name] = str(row[field_name])
+    return out
+
+
+async def group_identity(title_key: str) -> tuple[str, dict[str, str], str] | None:
+    """`(media, ids, title)` for one stored title, or None if nothing holds it.
+
+    THE IDS ARE THE UNION every source named this title in, which is exactly what
+    a card carries: `resolve_records` hands the group's own merged ids to the
+    resolved record rather than the describing service's, so a card two services
+    listed offers a button for an id only one of them knew. Merging the rows back
+    reproduces that, in the same declared order, and a caller adding the title to
+    a library is then working from the ids the button in front of the reader was
+    drawn from rather than from ids the page handed it.
+
+    THAT IS THE WHOLE POINT OF IT EXISTING. A write whose subject comes off the
+    page is a write somebody can aim somewhere else by editing an attribute; a
+    write whose subject is a KEY the server resolves can only ever land on a title
+    this instance already holds.
+    """
+    rows = await db.fetch_all(
+        "SELECT media, title, ids_json FROM calendar_titles WHERE title_key = ?",
+        (str(title_key),))
+    if not rows:
+        return None
+    merged: dict[str, Any] = {}
+    title = ""
+    for row in rows:
+        # First writer wins, so two rows naming one title give a stable answer
+        # rather than one that depends on the order they came back.
+        for key, value in (json.loads(row["ids_json"] or "{}") or {}).items():
+            merged.setdefault(key, value)
+        title = title or str(row["title"] or "")
+    return str(rows[0]["media"]), collect_ids(merged), title
 
 
 async def slugs_for(title_keys) -> dict[str, dict[str, str]]:

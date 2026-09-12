@@ -39,7 +39,7 @@
     </div>
     {% if chips %}{{ fc.legend() }}{% endif %}
     <div class="fchips">
-        {% for state in chips %}{{ fc.chip(state) }}{% endfor %}
+        {% for state in chips %}{{ fc.chip(state, name, loop.index) }}{% endfor %}
     </div>
     {% if placeholder %}
     <input type="text" class="fchip-add" placeholder="{{ placeholder }}"

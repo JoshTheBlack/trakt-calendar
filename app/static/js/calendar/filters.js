@@ -12,9 +12,17 @@
 //   file knows no field names; and what a filter spec IS -- the leading '-',
 //   which dimensions fold case, that networks are a list -- stays entirely in
 //   app/calendar/filter.py, reached through the field names the server spelled.
-// What is left is the four things a browser cannot do declaratively: cycling a
-// chip in one press, adding a token the vocabulary does not name, keeping the
-// last service from being switched off, and posting the result.
+//   A chip CYCLES in one press without any of this knowing what a cycle is: each
+//   radio is followed by the label belonging to the answer after it and the
+//   stylesheet draws only the checked one's (_filter_chip.html), so a press is a
+//   label doing what labels do. The order used to be an array here.
+//   The last service showing cannot be switched off, and that too is the
+//   stylesheet asking the group whether a second box is ticked (.fsources in
+//   style.css). It was two functions here, one of them run on an event a boosted
+//   arrival never fires — so on every arrival but the first, the lock was simply
+//   not applied.
+// What is left is the two things a browser cannot do declaratively: adding a
+// token the vocabulary does not name, and posting the result.
 
 function openFilters() {
     document.getElementById('filtersModal').classList.add('open');
@@ -41,17 +49,9 @@ onModalClose('filtersModal', () => {
     form.reset();
 });
 
-// Grey -> only these -> not these -> grey. The three radios are the answer; this
-// only advances which of them is checked.
-const CHIP_ORDER = ['', 'include', 'exclude'];
-
-function cycleChip(chip) {
-    const radios = [...chip.querySelectorAll('input[type="radio"]')];
-    const current = radios.find(radio => radio.checked);
-    const next = CHIP_ORDER[(CHIP_ORDER.indexOf(current ? current.value : '') + 1) % CHIP_ORDER.length];
-    const wanted = radios.find(radio => radio.value === next);
-    if (wanted) wanted.checked = true;
-}
+// How many chips this page has added by typing. Only ever grows, so an id is
+// never reused by a chip added after one was dropped.
+let addedChips = 0;
 
 // A TOKEN THE VOCABULARY DOES NOT NAME, cloned from the <template> the panel
 // renders. The name comes from the field's own data-name-prefix, which the
@@ -94,41 +94,24 @@ function addFilterToken(input) {
     const chip = document.getElementById('fchipTemplate').content.firstElementChild.cloneNode(true);
     chip.classList.add('is-added');
     chip.setAttribute('aria-label', token);
-    chip.querySelectorAll('input[type="radio"]').forEach(radio => {
+    // THE ids ARE WHAT THE CLONE CANNOT INHERIT, and they are what makes a chip
+    // cycle: each label points `for` at the NEXT radio, and a label can only
+    // point at an id. The number is a counter rather than the token, because a
+    // token is free text and an id cannot contain a space — the same reason the
+    // server numbers its own chips by position (_filter_chip.html).
+    const id = 'fchip-added-' + (addedChips += 1);
+    const radios = [...chip.querySelectorAll('input[type="radio"]')];
+    const faces = [...chip.querySelectorAll('.fchip-face')];
+    radios.forEach((radio, index) => {
         radio.name = input.dataset.namePrefix + token;
+        radio.id = `${id}-${index}`;
     });
-    chip.querySelector('.fchip-face').textContent = token;
+    faces.forEach((face, index) => {
+        face.htmlFor = `${id}-${(index + 1) % radios.length}`;
+        face.textContent = token;
+    });
     field.querySelector('.fchips').appendChild(chip);
     input.value = '';
-}
-
-// AN EMPTY CALENDAR WITH NO EXPLANATION READS AS A BROKEN APP, so the last
-// service showing cannot be switched off. The server refuses it too (see
-// post_me_filters), but a control that will not move says so before somebody has
-// committed to a save.
-// MARKED, NOT DISABLED, and that distinction is load-bearing: a disabled
-// checkbox is left out of FormData entirely, so disabling the only ticked
-// service would post an EMPTY group and earn exactly the refusal this is meant
-// to prevent. The class is what the stylesheet greys, and the change handler
-// below is what refuses the press.
-function markLastService(form) {
-    ['sources_show', 'sources_movie'].forEach(group => {
-        const boxes = [...form.querySelectorAll(`input[name="${group}"]`)];
-        const on = boxes.filter(box => box.checked);
-        boxes.forEach(box => {
-            box.closest('.fsource').classList.toggle('is-locked', on.length === 1 && box.checked);
-        });
-    });
-}
-
-function keepOneService(box) {
-    const form = box.closest('form');
-    const boxes = [...form.querySelectorAll(`input[name="${box.name}"]`)];
-    if (!box.checked && !boxes.some(other => other.checked)) {
-        box.checked = true;
-        toast('At least one service has to stay on', false);
-    }
-    markLastService(form);
 }
 
 // CLEARS THE VISIBLE TAB ONLY, and does not save -- the same bargain every other
@@ -189,14 +172,9 @@ async function saveFilters(event) {
     return false;
 }
 
-// One delegated listener for the whole panel. Bound at the document rather than
-// per control so that nothing has to be re-bound when a chip is added, and so a
-// boosted navigation cannot leave handlers pointing at a replaced <body>.
-document.addEventListener('click', (event) => {
-    const face = event.target.closest('.fchip-face');
-    if (face) cycleChip(face.closest('.fchip'));
-});
-
+// Bound at the document rather than per control so that nothing has to be
+// re-bound when a chip is added, and so a boosted navigation cannot leave
+// handlers pointing at a replaced <body>.
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Enter' || !event.target.classList.contains('fchip-add')) return;
     // Enter in a text field inside a form submits it, and here it means "add
@@ -215,15 +193,3 @@ document.addEventListener('input', (event) => {
     }
 });
 
-document.addEventListener('change', (event) => {
-    if (!event.target.closest('#filtersForm')) return;
-    if (event.target.name && event.target.name.startsWith('sources_')) keepOneService(event.target);
-});
-
-// The lock has to hold from the first paint, not from the first press: a viewer
-// who already has one service switched off must not be able to switch off the
-// other before touching anything.
-document.addEventListener('DOMContentLoaded', () => {
-    const form = document.getElementById('filtersForm');
-    if (form) markLastService(form);
-});

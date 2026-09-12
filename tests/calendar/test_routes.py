@@ -1187,9 +1187,16 @@ def _section(html: str, day: str) -> str:
 
 
 class DayLayoutTests(CalendarRouteTestCase):
-    """A day arrives laid out. Working its width — and whether it shows at all —
-    out on the client meant the header painted and then vanished, jumping the
-    rest of the month up the page."""
+    """What the server still owes a day it has not sent the cards for.
+
+    HOW WIDE A DAY IS AND WHETHER IT SHOWS AT ALL ARE THE STYLESHEET'S, asked of
+    the block's own cards (style.css's `--cols` and the hide-mode collapse rule),
+    and neither is markup any more — so neither is testable here, and a test
+    pretending otherwise would be asserting a string rather than a layout. What IS
+    the server's is the count a PLACEHOLDER carries, because it has no cards to be
+    asked about; the stylesheet does the same arithmetic on it that it does on a
+    block that has them.
+    """
 
     PAGE = "/calendar?year=2026&month=7&endpoint=shows"
     DAY = "/calendar/day?endpoint=shows&year=2026&month=7&date=2026-07-15"
@@ -1198,49 +1205,52 @@ class DayLayoutTests(CalendarRouteTestCase):
         super().setUp()
         self.user_id = self._make_user("layout_viewer")
         self.sign_in_as(self.user_id)
+        # Past the inline window, so every one of these days is a placeholder.
         entries = [_entry(f"show-{n}", f"Show {n}", "2026-07-15T20:00:00Z") for n in range(3)]
         entries.append(_entry("solo", "Solo", "2026-07-16T20:00:00Z"))
+        entries += [_entry(f"early-{n}", f"Early {n}", f"2026-07-0{n + 1}T20:00:00Z")
+                    for n in range(5)]
         patcher = patch("app.calendar.cache.fetch_window_records",
                         window_fetch(entries))
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def test_each_day_ships_its_own_column_count(self):
+    def test_a_placeholder_says_how_many_cards_it_holds_and_how_many_show(self):
         html = self.client.get(self.PAGE).text
-        self.assertIn("--cols: 3", _section(html, "2026-07-15"))
-        self.assertIn("--cols: 1", _section(html, "2026-07-16"))
+        self.assertIn("--held: 3", _section(html, "2026-07-15"))
+        self.assertIn("--shown: 3", _section(html, "2026-07-15"))
+        self.assertIn("--held: 1", _section(html, "2026-07-16"))
 
-    def test_the_column_count_is_capped_by_the_card_style(self):
-        """"Poster beside" cards are wide, so a day never grows past two columns
-        however many cards it holds."""
-        self.client.post("/api/me/prefs", json={"card_style": "horizontal"})
-        self.assertIn("--cols: 2", _section(self.client.get(self.PAGE).text, "2026-07-15"))
+    def test_a_placeholder_counts_a_marked_title_out_of_what_shows(self):
+        """`--shown` follows this viewer's marks and `--held` does not: the
+        stylesheet reserves space from one or the other depending on whether
+        hiding is on, and the switch is thrown without a reload."""
+        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
+                         json={"item_id": "show-0", "not_watching": True})
+        block = _section(self.client.get(self.PAGE).text, "2026-07-15")
+        self.assertIn("--held: 3", block)
+        self.assertIn("--shown: 2", block)
 
-    def test_hiding_sizes_a_day_to_what_is_actually_visible(self):
-        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
-        for show in ("show-0", "show-1"):
-            self.client.post("/api/state?year=2026&month=7&endpoint=shows",
-                             json={"item_id": show, "not_watching": True})
-        self.assertIn("--cols: 1", _section(self.client.get(self.PAGE).text, "2026-07-15"))
-
-    def test_a_day_with_nothing_left_to_show_arrives_collapsed(self):
-        """Every item on 15 July marked, hiding on: the day renders no cards, so
-        it must not paint its header first and collapse afterwards."""
-        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
+    def test_a_placeholder_this_viewer_sees_nothing_of_says_so(self):
+        """Zero is the selector the stylesheet collapses a placeholder on, so it
+        has to be an ATTRIBUTE as well as a number — see _day_skeleton.html."""
         for show in ("show-0", "show-1", "show-2"):
             self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                              json={"item_id": show, "not_watching": True})
-        html = self.client.get(self.PAGE).text
-        self.assertIn("is-empty-hidden", _section(html, "2026-07-15"))
-        self.assertNotIn("is-empty-hidden", _section(html, "2026-07-16"))
+        block = _section(self.client.get(self.PAGE).text, "2026-07-15")
+        self.assertIn('data-visible="0"', block)
+        self.assertIn("--shown: 0", block)
+        self.assertIn('data-visible="1"', _section(self.client.get(self.PAGE).text, "2026-07-16"))
 
-    def test_a_day_that_arrives_late_is_laid_out_the_same_way(self):
-        self.client.post("/api/me/prefs", json={"hide_not_watching": True})
-        self.client.post("/api/state?year=2026&month=7&endpoint=shows",
-                         json={"item_id": "show-0", "not_watching": True})
+    def test_a_day_that_arrives_late_carries_no_layout_at_all(self):
+        """It has its cards, so there is nothing left for the server to say about
+        how they sit — and a `--cols` written here would out-specify the
+        stylesheet's own answer and freeze the day at the width it arrived with."""
         fragment = self.client.get(self.DAY).text
-        self.assertIn("--cols: 2", _section(fragment, "2026-07-15"))
-        self.assertNotIn("is-empty-hidden", _section(fragment, "2026-07-15"))
+        block = _section(fragment, "2026-07-15")
+        self.assertNotIn("--cols", block)
+        self.assertNotIn("--held", block)
+        self.assertNotIn("is-empty-hidden", block)
 
     def test_a_late_day_draws_its_own_chip_again_out_of_band(self):
         """The shell drew the chip from the marks it read when the page loaded. A
@@ -1255,13 +1265,14 @@ class DayLayoutTests(CalendarRouteTestCase):
     def test_a_day_whose_every_show_was_marked_since_arrives_with_its_chip_greyed(self):
         """With hiding on, a day whose shows were all marked after the page loaded
         arrives collapsed — and its chip must stop offering to scroll to it, which
-        it went on doing when the chip was only ever drawn by the shell."""
+        it went on doing when the chip was only ever drawn by the shell. The chip
+        is the one half of this the stylesheet cannot reach: it sits above <main>,
+        so no selector runs from the day to it."""
         self.client.post("/api/me/prefs", json={"hide_not_watching": True})
         for show in ("show-0", "show-1", "show-2"):
             self.client.post("/api/state?year=2026&month=7&endpoint=shows",
                              json={"item_id": show, "not_watching": True})
         fragment = self.client.get(self.DAY).text
-        self.assertIn("is-empty-hidden", _section(fragment, "2026-07-15"))
         self.assertRegex(fragment, r'<a class="day-chip unreachable"[^>]*id="day-chip-2026-07-15"')
 
     def test_a_day_with_nothing_on_it_draws_no_chip(self):
@@ -1336,7 +1347,7 @@ class CalendarShellTests(CalendarRouteTestCase):
         block = _section(html, "2026-07-10")
         self.assertIn('data-date="2026-07-10"', block)
         self.assertIn('data-visible="1"', block)
-        self.assertIn("--skeleton-rows: 1", block)
+        self.assertIn("--held: 1", block)
         self.assertIn('hx-trigger="intersect once"', block)
         self.assertIn("Friday, 10 July", html)
 
@@ -1356,11 +1367,12 @@ class CalendarShellTests(CalendarRouteTestCase):
         self.assertEqual(_day_sections(html), ["2026-07-04"])
         self.assertEqual(_day_urls(html), [])
 
-    def test_a_later_day_carries_the_shells_is_new_answer_on_its_own_request(self):
+    def test_every_later_day_carries_ONE_TOKEN_naming_the_shells_is_new_answer(self):
         """The shell's diff commits this load as the next baseline, so a day that
-        fetches itself later cannot work out which of its cards are new. The shell
-        puts that day's share of the answer on the day's own request — that day's
-        keys only, so a day with nothing new asks exactly as it always did."""
+        fetches itself later cannot work out which of its cards are new. The
+        answer is FILED and every placeholder carries the token naming it — one
+        short opaque word, the same one on each, rather than the answer itself
+        spread across thirty addresses as data in a GET."""
         user_id = self._make_user("shell_newcomer")
         self.sign_in_as(user_id)
         asyncio.run(calendar_state.set_view_state(
@@ -1368,10 +1380,22 @@ class CalendarShellTests(CalendarRouteTestCase):
             last_show_ids=[_mark_key(f"show-{day}") for day in range(1, 10)], history=[]))
         html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
         urls = {re.search(r"date=([\d-]+)", url).group(1): url for url in _day_urls(html)}
-        self.assertTrue(urls["2026-07-10"].endswith(
-            f"&new={quote(_mark_key('show-10'), safe='')}"), urls["2026-07-10"])
-        for day in range(calendar_routes.INITIAL_DAY_BLOCKS + 1, 10):
-            self.assertNotIn("new=", urls[f"2026-07-{day:02d}"])
+        tokens = {re.search(r"&new=([^&]+)", url).group(1) for url in urls.values()}
+        self.assertEqual(len(tokens), 1, urls)
+        # Nothing about a card is in it — that is the whole point of a reference.
+        self.assertNotIn("show-10", tokens.pop())
+
+    def test_a_month_with_nothing_new_files_nothing_and_carries_no_token(self):
+        """Much the commonest case, because every load commits the baseline the
+        next one is diffed against. No answer is not worth a key."""
+        user_id = self._make_user("shell_returner")
+        self.sign_in_as(user_id)
+        asyncio.run(calendar_state.set_view_state(
+            user_id, "shows", 2026, 7, last_count=10,
+            last_show_ids=[_mark_key(f"show-{day}") for day in range(1, 11)], history=[]))
+        html = self.client.get("/calendar?year=2026&month=7&endpoint=shows").text
+        for url in _day_urls(html):
+            self.assertNotIn("new=", url)
 
 
 
@@ -1430,6 +1454,48 @@ class TheJumpAnchorIsRenderedByTheServerTests(CalendarRouteTestCase):
         resp = self.client.get(f"{self.MONTH}&highlight=trakt%3Ano-such-title")
         self.assertEqual(resp.status_code, 200)
         self.assertNotIn('id="jump-target"', resp.text)
+
+    def test_the_month_stays_in_date_order_around_the_day_it_ships_early(self):
+        """THE DEFECT THIS PINS: the jump's day was rendered with its cards and
+        APPENDED to the ones that already were, so a jump to the 28th put that day
+        between the 5th and the 6th — the reader landed on the right card with the
+        rest of the month loading BELOW it, out of sequence.
+
+        <main> IS THE MONTH. Which days arrive with their cards is a property of
+        each day, not of which list it came out of."""
+        month = [_entry(f"show-{day}", f"Show {day}", f"2026-07-{day:02d}T20:00:00Z")
+                 for day in range(1, 29)]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(month)):
+            self.client.get(self.MONTH)
+            html = self.client.get(
+                f"{self.MONTH}&highlight={_mark_key('show-28')}").text
+        # Every day of the month, in order, whether drawn or still a placeholder.
+        drawn = re.findall(r'id="day-(\d{4}-\d{2}-\d{2})"', html)
+        self.assertEqual(drawn, sorted(drawn), "the month is out of date order")
+        self.assertEqual(len(drawn), 28)
+        # The jump's day is drawn with its cards; the days before it are not.
+        self.assertIn("2026-07-28", _day_sections(html))
+        self.assertIn("2026-07-20", _placeholder_dates(html))
+
+    def test_exactly_one_card_carries_it_however_often_the_title_airs(self):
+        """`highlight` names a TITLE and a title airs as often as it airs — twice
+        in one day on the all-episodes calendar. Every card for it used to be
+        given the same id, and a document holding an id twice sends the browser to
+        whichever came first rather than to the one that was searched for."""
+        twice_a_day = [_entry("the-drama", "The Drama", "2026-07-15T20:00:00Z"),
+                       _entry("the-drama", "The Drama", "2026-07-15T21:30:00Z"),
+                       _entry("the-drama", "The Drama", "2026-07-22T20:00:00Z")]
+        with patch("app.calendar.cache.fetch_window_records", window_fetch(twice_a_day)):
+            self.client.get(self.MONTH)
+            html = self.client.get(f"{self.MONTH}&highlight={self._mark()}").text
+        self.assertEqual(html.count('id="jump-target"'), 1, "the anchor is drawn twice")
+        # And it is on the FIRST airing's day, so a reader lands where the month
+        # starts showing the title rather than at some later repeat: the anchor
+        # falls between the 15th's section and the 22nd's.
+        self.assertLess(html.index(_section(html, "2026-07-15")),
+                        html.index('id="jump-target"'))
+        self.assertLess(html.index('id="jump-target"'),
+                        html.index(_section(html, "2026-07-22")))
 
 
 class FollowingASearchResultWritesOneAiringTests(CalendarRouteTestCase):
@@ -1666,43 +1732,74 @@ class CalendarDayRouteTests(CalendarRouteTestCase):
         asyncio.run(calendar_state.set_not_watching(self.user_id, "the-drama", True))
         self.assertIn("not-watching", _card_class(self.client.get(self.DAY).text, _mark_key("the-drama")))
 
-    def test_a_late_day_draws_is_new_from_the_answer_its_address_carries(self):
+    def test_a_late_day_draws_is_new_from_the_answer_the_token_names(self):
         """is-new is a whole-month diff the shell makes and commits, so a day
         fetched afterwards cannot make it again — re-reading the baseline would
-        find the shell's own commit and conclude nothing is new. The shell writes
-        each later day's answer onto that day's request, and the day draws it."""
+        find the shell's own commit and conclude nothing is new. The shell FILES
+        its answer and the day resolves the token naming it."""
         drama = _mark_key("the-drama")
-        marked = self.client.get(f"{self.DAY}&new={quote(drama, safe='')}").text
+        token = asyncio.run(calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {drama}))
+        marked = self.client.get(f"{self.DAY}&new={token}").text
         self.assertIn("is-new", _card_class(marked, drama))
-        # Re-reading the baseline is not how it decides: with nothing on the
-        # address, nothing is marked, whatever the stored baseline says.
+        # Re-reading the baseline is not how it decides: with no token, nothing is
+        # marked, whatever the stored baseline says.
         asyncio.run(calendar_state.set_view_state(
             self.user_id, "shows", 2026, 7,
             last_count=1, last_show_ids=["something-else"], history=[]))
         self.assertNotIn("is-new", _card_class(self.client.get(self.DAY).text, drama))
 
-    def test_an_is_new_key_naming_nothing_on_the_day_marks_nothing(self):
-        """The day's cards ask whether THEIR key is among the answer, so a key for
-        a title on another day — or anything else a hand-edited address carries —
-        marks no card here."""
-        text = self.client.get(
-            f"{self.DAY}&new={quote(_mark_key('the-comedy'), safe='')}&new=nonsense").text
+    def test_a_token_naming_nothing_marks_nothing(self):
+        """Expired, invented, or simply never written: a missing answer is no
+        marks, which is what a late day did before one was carried at all —
+        honest rather than wrong."""
+        text = self.client.get(f"{self.DAY}&new=not-a-real-token").text
         self.assertIn("The Drama", text)
         self.assertNotIn("is-new", text)
 
-    def test_a_failed_day_keeps_its_answer_for_the_retry_and_drops_what_was_invented(self):
-        """The retry re-requests the day's own address, so the answer has to
-        survive a failure — while a value not shaped like a card's identity is not
-        written back into the page."""
-        drama = quote(_mark_key("the-drama"), safe="")
+    def test_one_accounts_token_reads_nothing_for_another(self):
+        """The answer says which titles were new to ONE account, so the user is in
+        the key as well as the token — a token copied out of somebody else's page
+        resolves to nothing rather than to their answer."""
+        drama = _mark_key("the-drama")
+        stranger = self._make_user("is_new_stranger")
+        token = asyncio.run(calendar_routes._remember_new_marks(
+            stranger, "shows", 2026, 7, {drama}))
+        self.assertNotIn("is-new", self.client.get(f"{self.DAY}&new={token}").text)
+
+    def test_an_is_new_key_naming_nothing_on_the_day_marks_nothing(self):
+        """The day's cards ask whether THEIR key is among the answer, so a key for
+        a title on another day marks no card here."""
+        token = asyncio.run(calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {_mark_key("the-comedy")}))
+        text = self.client.get(f"{self.DAY}&new={token}").text
+        self.assertIn("The Drama", text)
+        self.assertNotIn("is-new", text)
+
+    def test_a_failed_day_keeps_the_token_for_the_retry(self):
+        """The retry re-requests the day's own address, so the token has to
+        survive a failure — and it is the whole of what a retry carries forward
+        now, which is one opaque word instead of a list of keys rebuilt into the
+        page."""
+        token = asyncio.run(calendar_routes._remember_new_marks(
+            self.user_id, "shows", 2026, 7, {_mark_key("the-drama")}))
 
         def fake(endpoint, start):
             raise TraktError("Trakt unreachable", 503)
 
         with patch("app.calendar.cache.fetch_window_records", window_fetch(fake)):
-            text = self.client.get(f"{self.DAY}&new={drama}&new=%3Cb%3Ehello").text
-        self.assertIn(f"&amp;new={drama}", text)
-        self.assertNotIn("hello", text)
+            text = self.client.get(f"{self.DAY}&new={token}").text
+        self.assertIn(f"&amp;new={token}", text)
+
+    def test_a_retry_writes_back_nothing_a_hand_edited_address_invented(self):
+        """The retry button is built from the address, so what the address carries
+        is rendered into the page. A token is quoted into it and nothing else is
+        carried at all."""
+        with patch("app.calendar.cache.fetch_window_records",
+                   window_fetch(lambda endpoint, start: (_ for _ in ()).throw(
+                       TraktError("Trakt unreachable", 503)))):
+            text = self.client.get(f"{self.DAY}&new=%3Cb%3Ehello").text
+        self.assertNotIn("<b>hello", text)
 
     def test_a_bad_date_is_refused_before_it_reaches_the_cache(self):
         for bad in ("date=nope",

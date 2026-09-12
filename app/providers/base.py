@@ -451,6 +451,33 @@ class Record:
     # after several records have been compared, which happens at read.
     source_links: dict[str, str] = field(default_factory=dict)
 
+    def shown_source(self, field_name: str) -> str:
+        """Which service's stored value this record is carrying for `field_name`.
+
+        A REFERENCE TO A ROW, AND THAT IS WHAT IT IS FOR. A surface showing this
+        record can name the service beside a field instead of sending the field's
+        TEXT anywhere — a title, a poster address, a description that measured
+        1,790 characters at its longest on one real database. The row is already
+        stored under this title's key, so the server can read back exactly what
+        the reader is looking at from one word.
+
+        THREE CASES, ONE READING. Where the services disagreed, `alternatives`
+        holds every value they gave and the one equal to what this record carries
+        is the winner — the same comparison a card makes to decide which service's
+        mark to draw beside the field. Where they agreed, or only one of them
+        spoke, `field_sources` names who spoke and any of them is a correct answer
+        because their values are identical. Where neither map is populated — a
+        group only one source described, which is every group on a single-source
+        instance — that source is the answer.
+        """
+        stated = self.alternatives.get(field_name)
+        if stated:
+            current = getattr(self, field_name, None)
+            for name, value in stated.items():
+                if value == current:
+                    return name
+        return next(iter(self.field_sources.get(field_name) or ()), str(self.source))
+
     def to_dict(self) -> dict[str, Any]:
         """The JSON-safe form the cache stores.
 

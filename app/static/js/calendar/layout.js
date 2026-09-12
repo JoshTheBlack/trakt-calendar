@@ -10,23 +10,13 @@ const BODY = document.body;
 
 // ---- Layout controls: card style + day packing ----
 // Applied instantly via <body> classes (pure CSS), then persisted to settings.
-function updateCols() {
-    const b = document.body;
-    // Column cap per style: poster-only wall is compact; beside cards are wide.
-    const cap = b.classList.contains('card-poster') ? 6 : (b.classList.contains('card-horizontal') ? 2 : 5);
-    // In hide mode, size each day's grid to its VISIBLE (watching) cards so packed
-    // layout doesn't reserve columns for hidden not-watching items.
-    const hiding = b.classList.contains('hide-not-watching');
-    const sel = hiding ? '.card:not(.not-watching)' : '.card';
-    // Days whose cards haven't been fetched yet are left alone: counting the cards
-    // a placeholder is holding would answer 0 and shrink it to one column, which is
-    // exactly wrong — the server sized it from the cards that are coming.
-    document.querySelectorAll('.day-block:not(.is-skeleton)').forEach(block => {
-        const n = block.querySelectorAll(sel).length;
-        block.style.setProperty('--cols', Math.max(1, Math.min(n, cap)));
-    });
-}
-
+//
+// NOTHING HERE RE-PACKS A DAY. How many columns a day's grid takes, and whether
+// hide mode empties it entirely, are the stylesheet's questions about that day's
+// own cards (style.css's `--cols` and the collapse rule beside it). This file
+// used to answer both by walking every day block after every change — a class
+// flip, a mark, a late day — and the caps it worked from were a third spelling
+// of numbers that also sat in the stylesheet and in the calendar's routes.
 async function setLayout(key, value) {
     if (key === 'card_style') {
         document.body.classList.remove('card-vertical', 'card-horizontal', 'card-poster');
@@ -35,7 +25,6 @@ async function setLayout(key, value) {
         document.body.classList.remove('pack-stacked', 'pack-packed');
         document.body.classList.add('pack-' + value);
     }
-    updateCols();
     // The layout already changed on screen; this only persists it — to this
     // account's own view preferences, so it sticks on the next visit for
     // whoever is signed in, not just an administrator.
@@ -70,7 +59,7 @@ async function toggleHideNotWatching() {
     const btn = document.getElementById('hideToggle');
     label.textContent = hide ? '🚫 Hiding' : '👁️ Showing all';
     btn.classList.toggle('active', hide);
-    updateEmptyDays();
+    syncChipReach();
     // Persists to this account's own view preferences (same as setLayout).
     try {
         await fetch('/api/me/prefs', {
@@ -150,26 +139,30 @@ function initDayChips() {
     syncDayChips();
 }
 
-// In "Hiding" mode, collapse any day whose items are all not-watching (so nothing
-// would render under its header). In "Showing all" mode every day is shown.
-function updateEmptyDays() {
-    const hiding = BODY.classList.contains('hide-not-watching');
-    document.querySelectorAll('.day-block').forEach(block => {
-        // A day whose cards haven't arrived yet can't be asked how many of them
-        // are visible, so it answers from the count the server wrote onto it. Left
-        // to the card query it would look empty, collapse, and — being hidden —
-        // never be scrolled into view, so it would never load at all.
-        const hide = hiding && (block.classList.contains('is-skeleton')
-            ? parseInt(block.dataset.visible, 10) === 0
-            : !block.querySelector('.card:not(.not-watching)'));
-        block.classList.toggle('is-empty-hidden', hide);
-        // A collapsed day is not somewhere to jump to, so its chip stops looking
-        // and acting like a destination. Only days actually in the DOM are
-        // touched: a chip for a day whose block hasn't loaded yet is still a
-        // perfectly good target, and greying it would be a lie.
-        const chip = block.dataset.date &&
-            document.querySelector(`.day-chip[data-date="${CSS.escape(block.dataset.date)}"]`);
-        if (chip) chip.classList.toggle('unreachable', hide);
+// A COLLAPSED DAY IS NOT SOMEWHERE TO JUMP TO, so its chip stops looking and
+// acting like a destination.
+//
+// THIS IS WHAT COULD NOT BECOME A STYLESHEET RULE, and the reason is where the
+// chip sits: the strip is pinned above <main>, so the day it names is neither an
+// ancestor nor a following sibling of it and no selector can reach from one to
+// the other. Expressing it as `:has()` on <body> would mean a rule per date —
+// thirty-one whole-document selectors re-evaluated every time a card is marked on
+// a page that can hold a thousand of them.
+//
+// IT ASKS THE STYLESHEET RATHER THAN RESTATING IT. Whether a day is collapsed is
+// decided in exactly one place (style.css's hide-mode rule), and this reads that
+// decision back off the element instead of working the condition out a second
+// time — so a change to what "empty" means cannot leave the chips disagreeing
+// with the days.
+//
+// Only days actually in the DOM are touched: a chip for a day whose block has not
+// loaded yet is still a perfectly good target, and greying it would be a lie.
+function syncChipReach() {
+    document.querySelectorAll('.day-block[data-date]').forEach(block => {
+        const chip = document.getElementById('day-chip-' + block.dataset.date);
+        if (chip) {
+            chip.classList.toggle('unreachable',
+                getComputedStyle(block).display === 'none');
+        }
     });
-    updateCols();  // re-pack columns for the now-visible card counts
 }

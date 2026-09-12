@@ -2,8 +2,8 @@
 // and the tiles that count them.
 //
 // Everything here is about ONE month as this account sees it. The layout of the
-// day blocks is calendar/layout.js; what a card's buttons do to Sonarr/Radarr is
-// calendar/arr-buttons.js.
+// day blocks is style.css; adding a card's title to Sonarr/Radarr is markup on
+// the button (templates/_library_button.html).
 
 // ---- Page context ----
 // A boosted navigation swaps the <body>'s children in place WITHOUT reloading
@@ -159,5 +159,5 @@ function updateStats() {
     watchingEl.textContent = actualWatching;
     notWatchingEl.textContent = actualNotWatching;
     lastKnownStats = { total, watching: actualWatching, notWatching: actualNotWatching };
-    updateEmptyDays();
+    syncChipReach();
 }

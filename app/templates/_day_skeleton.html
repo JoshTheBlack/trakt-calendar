@@ -13,13 +13,23 @@
    element, and it also fires when one BECOMES visible (turning "Hiding" off)
    without waiting for the viewer to scroll.
 
-   `data-visible` is what this viewer would see of the day: calendar/layout.js
-   needs it to decide whether the placeholder collapses when hiding is toggled,
-   which it cannot work out by counting cards that are not here yet. #}
-<section class="day-block is-skeleton{% if group.collapsed %} is-empty-hidden{% endif %}"
+   HOW MANY CARDS ARE COMING IS THE ONE THING A PLACEHOLDER HAS TO BE TOLD. Every
+   other day block answers that by being asked about its own cards (style.css
+   counts them with `:nth-child(k of …)`), and a placeholder has none to count —
+   so the two numbers the shell already worked out ride along and the stylesheet
+   does the same arithmetic on them: `--held` is everything on the day and
+   `--shown` is what this viewer would see of it with not-watching titles hidden,
+   because the hide switch is thrown without a reload and the space reserved has
+   to follow it.
+
+   `data-visible` IS `--shown` AGAIN, and the repetition is the price of one
+   thing CSS cannot do: a selector can test an attribute's value but nothing can
+   read a custom property's, and it takes a SELECTOR to collapse the day when the
+   number is zero. #}
+<section class="day-block is-skeleton"
          id="day-{{ group.date }}" data-date="{{ group.date }}"
          data-visible="{{ group.visible }}"
-         style="--cols: {{ group.cols | default(1) }}; --skeleton-rows: {{ group.rows | default(1) }}"
+         style="--held: {{ group['items']|length }}; --shown: {{ group.visible }}"
          hx-get="{{ group.url }}" hx-trigger="intersect once" hx-swap="outerHTML">
     <div class="day-header">
         <div class="day-title">📅 {{ group.label }}</div>

@@ -293,56 +293,34 @@ class DayChipTests(unittest.TestCase):
         self.assertEqual((chips[1]["count"], chips[1]["shown"]), (1, 1))
 
 
-class DayLayoutTests(unittest.TestCase):
-    """_apply_day_layout — shared with /calendar/day so a day fetched late is
-    laid out exactly like one the shell shipped inline."""
+class VisibleCountTests(unittest.TestCase):
+    """`_count_visible` — the one presentation fact a day that has not been
+    fetched yet cannot work out for itself.
 
-    def test_columns_are_capped_per_card_style(self):
-        for style, cap in (("poster", 6), ("horizontal", 2), ("vertical", 5)):
-            with self.subTest(style=style):
-                grouped = [_day("2026-07-01", *(f"s{n}" for n in range(10)))]
-                calendar_routes._apply_day_layout(
-                    grouped, not_watching=set(), hide_not_watching=False, card_style=style)
-                self.assertEqual(grouped[0]["cols"], cap)
+    HOW WIDE A DAY IS AND WHETHER IT COLLAPSES ARE NOT TESTED HERE AND CANNOT BE:
+    they are the stylesheet's, asked of a block's own cards (style.css's `--cols`
+    and the hide-mode collapse rule), and a stylesheet needs a browser to have an
+    opinion. What the server still owes a PLACEHOLDER is this number, which the
+    stylesheet does the same arithmetic on.
+    """
 
-    def test_a_thin_day_uses_only_the_columns_it_needs(self):
+    def test_it_counts_what_this_viewer_would_see(self):
+        grouped = [_day("2026-07-01", "a", "b"), _day("2026-07-02", "c")]
+        calendar_routes._count_visible(grouped, {_key("a")})
+        self.assertEqual(grouped[0]["visible"], 1)
+        self.assertEqual(grouped[1]["visible"], 1)
+
+    def test_a_day_this_viewer_sees_none_of_counts_zero(self):
+        """Zero is what the stylesheet collapses the placeholder on, so a day
+        every title of which is marked has to report it rather than falling back
+        to how many the day holds."""
         grouped = [_day("2026-07-01", "a", "b")]
-        calendar_routes._apply_day_layout(
-            grouped, not_watching=set(), hide_not_watching=False, card_style="vertical")
-        self.assertEqual(grouped[0]["cols"], 2)
-        self.assertEqual(grouped[0]["rows"], 1)
-
-    def test_rows_reserve_height_for_a_day_not_yet_fetched(self):
-        """A placeholder can only hold the right amount of space — so the
-        scrollbar and the jump-to strip land where the day really is — if the
-        server says how many rows of cards are coming."""
-        grouped = [_day("2026-07-01", *(f"s{n}" for n in range(7)))]
-        calendar_routes._apply_day_layout(
-            grouped, not_watching=set(), hide_not_watching=False, card_style="horizontal")
-        self.assertEqual(grouped[0]["cols"], 2)
-        self.assertEqual(grouped[0]["rows"], 4)  # 7 cards over 2 columns
-
-    def test_an_empty_day_still_reserves_one_row(self):
-        grouped = [{"date": "2026-07-01", "items": []}]
-        calendar_routes._apply_day_layout(
-            grouped, not_watching=set(), hide_not_watching=False, card_style="vertical")
-        self.assertEqual(grouped[0]["cols"], 1)
-        self.assertEqual(grouped[0]["rows"], 1)
-
-    def test_a_day_collapses_only_when_hiding_and_nothing_is_visible(self):
-        grouped = [_day("2026-07-01", "a"), _day("2026-07-02", "b")]
-        calendar_routes._apply_day_layout(
-            grouped, not_watching={_key("a")}, hide_not_watching=True, card_style="vertical")
-        self.assertTrue(grouped[0]["collapsed"])
+        calendar_routes._count_visible(grouped, {_key("a"), _key("b")})
         self.assertEqual(grouped[0]["visible"], 0)
-        self.assertFalse(grouped[1]["collapsed"])
 
-    def test_marked_items_do_not_collapse_a_day_when_hiding_is_off(self):
-        grouped = [_day("2026-07-01", "a")]
-        calendar_routes._apply_day_layout(
-            grouped, not_watching={_key("a")}, hide_not_watching=False, card_style="vertical")
-        self.assertFalse(grouped[0]["collapsed"])
-        # Still reported, because the client needs it to keep the tiles honest.
+    def test_a_day_with_nothing_on_it_counts_zero(self):
+        grouped = [{"date": "2026-07-01", "items": []}]
+        calendar_routes._count_visible(grouped, set())
         self.assertEqual(grouped[0]["visible"], 0)
 
 

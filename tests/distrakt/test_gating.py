@@ -385,36 +385,54 @@ class RequestingUsersTokenTests(DistraktTestCase):
 
 
 class EasterEggFlagTests(DistraktTestCase):
-    """What the calendar page tells the browser, and what it buys."""
+    """What the calendar page tells the browser, and what it buys.
+
+    IT IS A FACT ABOUT THE PAGE, so it rides on #pageMeta rather than on `window`:
+    a swap brings the new page's copy and leaves nothing of the old one behind.
+    That is what stops the reveal firing on a page that never offered one — the
+    tracker, most visibly, where the calendar's leftover flag used to make the
+    Konami code navigate away from the page it opens.
+    """
 
     CALENDAR = "/?month=1&year=2026"
 
+    def _reveal_offered(self) -> bool:
+        meta = re.search(r'<div id="pageMeta"[^>]*>', self.client.get(self.CALENDAR).text)
+        return "data-distrakt" in meta.group(0)
+
     def test_an_unapproved_user_is_told_false(self):
         self.sign_in_as(self._make_user("plain", calendar_approved=True))
-        self.assertIn("window.DISTRAKT_AVAILABLE = false", self.client.get(self.CALENDAR).text)
+        self.assertFalse(self._reveal_offered())
 
     def test_approval_without_a_trakt_link_is_still_false(self):
         """The flag mirrors the real gate, both halves of it — otherwise the
         easter egg would send someone to a page that refuses them."""
         self.sign_in_as(self._make_user("unlinked", calendar_approved=True, distrakt_approved=True))
-        self.assertIn("window.DISTRAKT_AVAILABLE = false", self.client.get(self.CALENDAR).text)
+        self.assertFalse(self._reveal_offered())
 
     def test_a_link_without_approval_is_still_false(self):
         user_id = self._make_user("linked", calendar_approved=True)
         self._link_trakt(user_id, provider_user_id=31, access_token="t")
         self.sign_in_as(user_id)
-        self.assertIn("window.DISTRAKT_AVAILABLE = false", self.client.get(self.CALENDAR).text)
+        self.assertFalse(self._reveal_offered())
 
     def test_an_approved_and_linked_user_is_told_true(self):
         self.sign_in_as(self.tracker_user())
-        self.assertIn("window.DISTRAKT_AVAILABLE = true", self.client.get(self.CALENDAR).text)
+        self.assertTrue(self._reveal_offered())
+
+    def test_the_tracker_never_offers_the_reveal_to_itself(self):
+        """There is nowhere for it to go, and the second listener that thought
+        otherwise is what made the Konami code navigate away from it. The page that IS the tracker
+        carries no reveal however entitled the account is."""
+        self.sign_in_as(self.tracker_user())
+        meta = re.search(r'<div id="pageMeta"[^>]*>', self.client.get("/distrakt").text)
+        self.assertNotIn("data-distrakt", meta.group(0))
 
     def test_the_flag_leaks_no_link_to_the_page_it_gates(self):
         """A refused account's calendar must not advertise the tracker anywhere
         else either — the flag being false is the whole disclosure budget."""
         self.sign_in_as(self._make_user("plain2", calendar_approved=True))
-        body = self.client.get(self.CALENDAR).text
-        self.assertNotIn("window.DISTRAKT_AVAILABLE = true", body)
+        self.assertNotIn("data-distrakt", self.client.get(self.CALENDAR).text)
 
     def test_forging_the_flag_changes_nothing(self):
         """The flag is a rendering hint. The server decides, on every route, from

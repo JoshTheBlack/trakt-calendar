@@ -200,7 +200,7 @@ class UnauthenticatedTests(GatingTestCase):
                 self.assertEqual(self.client.get(path).status_code, 401)
         for path in ("/api/settings", "/api/auth/device/start",
                      "/api/auth/device/poll", "/api/auth/refresh",
-                     "/api/integrations/options", "/api/integrations/add",
+                     "/api/integrations/options", "/calendar/library/add",
                      "/calendar/library/add-month",
                      "/api/network-logo/regenerate"):
             with self.subTest(path=path):
@@ -451,7 +451,7 @@ class RequestShapeTests(GatingTestCase):
         browser sends it with cookies and asks nobody's permission first. Not
         accepting the shape at all is what removes the whole class."""
         for path in ("/api/settings", "/api/state", "/api/distrakt/refresh",
-                     "/api/integrations/add", "/onboarding", "/login", "/logout"):
+                     "/calendar/library/add", "/onboarding", "/login", "/logout"):
             with self.subTest(path=path):
                 resp = self.client.post(path, data={"trakt_access_token": "stolen"})
                 self.assertEqual(resp.status_code, 415)

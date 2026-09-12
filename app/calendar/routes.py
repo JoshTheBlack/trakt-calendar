@@ -4,11 +4,11 @@ JSON endpoints the page drives itself from.
 The shell (`calendar_page`) is assembled out of five separable answers rather
 than one long context build, because they are asked at different scopes and one
 of them is asked twice. `assemble_month` produces the month's cards and every
-number stated ABOUT the month; `_apply_day_layout` decides how one day is drawn
-and is shared with /calendar/day so a day fetched late is laid out identically to
-one shipped inline; `_view_preferences`, `_view_data` and `_day_chips` are three
-different views of the same assembly for three different consumers — the
-template, the client's own bookkeeping, and the jump-to strip.
+number stated ABOUT the month; `_count_visible` tells a day that has not been
+fetched yet how much space to hold for the cards that are coming;
+`_view_preferences`, `_view_data` and `_day_chips` are three different views of
+the same assembly for three different consumers — the template, the client's own
+bookkeeping, and the jump-to strip.
 
 Everything deciding WHAT a viewer may see is read from their session, never from
 the query string: the per-user filters and the not-watching marks are theirs, so
@@ -24,9 +24,9 @@ import calendar as _calendar
 import dataclasses
 import logging
 import re
+import secrets
 from collections import Counter
 from datetime import date, datetime
-from math import ceil
 from urllib.parse import quote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -35,10 +35,11 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Resp
 from markupsafe import Markup
 
 from . import (cache as calendar_cache, enrich as calendar_enrich,
-               filter as calendar_filter, resolve as calendar_resolve,
-               search as calendar_search, share_links, state as calendar_state,
-               vocab)
-from .. import auth, authz, chrome, clock, db, details_panel, route_params
+               entries as calendar_entries, filter as calendar_filter,
+               resolve as calendar_resolve, search as calendar_search,
+               share_links, state as calendar_state, vocab)
+from .. import (auth, authz, cache, chrome, clock, db, details_panel,
+                route_params)
 from ..auth import AuthLevel
 from ..config import load_settings
 from ..endpoints import DEFAULT_ENDPOINT, ENDPOINTS, endpoint_choices, get_endpoint
@@ -111,38 +112,27 @@ def _resolve_viewer_tz(user, settings) -> ZoneInfo:
     return ZoneInfo("UTC")
 
 
-# How many columns a packed day's grid may grow to, per card style: the poster
-# wall is compact, "poster beside" cards are wide. Mirrored by updateCols() in
-# calendar/layout.js, which re-runs this per day after a toggle changes what is
-# visible.
-_COLUMN_CAPS = {"poster": 6, "horizontal": 2}
-_COLUMN_CAP_DEFAULT = 5
+def _count_visible(grouped: list[dict], not_watching: set[str]) -> None:
+    """Tell each day how many of its cards this viewer would see with not-watching
+    titles hidden.
 
+    IT IS THE ONE PRESENTATION FACT A DAY THAT HAS NOT BEEN FETCHED YET CANNOT
+    WORK OUT. A day block that HAS its cards is asked about them by the
+    stylesheet — how many columns it needs, and whether hide mode empties it
+    entirely are both `:has()` and `:nth-child(k of …)` over the cards themselves,
+    so they stay right through a mark made without a reload. A PLACEHOLDER has no
+    cards to be asked about and still has to reserve the right width and height,
+    or the scrollbar and the jump-to strip land somewhere other than where the day
+    really is. So the shell, which assembled the whole month anyway, writes the
+    number onto the placeholder and the stylesheet does the rest of the arithmetic
+    from it (_day_skeleton.html, style.css's `--shown`).
 
-def _apply_day_layout(grouped: list[dict], *, not_watching: set[str],
-                      hide_not_watching: bool, card_style: str) -> None:
-    """Annotate each day with the two presentation facts the client used to work
-    out only AFTER the page had painted: how many columns that day's grid needs,
-    and whether the day collapses entirely because everything on it is hidden.
-
-    Both are decided from the cards the day contains, which the server knows
-    before it writes them. Left to the client they land a frame late, and a day
-    header that paints and then vanishes takes the rest of the month up the page
-    with it — the "1 July, then suddenly 2 July" flicker on a hide-mode load.
-
-    `rows` and `visible` are the same answer put to a different use: a day that
-    has not been fetched yet is drawn as a placeholder, and it can only reserve
-    the right amount of vertical space (so the scrollbar and the jump-to strip
-    land where the day really is) if it knows how many rows of cards are coming."""
-    cap = _COLUMN_CAPS.get(card_style, _COLUMN_CAP_DEFAULT)
+    The column CAPS are not here and never come back: they are a fact about how
+    each card style looks, they live beside the styles in style.css, and they used
+    to be spelled a third time in calendar/layout.js."""
     for group in grouped:
-        visible = sum(1 for item in group["items"]
-                      if item.mark_key not in not_watching)
-        shown = visible if hide_not_watching else len(group["items"])
-        group["cols"] = max(1, min(shown, cap))
-        group["collapsed"] = hide_not_watching and visible == 0
-        group["visible"] = visible
-        group["rows"] = ceil(shown / group["cols"]) if shown else 1
+        group["visible"] = sum(1 for item in group["items"]
+                               if item.mark_key not in not_watching)
 
 
 def _filters_active(prefs: dict) -> bool:
@@ -739,41 +729,62 @@ async def calendar_page(request: Request):
     # account actually stated rather than what it is looking at right now.
     saved_sources = await source_prefs.load(user.user_id)
 
-    _apply_day_layout(month_view.grouped, not_watching=month_view.not_watching_keys,
-                      hide_not_watching=view["hide_not_watching"],
-                      card_style=view["card_style"])
+    _count_visible(month_view.grouped, month_view.not_watching_keys)
 
     # Only the first few days go out with the shell; every day after them is a
     # placeholder that fetches its own cards when it is scrolled to. So first
     # paint costs a handful of cards instead of a month of them, and a day nobody
     # ever scrolls to is never assembled, rendered, or shipped at all.
     #
-    # The split is by DAY BLOCK rather than by date, because a month can open with
-    # a run of empty days and "the first five dates" would then ship nothing.
-    inline_groups = month_view.grouped[:INITIAL_DAY_BLOCKS]
-    skeleton_groups = month_view.grouped[INITIAL_DAY_BLOCKS:]
-    # THE DAY A JUMP IS AIMED AT SHIPS WITH THE SHELL, wherever in the month it
+    # THE MONTH IS ONE ORDERED LIST AND EVERY DAY STAYS IN IT, which is the whole
+    # reason this is a flag rather than two lists. <main> IS the month, in date
+    # order, and a day lifted out of the sequence to be rendered early lands
+    # between the 5th and the 6th however far through the month it belongs — which
+    # is exactly what a jump into the 28th used to do.
+    #
+    # The first few are chosen by DAY BLOCK rather than by date, because a month
+    # can open with a run of empty days and "the first five dates" would then ship
+    # nothing.
+    inline = set(range(min(INITIAL_DAY_BLOCKS, len(month_view.grouped))))
+    # THE DAY A JUMP IS AIMED AT SHIPS WITH THE SHELL TOO, wherever in the month it
     # falls. A search result links to one card, and a browser can only scroll to
     # an element that EXISTS when the page is parsed — a card still inside an
     # unfetched placeholder is not one. That is what made landing on a result
     # need script: something had to wait for the day to arrive, and then keep
     # correcting as the days above it grew. Shipping one extra day costs a
     # handful of cards and lets an anchor behave like an anchor.
+    #
+    # AND IT IS ONE CARD. `highlight` is a TITLE's identity, and a title airs on as
+    # many days of a month as it airs on — twice in one day, on the all-episodes
+    # calendar. Every card for it used to match, so `id="jump-target"` was drawn a
+    # dozen times and the browser scrolled to whichever came first. The FIRST
+    # airing is the anchor and the rest are ordinary cards; the template asks
+    # whether the card it is drawing is this exact one (`sameas`), which is the
+    # only test that can tell two airings of one show apart without the route and
+    # the template agreeing on a second way to name them.
     highlight = request.query_params.get("highlight") or ""
+    anchor = None
     if highlight:
-        for index, group in enumerate(skeleton_groups):
-            if any(item.mark_key == highlight for item in group["items"]):
-                inline_groups = inline_groups + [skeleton_groups.pop(index)]
+        for index, group in enumerate(month_view.grouped):
+            found = next((item for item in group["items"]
+                          if item.mark_key == highlight), None)
+            if found is not None:
+                anchor = found
+                inline.add(index)
                 break
-    for group in skeleton_groups:
-        # THE SHELL'S IS-NEW ANSWER FOR THAT DAY RIDES ON ITS OWN REQUEST. The
-        # diff above has already committed this load as the baseline, so a day
-        # fetched afterwards could never work it out again; handed the answer,
-        # the day route draws the marks itself.
-        group["url"] = _day_url(
-            endpoint.key, date.fromisoformat(group["date"]),
-            source=request.query_params.get("source"),
-            new=sorted({item.mark_key for item in group["items"]} & month_view.new_ids))
+    # THE SHELL'S IS-NEW ANSWER IS FILED ONCE AND ITS PLACEHOLDERS CARRY THE
+    # TOKEN. The diff above has already committed this load as the baseline, so a
+    # day fetched afterwards could never work it out again; pointed at the answer,
+    # the day route draws the marks itself. Written once per load rather than once
+    # per day because it IS one answer about the month.
+    new_token = await _remember_new_marks(
+        user.user_id, endpoint.key, year, month, month_view.new_ids)
+    for index, group in enumerate(month_view.grouped):
+        group["inline"] = index in inline
+        if not group["inline"]:
+            group["url"] = _day_url(
+                endpoint.key, date.fromisoformat(group["date"]),
+                source=request.query_params.get("source"), new=new_token)
 
     context = {
         "request": request,
@@ -809,15 +820,15 @@ async def calendar_page(request: Request):
         # rather than numbering them.
         "month_names": [_calendar.month_name[m] for m in range(1, 13)],
         "nav": route_params.adjacent_months(year, month),
-        # The days rendered INLINE. The whole month is what every number on the
-        # page is computed from; this is only what is painted now.
-        # WHICH CARD A JUMP IS AIMED AT, so the card itself can carry the anchor
-        # rather than a script hunting for it after the fact.
-        "highlight": highlight,
-        "grouped": inline_groups,
-        # The days that are announced but not yet fetched: header, chip target and
-        # reserved height now, cards when the viewer reaches them.
-        "skeletons": skeleton_groups,
+        # WHICH CARD A JUMP IS AIMED AT, so that card can carry the anchor rather
+        # than a script hunting for it after the fact. The template tests identity
+        # against it rather than comparing keys over again — see above.
+        "anchor": anchor,
+        # EVERY DAY OF THE MONTH THAT HOLDS ANYTHING, IN ORDER, each saying
+        # whether it is drawn with its cards or as a placeholder that will fetch
+        # them (`inline`). One list rather than two, because <main> is the month
+        # and the two are interleaved the moment a jump pulls a later day forward.
+        "days": month_view.grouped,
         "total": month_view.total,
         # The stats tiles, the is-new marks, the "since last run" line and the
         # history log are all computed above and rendered with the page, so they
@@ -885,7 +896,8 @@ async def calendar_page(request: Request):
     # turning the shell's cards into HTML — the other half of the server's blocking
     # time before the browser gets anything. It is now bounded by the inline day
     # count rather than growing with the whole month.
-    with span("calendar.render", cards=sum(len(g["items"]) for g in inline_groups)):
+    with span("calendar.render", cards=sum(len(g["items"]) for g in month_view.grouped
+                                           if g["inline"])):
         response = templates.TemplateResponse(request, "index.html", context)
     return response
 
@@ -924,39 +936,73 @@ def _library(user, settings) -> integrations_routes.LibraryView | None:
     return integrations_routes.LibraryView(settings) if user and user.is_admin else None
 
 
-# How many is-new keys one day's request may carry. The busiest calendar lists a
-# few hundred titles on a day, so this never cuts a real answer short, and it
-# bounds what a hand-built address can make the day route read.
-_MAX_NEW_ON_A_DAY = 1000
+# HOW LONG THE SHELL'S IS-NEW ANSWER OUTLIVES THE LOAD THAT MADE IT. It is read
+# by the days of ONE page as the reader scrolls through them, so its life is a
+# page's life and not a session's: half an hour is far past the longest anybody
+# spends scrolling a month, and short enough that an abandoned tab's answer is
+# gone rather than sitting in the store indefinitely.
+_NEW_MARKS_TTL_SECONDS = 30 * 60
 
 
-def _new_marks(values: list[str]) -> list[str]:
-    """The is-new keys a day's request may carry forward: each shaped like a card's
-    identity — an item key, or a source and its id for a title the identity
-    waterfall cannot key (`Item.mark_key`) — deduplicated and bounded.
+def _new_marks_key(user_id: int, endpoint_key: str, year: int, month: int,
+                   token: str) -> str:
+    """Where one page load's is-new answer is filed in the shared cache.
 
-    The day's cards only ever ask "is my key among these", so a value naming no
-    card on the day marks nothing whatever it says. What the shape check guards is
-    the RETRY: a day that fails draws a button re-requesting its own address, which
-    is built from these, and nothing a hand-edited address invents should be
-    written back into the page."""
-    sources = {str(source) for source in Source}
-    kept: dict[str, None] = {}
-    for value in values:
-        try:
-            parse_item_key(value)
-        except ValueError:
-            prefix, _, rest = value.partition(":")
-            if prefix not in sources or not rest:
-                continue
-        kept[value] = None
-        if len(kept) == _MAX_NEW_ON_A_DAY:
-            break
-    return sorted(kept)
+    THE USER IS IN THE KEY, not only the token, so a token guessed or copied from
+    somebody else's page reads nothing — this names which titles were new to ONE
+    account, and the day route looks it up as the account making the request. The
+    month and calendar are in it for the ordinary reason: one reader can have two
+    tabs open on two months.
+    """
+    return f"calendar:new:{user_id}:{endpoint_key}:{year}-{month:02d}:{token}"
+
+
+async def _remember_new_marks(user_id: int, endpoint_key: str, year: int,
+                              month: int, new_ids: set[str]) -> str:
+    """File this load's is-new answer and return the token naming it.
+
+    THE ANSWER IS THE SERVER'S, SO THE SERVER KEEPS IT. A day fetched after the
+    page has painted cannot work out what was new: the shell's diff has already
+    committed this load as the next baseline, so re-reading it would see its own
+    commit and conclude nothing is new. The answer used to ride on each
+    placeholder's own request, one `new=` parameter per key — a payload in a GET,
+    bounded and shape-checked because it was written back into the page by a retry
+    button. A token is a REFERENCE: the day route resolves it against this
+    account's own cache entry, and the only thing an edited address can do with it
+    is name an entry that is not there.
+
+    NO ANSWER IS NOT WORTH A KEY. A month with nothing new on it — much the
+    commonest case, since every load commits the baseline the next one is diffed
+    against — writes nothing and hands back no token.
+    """
+    if not new_ids:
+        return ""
+    token = secrets.token_urlsafe(9)
+    await cache.set(_new_marks_key(user_id, endpoint_key, year, month, token),
+                    sorted(new_ids), retain_seconds=_NEW_MARKS_TTL_SECONDS)
+    return token
+
+
+async def _new_marks(user_id: int, endpoint_key: str, year: int, month: int,
+                     token: str) -> set[str]:
+    """The is-new keys a day may mark, read back from what the shell filed.
+
+    A TOKEN THAT NAMES NOTHING MEANS NO MARKS, and that is honest rather than
+    wrong: it is what a late day did before the answer was carried at all. The
+    entry expires with the page it belongs to, and a reader who leaves a month
+    open for an afternoon gets a day with no ✨ on it rather than a day claiming
+    something is new that stopped being new hours ago.
+    """
+    if not token:
+        return set()
+    stored = await cache.get(
+        _new_marks_key(user_id, endpoint_key, year, month, token),
+        _NEW_MARKS_TTL_SECONDS)
+    return {str(key) for key in stored} if isinstance(stored, list) else set()
 
 
 def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
-             new: list[str] | tuple[str, ...] = ()) -> str:
+             new: str = "") -> str:
     """The content request for one day. Built in one place because the shell's
     placeholder and the retry button on a day that failed must ask for exactly the
     same thing.
@@ -967,18 +1013,15 @@ def _day_url(endpoint_key: str, day: date, *, source: str | None = None,
     placeholder's URL for a viewer who never overrode anything, so the common
     case is unchanged.
 
-    `new` is the shell's is-new answer for THIS day: the mark keys of the cards on
-    it that were missing from the viewer's baseline. The shell's diff commits the
-    load it made as the next baseline, so a day fetched afterwards could never
-    work that out again; the answer rides on the day's own request instead, and
-    the day route draws the marks from it. Only that day's keys, so an address
-    carries a handful and usually none — and it is the address the placeholder
-    fetches, never one in the address bar."""
+    `new` is the token naming where this load's is-new answer is filed — see
+    `_remember_new_marks`. One short opaque word, the same one on every
+    placeholder in the page, and absent for a month with nothing new on it."""
     url = (f"/calendar/day?endpoint={quote(endpoint_key)}"
           f"&year={day.year}&month={day.month}&date={day.isoformat()}")
     if source:
         url += f"&source={quote(source)}"
-    url += "".join(f"&new={quote(key, safe='')}" for key in new)
+    if new:
+        url += f"&new={quote(new, safe='')}"
     return url
 
 
@@ -1074,10 +1117,11 @@ async def calendar_day(request: Request):
     is-new is NOT COMPUTED HERE, BUT IT IS DRAWN HERE. The diff and its baseline
     commit are a whole-month decision the shell already made and wrote; re-reading
     the baseline from a fragment would see the shell's own commit and conclude
-    nothing is new. So the shell writes this day's share of its answer onto the
-    day's own request (`_day_url`'s `new`) and the cards are marked from that. It
-    is the one thing read from the query that is not the day's address, and a
-    value naming no card on the day marks nothing."""
+    nothing is new. So the shell files its answer and puts the TOKEN naming it on
+    the day's own request (`_day_url`'s `new`); this reads the answer back as the
+    account making the request and marks the cards from it. A token naming nothing
+    — expired, or invented — marks nothing, which is what a late day did before
+    the answer was carried at all."""
     settings = load_settings()
     user = await auth.current_user(request)
     prefs = await auth.get_user_prefs(user.user_id)
@@ -1099,20 +1143,22 @@ async def calendar_day(request: Request):
 
     tz = _resolve_viewer_tz(user, settings)
     not_watching = await calendar_state.not_watching_ids(user.user_id)
-    new = _new_marks(request.query_params.getlist("new"))
+    new = await _new_marks(user.user_id, endpoint.key, year, month,
+                           request.query_params.get("new") or "")
     context = {
         "request": request, "not_watching": not_watching,
         # Same as the shell's — a day that arrives late offers the same badges.
         "can_filter": True,
-        # The shell's is-new answer for this day — see the docstring.
-        "new_ids": set(new),
+        # The shell's is-new answer, for the cards on this day — see the docstring.
+        "new_ids": new,
         "settings": settings, "is_admin": bool(user and user.is_admin),
         # And the same add-to-library buttons, in the state they are in.
         "library": _library(user, settings),
         "date": day.isoformat(), "label": calendar_cache.day_label(day),
-        # The retry asks for exactly what the placeholder did, answer included.
+        # The retry asks for exactly what the placeholder did, token included —
+        # which is the whole of what a retry now has to carry forward.
         "retry_url": _day_url(endpoint.key, day, source=request.query_params.get("source"),
-                              new=new),
+                              new=request.query_params.get("new") or ""),
         "partial": False,
     }
     try:
@@ -1128,14 +1174,13 @@ async def calendar_day(request: Request):
         # shell used — a day fetched late must decide "is this marked" by exactly
         # the rule the shell's own blocks were drawn with.
         context["not_watching"] = meta["not_watching_keys"]
-        # Same per-day presentation the shell's own blocks were rendered with, so a
-        # day that arrives late is laid out correctly on arrival rather than being
-        # re-packed (and, in hide mode, collapsed) a frame after it appears.
-        _apply_day_layout(grouped, not_watching=meta["not_watching_keys"],
-                          hide_not_watching=prefs["hide_not_watching"],
-                          card_style=prefs["card_style"] or settings.card_style)
-        # And its chip in the jump-to strip, drawn by the rule the shell's came
-        # from, so a day that arrives collapsed stops being a destination there.
+        # NOTHING LAYS THIS DAY OUT: it arrives with its cards, and how wide it is
+        # and whether hide mode empties it are the stylesheet's questions about
+        # those cards (style.css's `--cols`), asked the moment it lands and asked
+        # again every time a mark changes the answer.
+        # Its chip in the jump-to strip is still the server's, drawn by the rule
+        # the shell's came from, so a day that arrives collapsed stops being a
+        # destination there.
         if grouped:
             context["chip"] = _day_chip(day, grouped[0]["items"], meta["not_watching_keys"],
                                         prefs["hide_not_watching"])
@@ -1218,6 +1263,116 @@ async def jump_to_a_searched_title(request: Request):
     return RedirectResponse(destination, status_code=303)
 
 
+def _library_answer(request: Request, *, marks=(), message: str = "",
+                    ok: bool = True) -> Response:
+    """What an add answers with: every button on the page for that title, redrawn,
+    and a line saying what happened.
+
+    ONE RESPONSE REACHES EVERY COPY OF A BUTTON, and that is what takes the whole
+    of the page's add script away. A title can air on a dozen days of a month and
+    its panel carries a button of its own, so an add has always had to mark
+    buttons the response was not aimed at. htmx's out-of-band swap is addressed by
+    SELECTOR rather than by id — `outerHTML:.arr-btn[data-library-id='555']` — so
+    one redrawn button in the answer replaces every button on the page for that
+    title in that library, wherever they were drawn and whenever they arrived.
+    Measured on this app's own vendored htmx before any of this was written.
+
+    THE SELECTOR MUST CONTAIN NO SPACE. htmx splits an out-of-band value at the
+    first colon into a swap style and a selector, and only when the value has no
+    space in it — one with a space is read as a swap style with modifiers
+    instead, and the swap silently becomes an ordinary one. So the attribute
+    selector is written tight.
+
+    THE TOAST RIDES THE SAME ANSWER, appended to the shell's `#toastHost` the way
+    the rankings board's own flash does, so nothing has to compose a sentence in
+    the browser from a JSON refusal.
+    """
+    return templates.TemplateResponse(request, "_library_answer.html", {
+        "request": request, "marks": marks, "message": message, "ok": ok})
+
+
+def _marks_for(library, target: str, titles) -> list[dict]:
+    """One redraw per title added, for `_library_answer` — the buttons for that
+    service alone, since an add to Sonarr says nothing about Seerr."""
+    out = []
+    for key, media, ids in titles:
+        buttons = [b for b in library.buttons(media, ids) if b.kind == target]
+        if buttons:
+            out.append({"key": key, "buttons": buttons})
+    return out
+
+
+@guard.post("/calendar/library/add", AuthLevel.ADMIN)
+async def add_to_library(request: Request):
+    """Add ONE title to Sonarr, Radarr or Seerr — what a card's own button posts.
+
+    IT NAMES THE CARD AND NOT THE TITLE'S IDS. The body is `{key, target}`: the
+    shared identity the card already carries and which service to add to. The ids
+    are read back off the rows this instance drew that card from
+    (`entries.group_identity`), so a page-supplied id can never reach a write into
+    the operator's own library — the rule the rankings board already follows for
+    the same reason, and the one that makes an edited attribute worth nothing.
+
+    IT ANSWERS MARKUP, not JSON: the buttons redrawn and a toast, both out of band
+    — see `_library_answer`."""
+    data = await authz.json_body(request)
+    settings = load_settings()
+    target = str(data.get("target") or "")
+    if target not in integrations_routes.LIBRARY_ID_KEYS:
+        return _library_answer(request, message="Unknown service.", ok=False)
+    if not integrations_routes.configured(target, settings):
+        return _library_answer(
+            request, ok=False,
+            message=f"{integrations_routes.LIBRARY_NAMES[target]} isn't configured.")
+    held = await calendar_entries.group_identity(str(data.get("key") or ""))
+    if held is None:
+        return _library_answer(request, message="This calendar no longer holds that title.",
+                               ok=False)
+    media, ids, title = held
+    key = str(data.get("key"))
+    result = await integrations_routes.add_title(settings, target, media, ids, title)
+    # THE BUTTONS ARE DRAWN AFTER THE ADD, so a successful one comes back marked
+    # in-library without anything here restating what "added" looks like: the add
+    # remembers the id and LibraryView reads the same memory.
+    return _library_answer(
+        request, ok=bool(result.get("ok")),
+        message=result.get("message") or result.get("error") or "Could not add",
+        marks=_marks_for(integrations_routes.LibraryView(settings), target,
+                         [(key, media, ids)]))
+
+
+def _add_all_answer(request: Request, endpoint, *, confirm: str = "",
+                    message: str = "", ok: bool = True, marks=()) -> Response:
+    """Every answer Add all gives, drawn through one partial.
+
+    IT ALWAYS REDRAWS THE CONTROL, because the answer REPLACES the element that
+    was pressed: either with the confirmation, or with the button back where it
+    was. One renderer for both means there is no state in which the page is left
+    holding neither, which is what a refusal answered as a bare sentence would
+    have done."""
+    return templates.TemplateResponse(request, "_add_all.html", {
+        "request": request, "endpoint": endpoint, "confirm": confirm,
+        "message": message, "ok": ok, "marks": marks,
+        # The page's own query string, so the month this acts on is the month
+        # being looked at — the button, the confirmation and the commit all name
+        # it the same way.
+        "query": f"?{request.url.query}" if request.url.query else "",
+    })
+
+
+@guard.get("/calendar/fragments/add-all", AuthLevel.ADMIN)
+async def add_all_fragment(request: Request):
+    """The Add all button, drawn again — what Cancel asks for.
+
+    A READ THAT CHANGES NOTHING, so it is a GET like every other fragment here.
+    Cancelling could not be markup alone: the confirmation replaced the button, so
+    putting the button back means drawing it, and the one place it is drawn is
+    this partial."""
+    settings = load_settings()
+    prefs = await auth.get_user_prefs((await auth.current_user(request)).user_id)
+    return _add_all_answer(request, _requested_endpoint(request, prefs, settings))
+
+
 @guard.post("/calendar/library/add-month", AuthLevel.ADMIN)
 async def add_month_to_library(request: Request):
     """The calendar's Add all: every title this month shows and this viewer is
@@ -1234,8 +1389,15 @@ async def add_month_to_library(request: Request):
     already held, or carrying no id that service matches on, is skipped rather
     than sent to be refused.
 
-    `{"dry_run": true}` counts and adds nothing, so the confirmation can say how
-    many. It does NOT commit the is-new baseline: that is the page load's decision
+    IT IS ASKED TWICE, AND BOTH ANSWERS ARE MARKUP. The first press counts and
+    adds nothing, and is answered with a confirmation the server DREW — the
+    sentence and the button that commits, in place of the Add all button. The
+    second press carries `{"commit": true}`, does the adds, and is answered with
+    the control back plus one redrawn button per title added and a line saying
+    what happened (`_library_answer`). Neither step needs the page to compose a
+    sentence or to know what an added button looks like.
+
+    NEITHER STEP COMMITS THE IS-NEW BASELINE: that is the page load's decision
     alone (`assemble_month`), and a button press is not a visit."""
     data = await authz.json_body(request)
     settings = load_settings()
@@ -1247,11 +1409,16 @@ async def add_month_to_library(request: Request):
     endpoint = _requested_endpoint(request, prefs, settings)
     target = "radarr" if endpoint.media == Media.MOVIE else "sonarr"
     service = integrations_routes.LIBRARY_NAMES[target]
+    # A REFUSAL PUTS THE CONTROL BACK, because the answer replaces the button that
+    # was pressed: left as a bare sentence the button would be gone and there
+    # would be nothing to press again once the service came back.
+    def refuse(message: str) -> Response:
+        return _add_all_answer(request, endpoint, message=message, ok=False)
+
     if not integrations_routes.configured(target, settings):
-        return JSONResponse({"ok": False, "error": f"{service} isn't configured."}, status_code=400)
+        return refuse(f"{service} isn't configured.")
     if not integrations_routes.INTEGRATION_HEALTH[target].get("reachable"):
-        return JSONResponse({"ok": False, "error": f"{service} can't be reached right now."},
-                            status_code=503)
+        return refuse(f"{service} can't be reached right now.")
 
     not_watching = await calendar_state.not_watching_ids(user.user_id)
     try:
@@ -1264,9 +1431,12 @@ async def add_month_to_library(request: Request):
             prefs=await _viewer_source_selection(request, user, endpoint.media),
         )
     except TraktError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=502)
+        return refuse(str(exc))
 
     library = integrations_routes.LibraryView(settings)
+    # KEYED ON THE LIBRARY ID rather than on the card's key, because ONE ADD PER
+    # TITLE means one add per thing the service will store: a show airing on a
+    # dozen days is one Sonarr series.
     wanted: dict[str, tuple] = {}
     held = 0
     for item in (item for group in grouped for item in group["items"]):
@@ -1278,31 +1448,40 @@ async def add_month_to_library(request: Request):
             if button.in_library:
                 held += 1
             else:
-                wanted.setdefault(button.library_id, (item.media, item.ids, item.title))
+                wanted.setdefault(button.library_id,
+                                  (item.mark_key, item.media, item.ids, item.title))
     already = f" {held} already there." if held else ""
 
-    if data.get("dry_run"):
-        message = (f"Add {len(wanted)} watching title{'' if len(wanted) == 1 else 's'} "
-                   f"from this month to {service}?{already}" if wanted else
-                   f"Nothing to add — every watching title this month is already in {service} "
-                   f"or has no id {service} can use.")
-        return JSONResponse({"ok": True, "count": len(wanted), "service": target, "message": message})
+    if not data.get("commit"):
+        if not wanted:
+            return refuse(f"Nothing to add — every watching title this month is already "
+                          f"in {service} or has no id {service} can use.")
+        return _add_all_answer(
+            request, endpoint,
+            confirm=f"Add {len(wanted)} watching title{'' if len(wanted) == 1 else 's'} "
+                    f"from this month to {service}?{already}")
 
     # Three at a time, as the page's own button-by-button add always was: these
     # are writes into a service this app does not control and cannot hurry.
     gate = asyncio.Semaphore(3)
 
-    async def add(library_id: str, media, ids, title) -> tuple[str, dict]:
+    async def add(library_id: str, key, media, ids, title) -> tuple[tuple, dict]:
         async with gate:
-            return library_id, await integrations_routes.add_title(settings, target, media, ids, title)
+            return ((key, media, ids),
+                    await integrations_routes.add_title(settings, target, media, ids, title))
 
-    results = await asyncio.gather(*(add(key, *title) for key, title in wanted.items()))
-    added = [key for key, result in results if result.get("ok")]
+    results = await asyncio.gather(*(add(library_id, *rest)
+                                     for library_id, rest in wanted.items()))
+    added = [title for title, result in results if result.get("ok")]
     failed = len(results) - len(added)
-    message = (f"Added {len(added)} to {service}."
-               + (f" {failed} could not be added." if failed else "") + already)
-    return JSONResponse({"ok": not failed or bool(added), "service": target,
-                         "added": added, "message": message})
+    return _add_all_answer(
+        request, endpoint, ok=not failed or bool(added),
+        message=(f"Added {len(added)} to {service}."
+                 + (f" {failed} could not be added." if failed else "") + already),
+        # THE MARKS ARE READ AFTER THE ADDS, from a LibraryView built now: every
+        # successful add remembered its id, so the buttons come back marked
+        # without this restating what "added" looks like.
+        marks=_marks_for(integrations_routes.LibraryView(settings), target, added))
 
 
 @guard.get("/calendar/fragments/season-line", AuthLevel.CALENDAR_APPROVED)
@@ -1400,12 +1579,21 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     thing, and a second route would be a second gate, a second refusal shape and
     a second place the client decides who to ask.
 
-    THE PICTURE AND THE NAME COME FROM THE CARD, not from the answer, and they
-    are the two parameters the browser adds rather than the template: the
-    source-flip control can change either after the card was rendered. Both are
-    echoed back into the viewer's own page from the viewer's own request, which is
-    why they may be query parameters here and may not be on the public share
-    route — see share_routes._Described for that half.
+    THE NAME, THE PICTURE AND THE DESCRIPTION COME FROM THE CARD, not from the
+    answer: those three are what this viewer's own field order picked, and
+    calendar/source-swap.js can flip any of them after the card was rendered, so
+    a panel drawn from the answer alone would open on words the reader was not
+    just looking at.
+
+    THE REQUEST NAMES A SERVICE FOR EACH, NOT THE VALUE. `?title=simkl` is read
+    back out of the row this card was drawn from (`entries.stored_values`), which
+    is one indexed lookup on the `key` the card already sends, and it means
+    nothing a caller WROTE is rendered into a response served from the owner's
+    origin — the rule share_routes._Described has always held the public panel to,
+    now holding on the signed-in one as well. A parameter absent, naming a service
+    with no row for this title, or naming nothing this app has registered leaves
+    the field unanswered, and the panel draws the describing service's own, which
+    is what it drew before any of this existed.
 
     Catalogue credentials only, for the same reason as the season line: everything this
     returns — overview, cast, the episode list — is public and shared, and
@@ -1456,10 +1644,16 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
     if episodes_only:
         return details_panel.season_pane(request, details, media=media,
                                          season=season, progress=progress)
+    # WHAT THE CARD IS SHOWING, read back from the row it was drawn from — one
+    # lookup for all three, and the only thing the request itself supplied is a
+    # service's name per field. See the docstring, and `entries.stored_values`.
+    shown = await calendar_entries.stored_values(
+        params.get("key", ""),
+        {name: params.get(name, "") for name in calendar_entries.SHOWN_FIELDS})
     return details_panel.panel(
         request, details, media=media, season=season,
-        title=params.get("title", ""), poster=params.get("poster", ""),
-        overview=params.get("overview", ""),
+        title=shown.get("title", ""), poster=shown.get("poster", ""),
+        overview=shown.get("overview", ""),
         links=detail_source.outbound_links(ids, media),
         progress=progress,
         actions=await _library_actions(request, settings, media, params),
@@ -1485,16 +1679,20 @@ async def _library_actions(request: Request, settings, media: str, params) -> st
     administrator (_card.html), rather than from the describing service's answer:
     the card's buttons behind the panel were drawn from those ids, and a button
     here marked from a different answer could disagree with them about the same
-    title. The panel delivers what this returns out-of-band into its header."""
+    title. The panel delivers what this returns out-of-band into its header.
+
+    THE IDS DECIDE WHAT A BUTTON SAYS AND THE KEY IS WHAT IT POSTS. The ids
+    answer "is this title in that library"; the add itself names the card and
+    lets the route read the ids back, so what reaches the template is the key."""
     library = _library(await auth.current_user(request), settings)
     if library is None:
         return ""
-    ids = {"tvdb": params.get("tvdb", ""), "tmdb": params.get("tmdb", "")}
-    buttons = library.buttons(media, ids)
+    buttons = library.buttons(
+        media, {"tvdb": params.get("tvdb", ""), "tmdb": params.get("tmdb", "")})
     if not buttons:
         return ""
     return Markup(templates.get_template("_library_actions.html").render(
-        buttons=buttons, media=media, ids=ids, title=params.get("title", "")))
+        buttons=buttons, key=params.get("key", "")))
 
 
 async def _viewer_progress(request: Request, key: str | None, season: int | None,

@@ -75,7 +75,6 @@ PAGE_SCRIPTS = {
         "static/js/nav.js",
         "static/js/calendar/view.js",
         "static/js/calendar/layout.js",
-        "static/js/calendar/arr-buttons.js",
         "static/js/calendar/source-swap.js",
         "static/js/calendar/cert-picker.js",
         "static/js/calendar/filters.js",
@@ -100,6 +99,11 @@ PAGE_SCRIPTS = {
         "static/js/tracker/emoji.js",
         "static/js/tracker/backup.js",
         "static/js/tracker/backfill.js",
+        # The calendar's file, on this page too, because the Konami code is ONE
+        # listener for both — see static/js/calendar/easter-egg.js. Loading it
+        # twice is not a re-declaration: boost.js keys what is running on the
+        # file's PATH, and a page that already has it does not fetch it again.
+        "static/js/calendar/easter-egg.js",
         "static/js/tracker/boot.js",
     ),
     "rankings": (

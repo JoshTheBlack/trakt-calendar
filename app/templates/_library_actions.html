@@ -2,6 +2,8 @@
    the calendar's details route and handed to the panel as its header actions,
    which _details.html delivers out-of-band into the shell's #detailsActions.
    The same macro as a card's own buttons, so the panel and the card behind it
-   say the same thing about the same title. #}
+   say the same thing about the same title — and an add made from either marks
+   both, because a redrawn button is addressed by the id the service matches on
+   rather than by which element was pressed. #}
 {% import '_library_button.html' as library %}
-{%- for b in buttons %}{{ library.button(b, media, ids, title, wide=True) }}{% endfor -%}
+{%- for b in buttons %}{{ library.button(b, key, wide=True) }}{% endfor -%}

@@ -360,17 +360,36 @@ class TheIdsThePanelIsOpenedWithTests(unittest.TestCase):
         self.assertIn("trakt=trakt-id", address)
         self.assertIn("simkl=simkl-id", address)
 
-    def test_a_card_whose_services_disagree_about_its_description_sends_it(self):
-        """The panel draws the description on the card, flipped or not, and it can
-        only do that if the address carries it."""
+    def test_the_three_shown_fields_travel_as_a_SERVICE_NAME(self):
+        """The panel opens on the name, picture and description the card is
+        showing, which the describing service's own answer may disagree with. It
+        used to be told them by VALUE — a card whose services wrote different
+        descriptions shipped the whole of one in an attribute and asked for it
+        back in a URL, measured at 1,790 characters at its longest on one real
+        database. A service's name is one word, and the route reads the row."""
         address = self._address(_card_html(
-            _record(Source.TRAKT), _record(Source.SIMKL, overview="Another overview.")))
-        self.assertIn("overview=", address)
+            _record(Source.TRAKT),
+            _record(Source.SIMKL, overview="Another overview.", title="Another Title")))
+        for field in ("title", "poster", "overview"):
+            with self.subTest(field=field):
+                self.assertRegex(address, field + "=(trakt|simkl)(&|$)")
+        self.assertNotIn("Another overview.", address)
 
-    def test_a_card_with_one_description_sends_none(self):
-        """Nothing to disagree about, so the answer's own is drawn and every card
-        is spared a second copy of its description in an attribute."""
-        self.assertNotIn("overview=", self._address(_card_html(_record(Source.SIMKL))))
+    def test_the_name_is_the_service_whose_value_is_on_screen(self):
+        """Which is the same question the card asks to decide which service's mark
+        to draw beside the field, so the two cannot disagree — see
+        Record.shown_source."""
+        html = _card_html(_record(Source.TRAKT),
+                          _record(Source.SIMKL, overview="Another overview."))
+        shown = re.search(r'class="overview" data-field="overview" data-source="(\w+)"', html)
+        self.assertIsNotNone(shown, "the card drew no source on its description")
+        self.assertIn("overview=" + shown.group(1), self._address(html))
+
+    def test_a_card_only_one_service_described_names_that_one(self):
+        """There is nothing to disagree about, and the answer is still worth
+        naming: which service DESCRIBES the title is chosen separately from which
+        one listed it, so the two can differ even here."""
+        self.assertIn("overview=simkl", self._address(_card_html(_record(Source.SIMKL))))
 
     def test_a_simkl_only_card_asks_with_simkls_alone(self):
         """A service the card has no id for is left off the address rather than

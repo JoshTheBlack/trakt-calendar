@@ -8,10 +8,27 @@
    nothing marks it afterwards — the page used to poll for both facts every
    minute and mark every card after it painted, the server's own cards included.
 
-   It carries what an add sends (static/js/calendar/arr-buttons.js), and
-   `data-library-id`: the one of the title's ids that service matches on. That is
-   what lets an add mark every other button for the same title in the same
-   library without the browser knowing which id each service uses.
+   THE BUTTON IS THE WHOLE OF THE ADD. `hx-post` plus `hx-json-enc` sends
+   application/json, which is what app/authz.py's request-shape guard admits, so
+   there is no script between the press and the write; `hx-swap="none"` because
+   the answer is addressed to the buttons and the toast out of band rather than to
+   this one (_library_answer.html). The busy look is htmx's own `.htmx-request`
+   class, which it puts on the element for exactly as long as the request is in
+   flight — and takes off again however the request ends, which is the half a
+   hand-written one kept getting wrong.
+
+   IT POSTS THE CARD'S KEY AND THE SERVICE, AND NOTHING ELSE A WRITE DEPENDS ON.
+   The route reads the ids off the rows it drew this card from, so an id edited
+   into the page cannot reach the operator's own Sonarr. `data-library-id` stays
+   because it is what an ANSWER addresses — the one of the title's ids that
+   service matches on, which is how one redrawn button reaches every copy of
+   itself on the page without the browser knowing which id each service uses.
+
+   `oob` IS THE ANSWER'S SPELLING of the same button: `outerHTML:<selector>`,
+   which htmx splits at the FIRST COLON — and only when the value contains no
+   space, so the selector below is written tight. Both the service and the id are
+   in it because a film's Radarr and Seerr buttons share a TMDB id and are not the
+   same button.
 
    `wide` is the panel's spelling — "Add to Sonarr" — where a card has room for
    the service's name alone. #}
@@ -22,15 +39,17 @@
     disabled and says why, rather than offering an add the service will refuse. -#}
 {% set ID_NAMES = {'sonarr': 'TVDB', 'radarr': 'TMDB', 'seer': 'TMDB'} %}
 
-{% macro button(b, media, ids, title, wide=False) -%}
+{% macro button(b, key, wide=False, oob=False) -%}
 {%- set name = LIBRARY_NAMES[b.kind] -%}
 {%- set verb = 'Request on' if b.kind == 'seer' else 'Add to' -%}
 <button type="button" class="arr-btn {{ b.kind }}{% if b.in_library %} in-library{% elif not b.reachable %} unreachable{% endif %}"
-        data-arr="{{ b.kind }}" data-library-id="{{ b.library_id }}" data-media="{{ media }}"
-        data-tvdb="{{ ids.get('tvdb') or '' }}" data-tmdb="{{ ids.get('tmdb') or '' }}" data-title="{{ title }}"
+        data-arr="{{ b.kind }}" data-library-id="{{ b.library_id }}"
+        {%- if oob %} hx-swap-oob="outerHTML:.arr-btn[data-arr='{{ b.kind }}'][data-library-id='{{ b.library_id }}']"{% endif %}
         {%- if b.in_library %} title="Already in {{ name }}"
         {%- elif not b.library_id %} disabled title="No {{ ID_NAMES[b.kind] }} id, so {{ name }} can't add this"
         {%- elif not b.reachable %} disabled title="{{ name }} is unreachable"
-        {%- else %} title="{{ verb }} {{ name }}"{% endif %}
-        onclick="addToArr(this)"><img src="/static/icons/{{ b.kind }}.png" alt="">{% if wide %} {{ verb }} {{ name }}{% else %}<span>{{ name }}</span>{% endif %}</button>
+        {%- else %} title="{{ verb }} {{ name }}"
+                    hx-post="/calendar/library/add" hx-json-enc hx-swap="none"
+                    hx-vals='{{ {'key': key, 'target': b.kind} | tojson }}'{% endif %}
+        ><img src="/static/icons/{{ b.kind }}.png" alt="">{% if wide %} {{ verb }} {{ name }}{% else %}<span>{{ name }}</span>{% endif %}</button>
 {%- endmacro %}

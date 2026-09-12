@@ -204,7 +204,15 @@ written out, and that part is worth matching.
 .venv/Scripts/python.exe -m pytest -q tests/calendar/test_cache.py
 ```
 
-Run targeted files while iterating and the full suite before committing.
+**WHICH RUN A COMMIT NEEDS DEPENDS ON WHERE IT LANDS.** A commit on a BRANCH
+needs the targeted files — the ones covering what changed, plus whatever the
+change reaches into. A commit on MAIN, and any merge back into main, needs the
+FULL SUITE. The full run is ~6.5 minutes, which is cheap once at the point work
+becomes everybody's and expensive at every step of getting there; a branch is
+where the iterating happens, so the targeted run is what keeps it honest without
+making a commit something to put off.
+
+Run targeted files while iterating.
 `tests/` mirrors `app/`, so where a test lives says which part it covers.
 `tests/encryption/` is named for a concern instead of a package because the
 at-rest key path it covers end to end genuinely spans two: the kernel's

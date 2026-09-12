@@ -7,29 +7,46 @@
    `form.reset()` and its save is the form's own values — neither needs a script
    that knows what a chip is.
 
-   THE RADIOS ARE THE KEYBOARD CONTROL AND THE BUTTON IS THE POINTER ONE. A
+   THE RADIOS ARE THE KEYBOARD CONTROL AND THE LABELS ARE THE POINTER ONE. A
    radiogroup already does arrow-key cycling, labelling and ARIA properly, so the
-   real inputs are what a keyboard reaches; the visible face is a button taken out
-   of the tab order and hidden from assistive tech, existing only so that a
-   pointer can cycle the three in one press instead of three. Nothing is
-   duplicated — the button sets the radios and reads back from them.
+   real inputs are what a keyboard reaches; the visible face is a LABEL hidden
+   from assistive tech, existing only so that a pointer can cycle the three in one
+   press instead of three.
+
+   THE CYCLE IS THE MARKUP. Each radio is followed by the label that belongs to
+   the answer AFTER it, and the stylesheet draws only the label whose radio is
+   checked — so "grey, then only these, then not these, then grey" is three `for`
+   attributes and a `:checked +` rule. It used to be a click listener and a
+   three-element order in calendar/filters.js, and neither knew the cycle any
+   better than the browser does.
+
+   THE ids ARE POSITIONAL, not built from the token, because a token is free text
+   — "Talk Show", a network with a slash in it — and an id with a space in it is
+   an id nothing can point `for` at. `index` is the chip's place in its field, so
+   the field's own name plus that number is unique on the panel without the token
+   appearing in it at all.
 
    THE NAME CARRIES THE DESTINATION. `chip:<pref column>:<token>` is spelled by
    app/calendar/vocab.py's `field_name` and parsed back by the same module, so
    this template never spells the format itself. #}
-{% macro chip(state) %}
+{% macro chip(state, field, index) %}
+{%- set id = 'fchip-' ~ field ~ '-' ~ index -%}
 <span class="fchip" role="radiogroup" aria-label="{{ state.label }}">
-    <input type="radio" name="{{ state.name }}" value=""
+    <input type="radio" id="{{ id }}-0" name="{{ state.name }}" value=""
            autocomplete="off" aria-label="{{ state.label }}: not filtered"
            {% if state.mode == '' %}checked{% endif %}>
-    <input type="radio" name="{{ state.name }}" value="include"
+    <label class="fchip-face" for="{{ id }}-1" aria-hidden="true"
+           title="{{ state.label }} — press to keep only this">{{ state.label }}</label>
+    <input type="radio" id="{{ id }}-1" name="{{ state.name }}" value="include"
            autocomplete="off" aria-label="{{ state.label }}: only this"
            {% if state.mode == 'include' %}checked{% endif %}>
-    <input type="radio" name="{{ state.name }}" value="exclude"
+    <label class="fchip-face" for="{{ id }}-2" aria-hidden="true"
+           title="{{ state.label }} — press to filter this out">{{ state.label }}</label>
+    <input type="radio" id="{{ id }}-2" name="{{ state.name }}" value="exclude"
            autocomplete="off" aria-label="{{ state.label }}: filter out"
            {% if state.mode == 'exclude' %}checked{% endif %}>
-    <button type="button" class="fchip-face" tabindex="-1" aria-hidden="true"
-            title="{{ state.label }} — press to cycle: not filtered, only this, filter out">{{ state.label }}</button>
+    <label class="fchip-face" for="{{ id }}-0" aria-hidden="true"
+           title="{{ state.label }} — press to stop filtering on this">{{ state.label }}</label>
 </span>
 {% endmacro %}
 

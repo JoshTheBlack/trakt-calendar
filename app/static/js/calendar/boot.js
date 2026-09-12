@@ -22,17 +22,21 @@
 function initCalendarPage() {
     readPageContext();
     initCertPickers();
-    updateCols();
     initDistraktNav();
     initBuildTap();
     readViewData();
-    updateEmptyDays();
+    syncChipReach();
     initDayChips();
     // LAST, AND FROM HERE RATHER THAN FROM DOMContentLoaded. Following a search
     // result is a BOOSTED navigation: the body is swapped and that event never
     // fires, so a jump aimed at a card highlighted nothing on the one path the
     // feature exists for. Every arrival runs this init — cold load, boosted
     // navigation and Back alike — which is the whole reason it exists.
+    //
+    // IT IS THE BOOSTED ARRIVAL THAT STILL NEEDS IT. A cold load lands on the
+    // anchor by itself now and holds there; a boosted one is scrolled by htmx at
+    // swap time and drifts afterwards, by 842px in Firefox. The measurement is in
+    // calendar/search.js, beside the loop it kept.
     scrollToJumpTarget();
 }
 
@@ -56,7 +60,7 @@ function applyViewStateTo(root) {
         setCardState(card, pendingMarks.get(id));
         moved = true;
     });
-    if (moved) updateEmptyDays();
+    if (moved) syncChipReach();
 }
 
 // A BOOSTED arrival is not handled here. static/js/boost.js owns those: it has to

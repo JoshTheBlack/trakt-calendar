@@ -22,7 +22,12 @@
    keeps its scripts — see static/js/boost.js, which reads this and applies both.
    Inside the body deliberately: it has to travel with the swap, and it has to
    survive a Back, which htmx serves from its own cache with no request at all. #}
-<div id="pageMeta" hidden data-page="calendar" data-body-class="{{ body_class }}"></div>
+{# `data-distrakt` SAYS THERE IS SOMEWHERE TO GO, and it is on this element
+   rather than on `window` because it is a fact about the page on screen: a swap
+   brings the new page's #pageMeta with it, so the reveal cannot fire on a page
+   that never offered one. The server resolves it from the session — see the
+   context key of the same name — and it gates the REVEAL, not the menu item. #}
+<div id="pageMeta" hidden data-page="calendar" data-body-class="{{ body_class }}"{% if distrakt_available %} data-distrakt="1"{% endif %}></div>
 <div id="pageData" hidden data-month="{{ month }}" data-year="{{ year }}" data-endpoint="{{ endpoint.key }}" data-total="{{ total }}"></div>
 {# What the page knows about itself that the client still needs after paint: the
    month's per-show card counts (so a toggle can move the stat tiles without
@@ -224,9 +229,9 @@
            affordance. Left out of the page entirely for everyone else — a button
            that always fails is worse than no button. #}
         {% if is_admin and ((endpoint.media == 'movie' and settings.radarr_configured) or (endpoint.media != 'movie' and settings.sonarr_configured)) %}
-        <button type="button" id="addAllBtn" class="pill-btn" onclick="addAllToArr(event)" title="Add every watching item this month to {{ 'Radarr' if endpoint.media == 'movie' else 'Sonarr' }}">
-            <img class="pill-icon" src="/static/icons/{{ 'radarr' if endpoint.media == 'movie' else 'sonarr' }}.png" alt=""> Add all
-        </button>
+        {# The same partial the route answers with, so the button on the page and
+           the button a Cancel draws are one thing — see _add_all.html. #}
+        {% with query = '?' ~ request.url.query if request.url.query else '', confirm = '', message = '', marks = [] %}{% include '_add_all.html' %}{% endwith %}
         {% endif %}
         <button type="button" class="pill-btn" onclick="openShare()">🔗 Share</button>
 {% endcall %}
@@ -343,23 +348,25 @@
   haven't been applied to {{ 'it' if unenriched == 1 else 'them' }} yet.</div>
 {% endif %}
 
+{# THE MONTH, IN DATE ORDER, drawn from ONE list. A day is either rendered with
+   its cards or announced as a placeholder that pulls them in when the viewer
+   reaches it — so first paint costs a handful of cards instead of a month of
+   them, and a day nobody scrolls to is never built at all.
+
+   WHICH IT IS, IS A FLAG ON THE DAY rather than which list it came from, and that
+   is the whole reason there is one loop here. The days drawn with their cards are
+   NOT a prefix: a jump into the 28th ships that day too (calendar/routes.py), and
+   with two lists it was appended after the fifth — so the month read 1, 2, 3, 4,
+   5, 28, then 6 onwards. #}
 <main>
-    {% if not grouped %}
-        {% if not error %}
-        <div class="empty-state">
-            <div class="emoji">🕵️</div>
-            <div>No items matched your filters for this range.</div>
-        </div>
-        {% endif %}
-    {% else %}
-        {% for group in grouped %}{% include "_day_block.html" %}
-        {% endfor %}
+    {% if not days and not error %}
+    <div class="empty-state">
+        <div class="emoji">🕵️</div>
+        <div>No items matched your filters for this range.</div>
+    </div>
     {% endif %}
-    {# Every day after the first few is announced but not fetched: it stands in
-       <main> as itself, with its own heading, anchor and reserved height, and
-       pulls in its cards when the viewer reaches it. A day nobody scrolls to
-       costs one placeholder and nothing else. #}
-    {% for group in skeletons %}{% include "_day_skeleton.html" %}
+    {% for group in days %}{% if group.inline %}{% include "_day_block.html" %}
+    {% else %}{% include "_day_skeleton.html" %}{% endif %}
     {% endfor %}
 </main>
 
@@ -926,13 +933,19 @@
                                 tab: nothing is fetched or stored differently, and it lands on your
                                 next page load. Your movie calendar keeps its own answer.{% endcall %}
                         </div>
+                        {# THE BOX AND ITS FACE ARE SIBLINGS rather than a label
+                           wrapping the box, so the stylesheet can ask the GROUP
+                           whether a second service is ticked — which is what
+                           greys and deadens the last one still on. See .fsources
+                           in style.css; it used to be two functions in
+                           calendar/filters.js, one of which ran on an event a
+                           boosted arrival never fires. #}
                         <div class="fsources">
                             {% for choice in filter_panel.sources.show %}
-                            <label class="fsource">
-                                <input type="checkbox" name="sources_show" value="{{ choice.source }}"
-                                       autocomplete="off"{% if choice.on %} checked{% endif %}>
-                                <span>{{ choice.label }}</span>
-                            </label>
+                            <input type="checkbox" id="fsrc-show-{{ loop.index }}"
+                                   name="sources_show" value="{{ choice.source }}"
+                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
+                            <label class="fsource" for="fsrc-show-{{ loop.index }}">{{ choice.label }}</label>
                             {% endfor %}
                         </div>
                         <p class="hint">At least one has to stay on.</p>
@@ -977,11 +990,10 @@
                         </div>
                         <div class="fsources">
                             {% for choice in filter_panel.sources.movie %}
-                            <label class="fsource">
-                                <input type="checkbox" name="sources_movie" value="{{ choice.source }}"
-                                       autocomplete="off"{% if choice.on %} checked{% endif %}>
-                                <span>{{ choice.label }}</span>
-                            </label>
+                            <input type="checkbox" id="fsrc-movie-{{ loop.index }}"
+                                   name="sources_movie" value="{{ choice.source }}"
+                                   autocomplete="off"{% if choice.on %} checked{% endif %}>
+                            <label class="fsource" for="fsrc-movie-{{ loop.index }}">{{ choice.label }}</label>
                             {% endfor %}
                         </div>
                         <p class="hint">At least one has to stay on.</p>
@@ -1031,16 +1043,25 @@
 
         {# THE ONE PIECE OF MARKUP THE CLIENT BUILDS, and it is authored here so
            that it is still markup an editor and a grep can see. Adding a token
-           the vocabulary does not name clones this and fills in the name and the
-           text; the NAME FORMAT comes from the input's own data-name-prefix,
-           which the server spelled, so nothing in JavaScript knows how a filter
-           field is named. #}
+           the vocabulary does not name clones this and fills in the name, the ids
+           and the text; the NAME FORMAT comes from the input's own
+           data-name-prefix, which the server spelled, so nothing in JavaScript
+           knows how a filter field is named.
+
+           THE ids ARE THE ONE THING THE CLONE HAS TO FINISH. Three labels pointing
+           `for` at the next radio is what makes a chip cycle without script
+           (_filter_chip.html), and `for` matches an id — which a clone cannot
+           inherit, because an id is unique per document. So the clone is given
+           one, from a counter, and the shape stays identical to the chips the
+           server drew. #}
         <template id="fchipTemplate">
             <span class="fchip" role="radiogroup">
                 <input type="radio" value="" autocomplete="off">
+                <label class="fchip-face" aria-hidden="true"></label>
                 <input type="radio" value="include" autocomplete="off" checked>
+                <label class="fchip-face" aria-hidden="true"></label>
                 <input type="radio" value="exclude" autocomplete="off">
-                <button type="button" class="fchip-face" tabindex="-1" aria-hidden="true"></button>
+                <label class="fchip-face" aria-hidden="true"></label>
             </span>
         </template>
     </div>
@@ -1195,16 +1216,17 @@
 
 {% include "_details_modal.html" %}
 
+{# WHERE A SERVER-DRAWN LINE LANDS. static/js/ui.js makes one of these on demand
+   for the toasts it raises, but an out-of-band `beforeend` needs the element to
+   already be on the page — an add answers with its sentence in here, so the page
+   composes nothing from a refusal. #}
+<div id="toastHost"></div>
+
 <script>
     // Server-resolved from the session. Purely a rendering hint: every route the
     // admin-only controls call is gated independently, so a tampered value buys
     // nothing beyond buttons that 403.
     window.IS_ADMIN = {{ "true" if is_admin else "false" }};
-    // Whether the hidden tracker has anything to open for this account. Purely
-    // what the easter egg does on the client — the page and every one of its
-    // endpoints check the same two conditions server-side, so setting this by
-    // hand gets you a refusal rather than a tracker.
-    window.DISTRAKT_AVAILABLE = {{ "true" if distrakt_available else "false" }};
     // Which services could fill a shared link, per calendar the link may open
     // on. The Share panel picks its own calendar, so it needs every answer
     // rather than the one for the page it was opened from.

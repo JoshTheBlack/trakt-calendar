@@ -39,6 +39,28 @@ function closeCalendarSearch() {
 // than one shot, and it is the only thing that survives content growing above
 // the anchor after the fact.
 //
+// THIS WAS MEASURED AGAINST DELETING IT, in Firefox 153 and Chromium 151 against
+// a real month, and it survived the measurement — which is the only reason it is
+// still here.
+//
+// ON A COLD LOAD IT IS NO LONGER NEEDED AND THAT HALF IS GENUINELY DONE. The
+// server ships the target's own day with the shell and draws `id="jump-target"`
+// on exactly one card, so the anchor is in the document when the browser parses
+// it. Typing that address, or opening it from outside the app, lands on the card
+// and HOLDS: measured over seven seconds while the rest of the month filled in,
+// the landing did not move by a pixel in either browser, for a card and for a
+// `#day-` anchor alike. CSS scroll anchoring is what holds it.
+//
+// ON A BOOSTED ARRIVAL IT IS STILL NEEDED, AND THAT IS THE PATH THE FEATURE
+// EXISTS FOR. Following a search result swaps the body rather than reparsing the
+// document, so the scroll is htmx's and it happens at swap time — before the
+// inline days have finished laying out. Measured on the same month: WITHOUT this
+// loop Firefox finished with the card 842px BELOW the fold (top 1842 in a
+// 1000px viewport) while Chromium finished at 450; with it, both finished at
+// ~220. Chromium alone would not have kept it. Safari implements no scroll
+// anchoring at all and could not be measured here, so it is the browser this
+// protects most.
+//
 // TWO TARGETS, ONE MECHANISM, DIFFERENT CLAIMS. `highlight=` names a CARD and is
 // sent only by a stored result, where the calendar's own read path already
 // confirmed that card will be drawn. A `#day-` anchor names a DAY and is what a

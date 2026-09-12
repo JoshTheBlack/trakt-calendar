@@ -1,0 +1,40 @@
+{# ADD ALL, IN ALL THREE OF ITS STATES, drawn by the server every time.
+
+   The button, the confirmation it turns into, and the button again afterwards
+   are ONE partial because they replace each other: every answer this control
+   gives is swapped over the element that was pressed (`hx-swap="outerHTML"` on
+   the button, inherited by the two inside the confirmation), so a state drawn
+   somewhere else would be a state the next answer could not replace. It used to
+   be a pair of hand-written posts, a floating confirmation built in the browser
+   and a sentence composed there from a JSON refusal.
+
+   THE MONTH IS THE PAGE'S OWN QUERY STRING, appended to every address here, so
+   the button, the confirmation and the commit all act on the month being looked
+   at — the route reads it by the same rules the calendar itself does.
+
+   Context: `endpoint` (which service a month of it belongs in), `query`,
+   `confirm` (the sentence, when this is the confirmation), `message`/`ok` (a
+   line to flash), and `marks` (buttons to redraw — see _library_answer.html). #}
+{%- set service = 'Radarr' if endpoint.media == 'movie' else 'Sonarr' -%}
+{%- set icon = 'radarr' if endpoint.media == 'movie' else 'sonarr' -%}
+{% if confirm %}
+<span class="addall-confirm" hx-target="this" hx-swap="outerHTML">
+    <span class="hint">{{ confirm }}</span>
+    {# Cancel DRAWS THE BUTTON AGAIN rather than restoring anything: the
+       confirmation is what is on the page, so the way back is to ask for the
+       control. A read that changes nothing, so it is a GET. #}
+    <button type="button" class="btn-ghost small"
+            hx-get="/calendar/fragments/add-all{{ query }}">Cancel</button>
+    <button type="button" class="btn-primary small"
+            hx-post="/calendar/library/add-month{{ query }}" hx-json-enc
+            hx-vals='{"commit": true}'>Add them</button>
+</span>
+{% else %}
+<button type="button" id="addAllBtn" class="pill-btn"
+        title="Add every watching item this month to {{ service }}"
+        hx-post="/calendar/library/add-month{{ query }}" hx-json-enc
+        hx-target="this" hx-swap="outerHTML">
+    <img class="pill-icon" src="/static/icons/{{ icon }}.png" alt=""> Add all
+</button>
+{% endif %}
+{%- include '_library_answer.html' -%}

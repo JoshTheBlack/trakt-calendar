@@ -278,26 +278,14 @@ async def integrations_options(request: Request):
     return JSONResponse({"ok": True, **opts})
 
 
-@guard.post("/api/integrations/add", AuthLevel.ADMIN)
-async def integrations_add(request: Request):
-    """Add a title to Sonarr (show/TVDB), Radarr (movie/TMDB), or Seerr (request/TMDB).
-
-    Routed by `target`; falls back to the arr service implied by `media`.
-    """
-    data = await authz.json_body(request)
-    media = data.get("media")
-    target = data.get("target") or ("radarr" if media == "movie" else "sonarr")
-    settings = load_settings()
-    title = data.get("title") or "This title"
-
-    if target not in LIBRARY_ID_KEYS:
-        return JSONResponse({"ok": False, "error": "Unknown target."}, status_code=400)
-    if not configured(target, settings):
-        return JSONResponse({"ok": False, "error": f"{LIBRARY_NAMES[target]} isn't configured."},
-                            status_code=400)
-    ids = {"tvdb": data.get("tvdb"), "tmdb": data.get("tmdb")}
-    result = await add_title(settings, target, media, ids, title)
-    return JSONResponse(result, status_code=200 if result.get("ok") else 502)
+# NO ROUTE HERE ADDS A TITLE EITHER, and the reason is the same shape as the one
+# above. The add this module used to expose took the ids out of the REQUEST —
+# `{"tvdb": …, "tmdb": …}` — so a write into the operator's own library was
+# addressed by whatever an attribute on the page said. The calendar's own add
+# (app/calendar/routes.py's `add_to_library`) names the card instead and reads the
+# ids off the rows it drew that card from, which is the rule the rankings board
+# already followed; `add_title` below is the shared verb both it and the whole
+# month's add call.
 
 
 LIBRARY_NAMES = {"sonarr": "Sonarr", "radarr": "Radarr", "seer": "Seerr"}
