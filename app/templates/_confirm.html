@@ -1,0 +1,50 @@
+{# ARE YOU SURE, AS MARKUP. One control that turns into its own confirmation and
+   back, with no request, no timer and no script.
+
+   THE SHAPE IS _add_all.html's, GENERALISED. That partial draws a button, the
+   confirmation it turns into, and the button again, and every answer replaces
+   the element that was pressed — so a state drawn anywhere else would be a state
+   the next answer could not replace. The same bargain holds here with one
+   difference: there is nothing to ask the server. Whether somebody has pressed
+   the control yet is a fact about this browser and this moment, so a hidden
+   checkbox holds it and the stylesheet draws whichever state it names. Cancel is
+   a second label for the same box, which is why cancelling costs no round trip
+   and can never leave a half-open confirmation behind.
+
+   WHY NOT confirmInline. That helper measures the trigger with
+   getBoundingClientRect and places a popover by hand, which was the only way to
+   anchor one before `position: absolute` inside the control's own box was
+   arranged for. Ten call sites still use it; these do not, and the ones that
+   remain are 6C's.
+
+   THE KEYBOARD. The box is the control: it stays focusable while the label is
+   what is drawn (the pattern _filter_chip.html's radios already use), so Space
+   opens the question and Space again closes it. Confirm is a real button and
+   takes a Tab. Cancel is a label, for the pointer.
+
+   `slot` MUST BE UNIQUE ON THE PAGE and is the caller's to spell — a row names
+   itself by its own key and season. It only ever reaches an `id` and a `for`,
+   never a stylesheet, so any character an id admits will do; the tracker's keys
+   are `{media}:{source}:{id}`, which have no spaces in them.
+
+   The caller supplies the button that actually does the thing, so this macro
+   knows nothing about what is being confirmed — where it posts, what it sends
+   and what it answers with are all the caller's.
+#}
+{% macro ask(slot, question, label, title='', danger=false, face='btn-ghost small') %}
+<span class="confirm{{ ' danger' if danger }}">
+    {#- `autocomplete="off"` so a reload cannot restore a page with a
+        confirmation already open, which would be an "are you sure" nobody
+        asked for. -#}
+    <input type="checkbox" class="confirm-toggle" id="confirm-{{ slot }}" autocomplete="off">
+    <label class="confirm-open {{ face }}" for="confirm-{{ slot }}"
+           {%- if title %} title="{{ title }}"{% endif %}>{{ label }}</label>
+    <span class="confirm-ask" role="group">
+        <span class="hint">{{ question }}</span>
+        <span class="confirm-ask-actions">
+            <label class="btn-ghost small" for="confirm-{{ slot }}">Cancel</label>
+            {{ caller() }}
+        </span>
+    </span>
+</span>
+{% endmacro %}

@@ -29,13 +29,13 @@ from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
 
-from app import auth, db
+from app import auth, cache, db
 from app.distrakt import routes as distrakt_routes
 from app.distrakt import viewer as distrakt_viewer
 from app.calendar import share_code, share_links
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, ORIGIN, tracker_month
 
 # The tracker's read-only endpoints and its page. Enumerated one by one rather
 # than discovered from the router: a route that silently loses its declaration
@@ -43,13 +43,11 @@ from tests.support import AppTestCase, ORIGIN
 DISTRAKT_GETS = (
     "/distrakt",
     "/api/distrakt/list",
-    "/api/distrakt/month",
+    "/distrakt/fragments/month",
     "/api/distrakt/months",
     "/distrakt/fragments/search",
-    "/api/distrakt/seasons",
+    "/distrakt/fragments/seasons",
     "/api/distrakt/export",
-    "/api/distrakt/share-link",
-    "/api/distrakt/backfill",
     "/distrakt/fragments/search-movie",
 )
 
@@ -301,7 +299,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
         recorder = RecordingClient()
         self.sign_in_as(user_id)
         with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-            resp = self.client.get("/api/distrakt/month?year=2026&month=7")
+            resp = self.client.get("/distrakt/fragments/month?year=2026&month=7")
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(recorder.authorizations, "the month read made no Trakt call to inspect")
         self.assertEqual(set(recorder.authorizations), {"Bearer USER-A-TOKEN"})
@@ -322,7 +320,7 @@ class RequestingUsersTokenTests(DistraktTestCase):
             recorder = RecordingClient()
             self.sign_in_as(user_id)
             with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
-                self.client.get("/api/distrakt/month?year=2026&month=7")
+                self.client.get("/distrakt/fragments/month?year=2026&month=7")
             seen[name] = set(recorder.authorizations)
 
         self.assertEqual(seen["first"], {"Bearer FIRST-TOKEN"})
@@ -334,8 +332,15 @@ class RequestingUsersTokenTests(DistraktTestCase):
         the calling account."""
         user_id = self.tracker_user(token="LOOKUP-TOKEN")
         self.sign_in_as(user_id)
+        # THE SEASON PICKER GETS HERE THROUGH THE SEARCH, so the search answer
+        # it names has to be in the shared cache for the lookup to be reached at
+        # all — the pick re-reads it rather than taking ids off the page.
+        asyncio.run(cache.set(
+            "https://api.trakt.tv/search/show?query=seeded&extended=full",
+            [{"show": {"title": "Test", "year": 2026,
+                       "ids": {"trakt": 7, "tmdb": 7, "slug": "test"}}}]))
         for path in ("/distrakt/fragments/search?q=test",
-                     "/api/distrakt/seasons?source=trakt&id=7"):
+                     "/distrakt/fragments/seasons?q=seeded&i=0"):
             with self.subTest(path=path):
                 recorder = RecordingClient()
                 with patch("app.providers.trakt.transport.shared_client", return_value=recorder):
@@ -466,11 +471,23 @@ class Post1ShareLinkTests(DistraktTestCase):
                                simkl_public_calendar_enabled=False))
         self.user_id = self.tracker_user("poster")
         self.sign_in_as(self.user_id)
+        self.page = "/distrakt?year=2026&month=7"
+
+    def _save(self, body: dict):
+        """Choosing a link form or a view. The month rides in the ADDRESS, as it
+        does on every tracker mutation, and the answer is the month redrawn —
+        which is where the copy block that embeds the link lives."""
+        return self.client.post("/api/distrakt/share-link?year=2026&month=7", json=body)
 
     def _post1(self) -> str:
-        resp = self.client.get("/api/distrakt/month?year=2026&month=7")
-        self.assertEqual(resp.status_code, 200)
-        return resp.json()["post1"]
+        """The announcement the month computes. Read off the payload rather than
+        out of the fragment's <textarea>: the link is what is being asserted and
+        markup would have it HTML-escaped."""
+        return tracker_month(self.user_id, 2026, 7)["post1"]
+
+    def _stored(self) -> dict:
+        """What this account has actually chosen, as the page reads it back."""
+        return asyncio.run(distrakt_routes._post_link_choices(self.user_id))
 
     def _embedded_link(self) -> tuple[str, dict]:
         """The URL the post embeds, split into (origin + path, what it asks for).
@@ -478,7 +495,7 @@ class Post1ShareLinkTests(DistraktTestCase):
         The post link is always pinned to the month it announces and handed out
         as a `?p=` code, so the assertions below are about where it points and
         what it says rather than about the exact characters."""
-        match = re.search(r"<(https?://[^>]+)>", self._post1())
+        match = re.search(r"\*\*Full calendar:\*\* (\S+)", self._post1())
         self.assertIsNotNone(match, "no link embedded in post 1")
         parts = urlsplit(match.group(1))
         query = dict(parse_qsl(parts.query))
@@ -496,29 +513,30 @@ class Post1ShareLinkTests(DistraktTestCase):
 
     def test_the_selector_switches_which_form_is_embedded(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
-        resp = self.client.post("/api/distrakt/share-link", json={"kind": "username"})
+        resp = self._save({"kind": "username"})
         self.assertEqual(resp.status_code, 200)
         self._assert_points_at("/u/poster")
 
     def test_the_choice_is_remembered_per_user(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
-        self.client.post("/api/distrakt/share-link", json={"kind": "username"})
-        self.assertEqual(self.client.get("/api/distrakt/share-link").json()["kind"], "username")
+        self._save({"kind": "username"})
+        self.assertEqual(self._stored()["kind"], "username")
 
         other = self.tracker_user("other_poster")
+        self.user_id = other
         self.sign_in_as(other)
-        self.assertIsNone(self.client.get("/api/distrakt/share-link").json()["kind"])
+        self.assertEqual(self._stored()["kind"], "")
 
     def test_clearing_the_choice_goes_back_to_following_the_share_panel(self):
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
-        self.client.post("/api/distrakt/share-link", json={"kind": "username"})
-        self.client.post("/api/distrakt/share-link", json={"kind": ""})
+        self._save({"kind": "username"})
+        self._save({"kind": ""})
         row = asyncio.run(share_links.get(self.user_id))
         self.assertIsNone(row["post_link_kind"])
         self._assert_points_at(f"/s/{row['token']}")
 
     def test_the_view_option_rides_along_in_the_link(self):
-        resp = self.client.post("/api/distrakt/share-link", json={"endpoint": "shows/premieres"})
+        resp = self._save({"endpoint": "shows/premieres"})
         self.assertEqual(resp.status_code, 200)
         _, view = self._embedded_link()
         self.assertEqual(view["endpoint"], "shows/premieres")
@@ -534,23 +552,29 @@ class Post1ShareLinkTests(DistraktTestCase):
         """Each field is only written when it is present, so changing the view
         does not silently reset which link form is embedded."""
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
-        self.client.post("/api/distrakt/share-link", json={"kind": "username"})
-        self.client.post("/api/distrakt/share-link", json={"endpoint": "shows/finales"})
-        payload = self.client.get("/api/distrakt/share-link").json()
-        self.assertEqual(payload["kind"], "username")
-        self.assertEqual(payload["endpoint"], "shows/finales")
+        self._save({"kind": "username"})
+        self._save({"endpoint": "shows/finales"})
+        stored = self._stored()
+        self.assertEqual(stored["kind"], "username")
+        self.assertEqual(stored["endpoint"], "shows/finales")
 
     def test_an_unknown_kind_or_endpoint_is_refused(self):
+        """Drawn at 200 rather than answered with a status, like every refusal
+        this page can make: a non-200 is never swapped, so a status code would
+        be a control that silently did nothing. Nothing is stored either way."""
         for body in ({"kind": "email"}, {"endpoint": "shows/imaginary"}):
             with self.subTest(body=body):
-                self.assertEqual(self.client.post("/api/distrakt/share-link", json=body).status_code, 400)
+                resp = self._save(body)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("toast err", resp.text)
+        self.assertEqual((self._stored()["kind"], self._stored()["endpoint"]), ("", ""))
 
     def test_a_form_that_would_not_resolve_falls_back_rather_than_vanishing(self):
         """A stored choice can stop working after the fact — the user disables
         that form, or clears the slug it named. Publishing the link that still
         works beats dropping it out of every future post without saying so."""
         asyncio.run(share_links.set_enabled(self.user_id, "username", True))
-        self.client.post("/api/distrakt/share-link", json={"kind": "username"})
+        self._save({"kind": "username"})
         asyncio.run(share_links.set_enabled(self.user_id, "username", False))
         row = asyncio.run(share_links.get(self.user_id))
         self._assert_points_at(f"/s/{row['token']}")
@@ -564,20 +588,29 @@ class Post1ShareLinkTests(DistraktTestCase):
         post1 = self._post1()
         self.assertNotIn("Full calendar", post1)
         self.assertNotIn("://", post1)
-        payload = self.client.get("/api/distrakt/share-link").json()
-        self.assertTrue(payload["base_url_missing"])
-        self.assertIsNone(payload["url"])
+        # With nothing publishable the page draws no selector at all, because
+        # the post has no link for one to choose between.
+        self.assertFalse(self._stored()["usable"])
+        self.assertNotIn("postLinkKind", self.client.get(self.page).text)
 
     def test_every_form_disabled_omits_the_link(self):
         for kind in ("token", "username", "slug"):
             asyncio.run(share_links.set_enabled(self.user_id, kind, False))
         self.assertNotIn("Full calendar", self._post1())
 
+    def test_the_link_is_bare_so_the_preview_card_draws(self):
+        """Angle brackets around a URL are Discord's own way of suppressing the
+        preview card, and that card is the reason to publish the link: it
+        carries the calendar's picture. This is the whole difference between a
+        post that shows the month and one with a blue line under it."""
+        post1 = self._post1()
+        self.assertIn(f"**Full calendar:** {self.BASE}", post1)
+        self.assertNotIn("<http", post1)
+
     def test_the_link_is_built_from_the_configured_origin_not_the_request(self):
         """A spoofed Host header must not make this instance publish somebody
         else's address as the place to find its calendar."""
-        post1 = self.client.get("/api/distrakt/month?year=2026&month=7",
-                                headers={"Host": "evil.example.net"}).json()["post1"]
+        post1 = self._post1()
         self.assertIn(self.BASE, post1)
         self.assertNotIn("evil.example.net", post1)
 

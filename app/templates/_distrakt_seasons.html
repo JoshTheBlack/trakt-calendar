@@ -1,0 +1,74 @@
+{#- The add's own address, spelled once for the picker and for the
+    picks-itself case. The month rides in the query string, as it does on every
+    other tracker mutation; the body names the result. The answer is the month
+    redrawn, which also brings the add modal back closed and empty — see
+    _distrakt_month.html. -#}
+{% macro season_post(season) -%}
+hx-post="{{ '/api/distrakt/add-completed' if as_finished else '/api/distrakt/add' }}{{ month_query }}"
+    hx-json-enc hx-vals='{{ {"q": query, "i": index, "season": season} | tojson }}'
+    hx-target="#distraktShowList"
+    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
+{%- endmacro %}
+
+{# WHAT A CLICK ON A SEARCH RESULT ANSWERS WITH, in all three of its states:
+   a season picker, a refusal, or a season that names itself.
+
+   ONE PARTIAL FOR ALL THREE because each of them replaces the same slot, and a
+   state drawn anywhere else is one the next answer cannot replace — the shape
+   _add_all.html established. The refusal used to be a second element beside the
+   picker, hidden and unhidden by hand, which is two places for one answer to
+   live.
+
+   A SEASON BUTTON NAMES THE RESULT AND NOTHING ELSE. It sends the query that
+   found it, that result's key and the season picked; the route reads the title,
+   the network and every id back out of the same two answers this fragment was
+   drawn from (routes._resolve_pick). No id the browser could edit reaches a
+   write.
+
+   Context: `pick` (a routes.Pick, or None when nothing stored answers to that
+   name), `unavailable` (why the service could not be asked), `query`, `index`,
+   `month_query`, `as_finished` (this month is behind the clock, so an add
+   records something as finished during it). #}
+<div id="addSeasonPick" class="distrakt-season-pick">
+{%- if unavailable %}
+{# The service that knows this title could not be reached. Its own sentence,
+   because the reason it gives is more use than a fixed one. #}
+<p class="distrakt-note distrakt-warn">That season could not be looked up: {{ unavailable }}</p>
+{%- elif pick is none %}
+{# NOT "search failed": the search itself is gone from the store, which is a
+   different thing from a title that cannot be described. It happens to a modal
+   left open across a long enough gap, and the honest instruction is to ask
+   again. #}
+<p class="distrakt-note distrakt-warn">That search has expired — search for it again.</p>
+{%- elif pick.unkeyable %}
+{# Said HERE, after the per-title lookup that had its chance to resolve an id,
+   rather than on the row: a show hit arriving without a shared id is
+   under-described, not unfileable, and refusing it up front would refuse the
+   anime season-titles this flow exists to reach. The sentence is the server's
+   own — the same one the add route's refusal uses. #}
+<p class="distrakt-note distrakt-warn">{{ pick.unkeyable }}</p>
+{%- elif pick.named_season is not none %}
+{# THE HIT IS A SEASON — a source that files each season of a series as its own
+   title knows which season of the underlying show it is. Asking which season
+   would be asking a question the row already answered, and offering the whole
+   show's list invites picking one nobody searched for. So the add is made on
+   sight: `hx-trigger="load"` is the declarative form of what the browser used
+   to do the moment the lookup came back. #}
+<p class="distrakt-note">Adding {{ pick.title }} season {{ pick.named_season }}…</p>
+<button type="button" hidden hx-trigger="load"
+        {{ season_post(pick.named_season) }}></button>
+{%- elif not pick.seasons %}
+<div class="distrakt-empty">No aired seasons found.</div>
+{%- else %}
+<div class="field">
+    <label>Pick a season for <span>{{ pick.title }}</span></label>
+    <div class="distrakt-season-list">
+        {%- for season in pick.seasons %}
+        <button type="button" class="btn-ghost small" {{ season_post(season.season) }}>
+            S{{ '%02d' % season.season }} ({{ season.episode_count }} eps)
+        </button>
+        {%- endfor %}
+    </div>
+</div>
+{%- endif %}
+</div>

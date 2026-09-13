@@ -8,17 +8,14 @@
    library — including the ones on a day that arrived after the page did.
 
    THE SENTENCE RIDES ALONG rather than being composed in the browser from a
-   refusal: `#toastHost` is in the shell and this appends to it, the way the
-   rankings board's own flash does.
+   refusal, through the one partial every answer in the app says a line with
+   (_toast.html).
 
    Context: `marks`, one entry per title to redraw ({key, buttons}); `message`
    and `ok`. A refusal draws no buttons and only the line. #}
 {% import '_library_button.html' as library_button %}
+{% import '_toast.html' as toast %}
 {%- for mark in marks %}
 {%- for b in mark.buttons %}{{ library_button.button(b, mark.key, oob=True) }}{% endfor %}
 {%- endfor %}
-{%- if message %}
-<div id="toastHost" hx-swap-oob="beforeend">
-    <div class="toast {{ 'ok' if ok else 'err' }} is-flash" role="status">{{ message }}</div>
-</div>
-{%- endif %}
+{{- toast.flash(message, ok) }}

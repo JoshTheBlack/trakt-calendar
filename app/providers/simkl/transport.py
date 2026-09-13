@@ -910,6 +910,7 @@ async def cached_paged_get(
     pool: http_pool.Pool,
     ttl_seconds: int | None = None,
     raise_errors: bool = False,
+    cache_only: bool = False,
     app: str = DEFAULT_APP_NAME,
     max_pages: int = MAX_PAGES,
 ) -> list:
@@ -937,6 +938,11 @@ async def cached_paged_get(
     unless `raise_errors` says the caller would rather know. Partial results are
     the honest answer to "the first two pages arrived and the third did not", and
     they are what the viewer would have seen had the query been narrower.
+
+    `cache_only=True` NEVER WALKS ANYTHING: it answers the stored list — even
+    past its TTL — or an empty one, the same meaning `cached_get` gives the flag.
+    It is how a route acts on a result the page NAMED rather than handed over,
+    without the naming becoming a second search (see base.SearchPort).
     """
     key = cache_key(path, params)
     ttl = ttl_seconds if ttl_seconds is not None else settings.cache_ttl_minutes * 60
@@ -944,6 +950,11 @@ async def cached_paged_get(
     if cached is not None:
         _perf.debug("cacheHIT  %s", path)
         return cached if isinstance(cached, list) else []
+    if cache_only:
+        # Stale beats blank, exactly as `cached_get` decides it one function
+        # down: this caller can never trigger a refresh to fix a hard miss.
+        stale = await cache.get_stale(key)
+        return stale if isinstance(stale, list) else []
     out: list = []
     page = 1
     while page <= max_pages:

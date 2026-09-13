@@ -1,329 +1,47 @@
-// Rendering the month: the bucket order, the sort inside each bucket, and the
-// markup for one show row and one film row.
+// What the tracker's rows still need a browser for, and it is one thing.
 //
-// Building HTML only — what the buttons in a row DO is tracker/actions.js.
+// EVERYTHING ELSE IN THIS FILE WAS MARKUP IN STRINGS: the bucket order, the
+// labels, two comparison functions, and the show, film and question rows
+// themselves. All of it is templates/_distrakt_rows.html now, drawn from the
+// payload the server was already building — and the vocabulary it re-declared
+// (six bucket labels, seven weekday names, a leading-article sort) went with it,
+// back to app/distrakt/discord_fmt.py where the announcement posts read the same
+// facts. The two SORTS had drifted while they sat side by side in two languages:
+// this one matched a leading article followed by any whitespace where Python
+// matches a literal space, and ordered with localeCompare where Python orders by
+// code point, so a title separated by a non-breaking space and any accented
+// title came out in a different order on the page than in the post the page
+// exists to produce.
 
-const BUCKET_LABELS = {
-    cleanup: 'Cleanup', keepup: 'Keepup', new: 'New Shows', returning: 'Returning',
-    completed: 'Completed', abandoned: 'Abandoned',
-};
-const BUCKET_ORDER = ['cleanup', 'keepup', 'new', 'returning', 'completed', 'abandoned'];
-const WEEKDAY_ORDER = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-
-// Alphabetical sort key ignoring a leading article (mirrors discord_fmt._sort_title).
-function sortTitle(t) {
-    const s = String(t || '').trim().toLowerCase();
-    const m = s.match(/^(the|a|an)\s+(.*)$/);
-    return m ? m[2] : s;
-}
-const byTitle = (a, b) => sortTitle(a.title).localeCompare(sortTitle(b.title));
-// New Shows / Returning order by release (premiere) date, ties by title.
-function premiereKey(s) {
-    const p = String(s.premiere || '').split('/');
-    return (parseInt(p[0], 10) || 99) * 100 + (parseInt(p[1], 10) || 99);
-}
-const byPremiere = (a, b) => (premiereKey(a) - premiereKey(b)) || byTitle(a, b);
-
-// `emptyNote` is the server's own sentence for why this month is empty, when it
-// knows one — a month waiting to be imported reads very differently from one
-// that simply has nothing on it yet, and the blank list looks identical either
-// way. Falls back to the generic line for every month that is just empty.
-// A question the history pull raised that only the viewer can settle. Thin on
-// purpose: it says only what the history event itself said, because the season
-// lookup that would fill in counts and dates is exactly the cost this row exists
-// to defer until somebody actually wants it.
+// MEASURING WHAT THE BROWSER HAS ACTUALLY LAID OUT is the one question no server
+// can answer: whether a title is wider than the cell drawn for it depends on the
+// font, the viewport and the reader's own text size. So a title marquee-scrolls
+// on hover only when it genuinely overflows.
 //
-// Drawn ABOVE every section rather than inside one — it is not a bucket and it
-// is not part of the month; it is a question, and a question buried under six
-// headings is a question nobody answers.
-//
-// THREE QUESTIONS SHARE ONE ROW because they read the same way and are answered
-// the same way; only the sentence and what ✓ does differ. Saying no is one
-// statement whichever it was — do not put this season on my list, stop asking —
-// so all three send the same dismissal.
-//
-// The title and the ids travel on the row's dataset rather than through the
-// onclick attribute, for the reason deleteFilm already documents: a show called
-// "Good Luck, Have Fun, Don't Die" carries both quote characters, and either one
-// ends the attribute early and kills the handler.
-const ASK_KINDS = {
-    unknown: {
-        sentence: 'Should we add this to Distrakt?',
-        yesTitle: 'Add this season',
-        yes: 'addUnknownSeason',
-    },
-    givenUp: {
-        sentence: "You'd given this up. Add it back to Distrakt?",
-        yesTitle: 'Put this season back on your list',
-        yes: 'resumeGivenUpSeason',
-    },
-    // The odd one out: it is not raised by a play, so there is no episode to name
-    // and the sentence is the SERVER's. What raised it is a comparison between
-    // what the month wrote down and what the services say now, and only the server
-    // holds both halves — a sentence assembled here would be a second opinion
-    // about numbers it would have to re-derive to state.
-    unbacked: {
-        yesTitle: 'Work this season out again from what the services say now',
-        yes: 'readdSettledSeason',
-    },
-};
+// DELEGATED, AND ON THE DOCUMENT, because the rows arrive with a fragment and
+// are replaced by every mutation — a listener bound per cell would have to be
+// re-bound after each of those, which is the lifecycle this app keeps deleting.
+// `mouseover`/`mouseout` rather than enter/leave: those two do not bubble.
+document.addEventListener('mouseover', (event) => {
+    if (!(event.target instanceof Element)) return;
+    const cell = event.target.closest('.distrakt-title');
+    if (!cell || cell.classList.contains('scrolling')) return;
+    const inner = cell.querySelector('.tt');
+    if (!inner) return;
+    const overflow = inner.scrollWidth - cell.clientWidth;
+    if (overflow <= 4) return;
+    inner.style.setProperty('--scroll', overflow + 'px');
+    // Long titles take proportionally longer, with a floor so a barely-clipped
+    // one does not flick back and forth.
+    inner.style.setProperty('--dur', Math.max(2.5, overflow / 45) + 's');
+    cell.classList.add('scrolling');
+});
 
-function askRow(u, kind) {
-    const ask = ASK_KINDS[kind];
-    const args = `'${esc(u.key)}', ${u.season}, this`;
-    const season = `S${String(u.season).padStart(2, '0')}`;
-    // A question a PLAY raised names the episode that raised it; one raised by a
-    // settled row names the season and carries the server's own explanation.
-    const text = u.note
-        ? `<strong>${esc(`${u.title || 'Something'} ${season}`)}</strong> — ${esc(u.note)}`
-        : `You watched <strong>${esc(`${u.title || 'Something'} ${season}E${String(u.number).padStart(2, '0')}`)}</strong>. ${esc(ask.sentence)}`;
-    return `
-        <div class="distrakt-unknown-row" data-key="${esc(u.key)}" data-season="${u.season}"
-             data-title="${esc(u.title || '')}" data-ids="${esc(JSON.stringify(u.ids || {}))}">
-            <span class="distrakt-unknown-text">${text}</span>
-            <span class="distrakt-row-actions">
-                <button type="button" class="btn-ghost small" title="${esc(ask.yesTitle)}"
-                        onclick="${ask.yes}(${args})">✓</button>
-                <button type="button" class="btn-ghost small" title="Don't ask about this season again"
-                        onclick="dismissUnknownSeason(${args})">✗</button>
-            </span>
-        </div>`;
-}
-
-// The ones nothing knows about first: a title the tracker has never heard of is a
-// bigger gap than one it holds a verdict on, and a verdict that has lost its
-// backing is the smallest of the three — the row it is about is on the page just
-// below, saying exactly what it has always said.
-function renderAsks(unknown, givenUp, unbacked) {
-    return (unknown || []).map(u => askRow(u, 'unknown')).join('')
-        + (givenUp || []).map(u => askRow(u, 'givenUp')).join('')
-        + (unbacked || []).map(u => askRow(u, 'unbacked')).join('');
-}
-
-function renderShowList(shows, movies, emptyNote, unknown, givenUp, unbacked) {
-    const host = document.getElementById('distraktShowList');
-    const films = movies || [];
-    const asks = renderAsks(unknown, givenUp, unbacked);
-    if (!shows.length && !films.length) {
-        // The questions still stand on an otherwise empty month: they come from
-        // viewing, not from anything the month holds.
-        host.innerHTML = asks + `<div class="distrakt-empty">${esc(emptyNote || 'Nothing tracked yet this month.')}</div>`;
-        return;
-    }
-    const groups = {};
-    BUCKET_ORDER.forEach(b => groups[b] = []);
-    shows.forEach(s => (groups[s.bucket] || (groups[s.bucket] = [])).push(s));
-
-    let html = asks;
-    BUCKET_ORDER.forEach(bucket => {
-        const rows = groups[bucket] || [];
-        if (!rows.length) return;
-        // New/Returning by release date; everything else alphabetical.
-        const cmp = (bucket === 'new' || bucket === 'returning') ? byPremiere : byTitle;
-        html += `<div class="distrakt-bucket-head">${esc(BUCKET_LABELS[bucket] || bucket)}</div>`;
-        if (bucket === 'keepup') {
-            const byDay = {};
-            WEEKDAY_ORDER.forEach(d => byDay[d] = []);
-            rows.forEach(s => (byDay[s.cadence] || (byDay[s.cadence] = [])).push(s));
-            WEEKDAY_ORDER.forEach(day => {
-                const dayRows = byDay[day] || [];
-                if (!dayRows.length) return;
-                html += `<div class="distrakt-weekday-head">${esc(day)}</div>`;
-                html += dayRows.sort(byTitle).map(showRow).join('');
-            });
-        } else {
-            html += rows.slice().sort(cmp).map(showRow).join('');
-        }
-    });
-    // Films watched during the month, in their own block. They were being
-    // recorded, counted and imported while appearing nowhere on this page except
-    // buried in the POST 2 text, which reads exactly like them not being there.
-    if (films.length) {
-        html += `<div class="distrakt-bucket-head">Films</div>`;
-        html += films.slice().sort(byWatchedAt).map(filmRow).join('');
-    }
-    host.innerHTML = html;
-    setupTitleScroll(host);
-}
-
-function byWatchedAt(a, b) {
-    return String(a.watched_at || '').localeCompare(String(b.watched_at || ''));
-}
-
-// A watched film: no buckets, no counts, no progress — a play on a day. The one
-// control it has is ✕, because Trakt's history is not always right about what
-// was watched and there is no roster row to correct it through.
-function filmRow(m) {
-    const day = String(m.watched_at || '').slice(0, 10);
-    return `
-        <div class="distrakt-show-row distrakt-film-row" data-key="${esc(m.key || '')}" data-season="-1">
-            <span class="distrakt-badge">🎬</span>
-            <span class="distrakt-title"><span class="tt">${esc(m.title || 'Untitled')}</span></span>
-            <span class="distrakt-season"></span>
-            <span class="distrakt-network">Film</span>
-            <span class="distrakt-counts">${esc(m.year || '')}</span>
-            <span class="distrakt-dates">${esc(day)}</span>
-            <span class="distrakt-row-actions">${m.key ? `
-                <button type="button" class="btn-ghost small danger" title="Remove this film"
-                        data-title="${esc(m.title || '')}"
-                        onclick="deleteFilm('${esc(m.key)}', this)">✕</button>` : ''}
-            </span>
-        </div>`;
-}
-
-// A season that was finished and is on the pile again — the episode count moved,
-// so there is more of it than there was. Said out loud rather than left to be
-// noticed: a title you remember finishing, sitting back on the list with no
-// explanation, reads as the page having got it wrong.
-// It is a button because dismissing it is the only thing that clears it — not
-// time and not the next load — so the mark has to be pressable where it is read.
-// The row itself opens the details modal on click; details.js ignores clicks that
-// land on a button, so this one does not have to fight it.
-function returnMark(s) {
-    if (!s.returned) return '';
-    return ` <button type="button" class="distrakt-return"
-            title="More of this season exists than when you finished it — click when you've seen this"
-            onclick="acknowledgeReturn('${esc(s.key)}', ${s.season}, this)">back</button>`;
-}
-
-// A service has stopped listing this title. NOT a deletion, and the mark exists
-// so that stays visible: the row keeps its counts and its place, and says which
-// service dropped it. Simkl prescribes deleting the local rows when its library
-// diff no longer names a title; this app records the statement instead, because
-// watch history is not re-derivable from anything here and a wrong deletion is
-// permanent and silent where a wrong mark costs nothing.
-//
-// NOT A BUTTON, WHICH IS THE DIFFERENCE FROM returnMark ABOVE. That marker is
-// cleared only by the viewer pressing it; this one is a claim about what a
-// service currently holds, so the service naming the title again clears it on its
-// own and there is nothing to press. Removing the row for good is the ✕ that was
-// always there — the one thing that deletes a record — and needs no second path.
-function missingMark(s) {
-    const gone = s.missing_sources || [];
-    if (!gone.length) return '';
-    const names = gone.map(name => esc(name)).join(' and ');
-    return ` <span class="distrakt-missing"
-            title="No longer in your ${names} library — your counts here are kept. Use ✕ to remove it.">dropped</span>`;
-}
-
-function showRow(s) {
-    const isNewRet = s.bucket === 'new' || s.bucket === 'returning';
-    // The x/y comes from the server already written out, because when two
-    // accounts report different numbers for a season the row shows BOTH, each
-    // labelled — and that rule is the same one a closed month is written with, so
-    // it has one home rather than a copy here that could disagree with it.
-    const xy = s.counts || `${s.watched}/${s.total}`;
-    // EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED. A completed row used to
-    // draw nothing here, on the reasoning that "finished" already says x equals y
-    // — which is true only while one service is answering. With two, a season
-    // lands in Completed on the PRIMARY service's number, and the other may still
-    // be part-way through it; a blank cell then reads as both of them agreeing the
-    // season is done, which is a claim neither of them made. The string is the
-    // server's (app/distrakt/counts.py), so a row where they disagree arrives here
-    // already carrying both numbers, each named, and drawing it is all that is
-    // left to do. The announcement post deliberately does NOT follow: it is prose
-    // rather than a ledger and carries one number or none (app/distrakt/live.py).
-    // AND THE WHOLE STORY BEHIND IT HANGS OFF IT AS A TOOLTIP. One line has room
-    // for the numbers and nothing else, so a service nobody asked, a service that
-    // agrees, and a service that said "all of it" without itemizing all look
-    // identical in the cell — see app/distrakt/counts.py's counts_detail, which
-    // composes the long form server-side. This draws it and decides nothing: the
-    // sentence arrives finished, the same way `counts_note` beside it does.
-    let counts = isNewRet ? `${xy}${s.cadence ? ', ' + s.cadence : ''}` : xy;
-    // New/Returning: premiere (– finale for weekly). Keepup: finale (end date).
-    let dates = '';
-    if (isNewRet) dates = (s.cadence === 'b') ? (s.premiere || '?/?') : `${s.premiere || '?/?'} – ${s.finale || '?/?'}`;
-    else if (s.bucket === 'keepup') dates = s.finale || '?/?';
-    // A ROW WHOSE TOTALS THE SERVER COULD NOT REFRESH KEEPS ITS NUMBERS. They are
-    // the last ones actually read, which is a real fact about the season, and
-    // blanking them was worse than showing them: a roster whose one catalogue
-    // credential went missing rendered as rows with no counts at all, which reads
-    // as "nothing here" rather than as "nothing new here". What the row owes the
-    // reader is not silence but a mark saying the numbers are not current —
-    // `distrakt-freshness` below, red or green, carrying the server's own
-    // sentence as its tooltip (app/distrakt/live.py composes both, because the
-    // reason differs — unreachable, unconfigured, or a title nothing can look up
-    // — and only the server knows which).
-    // A closed month keeps its ✕ but loses the abandon toggle: what a past month
-    // RECORDS can still be corrected (a season you finished years ago and
-    // re-watched one episode of does not belong on its list), but its verdicts
-    // were settled when it froze and are not up for re-deciding now.
-    const remove = `
-            <button type="button" class="btn-ghost small danger" onclick="deleteShow('${esc(s.key)}', ${s.season}, event, '${esc(s.added_by || '')}')" title="${monthClosed ? 'Remove from this month' : 'Remove from tracker'}">✕</button>`;
-    // A COMPLETED ROW OFFERS NO ABANDON EITHER, and that is not a tidying-up. You
-    // cannot give up on something you have finished, so the control was offering a
-    // move that has no meaning — and it could never have worked on one: the abandon
-    // route searches the way a watch-history reconciliation searches, and that
-    // search deliberately steps over a verdict the month under way has already
-    // reached, so pressing it answered 404 with nothing to explain why. Widening
-    // the search is the repair that must NOT be made — it would find the completed
-    // record, fail to migrate it (it is on no list) and file an abandoned record
-    // BESIDE it, putting one season on this page twice under two headings. So the
-    // control goes and the route's refusal stays, as the backstop for a direct
-    // call. Un-abandoning is untouched: that one is offered on an abandoned row,
-    // which is a different bucket and a real move.
-    const abandonable = !monthClosed && s.bucket !== 'completed';
-    const actions = !abandonable ? remove : `
-            <button type="button" class="btn-ghost small" onclick="toggleAbandon('${esc(s.key)}', ${s.season}, ${!s.abandoned})">${s.abandoned ? 'Un-abandon' : 'Abandon'}</button>` + remove;
-    const net = s.network || '';
-    // Prefer the TMDB network logo (shared cache with the calendar); if it isn't
-    // cached (404) fall back to the mapped emoji token.
-    const badge = net
-        ? `<img class="distrakt-logo" src="/api/network-logo?name=${encodeURIComponent(net)}&tmdb=${(s.ids || {}).tmdb || ''}" alt="" data-emoji="${esc(emojiFor(net))}" onerror="onLogoError(this)">`
-        : esc(emojiFor(net));
-    return `
-        <div class="distrakt-show-row${s.abandoned ? ' abandoned' : ''}${s.unavailable ? ' unavailable' : ''}" title="${esc(net)}"
-             data-key="${esc(s.key)}" data-season="${s.season}" data-title="${esc(s.title)}"
-             onclick="openDistraktDetails(this, event)">
-            <!-- Whether these numbers are this load's, first in the row so the
-                 column reads down as one thing rather than being hunted for
-                 beside each row's counts. On every row, so the mark means
-                 something on sight rather than only when it appears; the
-                 sentence behind it names the services the numbers came from and
-                 is composed server-side, where the reason is known.
-                 THREE STATES, NAMED BY THE SERVER: current, partial (a number
-                 here belongs to a service nobody asked, so no refresh will move
-                 it) and stale (a service was asked and could not be read). The
-                 class IS the server's word — branching here on a flag would put
-                 the vocabulary in two places, which is what the sentence itself
-                 already avoids.
-                 A CLOSED MONTH GETS NONE. What a frozen month recorded is not
-                 waiting on anybody, so freshness is not a question it has —
-                 asked of the month rather than inferred from a missing field,
-                 which is how a row that had one arrived here wearing it. -->
-            ${!monthClosed && s.counts_note ? `<span class="distrakt-freshness ${esc(s.counts_freshness || 'current')}"
-                  role="img" title="${esc(s.counts_note)}"
-                  aria-label="${esc(s.counts_note)}"></span>` : ''}
-            <span class="distrakt-badge">${badge}</span>
-            <span class="distrakt-title"><span class="tt">${esc(s.title)}</span>${returnMark(s)}${missingMark(s)}</span>
-            <span class="distrakt-season">S${String(s.season).padStart(2, '0')}</span>
-            <!-- Spelled out in every bucket, not just as a tooltip: this is the
-                 string the emoji map is keyed on, so seeing it is what makes the
-                 map editable without guessing. -->
-            <span class="distrakt-network">${esc(net || '—')}</span>
-            <span class="distrakt-counts"${counts && s.counts_detail
-                ? ` title="${esc(s.counts_detail)}"` : ''}>${counts ? '(' + esc(counts) + ')' : ''}</span>
-            <span class="distrakt-dates">${esc(dates)}</span>
-            <span class="distrakt-row-actions">${actions}</span>
-        </div>`;
-}
-
-// Marquee-scroll a title on hover only when it actually overflows its cell.
-function setupTitleScroll(host) {
-    host.querySelectorAll('.distrakt-title').forEach(cell => {
-        const inner = cell.querySelector('.tt');
-        if (!inner) return;
-        cell.addEventListener('mouseenter', () => {
-            const overflow = inner.scrollWidth - cell.clientWidth;
-            if (overflow > 4) {
-                inner.style.setProperty('--scroll', overflow + 'px');
-                inner.style.setProperty('--dur', Math.max(2.5, overflow / 45) + 's');
-                cell.classList.add('scrolling');
-            }
-        });
-        cell.addEventListener('mouseleave', () => {
-            cell.classList.remove('scrolling');
-            inner.style.removeProperty('--scroll');
-        });
-    });
-}
+document.addEventListener('mouseout', (event) => {
+    if (!(event.target instanceof Element)) return;
+    const cell = event.target.closest('.distrakt-title');
+    if (!cell || cell.contains(event.relatedTarget)) return;
+    cell.classList.remove('scrolling');
+    const inner = cell.querySelector('.tt');
+    if (inner) inner.style.removeProperty('--scroll');
+});

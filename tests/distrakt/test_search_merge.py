@@ -315,7 +315,10 @@ class FailedPassthroughTests(unittest.TestCase):
 
 
 def _port(*hits, error=None):
-    async def _search_titles(_settings, _media, _query):
+    """A SearchPort stand-in. `cached_only` is taken and ignored, as a real port
+    that answers only from its store would take it — the merge does not decide
+    it, it passes it on."""
+    async def _search_titles(_settings, _media, _query, *, cached_only=False):
         if error is not None:
             raise error
         return list(hits)
@@ -358,13 +361,13 @@ class SearchCatalogueTests(unittest.IsolatedAsyncioTestCase):
         this to sequential awaits would still pass every other test here."""
         order: list[str] = []
 
-        async def _slow(_settings, _media, _query):
+        async def _slow(_settings, _media, _query, *, cached_only=False):
             order.append("trakt-start")
             await asyncio.sleep(0.02)
             order.append("trakt-end")
             return []
 
-        async def _fast(_settings, _media, _query):
+        async def _fast(_settings, _media, _query, *, cached_only=False):
             order.append("simkl-start")
             order.append("simkl-end")
             return []

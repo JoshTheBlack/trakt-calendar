@@ -30,7 +30,7 @@ class TraktSeasonsTests(unittest.IsolatedAsyncioTestCase):
         spy = AsyncMock(return_value=SEASONS)
         with patch.object(detail, "fetch_show_seasons", spy):
             answer = await _TraktDetailPort().fetch_seasons(SETTINGS, "123", Media.SHOW)
-        spy.assert_awaited_once_with(SETTINGS, "123")
+        spy.assert_awaited_once_with(SETTINGS, "123", cached_only=False)
         self.assertEqual(answer.seasons, SEASONS)
 
     async def test_named_season_is_always_none(self):

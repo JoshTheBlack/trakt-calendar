@@ -33,7 +33,7 @@ from app.distrakt import viewer as distrakt_viewer
 from app.distrakt import store, watch_history
 from app.providers.base import ItemKey
 
-from tests.support import migrated_db
+from tests.support import RewatchPrompt, migrated_db
 from tests.distrakt.test_gating import DistraktTestCase
 
 KEY = ItemKey("show", "tmdb", "1396")
@@ -144,25 +144,41 @@ class _RosterAddCase(DistraktTestCase):
         return asyncio.run(store.find_month_record(
             self.user_id, month, store.RecordKind.COMPLETED, KEY, 1))
 
+    def _picked(self):
+        """The search door NAMES a result now — the query and its place in the
+        answer — and the route reads the title, the network and the ids back out
+        of that search. Stood in for here because what these are about is the
+        QUESTION the add asks before it writes anything."""
+        return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
+            return_value=distrakt_routes.Pick(
+                title="Breaking Bad", network="AMC", year=None, ids=dict(self.IDS),
+                seasons=[], named_season=None, unkeyable=None)))
+
     def _search_add(self, *, history=None, source="trakt", sources=None,
                     detail=None, **extra):
         """The search door: /api/distrakt/add."""
         with self._services(history=history, source=source, sources=sources,
-                            detail=detail):
-            return self.client.post("/api/distrakt/add", json={
-                "year": 2026, "month": 9, "ids": dict(self.IDS),
-                "title": "Breaking Bad", "network": "AMC", "season": 1, **extra,
-            })
+                            detail=detail), self._picked():
+            return self.client.post(
+                "/api/distrakt/add?year=2026&month=9",
+                json={"q": "breaking bad", "i": 0, "season": 1, **extra})
 
     def _prompt_add(self, *, history=None, source="trakt", sources=None,
                     detail=None, **extra):
-        """The history door: /api/distrakt/unknown-add."""
+        """The history door: /api/distrakt/unknown-add.
+
+        THE ROW'S OWN FACTS COME OUT OF THE STORE now rather than out of the
+        request, so the outstanding play this answers has to exist — which is
+        what `lifecycle.reconcile_history` writes before the question is ever
+        drawn."""
+        asyncio.run(store.open_prompt(self.user_id, KEY, 1, number=1,
+                                      title="Breaking Bad", ids=dict(self.IDS),
+                                      watched_at="2026-09-01T00:00:00Z"))
         with self._services(history=history, source=source, sources=sources,
                             detail=detail):
-            return self.client.post("/api/distrakt/unknown-add", json={
-                "key": str(KEY), "season": 1, "ids": dict(self.IDS),
-                "title": "Breaking Bad", "year": 2026, "month": 9, **extra,
-            })
+            return self.client.post(
+                "/api/distrakt/unknown-add?year=2026&month=9",
+                json={"key": str(KEY), "season": 1, **extra})
 
 
 class TheFloorFiltersTheHistoryTests(unittest.TestCase):
@@ -330,14 +346,14 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
         """Which is almost every add, so the question must not appear on one."""
         resp = self._post()
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
         self.assertIsNotNone(self._row(), "an ordinary add did not land")
 
     def test_a_partly_watched_season_is_added_without_a_question(self):
         """Somebody two episodes into a season is not re-watching it. The
         question is about a FINISHED one, and those plays already count."""
         resp = self._post(history={"1": "2026-08-30", "2": "2026-08-31"})
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
         self.assertIsNotNone(self._row())
 
     def test_twelve_of_thirteen_episodes_is_not_finished(self):
@@ -350,14 +366,14 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
         """
         nearly = {str(n): "2026-08-%02d" % n for n in range(1, 13)}
         resp = self._post(history=nearly)
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
         self.assertIsNotNone(self._row(), "a season in progress was not added")
 
     def test_all_thirteen_is_finished(self):
         """The boundary from the other side, so the count is a threshold rather
         than a strict inequality nobody checked."""
         whole = {str(n): "2026-08-%02d" % n for n in range(1, 14)}
-        self.assertIn("needs_decision", self._post(history=whole).json())
+        self.assertTrue(RewatchPrompt(self._post(history=whole).text).asked)
 
     def test_two_services_reporting_the_same_run_is_still_one_run(self):
         """PER SERVICE AND NOT SUMMED. Trakt and Simkl both listing the same
@@ -366,14 +382,14 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
         throw away a run they are in the middle of."""
         half = {str(n): "2026-08-%02d" % n for n in range(1, 8)}
         resp = self._search_add(sources={"trakt": half, "simkl": half})
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
 
     def test_a_season_lookup_that_failed_asks_nothing(self):
         """No total means nothing to compare a count against, and guessing would
         ask about seasons at random. The add proceeds as an ordinary one."""
         whole = {str(n): "2026-08-%02d" % n for n in range(1, 14)}
         resp = self._search_add(history=whole, detail={})
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
         self.assertIsNotNone(self._row())
 
     # -- the question --
@@ -381,19 +397,39 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
     def test_a_finished_season_is_asked_about_and_nothing_is_written(self):
         resp = self._post(history=self.OLD_RUN)
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        asked = resp.json().get("needs_decision")
-        self.assertIsNotNone(asked, "a finished season was filed without asking")
-        self.assertEqual(asked["completed_on"], "2020-02-14")
-        self.assertEqual(asked["season"], 1)
-        self.assertEqual(asked["title"], "Breaking Bad")
+        asked = RewatchPrompt(resp.text)
+        self.assertTrue(asked.asked, "a finished season was filed without asking")
+        # The day is spelled for a reader now: the server holds it and formats
+        # it, where the browser used to be handed an ISO day to format itself.
+        self.assertEqual(asked.finished_on, "14 February 2020")
+        self.assertEqual(asked.season, 1)
+        self.assertEqual(asked.title, "Breaking Bad")
         self.assertIsNone(self._row(),
                           "the season was added before the question was answered")
 
     def test_the_offered_start_is_the_day_after_the_old_finish(self):
         """The last episode of that run was watched ON the finish day, so a
         floor including it would show a fresh run starting at one."""
-        asked = self._post(history=self.OLD_RUN).json()["needs_decision"]
-        self.assertEqual(asked["suggested_from"], "2020-02-15")
+        asked = RewatchPrompt(self._post(history=self.OLD_RUN).text)
+        self.assertEqual(asked.suggested_from, "2020-02-15")
+
+    def test_the_button_opens_naming_the_day_the_field_already_holds(self):
+        """The field is pre-filled, so "Start a fresh run" beside it was the
+        question offering a day and denying it in the same breath. Every day
+        this prompt can show is spelled by the server — the opening label and
+        both presets — which leaves the browser only a day somebody types."""
+        asked = RewatchPrompt(self._post(history=self.OLD_RUN).text)
+        self.assertEqual(asked.submit_label, "Start the run from 15 February 2020")
+
+    def test_a_restart_draws_both_presets_with_their_days_spelled_out(self):
+        """The presets ARE the two answers anybody means, and the server spells
+        each of their days: pressing one has to be able to say which day it
+        chose without a date formatter in the browser."""
+        restarted = {**self.OLD_RUN, "1": "2026-09-01", "2": "2026-09-03"}
+        asked = RewatchPrompt(self._post(history=restarted).text)
+        self.assertEqual(asked.presets, ["2026-09-01", "2026-09-04"])
+        self.assertEqual(asked.preset_labels,
+                         ["1 September 2026", "4 September 2026"])
 
     def test_asking_writes_no_month_record_either(self):
         """Not merely no roster row: nothing at all. A question is not a change."""
@@ -509,7 +545,7 @@ class TheAddAsksBeforeItWritesAnythingTests(_RosterAddCase):
         run they are in the middle of."""
         self._post(history=self.OLD_RUN, decided=True, history_from="2020-02-15")
         again = self._post(history=self.OLD_RUN)
-        self.assertNotIn("needs_decision", again.json())
+        self.assertFalse(RewatchPrompt(again.text).asked)
 
     def test_a_settled_month_record_is_left_where_it_is(self):
         """A re-watch is a SECOND thing, not a move. The old viewing keeps the
@@ -559,8 +595,8 @@ class TheHistoryIsFetchedBeforeTheQuestionTests(_RosterAddCase):
     def test_a_first_add_of_a_finished_season_still_asks(self):
         resp, _calls = self._post()
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        self.assertIn("needs_decision", resp.json(),
-                      "the first add of a finished season did not ask")
+        self.assertTrue(RewatchPrompt(resp.text).asked,
+                        "the first add of a finished season did not ask")
 
     def test_it_writes_nothing_while_it_asks(self):
         """The rule the reordering must not break: the history fetch is allowed
@@ -578,7 +614,7 @@ class TheHistoryIsFetchedBeforeTheQuestionTests(_RosterAddCase):
     def test_the_answer_still_performs_the_add(self):
         resp, _calls = self._post(decided=True, history_from="2026-09-01")
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
         row = asyncio.run(store.find_user_record(self.user_id, KEY, 1))
         self.assertIsNotNone(row, "the answered add did not land")
         self.assertEqual(row["history_from"], "2026-09-01")
@@ -609,17 +645,18 @@ class TheQuestionDoesNotDependOnWhichServiceSawItTests(_RosterAddCase):
         return self._search_add(history=history, source=source, **extra)
 
     def test_a_season_simkl_says_is_finished_is_asked_about(self):
-        body = self._post(source="simkl", history=self.RUN).json()
-        self.assertIn("needs_decision", body,
-                      "a Simkl-only account was not asked about a finished season")
-        self.assertEqual(body["needs_decision"]["completed_on"], "2020-02-14")
+        asked = RewatchPrompt(self._post(source="simkl", history=self.RUN).text)
+        self.assertTrue(asked.asked,
+                        "a Simkl-only account was not asked about a finished season")
+        self.assertEqual(asked.finished_on, "14 February 2020")
 
     def test_it_asks_the_plainer_version_with_no_restart_detail(self):
         """Nothing in a library snapshot can say a second pass has begun, so the
         question offers the day after the last play and names no episodes."""
-        decision = self._post(source="simkl", history=self.RUN).json()["needs_decision"]
-        self.assertEqual(decision["restart"], {})
-        self.assertEqual(decision["suggested_from"], "2020-02-15")
+        asked = RewatchPrompt(self._post(source="simkl", history=self.RUN).text)
+        self.assertEqual(asked.presets, [])
+        self.assertEqual(asked.episodes, [])
+        self.assertEqual(asked.suggested_from, "2020-02-15")
 
     def test_answering_it_completes_the_season_the_same_way(self):
         self._post(source="simkl", history=self.RUN, decided=True, history_from="")
@@ -634,8 +671,8 @@ class TheQuestionDoesNotDependOnWhichServiceSawItTests(_RosterAddCase):
         most wanted."""
         for source in ("trakt", "simkl"):
             with self.subTest(source=source):
-                body = self._post(source=source, history=self.RUN).json()
-                self.assertIn("needs_decision", body)
+                self.assertTrue(
+                    RewatchPrompt(self._post(source=source, history=self.RUN).text).asked)
 
 
 class TheAnswerNamesTheRowItWroteTests(_RosterAddCase):
@@ -657,29 +694,47 @@ class TheAnswerNamesTheRowItWroteTests(_RosterAddCase):
     def _add(self, **extra):
         return self._search_add(**extra)
 
-    def test_an_add_names_the_season_it_wrote(self):
-        body = self._add().json()
-        self.assertEqual(body.get("highlight"), {"key": str(KEY), "season": 1})
+    def _named(self, **extra):
+        """Which row the answer pointed at, recorded as the route names it.
 
-    def test_the_name_matches_the_row_that_was_actually_written(self):
-        """The point of it: a name that does not match what was stored marks the
-        wrong row, or nothing. Checked against the store rather than against the
-        rendered payload, because the two answer different questions — what was
-        written, and what this month happens to draw."""
-        body = self._add().json()
-        named = body["highlight"]
+        THE MARK IS MARKUP NOW — the row the add wrote is drawn with
+        `.row-marked` and htmx's own `show:` swap modifier scrolls to it — so
+        what used to be a `highlight` object the browser matched a row against
+        is a class on that row. Recorded at the naming rather than read out of
+        the markup because the two are different questions: this asks what the
+        route named, and whether the month happens to DRAW that row is the
+        month's business (see `_point_at`, which says the name is advisory).
+        """
+        named = []
+        real = distrakt_routes._point_at
+
+        def record(payload, key, season):
+            named.append({"key": str(key), "season": season})
+            return real(payload, key, season)
+
+        with patch.object(distrakt_routes, "_point_at", record):
+            self._add(**extra)
+        return named
+
+    def test_an_add_names_the_season_it_wrote(self):
+        self.assertEqual(self._named(), [{"key": str(KEY), "season": 1}])
+
+    def test_the_marked_row_is_the_one_that_was_actually_written(self):
+        """The point of it: a mark on the wrong row scrolls the reader somewhere
+        else, and a mark on none scrolls nowhere. Asked of the payload the month
+        is drawn from and then checked against the STORE, because the two answer
+        different questions — what this month draws, and what was written."""
+        named, = self._named()
         row = asyncio.run(store.find_user_record(
             self.user_id, ItemKey(*str(named["key"]).split(":")), named["season"]))
-        self.assertIsNotNone(row, "the highlight named a row nothing wrote")
+        self.assertIsNotNone(row, "the mark named a row nothing wrote")
 
     def test_a_question_names_nothing_because_it_wrote_nothing(self):
         """A `needs_decision` response has no row to point at, and pointing at
         one would scroll the reader away from the question being asked."""
-        body = self._search_add(
-            history=self.OLD_RUN,
-            detail={**self.SEASON, "finished_airing": True}).json()
-        self.assertIn("needs_decision", body)
-        self.assertNotIn("highlight", body)
+        named = self._named(history=self.OLD_RUN,
+                            detail={**self.SEASON, "finished_airing": True})
+        self.assertEqual(named, [])
 
 
 class SayingYesToAnUnplacedPlayAsksTooTests(_RosterAddCase):
@@ -721,8 +776,8 @@ class SayingYesToAnUnplacedPlayAsksTooTests(_RosterAddCase):
     def test_a_finished_season_is_asked_about_rather_than_added(self):
         resp = self._post(history=self.OLD_RUN)
         self.assertEqual(resp.status_code, 200, resp.text[:300])
-        self.assertIn("needs_decision", resp.json(),
-                      "saying yes to an unplaced play added a finished season silently")
+        self.assertTrue(RewatchPrompt(resp.text).asked,
+                        "saying yes to an unplaced play added a finished season silently")
 
     def test_it_writes_nothing_while_it_asks(self):
         self._post(history=self.OLD_RUN)
@@ -731,7 +786,7 @@ class SayingYesToAnUnplacedPlayAsksTooTests(_RosterAddCase):
     def test_an_ordinary_unplaced_play_is_still_added_without_a_question(self):
         """Which is what this row is for almost every time it appears."""
         resp = self._post(history={"1": "2026-09-01"})
-        self.assertNotIn("needs_decision", resp.json())
+        self.assertFalse(RewatchPrompt(resp.text).asked)
         self.assertIsNotNone(self._row(), "an ordinary yes did not add the season")
 
     def test_answering_with_a_floor_adds_it_at_zero(self):
@@ -749,8 +804,16 @@ class SayingYesToAnUnplacedPlayAsksTooTests(_RosterAddCase):
         self.assertIsNone(self._row(), "it was filed as completed AND left on the list")
 
     def test_the_answer_names_the_row_it_wrote(self):
-        body = self._post(history={"1": "2026-09-01"}).json()
-        self.assertEqual(body.get("highlight"), {"key": str(KEY), "season": 1})
+        named = []
+        real = distrakt_routes._point_at
+
+        def record(payload, key, season):
+            named.append({"key": str(key), "season": season})
+            return real(payload, key, season)
+
+        with patch.object(distrakt_routes, "_point_at", record):
+            self._post(history={"1": "2026-09-01"})
+        self.assertEqual(named, [{"key": str(KEY), "season": 1}])
 
 
 class TheOfferedStartFindsARestartTests(unittest.TestCase):

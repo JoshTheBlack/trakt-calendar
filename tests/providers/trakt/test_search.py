@@ -50,7 +50,7 @@ class TraktSearchPortTests(unittest.IsolatedAsyncioTestCase):
         spy = AsyncMock(return_value=[WITH_TRAKT_ID])
         with patch.object(detail, "search_titles", spy):
             hits = await _TraktSearchPort().search_titles(SETTINGS, Media.SHOW, "a show")
-        spy.assert_awaited_once_with(SETTINGS, "show", "a show")
+        spy.assert_awaited_once_with(SETTINGS, "show", "a show", cache_only=False)
         self.assertEqual(len(hits), 1)
 
     async def test_a_hit_with_no_trakt_id_is_not_dropped(self):

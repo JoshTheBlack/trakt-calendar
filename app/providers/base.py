@@ -1246,7 +1246,8 @@ class DetailPort(Protocol):
         """
         ...
 
-    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
+                            cached_only: bool = False) -> SeasonsAnswer:
         """The season picker's answer for one title, in THIS SOURCE's own id
         space — see `SeasonsAnswer` for why the season list, a self-named
         season and newly-surfaced ids all come back from one call.
@@ -1254,6 +1255,14 @@ class DetailPort(Protocol):
         `source_id` is this source's own id for the title, the same value
         `fetch_details` takes it as and for the same reason: a source cannot
         look a title up by an id it does not issue.
+
+        `cached_only=True` NEVER MAKES A CALL: it answers from what an identical
+        request already stored, and answers nothing at all when that has gone.
+        It is how a route acts on a result the page NAMES rather than hands over
+        — the add flow re-reads the very search and the very season lookup the
+        picker made moments before, so what gets stored is the service's own
+        answer and never a field the browser sent back. Re-asking instead would
+        turn an add into a search that nobody's budget ever sees.
 
         Raises this source's own `SourceUnavailable` subclass on a genuine
         failure — the same distinction every other port in this file draws
@@ -1332,10 +1341,19 @@ class SearchPort(Protocol):
     `DetailPort.catalogue_configured` does for per-title lookups.
     """
 
-    async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:
+    async def search_titles(self, settings: Settings, media: Media, query: str, *,
+                            cached_only: bool = False) -> list[SearchHit]:
         """Every title this source's catalogue matches `query` on, for
         `media`. An empty query answers [] without a call — there is nothing
         to ask a service for.
+
+        `cached_only=True` NEVER MAKES A CALL: it answers from what an identical
+        request already stored, and answers nothing at all when that has gone.
+        It is how a route acts on a result the page NAMES rather than hands over
+        — the add flow re-reads the very search and the very season lookup the
+        picker made moments before, so what gets stored is the service's own
+        answer and never a field the browser sent back. Re-asking instead would
+        turn an add into a search that nobody's budget ever sees.
 
         RAISES THE SOURCE'S OWN SourceUnavailable SUBCLASS RATHER THAN
         RETURNING [] on a failure that is not "no matches" — a caller reading

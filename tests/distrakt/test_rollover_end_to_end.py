@@ -28,12 +28,13 @@ from datetime import date, datetime, timedelta, timezone
 from unittest import mock
 
 from app import clock, distrakt as distrakt_store
+from app.distrakt import routes as distrakt_routes
 from app.calendar import state as calendar_state
 from app.config import Settings
 from app.distrakt import watch_history
 from app.providers.base import Item, ItemKey, Media, Source
 
-from ..support import ORIGIN, AppTestCase
+from ..support import ORIGIN, AppTestCase, tracker_month
 
 # The two months the rollover happens across, and the day either side of the
 # boundary between them. Named once so a test reads as a story about a boundary
@@ -244,25 +245,40 @@ class RolloverOverHttpTestCase(AppTestCase):
 
     def get_month(self, key: str, premieres: dict[str, list[Item]] | None = None,
                   plays=()) -> dict:
-        """GET /api/distrakt/month for a "YYYY-MM", with the reads patched."""
+        """The month payload for a "YYYY-MM", with the reads patched.
+
+        THE ROUTE THAT HANDED THIS BACK AS JSON IS GONE — the page reads a
+        RENDERED month and every mutation answers with the same markup — so a
+        test about what a month CONTAINS asks the function that works it out.
+        See tests/support.tracker_month for the split.
+        """
         year, month = distrakt_store.parse_month_key(key)
         with self.offline(premieres, plays):
-            resp = self.client.get(f"/api/distrakt/month?year={year}&month={month}")
-        self.assertEqual(resp.status_code, 200, resp.text)
-        return resp.json()
+            return tracker_month(self.user_id, year, month)
 
     def import_month(self, key: str, premieres: dict[str, list[Item]] | None = None) -> dict:
         """POST /api/distrakt/import — the control that BUILDS a month that has
-        not begun. Opening one no longer builds it, so this is the only way in."""
+        not begun. Opening one no longer builds it, so this is the only way in.
+
+        The route answers with the month DRAWN; what these tests are about is
+        what it then holds, so the payload is read back separately.
+        """
         year, month = distrakt_store.parse_month_key(key)
         with self.offline(premieres):
-            resp = self.client.post("/api/distrakt/import",
-                                    json={"year": year, "month": month})
+            resp = self.client.post(
+                f"/api/distrakt/import?year={year}&month={month}", json={})
         self.assertEqual(resp.status_code, 200, resp.text)
-        return resp.json()
+        self.assertNotIn("toast err", resp.text, resp.text[:300])
+        return self.get_month(key, premieres)
 
-    def post(self, path: str, body: dict) -> dict:
-        """POST one of the row controls, with every read it makes patched.
+    def post(self, path: str, body: dict, month: str | None = None) -> dict:
+        """POST one of the row controls, with every read it makes patched, and
+        read the month back afterwards.
+
+        THE MONTH RIDES IN THE ADDRESS. Which month a control acts on is a
+        REFERENCE the server resolves rather than data the browser hands over,
+        so it is a query parameter on every one of these — the shape
+        templates/_add_all.html gives the calendar's own month action.
 
         Patched on the modules that DEFINE these functions, which is also where
         the route reaches them: it calls across the package through the module
@@ -270,11 +286,24 @@ class RolloverOverHttpTestCase(AppTestCase):
         enough — and a double installed there cannot be bypassed by a second
         reference nobody can see.
         """
+        month = month or body.pop("_month", None)
+        if month is None:
+            year, month_no = body.pop("year", None), body.pop("month", None)
+            month = (distrakt_store.month_key(year, month_no)
+                     if year is not None else _month_key(clock.today()))
+        year, month_no = distrakt_store.parse_month_key(month)
         with self.offline(), \
                 mock.patch("app.providers.trakt.sync.fetch_watched_map", return_value={}):
-            resp = self.client.post(path, json=body)
+            resp = self.client.post(f"{path}?year={year}&month={month_no}", json=body)
         self.assertEqual(resp.status_code, 200, resp.text)
-        return resp.json()
+        self.assertNotIn("toast err", resp.text, resp.text[:300])
+        # WHAT THE POST ITSELF SPENT, kept before the month is read back: reading
+        # it enters `offline` again, and that is where the recorders are set up.
+        spent = (list(self.season_calls), list(self.network_calls),
+                 list(self.baseline_calls))
+        month_payload = self.get_month(month)
+        self.season_calls, self.network_calls, self.baseline_calls = spent
+        return month_payload
 
     def kinds_on(self, month_key: str) -> dict[int, set[str]]:
         """{numeric id: the kinds of record the month holds for it}, read from the
@@ -723,9 +752,12 @@ class AnyMonthAheadCanBeAskedForTests(RolloverOverHttpTestCase):
         with fake_today(ON_THE_FIRST):
             self.import_month(OPENING, {OPENING: [_item(801, 1, "August New", "2026-08-05")]})
             with self.offline():
-                resp = self.client.post("/api/distrakt/import", json={"year": 2026, "month": 7})
-        self.assertEqual(resp.status_code, 400, resp.text)
-        self.assertIn("never tracked", resp.json()["error"])
+                resp = self.client.post("/api/distrakt/import?year=2026&month=7", json={})
+        # Drawn rather than answered with a status, like every refusal on this
+        # page: a non-200 is never swapped, so a status code would be a control
+        # that silently did nothing.
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIn("never tracked", resp.text)
         self.assertEqual(self.stored_ids(CLOSING), set())
 
 
@@ -903,6 +935,25 @@ class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):
     that the seam leaks into a normal deployment.
     """
 
+    def _month_asked_for(self) -> str:
+        """The month the fragment route resolved, recorded as it hands it on.
+
+        Read at the handover rather than out of the markup: what these two are
+        about is the route's FALLBACK when the address names no month, and the
+        drawn month has no field naming itself any more.
+        """
+        seen = []
+        real = distrakt_routes._month_answer
+
+        async def record(request, user_id, year, month, settings, **kw):
+            seen.append(distrakt_store.month_key(year, month))
+            return await real(request, user_id, year, month, settings, **kw)
+
+        with mock.patch.object(distrakt_routes, "_month_answer", record):
+            resp = self.client.get("/distrakt/fragments/month")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        return seen[0]
+
     def test_the_month_api_answers_about_the_real_month_by_default(self):
         # No `fake_today` around this one, and no year/month in the query either:
         # the route falls back to its own idea of today, which must be the real
@@ -912,10 +963,8 @@ class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):
         # because an override is in force for them.
         real = date.today()
         with self.offline():
-            resp = self.client.get("/api/distrakt/month")
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["month"],
-                         distrakt_store.month_key(real.year, real.month))
+            asked = self._month_asked_for()
+        self.assertEqual(asked, distrakt_store.month_key(real.year, real.month))
 
     def test_a_faked_date_reaches_the_route_over_http(self):
         # The other direction, and the reason the rest of the file means
@@ -923,9 +972,8 @@ class TheRealClockStillGovernsWithoutTheVariableTests(RolloverOverHttpTestCase):
         # Ten years out so it can never coincide with the real one.
         far = date(date.today().year + 10, 3, 1)
         with fake_today(far), self.offline():
-            resp = self.client.get("/api/distrakt/month")
-        self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["month"], distrakt_store.month_key(far.year, far.month))
+            asked = self._month_asked_for()
+        self.assertEqual(asked, distrakt_store.month_key(far.year, far.month))
 
 
 class QuestionsSurviveTheRequestThatRaisedThemTests(RolloverOverHttpTestCase):
@@ -1236,15 +1284,22 @@ class AddingFromAPromptBringsTheNetworkTests(RolloverOverHttpTestCase):
             self.post("/api/distrakt/unknown-add", {**self.ROW, **_viewing(OPENING)})
         self.assertEqual(len(self.network_calls), 1)
 
-    def test_a_network_the_client_did_send_is_not_overwritten(self):
-        """The lookup fills a gap; it does not overrule something already known.
-        Nothing sends one today, but the row is client-supplied and a future
-        surface that has one should not have it silently replaced."""
+    def test_the_row_the_page_drew_is_re_read_rather_than_taken_from_the_request(self):
+        """A CALLER CANNOT NAME A DIFFERENT TITLE. The play that raised the
+        question was written down with its own title and ids before the row was
+        ever drawn (store.open_prompts), so the answer reads them back from there
+        — which closed the last door through which a browser could decide what
+        identity somebody's watch record is filed under."""
         self.ask()
         with fake_today(ON_THE_FIRST):
             self.post("/api/distrakt/unknown-add",
-                      {**self.ROW, "network": "Stated By The Caller", **_viewing(OPENING)})
-        self.assertEqual(self.listed_networks(), ["Stated By The Caller"])
+                      {**self.ROW, "title": "Something Else Entirely",
+                       "ids": {"tmdb": 1}, "network": "Stated By The Caller",
+                       **_viewing(OPENING)})
+        records = asyncio.run(distrakt_store.user_records(self.user_id))
+        listed = [r for r in records if int(r["match_id"]) == 999]
+        self.assertEqual([r["title"] for r in listed], ["No Network Yet"])
+        self.assertEqual(self.listed_networks(), ["Fake Network"])
 
 
 class RemovingOneSeasonLeavesTheOthersAloneTests(RolloverOverHttpTestCase):
@@ -1327,12 +1382,18 @@ class RemovingOneSeasonLeavesTheOthersAloneTests(RolloverOverHttpTestCase):
         """
         self.seed_four_seasons()
         self.remove(3)
+        # The question this answers is one a play raised, and the row's own facts
+        # — its title and every id — were written down with it before it was ever
+        # drawn. The answer reads them back from there rather than from the
+        # request, so the outstanding play has to exist.
+        asyncio.run(distrakt_store.open_prompt(
+            self.user_id, ItemKey("show", "tmdb", "950"), 3, number=1,
+            title="Four Seasons",
+            ids={"trakt": 950, "tmdb": 950, "slug": "slug-950"},
+            watched_at="2026-08-02T00:00:00Z"))
         with fake_today(ON_THE_FIRST):
             self.post("/api/distrakt/unknown-add",
-                      {"key": "show:tmdb:950", "season": 3,
-                       "ids": {"trakt": 950, "tmdb": 950, "slug": "slug-950"},
-                       "title": "Four Seasons",
-                       **_viewing(OPENING)})
+                      {"key": "show:tmdb:950", "season": 3, **_viewing(OPENING)})
         with fake_today(ON_THE_FIRST):
             self.get_month(OPENING)
         self.assertNotEqual(self.rows().get(3), "abandoned",

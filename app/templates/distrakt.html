@@ -1,11 +1,4 @@
-{% import '_source_logo.html' as src with context %}
-{# WHAT THE ADD FLOW'S SEARCH FIELDS SAY THEY SEARCH. Both modals ask the same
-   catalogues, so both wear the same label, and it names them from the registry's
-   own list rather than from a service somebody hard-coded when there was only
-   one — "Search Trakt" stopped being true the moment a second catalogue could
-   answer. With no catalogue at all it goes back to naming nothing: the field is
-   still there, and the results say why it can find nothing. #}
-{% set search_label = ('Search ' ~ src.names(catalogue_sources)) if catalogue_sources else 'Search' %}
+{% import '_distrakt_modals.html' as modals %}
 <!DOCTYPE html>
 <html lang="en">
 {% import '_head.html' as page with context %}
@@ -13,11 +6,11 @@
              site_suffix=false) }}
 {%- set body_class %}distrakt-page{% endset %}
 {# `hx-indicator` IS INHERITED BY EVERY ELEMENT UNDER THIS ONE, which is the
-   whole reason it is declared here and nowhere else: a boosted navigation, a
-   day block arriving and a search all mark the same bar for as long as they are
-   in flight, with no script registering anything and nothing to clean up after
-   a swap. The bar itself is drawn by the site header — see _nav.html for what
-   it is for, and style.css for why it waits a moment before appearing. #}
+   whole reason it is declared here and nowhere else: a boosted navigation, the
+   month arriving and a search all mark the same bar for as long as they are in
+   flight, with no script registering anything and nothing to clean up after a
+   swap. The bar itself is drawn by the site header — see _nav.html for what it
+   is for, and style.css for why it waits a moment before appearing. #}
 <body class="{{ body_class }}" hx-boost="true" hx-indicator="#pageProgress">
 {# What a boosted arrival cannot work out for itself. A swap replaces the body's
    CHILDREN, so the <body> element keeps the previous page's classes and the <head>
@@ -51,20 +44,43 @@
                         calendar_href='/calendar?year=' ~ year ~ '&month=' ~ month,
                         calendar_available=calendar_available,
                         ranker_available=ranker_available, is_admin=is_admin) %}
-        <button type="button" class="pill-btn" onclick="importFromCalendar()" title="Pull this month's premieres from the Trakt calendar">⤓ Import</button>
-        <button type="button" class="pill-btn" onclick="openAddShow()">➕ Add show</button>
-        <button type="button" class="pill-btn" onclick="openAddMovie()">🎬 Add film</button>
+        <button type="button" class="pill-btn"
+                title="Pull this month's premieres from the Trakt calendar"
+                hx-post="/api/distrakt/import{{ month_query }}" hx-json-enc
+                hx-target="#distraktShowList"
+                hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked">⤓ Import</button>
+        <button type="button" class="pill-btn" data-modal-open="addShowModal">➕ Add show</button>
+        <button type="button" class="pill-btn" data-modal-open="addMovieModal">🎬 Add film</button>
 {% endcall %}
 
 <main class="distrakt-main">
+    {# Where a read-only month says so. Empty until the month arrives and tells
+       it what to say — the same element every time, so an answer that finds the
+       month editable simply empties it again. #}
+    <div id="distraktBanner"></div>
+
     <div id="distraktRoot">
+        {# THE TABS ARE RADIOS AND THREE STYLESHEET RULES. A radiogroup is what a
+           tab strip IS — one of a set, chosen, keyboard-navigable — so the
+           panels are shown by `:checked ~` and the strip is labels. It was a
+           function toggling a class on four buttons and `hidden` on four
+           panels, which is the same statement made twice in a language that
+           cannot see the markup.
+
+           EVERY RADIO IS A SIBLING OF EVERY PANEL, which is what makes the
+           general sibling combinator reach: a strip that wrapped its own inputs
+           would bury them where no selector could get from one to the other. #}
+        <input type="radio" name="distrakt-tab" id="tab-shows" class="distrakt-tab-radio" checked autocomplete="off">
+        <input type="radio" name="distrakt-tab" id="tab-copy" class="distrakt-tab-radio" autocomplete="off">
+        <input type="radio" name="distrakt-tab" id="tab-data" class="distrakt-tab-radio" autocomplete="off">
+        <input type="radio" name="distrakt-tab" id="tab-emoji" class="distrakt-tab-radio" autocomplete="off">
         <nav class="distrakt-tabs">
-            <button type="button" class="distrakt-tab active" data-tab="shows" onclick="switchTab('shows')">This month's shows</button>
-            <button type="button" class="distrakt-tab" data-tab="copy" onclick="switchTab('copy')">Copy blocks</button>
-            <button type="button" class="distrakt-tab" data-tab="data" onclick="switchTab('data')">Backup</button>
+            <label class="distrakt-tab" for="tab-shows">This month's shows</label>
+            <label class="distrakt-tab" for="tab-copy">Copy blocks</label>
+            <label class="distrakt-tab" for="tab-data">Backup</label>
             {# Everyone with the tracker gets this: the map is their own and
                decides how their own Discord posts render. #}
-            <button type="button" class="distrakt-tab" data-tab="emoji" onclick="switchTab('emoji')">Emoji map</button>
+            <label class="distrakt-tab" for="tab-emoji">Emoji map</label>
         </nav>
 
         <section class="distrakt-panel" data-panel="shows">
@@ -72,37 +88,78 @@
                than on the Copy blocks tab where its effect was invisible. #}
             <div class="distrakt-section-head">
                 <h2>This month's shows</h2>
-                <button type="button" class="btn-ghost small" onclick="refreshMonth()"
-                        title="Re-read watch history and season data from Trakt">↻ Refresh</button>
+                <button type="button" class="btn-ghost small"
+                        title="Re-read watch history and season data from your services"
+                        hx-post="/api/distrakt/refresh{{ month_query }}" hx-json-enc
+                        hx-target="#distraktShowList"
+                        hx-swap="innerHTML swapEmpty:false">↻ Refresh</button>
             </div>
             {# Shown only when the server degraded this month to last-known totals
-               because Trakt rate-limited or was unreachable during a refresh. #}
+               because a service rate-limited or was unreachable. Replaced whole by
+               every month answer. #}
             <div id="distraktNotice" class="distrakt-notice" hidden></div>
+
+            {# THE MONTH FETCHES ITSELF, and the request lives on a HIDDEN SIBLING
+               rather than on the list. Read in the vendored htmx: a request's
+               verb is found by walking `get, post, put, patch, delete` in that
+               order, each one looked up THROUGH ATTRIBUTE INHERITANCE — so an
+               `hx-get` here would be found before the `hx-post` on every row
+               button inside, and pressing ✕ would issue this GET instead. The
+               rankings board's removal list needed the same separation for the
+               same reason (_ranker_board_shell.html's #rankerRemovedRefresh).
+
+               FETCHED RATHER THAN DRAWN WITH THE PAGE so the shell paints while
+               the month is worked out: opening one can pull a month of
+               premieres, sweep recent viewing and write a roster's worth of
+               rows. `month-changed` is what an answer that changes the month
+               without being about it raises — saving the emoji map, restoring a
+               backup — through an HX-Trigger header. #}
+            <div id="distraktMonthLoader" hidden
+                 hx-get="/distrakt/fragments/month{{ month_query }}"
+                 hx-trigger="load, month-changed from:body"
+                 hx-target="#distraktShowList" hx-swap="innerHTML"></div>
             <div id="distraktShowList" class="distrakt-show-list">
                 <div class="distrakt-empty">Loading…</div>
             </div>
         </section>
 
-        <section class="distrakt-panel distrakt-section" data-panel="copy" hidden>
+        <section class="distrakt-panel distrakt-section" data-panel="copy">
             <div class="distrakt-section-head">
                 <h2>Copy blocks</h2>
             </div>
+            {# WHICH SHARE LINK THE POST EMBEDS AND WHICH VIEW IT OPENS ON. Both
+               selects post themselves and are answered with the month, because
+               the link is rendered INTO the announcement post — the only place
+               their effect is visible is the block below them. Only forms that
+               would actually resolve are offered: an entry that silently
+               produces no link is worse than not being there. #}
             <div class="distrakt-copy-block">
                 <div class="distrakt-copy-head">
                     <span>POST 1 — announcement</span>
                     <div class="distrakt-copy-actions">
-                        <!-- Which of your share links the post embeds, and which
-                             calendar view it opens on. Both are remembered. -->
-                        <select id="postLinkKind" class="distrakt-link-select" title="Which share link to embed"
-                                onchange="savePostLink()"></select>
-                        <select id="postLinkEndpoint" class="distrakt-link-select" title="Which calendar view the link opens"
-                                onchange="savePostLink()">
-                            <option value="">Link: default view</option>
-                            {% for ep in endpoints %}
-                            <option value="{{ ep.key }}">Link: {{ ep.label }}</option>
+                        {%- if post_link.usable %}
+                        <select id="postLinkKind" class="distrakt-link-select" name="kind"
+                                title="Which share link to embed" autocomplete="off"
+                                hx-post="/api/distrakt/share-link{{ month_query }}" hx-json-enc
+                                hx-trigger="change" hx-target="#distraktShowList"
+                                hx-swap="innerHTML swapEmpty:false">
+                            <option value=""{{ ' selected' if not post_link.kind }}>Link: as shared ({{ post_link.preferred_label }})</option>
+                            {% for kind, label in post_link.kinds %}
+                            <option value="{{ kind }}"{{ ' selected' if post_link.kind == kind }}>Link: {{ label }}</option>
                             {% endfor %}
                         </select>
-                        <button type="button" class="btn-ghost small" onclick="copyBlock('post1')">Copy</button>
+                        <select id="postLinkEndpoint" class="distrakt-link-select" name="endpoint"
+                                title="Which calendar view the link opens" autocomplete="off"
+                                hx-post="/api/distrakt/share-link{{ month_query }}" hx-json-enc
+                                hx-trigger="change" hx-target="#distraktShowList"
+                                hx-swap="innerHTML swapEmpty:false">
+                            <option value=""{{ ' selected' if not post_link.endpoint }}>Link: default view</option>
+                            {% for ep in endpoints %}
+                            <option value="{{ ep.key }}"{{ ' selected' if post_link.endpoint == ep.key }}>Link: {{ ep.label }}</option>
+                            {% endfor %}
+                        </select>
+                        {%- endif %}
+                        <button type="button" class="btn-ghost small" data-copy="#post1Text">Copy</button>
                     </div>
                 </div>
                 <textarea id="post1Text" class="distrakt-copy-textarea" readonly spellcheck="false"></textarea>
@@ -110,13 +167,13 @@
             <div class="distrakt-copy-block">
                 <div class="distrakt-copy-head">
                     <span>POST 2 — living tracker</span>
-                    <button type="button" class="btn-ghost small" onclick="copyBlock('post2')">Copy</button>
+                    <button type="button" class="btn-ghost small" data-copy="#post2Text">Copy</button>
                 </div>
                 <textarea id="post2Text" class="distrakt-copy-textarea" readonly spellcheck="false"></textarea>
             </div>
         </section>
 
-        <section class="distrakt-panel distrakt-section" data-panel="data" hidden>
+        <section class="distrakt-panel distrakt-section" data-panel="data">
             <div class="distrakt-section-head">
                 <h2>Backup</h2>
             </div>
@@ -138,18 +195,29 @@
                 {# Restore REPLACES rather than merges, so this is destructive in a
                    way no other control on this page is. The typed acknowledgement
                    is deliberately more friction than a confirm dialog: it cannot
-                   be dismissed by reflex, and it names what is about to happen. #}
+                   be dismissed by reflex, and it names what is about to happen.
+                   `required pattern` is the browser's own check and the route
+                   makes the same one, because a browser validation is a courtesy
+                   to the person typing and not a gate. #}
                 <p class="distrakt-note distrakt-warn">This <strong>replaces</strong> everything
                     currently tracked here with the contents of the file. What is here now is not
                     recoverable afterwards unless you downloaded it first.</p>
-                <input type="file" id="restoreFile" accept="application/json,.json" onchange="onRestoreFileChosen()">
-                <div id="restoreConfirm" hidden>
-                    <label for="restoreAck">Type <code>REPLACE MY DATA</code> to confirm:</label>
-                    <input type="text" id="restoreAck" spellcheck="false" autocomplete="off"
-                           placeholder="REPLACE MY DATA" oninput="onRestoreAckInput()">
-                    <button type="button" class="btn-ghost small btn-danger" id="restoreBtn"
-                            onclick="restoreTrackerBackup()" disabled>Replace my data</button>
-                </div>
+                <form hx-post="/api/distrakt/restore{{ month_query }}" hx-json-enc hx-boost="false"
+                      hx-target="#restoreStatus" hx-swap="outerHTML">
+                    {# THE ONE THING ONLY THE BROWSER CAN DO: read a chosen file.
+                       The shape guard admits application/json alone — a
+                       cross-origin multipart upload is exactly what it exists to
+                       refuse — so the text has to reach the body through a field.
+                       static/js/tracker/backup.js is those few lines and nothing
+                       else. #}
+                    <input type="file" id="restoreFile" accept="application/json,.json"
+                           data-file-into="#restorePayload" data-file-status="#restoreStatus">
+                    <input type="hidden" name="payload" id="restorePayload">
+                    <label for="restoreAck">Type <code>{{ restore_ack }}</code> to confirm:</label>
+                    <input type="text" id="restoreAck" name="ack" spellcheck="false" autocomplete="off"
+                           placeholder="{{ restore_ack }}" required pattern="{{ restore_ack }}">
+                    <button type="submit" class="btn-ghost small btn-danger">Replace my data</button>
+                </form>
                 <p class="distrakt-note" id="restoreStatus"></p>
             </div>
 
@@ -158,45 +226,72 @@
             <div class="distrakt-copy-block">
                 <div class="distrakt-copy-head"><span>Backfill months from watch history</span></div>
                 <p class="distrakt-note">Months from before you started tracking are empty — the
-                    tracker only ever grows forward. This reads your Trakt watch history and fills
+                    tracker only ever grows forward. This reads your watch history and fills
                     them in with the <strong>seasons you finished during each one, and the films you
                     watched</strong>, in one pass — both count towards Rankings imports, which take
                     shows and movies separately. Each month it writes is closed, like any past month.
                     Months already tracked keep their own decisions; only their films are topped up,
                     so this is safe to run again.</p>
-                <div class="two-col">
-                    <div class="field">
-                        <label for="backfillStart">From</label>
-                        <input type="month" id="backfillStart">
+                {# The range the dialog opens on is rendered rather than fetched:
+                   the server decides it (backfill.default_range) and used to
+                   answer a request whose only job was to fill in two inputs. #}
+                <form hx-post="/api/distrakt/backfill/survey" hx-json-enc hx-boost="false"
+                      hx-target="#backfillResult" hx-swap="outerHTML">
+                    <div class="two-col">
+                        <div class="field">
+                            <label for="backfillStart">From</label>
+                            <input type="month" id="backfillStart" name="start" value="{{ backfill_start }}">
+                        </div>
+                        <div class="field">
+                            <label for="backfillEnd">To</label>
+                            <input type="month" id="backfillEnd" name="end" value="{{ backfill_end }}">
+                        </div>
                     </div>
-                    <div class="field">
-                        <label for="backfillEnd">To</label>
-                        <input type="month" id="backfillEnd">
-                    </div>
-                </div>
-                <button type="button" class="btn-ghost small" id="backfillCheckBtn"
-                        onclick="checkBackfill()">Check what's there</button>
-                <div id="backfillResult" hidden></div>
-                <p class="distrakt-note" id="backfillStatus"></p>
+                    <button type="submit" class="btn-ghost small">Check what's there</button>
+                    <span class="htmx-indicator distrakt-note">Reading your watch history… this one takes a while.</span>
+                </form>
+                {#- The same block the survey answers with, in its empty state. -#}
+                {% with plan = none, warning = '', done = '' %}{% include '_distrakt_backfill.html' %}{% endwith %}
             </div>
         </section>
 
-        <section class="distrakt-panel distrakt-section" data-panel="emoji" hidden>
+        <section class="distrakt-panel distrakt-section" data-panel="emoji">
             <h2>Network → emoji map</h2>
             <p class="distrakt-note">Your own map — it decides how the networks in
                 <strong>your</strong> Discord posts render, and nobody else's. New networks
                 are added here automatically as your roster picks them up. It travels with
                 the Backup export.</p>
-            <div id="emojiRows" class="emoji-rows"></div>
-            <div class="emoji-map-actions">
-                <button type="button" class="btn-ghost small" onclick="addEmojiRow()">+ Add network</button>
-                <button type="button" class="btn-ghost small" onclick="backfillNetworks()" title="Add every network used by this month's shows">⤓ Backfill from shows</button>
-            </div>
-            <div class="field distrakt-default-emoji">
-                <label for="e_default">Default emoji (fallback)</label>
-                <input type="text" id="e_default" spellcheck="false">
-            </div>
-            <button type="button" class="btn-primary" onclick="saveEmojiMap()">Save emoji map</button>
+            {# THE EDITOR IS A FORM AND ITS ROWS ARE THE SERVER'S. Every control
+               here posts the form and is answered with the rows, so an edit
+               nobody has saved rides along with the request instead of having to
+               be read back out of the DOM before a redraw could clobber it.
+
+               NOTHING IN THIS FORM CARRIES `hx-get` — see the month loader above
+               for why an inherited GET would become every button's verb. #}
+            <form id="emojiForm" hx-boost="false"
+                  hx-post="/api/distrakt/emojis" hx-json-enc
+                  hx-target="#emojiRows" hx-swap="outerHTML">
+                {#- The same rows every emoji answer swaps in, drawn from the
+                    same builder (routes._emoji_row_contexts). -#}
+                {% with rows = emoji_rows, message = '' %}{% include '_distrakt_emoji_rows.html' %}{% endwith %}
+                <div class="emoji-map-actions">
+                    <button type="button" class="btn-ghost small"
+                            hx-post="/distrakt/fragments/emoji-rows" hx-json-enc
+                            hx-include="#emojiForm"
+                            hx-target="#emojiRows" hx-swap="outerHTML">+ Add network</button>
+                    <button type="button" class="btn-ghost small"
+                            title="Add every network used by this month's shows"
+                            hx-post="/api/distrakt/backfill-networks{{ month_query }}" hx-json-enc
+                            hx-include="#emojiForm"
+                            hx-target="#emojiRows" hx-swap="outerHTML">⤓ Backfill from shows</button>
+                </div>
+                <div class="field distrakt-default-emoji">
+                    <label for="e_default">Default emoji (fallback)</label>
+                    <input type="text" id="e_default" name="default_network_emoji"
+                           value="{{ default_network_emoji }}" spellcheck="false">
+                </div>
+                <button type="submit" class="btn-primary">Save emoji map</button>
+            </form>
         </section>
     </div>
 </main>
@@ -207,184 +302,9 @@
    viewer's own record of the season drawn onto its episode rows. #}
 {% include "_details_modal.html" %}
 
-<!-- Add-film modal: a film is a play on a day, not a roster entry, so this asks
-     for the date and nothing else — the month it lands in follows from it. -->
-<div id="addMovieModal" class="modal-overlay">
-    <div class="modal">
-        <div class="modal-head">
-            <h2>🎬 Add a film</h2>
-            <button type="button" class="modal-close" onclick="closeAddMovie()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <p class="distrakt-note">Recorded as watched on the day you pick, which is the month
-                it shows up in — here and in Rankings imports.</p>
-            <div class="field">
-                <label for="addMovieDate">Watched on</label>
-                <input type="date" id="addMovieDate">
-            </div>
-            <div class="field">
-                <label for="addMovieSearch">{{ search_label }}</label>
-                {# Submitted, not typed — see the show modal's own field below. #}
-                <div class="distrakt-search-submit">
-                    <input type="text" id="addMovieSearch" name="q" placeholder="Type a film title…"
-                           autocomplete="off" spellcheck="false"
-                           hx-get="/distrakt/fragments/search-movie" hx-trigger="search-submit"
-                           hx-target="#addMovieResults" hx-indicator="#addMovieBusy"
-                           onkeydown="onAddSearchKey(event, 'addMovieSearch')">
-                    <button type="button" class="btn-ghost small" onclick="submitAddSearch('addMovieSearch')">Search</button>
-                    <span id="addMovieBusy" class="htmx-indicator distrakt-empty">Searching…</span>
-                </div>
-            </div>
-            <div id="addMovieResults" class="distrakt-search-results"
-                 onclick="onMovieResultClick(event)" onkeydown="onResultKey(event)"></div>
-        </div>
-        <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="closeAddMovie()">Cancel</button>
-        </div>
-    </div>
-</div>
+{# Where every server-drawn line lands. #}
+<div id="toastHost"></div>
 
-<!-- Add-show modal -->
-{# ADDING A SEASON YOUR HISTORY SAYS YOU ALREADY FINISHED.
-
-   IT ASKS RATHER THAN GUESSING, because the two cases are indistinguishable
-   from the data: somebody starting a re-watch and a tracker meeting an old
-   completion for the first time produce the identical signal — a finished
-   season being added. Left to infer, it files the season onto the month that
-   history dates it to, which is right for the second and reads as broken for
-   the first, and there is no definition of "recent" that tells them apart
-   without being a guess somebody has to defend.
-
-   NO DEFAULT AND NO DISMISS-BY-CLICKING-AWAY. Both answers are real, and the
-   one that happens if the question is ignored is the old silent behaviour —
-   which is the thing being fixed. Closing it is still allowed and still means
-   "leave it as it was"; it just says so. #}
-<div id="rewatchModal" class="modal-overlay">
-    <div class="modal narrow">
-        <div class="modal-head">
-            <h2>🔁 Watched this before</h2>
-            <button type="button" class="modal-close" onclick="closeRewatchPrompt()">&times;</button>
-        </div>
-        <div class="modal-body">
-            <p id="rewatchQuestion"></p>
-            {# WHAT WAS WATCHED SINCE THE RUN TURNED BACK, listed rather than
-               summarised. The question used to be a date and nothing else, so
-               answering it meant remembering your own viewing; the episodes are
-               already known, and naming them lets the choice be made by looking.
-               Hidden when the play order shows no restart, which is the ordinary
-               case of a season watched once. #}
-            <div id="rewatchSince" hidden>
-                <p class="distrakt-note" id="rewatchSinceLead"></p>
-                <ul class="rewatch-episodes" id="rewatchEpisodes"></ul>
-            </div>
-            <p id="rewatchAsk"><strong>When should this run begin?</strong></p>
-            {# THE DAY A FRESH RUN COUNTS FROM, and the ONE thing the answer is
-               made of. Everything else here writes into this field rather than
-               answering around it — which is what stops a typed date being an
-               option with no way to submit it. #}
-            <div class="field">
-                <label for="rewatchFrom">Count episodes watched on or after</label>
-                {# `oninput` KEEPS THE BUTTON HONEST. The button names the date
-                   it will use, so a date typed here and a button saying
-                   something else would be two answers on screen at once. #}
-                <input type="date" id="rewatchFrom" oninput="syncRewatchButton()">
-            </div>
-            {# THE TWO ANSWERS ANYBODY ACTUALLY MEANS, as presets on the field
-               rather than as buttons of their own. "Count those" and "do not
-               count those" is how a person thinks about it; a date is how the
-               app stores it, and filling the field visibly is what shows the
-               reader those are the same statement. Hidden when nothing
-               restarted, because then there are no episodes to be either side
-               of. #}
-            <div class="rewatch-presets" id="rewatchPresets" hidden>
-                <button type="button" class="btn-ghost small"
-                        onclick="setRewatchFrom('before')">Include those episodes</button>
-                <button type="button" class="btn-ghost small"
-                        onclick="setRewatchFrom('after')">Start after them</button>
-            </div>
-        </div>
-        <div class="modal-foot rewatch-foot">
-            <button type="button" class="btn-ghost" onclick="answerRewatch(false)">Count everything I've watched</button>
-            {# THE LABEL IS WRITTEN BY syncRewatchButton, because "start a fresh
-               run" does not say WHICH run: after filling the date above, the
-               reader was left to assume this button used it. It names the day
-               instead. #}
-            <button type="button" class="btn-primary" id="rewatchSubmit"
-                    onclick="answerRewatch(true)">Start a fresh run</button>
-        </div>
-    </div>
-</div>
-
-<div id="addShowModal" class="modal-overlay">
-    <div class="modal">
-        <div class="modal-head">
-            <h2 id="addShowTitle">➕ Add show</h2>
-            <button type="button" class="modal-close" onclick="closeAddShow()">&times;</button>
-        </div>
-        <div class="modal-body">
-            {# A past month is closed, so there is nothing live to bucket a show
-               against: what goes in was finished, and the wording says so before
-               anything is picked rather than after it lands. #}
-            <p class="distrakt-note distrakt-warn" id="addShowCompletedNote" hidden>
-                This month is closed. Whatever you pick is recorded as
-                <strong>finished during it</strong> — your Trakt watch history is not
-                consulted and cannot contradict it.</p>
-            <div class="field">
-                <label for="addSearchInput">{{ search_label }}</label>
-                {# SUBMITTED, NOT TYPED. Enter and the button are the same act,
-                   and an empty box does nothing — this is not a discovery UI,
-                   you open it already knowing what you came to add, and a
-                   catalogue fan-out at every prefix of a title somebody has in
-                   mind buys nothing for it. It is also what lets the results be
-                   an ordinary fragment: a request per keystroke could not be.
-                   The trigger is a custom event so the "is there anything to
-                   search for" question stays in one place in add.js rather
-                   than in an attribute. #}
-                <div class="distrakt-search-submit">
-                    <input type="text" id="addSearchInput" name="q" placeholder="Type a show title…"
-                           autocomplete="off" spellcheck="false"
-                           hx-get="/distrakt/fragments/search" hx-trigger="search-submit"
-                           hx-target="#addSearchResults" hx-indicator="#addSearchBusy"
-                           onkeydown="onAddSearchKey(event, 'addSearchInput')">
-                    <button type="button" class="btn-ghost small" onclick="submitAddSearch('addSearchInput')">Search</button>
-                    <span id="addSearchBusy" class="htmx-indicator distrakt-empty">Searching…</span>
-                </div>
-            </div>
-            {# ONE listener for every row, on the container that outlives them —
-               the rows arrive from the server and describe themselves, so
-               nothing here has to know how many there are or where in a list
-               each one sits. #}
-            <div id="addSearchResults" class="distrakt-search-results"
-                 onclick="onShowResultClick(event)" onkeydown="onResultKey(event)"></div>
-            {# A picked title the tracker turns out to have no id to file under.
-               Said HERE, after the per-title lookup that had its chance to
-               resolve it, rather than on the row: a show hit arriving without a
-               shared id is under-described, not unfileable, and refusing it up
-               front would refuse the anime season-titles this flow exists to
-               reach. The sentence is the server's own — the same one the add
-               route's refusal uses. #}
-            <p class="distrakt-note distrakt-warn" id="addShowUnkeyable" hidden></p>
-            <div id="addSeasonPick" class="distrakt-season-pick" hidden>
-                <div class="field">
-                    <label>Pick a season for <span id="addSeasonShowTitle"></span></label>
-                    <div id="addSeasonList" class="distrakt-season-list" onclick="onSeasonClick(event)"></div>
-                </div>
-            </div>
-        </div>
-        <div class="modal-foot">
-            <button type="button" class="btn-ghost" onclick="closeAddShow()">Cancel</button>
-        </div>
-    </div>
-</div>
-
-<script>
-    window.DISTRAKT_YEAR = {{ year }};
-    window.DISTRAKT_MONTH = {{ month }};
-    window.IS_ADMIN = {{ "true" if is_admin else "false" }};
-    // This user's OWN map, rendered in rather than fetched: the roster falls back
-    // to these emoji for any network with no logo, on the first paint.
-    window.NETWORK_EMOJIS = {{ network_emojis | tojson }};
-    window.DEFAULT_NETWORK_EMOJI = {{ default_network_emoji | tojson }};
-</script>
+{{ modals.all(catalogue_sources, as_finished, film_day, film_max) }}
 </body>
 </html>

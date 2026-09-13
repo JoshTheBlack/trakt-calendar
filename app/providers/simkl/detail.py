@@ -563,7 +563,8 @@ def _season_counts(episodes: list[dict]) -> list[dict]:
             for season, count in sorted(counts.items())]
 
 
-async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media.SHOW) -> SeasonsAnswer:
+async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media.SHOW, *,
+                        cached_only: bool = False) -> SeasonsAnswer:
     """app/providers/base.py's DetailPort.fetch_seasons.
 
     TWO CALLS, BOTH PAID BY ONE CLICK. `fetch_episodes` answers the picker's
@@ -580,17 +581,22 @@ async def fetch_seasons(settings: Settings, simkl_id, media: Media | str = Media
     record — and where a season-title's own record leaves it null, which is
     every season but the first, it is read off the series (see
     `_naming.network_of_series`).
+
+    `cached_only=True` reaches BOTH calls and the series lookup behind them, so a
+    caller re-reading what the picker already asked cannot make a request by any
+    route — see base.DetailPort.fetch_seasons for who does that and why.
     """
     media = Media(media)
     if media is not Media.SHOW or not simkl_id:
         return SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
     episodes, naming = await asyncio.gather(
-        fetch_episodes(settings, simkl_id, media),
-        _naming.fetch(settings, simkl_id),
+        fetch_episodes(settings, simkl_id, media, cache_only=cached_only),
+        _naming.fetch(settings, simkl_id, cache_only=cached_only),
     )
     return SeasonsAnswer(
         seasons=_season_counts(episodes),
         named_season=naming.season,
         ids=naming.ids,
-        network=await _naming.network_of_series(settings, simkl_id, naming),
+        network=await _naming.network_of_series(settings, simkl_id, naming,
+                                                cache_only=cached_only),
     )

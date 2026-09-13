@@ -1,12 +1,11 @@
-"""The add flow's catalogue search fragments and GET /api/distrakt/seasons
-through the catalogue registry (app/distrakt/routes.py's `_search_fragment` and
-`api_distrakt_seasons`).
+"""The add flow's catalogue search fragments and its season picker
+(app/distrakt/routes.py's `_search_fragment` and `distrakt_seasons_fragment`).
 
-The two search routes answer with RENDERED ROWS rather than JSON — see
-`_search_fragment` for why — so these read the markup the browser is handed.
-The row's own data attributes are what the pick reads back, so they are asserted
-as data (parsed out and compared) rather than pattern-matched: markup that
-looked right and did not parse would fail in the browser and nowhere here.
+All three answer with RENDERED MARKUP rather than JSON — see `_search_fragment`
+for why — so these read what the browser is handed. A row's own REQUEST is what
+the pick acts on now, so it is parsed out and compared rather than
+pattern-matched: markup that looked right and did not parse would fail in the
+browser and nowhere here.
 
 No network: each source's own search/season module function is patched at its
 own module object, so these exercise the ROUTE's gating, merge-wiring and
@@ -15,12 +14,18 @@ tests/providers/.
 """
 from __future__ import annotations
 
-import json
+import asyncio
 import re
+from html import unescape
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import AsyncMock, patch
 
+from datetime import date
+
 from app.config import Settings, save_settings
-from app.providers.base import SearchHit, SeasonsAnswer, Source
+from app.distrakt import routes as distrakt_routes
+from app.distrakt import search as catalogue_search
+from app.providers.base import Media, SearchHit, SeasonsAnswer, Source
 from app.providers.simkl import detail as simkl_detail
 from app.providers.simkl import search as simkl_search
 from app.providers.trakt import TraktError
@@ -36,29 +41,28 @@ TRAKT_HIT = {
 BOTH_CONFIGURED = dict(public_base_url=ORIGIN, trakt_client_id="cid",
                        simkl_client_id="scid", simkl_client_secret="ssecret")
 
-_ROW = re.compile(r'<div class="distrakt-search-row[^"]*"(.*?)>', re.S)
-_ATTR = re.compile(r"""\s([\w-]+)=(?:'([^']*)'|"([^"]*)")""")
+_ROW = re.compile(r'<button type="button" class="distrakt-search-row[^"]*"(.*?)>', re.S)
+_GET = re.compile(r'hx-get="([^"]*)"')
+_TITLE = re.compile(r'<span class="distrakt-title">([^<]*)</span>')
 
 
 def rows(html: str) -> list[dict]:
-    """Every result row's attributes, as the browser's `dataset` would read them.
+    """Every result row, as what it would ASK FOR if it were pressed.
 
-    Parsed rather than asserted against a substring because the attributes ARE
-    the contract with app/static/js/tracker/add.js: the pick reads `data-ids`
-    and `data-source-ids` back off the row, so a row is only correct if those
-    round-trip as the maps that went in.
+    Parsed rather than asserted against a substring because the row's request IS
+    the contract now: it names the query and the result's place in the answer,
+    and the server resolves the title from that. A row carrying a title, or an
+    id, or nothing at all would each look fine in a substring match.
     """
+    titles = _TITLE.findall(html)
     out = []
-    for attrs in _ROW.findall(html):
-        found = {name: single or double for name, single, double in _ATTR.findall(attrs)}
-        for key in ("data-ids", "data-source-ids"):
-            if key in found:
-                found[key] = json.loads(found[key])
-        # The sources arrive as ORDERED [source, id] pairs (see the template for
-        # why); read back as a dict for the tests that only care who is in it,
-        # with the raw list kept for the one that cares which is first.
-        found["sources"] = found.get("data-source-ids") or []
-        found["data-source-ids"] = dict(found["sources"])
+    for index, attrs in enumerate(_ROW.findall(html)):
+        found = {"disabled": "disabled" in attrs, "names": {}}
+        get = _GET.search(attrs)
+        if get:
+            query = parse_qs(urlsplit(unescape(get.group(1))).query)
+            found["names"] = {key: value[0] for key, value in query.items()}
+        found["title"] = titles[index] if index < len(titles) else ""
         out.append(found)
     return out
 
@@ -80,7 +84,7 @@ class SearchFragmentTests(AppTestCase):
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])):
             html = self.client.get("/distrakt/fragments/search?q=a").text
-        self.assertEqual(rows(html)[0]["data-title"], "A Show")
+        self.assertEqual(rows(html)[0]["title"], "A Show")
 
     def test_a_simkl_only_instance_can_still_search(self):
         save_settings(Settings(public_base_url=ORIGIN, simkl_client_id="scid",
@@ -108,25 +112,27 @@ class SearchFragmentTests(AppTestCase):
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])), \
              patch.object(simkl_search, "search_titles", AsyncMock(return_value=[simkl_hit])):
             html = self.client.get("/distrakt/fragments/search?q=a").text
-        found = rows(html)
-        self.assertEqual(len(found), 1)
-        self.assertEqual(set(found[0]["data-source-ids"]), {"trakt", "simkl"})
+        self.assertEqual(len(rows(html)), 1)
         # Both marks, from the macro that owns the filenames.
         self.assertIn("trakt-circlemark-dark.svg", html)
         self.assertIn("simkllogo.svg", html)
 
-    def test_the_leader_is_the_first_key_of_source_ids(self):
-        """The browser asks `source_ids`'s FIRST key for the season list, so the
-        registry's order has to survive both the merge and the render — an
-        alphabetical sort anywhere in between would silently make Simkl answer
-        for a row Trakt leads."""
-        simkl_hit = SearchHit(source=Source.SIMKL, source_id="9", media="show",
-                              ids={"simkl": 9, "tmdb": 100}, title="A Show", year=2022,
-                              season=None, network="", runtime=None, overview="")
+    def test_a_row_names_the_query_and_its_place_and_nothing_else(self):
+        """The contract that replaced three data attributes holding a copy of
+        the title: the server reads the hit back out of the same search, so what
+        gets stored is the service's own answer and never a field a page sent.
+
+        WHICH SOURCE LEADS is no longer a fact about the markup at all — it is
+        `next(iter(hit.source_ids))` inside `_resolve_pick`, and
+        SeasonPickerFragmentTests is where it is pinned."""
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_HIT])), \
-             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[simkl_hit])):
-            html = self.client.get("/distrakt/fragments/search?q=a").text
-        self.assertEqual(rows(html)[0]["sources"][0][0], "trakt")
+             patch.object(simkl_search, "search_titles", AsyncMock(return_value=[])):
+            html = self.client.get(
+                "/distrakt/fragments/search?year=2026&month=8&q=a").text
+        self.assertEqual(rows(html)[0]["names"],
+                         {"year": "2026", "month": "8", "q": "a", "i": "0"})
+        self.assertNotIn("data-ids", html)
+        self.assertNotIn("data-source-ids", html)
 
     def test_a_single_source_instance_draws_no_marks(self):
         """With one catalogue there is nothing to disambiguate, so the row looks
@@ -157,8 +163,10 @@ class SearchFragmentTests(AppTestCase):
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
              patch.object(simkl_search, "search_titles", AsyncMock(return_value=[bare_hit])):
             html = self.client.get("/distrakt/fragments/search?q=a").text
-        self.assertNotIn("aria-disabled", html)
-        self.assertEqual(rows(html)[0]["data-source-ids"], {"simkl": "694485"})
+        self.assertFalse(rows(html)[0]["disabled"])
+        # It has no shared id at all, and naming a result by its PLACE is what
+        # lets it be picked anyway.
+        self.assertEqual(rows(html)[0]["names"]["i"], "0")
 
     def test_a_row_says_which_season_it_is_when_its_source_named_one(self):
         """Several titles of one series come back sharing a name — three
@@ -218,7 +226,7 @@ class MovieSearchFragmentTests(AppTestCase):
         save_settings(Settings(public_base_url=ORIGIN, trakt_client_id="cid"))
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_MOVIE_HIT])):
             html = self.client.get("/distrakt/fragments/search-movie?q=a").text
-        self.assertEqual(rows(html)[0]["data-title"], "A Movie")
+        self.assertEqual(rows(html)[0]["title"], "A Movie")
         # A film's third column is its runtime; it has no network to show.
         self.assertIn("118 min", html)
 
@@ -244,9 +252,7 @@ class MovieSearchFragmentTests(AppTestCase):
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[TRAKT_MOVIE_HIT])), \
              patch.object(simkl_search, "search_titles", AsyncMock(return_value=[simkl_hit])):
             html = self.client.get("/distrakt/fragments/search-movie?q=a").text
-        found = rows(html)
-        self.assertEqual(len(found), 1)
-        self.assertEqual(set(found[0]["data-source-ids"]), {"trakt", "simkl"})
+        self.assertEqual(len(rows(html)), 1)
 
     def test_one_source_failing_is_named_and_does_not_fail_the_search(self):
         async def _boom(*args, **kwargs):
@@ -269,7 +275,9 @@ class MovieSearchFragmentTests(AppTestCase):
         with patch.object(trakt_detail, "search_titles", AsyncMock(return_value=[])), \
              patch.object(simkl_search, "search_titles", AsyncMock(return_value=[bare_hit])):
             html = self.client.get("/distrakt/fragments/search-movie?q=a").text
-        self.assertIn("aria-disabled", html)
+        # `disabled` is what refuses it now: the row became the <button> it
+        # always was, and the element already knows how to be unpressable.
+        self.assertTrue(rows(html)[0]["disabled"])
         self.assertIn("Untethered", html)
 
 
@@ -308,7 +316,23 @@ class SearchLabelTests(AppTestCase):
         self.assertNotIn("Search Simkl", page)
 
 
-class SeasonsRouteTests(AppTestCase):
+class SeasonPickerFragmentTests(AppTestCase):
+    """What a click on a search result answers with, and how the result it names
+    is resolved.
+
+    THE ADDRESS NAMES A RESULT AND CARRIES NOTHING ELSE. It used to carry the
+    source, that source's id and every shared id the hit had, and the answer was
+    JSON the browser turned into buttons. Now it names the query and the result's
+    place in the answer, the server reads the hit back out of the same cached
+    search, and the answer is the picker itself — so no id a page could edit
+    reaches the add behind it.
+
+    THE PLACE RATHER THAN THE KEY, and that is not laziness: a show hit can
+    legitimately have no shared id at all, which is the ordinary shape of a Simkl
+    season-title before its per-title lookup fills one in — and those are exactly
+    the rows this flow exists to reach.
+    """
+
     def make_settings(self):
         return Settings(**BOTH_CONFIGURED)
 
@@ -318,82 +342,146 @@ class SeasonsRouteTests(AppTestCase):
                                       calendar_approved=True)
         self.link_identity(self.user_id, "simkl", 4242, "simkl-token")
         self.sign_in_as(self.user_id)
+        # Taken from the clock, because which add route a season button posts to
+        # follows from whether the month is behind it — a written-down month
+        # would rot the day the real calendar passed it.
+        today = date.today()
+        self.ahead = (today.year + 1, 1)
+        self.behind = (today.year - 1, 1)
 
-    def test_missing_source_is_refused(self):
-        body = self.client.get("/api/distrakt/seasons?id=1").json()
-        self.assertEqual(body, {"ok": False, "error": "Missing or invalid source"})
+    def _found(self, *hits):
+        """The search the picker re-reads, stood in for.
 
-    def test_an_unregistered_source_is_refused(self):
-        body = self.client.get("/api/distrakt/seasons?source=letterboxd&id=1").json()
-        self.assertEqual(body, {"ok": False, "error": "Missing or invalid source"})
+        Patched at the merge rather than seeded into the response cache: what
+        these tests are about is the per-title lookup the pick then makes, and
+        which answers a transport happens to have stored is a different
+        question — tests/distrakt/test_add_flow.py asks that one.
+        """
+        return patch.object(catalogue_search, "search_catalogue", AsyncMock(
+            return_value=catalogue_search.SearchMergeResult(
+                hits=list(hits), failed=frozenset())))
 
-    def test_missing_id_is_refused(self):
-        body = self.client.get("/api/distrakt/seasons?source=trakt").json()
-        self.assertEqual(body, {"ok": False, "error": "Missing id"})
+    def _hit(self, source, source_id, ids, title="A Show", season=None, network=""):
+        return catalogue_search.MergedSearchHit(
+            key=None, season=season, source_ids={source: source_id}, ids=dict(ids),
+            title=title, year=2022, network=network, runtime=None, overview="")
+
+    def _pick(self, index=0, query="a", month=None):
+        month = month or self.ahead
+        return self.client.get(
+            f"/distrakt/fragments/seasons?year={month[0]}&month={month[1]}"
+            f"&q={query}&i={index}").text
+
+    def _resolved(self, index=0, query="a"):
+        """The Pick the fragment was drawn from — for the facts that are about
+        the RESOLUTION rather than about the markup."""
+        from app.distrakt import viewer
+
+        async def _run():
+            settings = await viewer.settings_for_user(self.user_id)
+            return await distrakt_routes._resolve_pick(
+                settings, Media.SHOW, query, index, cached_only=False)
+
+        return asyncio.run(_run())
+
+    def test_a_result_that_is_not_in_the_answer_is_refused(self):
+        with self._found():
+            self.assertIn("That search has expired", self._pick())
+
+    def test_a_result_named_past_the_end_of_the_answer_is_refused(self):
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})):
+            self.assertIn("That search has expired", self._pick(index=9))
+
+    def test_a_nonsense_place_is_refused_rather_than_guessed_at(self):
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})):
+            self.assertIn("That search has expired", self._pick(index="../7"))
 
     def test_the_sources_own_catalogue_gate_is_asked(self):
         save_settings(Settings(public_base_url=ORIGIN))
-        body = self.client.get("/api/distrakt/seasons?source=trakt&id=1").json()
-        self.assertEqual(body, {"ok": False, "error": "Not configured"})
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})):
+            self.assertIn("That search has expired", self._pick())
 
-    def test_a_trakt_hit_returns_its_season_list_and_no_named_season(self):
+    def test_a_trakt_hit_draws_its_season_list(self):
         seasons = [{"season": 1, "episode_count": 10}]
-        with patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=seasons)):
-            body = self.client.get(
-                "/api/distrakt/seasons?source=trakt&id=1&tmdb=100").json()
-        self.assertTrue(body["ok"])
-        self.assertEqual(body["seasons"], seasons)
-        self.assertIsNone(body["season"])
-        self.assertEqual(body["ids"], {"tmdb": 100})
-        self.assertIsNone(body["unkeyable"])
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})), \
+             patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=seasons)):
+            html = self._pick(month=self.ahead)
+        self.assertIn("S01 (10 eps)", html)
+        # The button names the result and the season, and nothing about the
+        # title: no id a browser could edit reaches the write.
+        self.assertIn('"q": "a"', html)
+        self.assertIn('"season": 1', html)
+        self.assertNotIn("tmdb", html)
+
+    def test_a_month_behind_the_clock_records_something_as_finished_instead(self):
+        """Which of the two add routes a season button posts to is the server's
+        decision, and it is the same test each of those routes already enforces
+        for itself: a past month is filled in by hand."""
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})), \
+             patch.object(trakt_detail, "fetch_show_seasons",
+                          AsyncMock(return_value=[{"season": 1, "episode_count": 10}])):
+            self.assertIn("/api/distrakt/add-completed", self._pick(month=self.behind))
+            self.assertIn("/api/distrakt/add?", self._pick(month=self.ahead))
 
     def test_a_bare_simkl_hit_is_resolved_by_the_same_lookup(self):
-        """The bare-hit case: a search hit search left without a shared id comes
-        back keyable once the per-title lookup has run, with no `ids` query
-        params needed at all — the lookup's own answer is enough on its own."""
+        """The bare-hit case: a hit the search left without a shared id comes
+        back keyable once the per-title lookup has run, with nothing carried on
+        the address at all — the lookup's own answer is enough on its own."""
         answer = SeasonsAnswer(seasons=[], named_season=3, network="",
                                ids={"tmdb": 1429, "tvdb": 99, "imdb": "tt1", "mal": 51019})
-        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
-            body = self.client.get(
-                "/api/distrakt/seasons?source=simkl&id=694485").json()
-        self.assertTrue(body["ok"])
-        self.assertEqual(body["season"], 3)
-        self.assertEqual(body["ids"], {"tmdb": 1429, "tvdb": 99, "imdb": "tt1", "mal": 51019})
-        self.assertIsNone(body["unkeyable"])
+        with self._found(self._hit(Source.SIMKL, "694485", {"simkl": 694485})), \
+             patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            pick = self._resolved()
+        self.assertEqual(pick.named_season, 3)
+        self.assertEqual(pick.ids, {"simkl": 694485, "tmdb": 1429, "tvdb": 99,
+                                    "imdb": "tt1", "mal": 51019})
+        self.assertIsNone(pick.unkeyable)
+
+    def test_a_season_that_names_itself_adds_on_sight(self):
+        """Asking which season would be asking a question the row already
+        answered, so the add fires as the answer lands — `hx-trigger="load"`,
+        which is the declarative form of what the browser used to do the moment
+        the lookup came back."""
+        answer = SeasonsAnswer(seasons=[], named_season=3, network="",
+                               ids={"tmdb": 1429})
+        with self._found(self._hit(Source.SIMKL, "694485", {"simkl": 694485})), \
+             patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            html = self._pick()
+        self.assertIn('hx-trigger="load"', html)
+        self.assertIn('"season": 3', html)
 
     def test_a_hit_still_unkeyable_after_the_lookup_says_so(self):
         answer = SeasonsAnswer(seasons=[], named_season=None, ids={}, network="")
-        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
-            body = self.client.get(
-                "/api/distrakt/seasons?source=simkl&id=1&title=Obscure").json()
-        self.assertTrue(body["ok"])
-        self.assertIn("Obscure", body["unkeyable"])
-        self.assertIsNone(body["season"])
+        with self._found(self._hit(Source.SIMKL, "1", {"simkl": 1}, title="Obscure")), \
+             patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            html = self._pick()
+        self.assertIn("Obscure", html)
+        self.assertNotIn("hx-post", html)
 
-    def test_given_ids_are_kept_when_the_lookup_adds_nothing_new(self):
-        """A Trakt hit is never bare — its per-title lookup surfaces no new
-        ids (SeasonsAnswer.ids is always {}) — so the ids the client already
-        had must survive the union, or every Trakt hit would look unkeyable."""
-        with patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=[])):
-            body = self.client.get(
-                "/api/distrakt/seasons?source=trakt&id=1&tmdb=100").json()
-        self.assertEqual(body["ids"], {"tmdb": 100})
-        self.assertIsNone(body["unkeyable"])
+    def test_the_hits_own_ids_are_kept_when_the_lookup_adds_nothing_new(self):
+        """A Trakt hit is never bare — its per-title lookup surfaces no new ids
+        (SeasonsAnswer.ids is always {}) — so the ids the hit already had must
+        survive the union, or every Trakt hit would look unkeyable."""
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})), \
+             patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=[])):
+            pick = self._resolved()
+        self.assertEqual(pick.ids, {"tmdb": 100})
+        self.assertIsNone(pick.unkeyable)
 
-    def test_the_lookups_own_ids_win_a_disagreement_with_the_clients(self):
+    def test_the_lookups_own_ids_win_a_disagreement_with_the_hits(self):
         """`season` is read off the same per-title record `ids` comes from, so
-        those two describe one title by construction. A client id that
-        disagrees describes a DIFFERENT one — and keeping it files the record
-        with one title's season beside another title's id, which is a row
-        nothing can count. The client's other ids still travel."""
+        those two describe one title by construction. An id that disagrees
+        describes a DIFFERENT one — and keeping it files the record with one
+        title's season beside another title's id, which is a row nothing can
+        count. The hit's other ids still travel."""
         answer = SeasonsAnswer(seasons=[], named_season=2, network="",
                                ids={"simkl": 2595284, "tmdb": 209867})
-        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
-            body = self.client.get(
-                "/api/distrakt/seasons?source=simkl&id=2595284"
-                "&simkl=1990194&tmdb=209867&imdb=tt22248376").json()
-        self.assertEqual(body["ids"], {"simkl": 2595284, "tmdb": 209867,
-                                       "imdb": "tt22248376"})
+        with self._found(self._hit(Source.SIMKL, "2595284",
+                                   {"simkl": 1990194, "tmdb": 209867, "imdb": "tt22248376"})), \
+             patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            pick = self._resolved()
+        self.assertEqual(pick.ids, {"simkl": 2595284, "tmdb": 209867,
+                                    "imdb": "tt22248376"})
 
     def test_the_lookup_carries_the_network_a_simkl_search_hit_never_has(self):
         """Simkl's search hit has no network and a single-catalogue instance has
@@ -402,31 +490,40 @@ class SeasonsRouteTests(AppTestCase):
         and "" registered in the viewer's emoji map."""
         answer = SeasonsAnswer(seasons=[], named_season=2, ids={"tmdb": 209867},
                                network="Nippon TV")
-        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
-            body = self.client.get("/api/distrakt/seasons?source=simkl&id=2595284").json()
-        self.assertEqual(body["network"], "Nippon TV")
+        with self._found(self._hit(Source.SIMKL, "2595284", {"simkl": 2595284})), \
+             patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            pick = self._resolved()
+        self.assertEqual(pick.network, "Nippon TV")
 
-    def test_a_trakt_hit_adds_no_network_because_its_search_hit_already_had_one(self):
-        with patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=[])):
-            body = self.client.get("/api/distrakt/seasons?source=trakt&id=1&tmdb=100").json()
-        self.assertEqual(body["network"], "")
+    def test_the_hits_own_network_is_not_overridden(self):
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100}, network="HBO")), \
+             patch.object(trakt_detail, "fetch_show_seasons", AsyncMock(return_value=[])):
+            pick = self._resolved()
+        self.assertEqual(pick.network, "HBO")
 
     def test_an_ambiguous_season_falls_back_to_the_picker(self):
         answer = SeasonsAnswer(seasons=[{"season": 1, "episode_count": 12}],
                                named_season=None, ids={"tmdb": 1}, network="")
-        with patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
-            body = self.client.get("/api/distrakt/seasons?source=simkl&id=1").json()
-        self.assertIsNone(body["season"])
-        self.assertEqual(body["seasons"], [{"season": 1, "episode_count": 12}])
+        with self._found(self._hit(Source.SIMKL, "1", {"simkl": 1})), \
+             patch.object(simkl_detail, "fetch_seasons", AsyncMock(return_value=answer)):
+            html = self._pick()
+        self.assertIn("S01 (12 eps)", html)
+        self.assertNotIn('hx-trigger="load"', html)
 
-    def test_a_genuine_failure_is_a_502_not_an_empty_answer(self):
+    def test_a_genuine_failure_is_drawn_rather_than_answered_with_a_status(self):
+        """A non-200 is never swapped, so a 502 here would leave the slot empty
+        with nothing to explain it."""
         async def _boom(*args, **kwargs):
             raise TraktError("Could not reach Trakt", status=502)
 
-        with patch.object(trakt_detail, "fetch_show_seasons", _boom):
-            resp = self.client.get("/api/distrakt/seasons?source=trakt&id=1")
-        self.assertEqual(resp.status_code, 502)
-        self.assertFalse(resp.json()["ok"])
+        with self._found(self._hit(Source.TRAKT, "1", {"tmdb": 100})), \
+             patch.object(trakt_detail, "fetch_show_seasons", _boom):
+            resp = self.client.get(
+                f"/distrakt/fragments/seasons?year={self.ahead[0]}&month=1&q=a&i=0")
+        self.assertEqual(resp.status_code, 200)
+        # AND IT SAYS WHICH FAILURE IT WAS. "Search for it again" would send
+        # somebody to retype a query that was never the problem.
+        self.assertIn("could not be looked up", resp.text)
 
 
 if __name__ == "__main__":  # pragma: no cover

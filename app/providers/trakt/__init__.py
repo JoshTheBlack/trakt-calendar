@@ -118,7 +118,8 @@ class _TraktDetailPort:
             return season_rules.empty_season(int(season))
         return await detail.fetch_season_detail(settings, source_id, int(season))
 
-    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
+                            cached_only: bool = False) -> SeasonsAnswer:
         """app/providers/base.py's DetailPort.fetch_seasons, over the existing
         `fetch_show_seasons` — see that function's own comment for the rule its
         answer already upholds (filtering on `episode_count` rather than
@@ -133,7 +134,8 @@ class _TraktDetailPort:
         add. Fetching either again to fill a field that is never the empty one
         would spend a request to restate what the caller already has.
         """
-        seasons = await detail.fetch_show_seasons(settings, source_id)
+        seasons = await detail.fetch_show_seasons(settings, source_id,
+                                                  cached_only=cached_only)
         return SeasonsAnswer(seasons=seasons, named_season=None, ids={}, network="")
 
 
@@ -154,8 +156,10 @@ class _TraktSearchPort:
     lose rows the merge exists to find.
     """
 
-    async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:
-        raw = await detail.search_titles(settings, str(media), query)
+    async def search_titles(self, settings: Settings, media: Media, query: str, *,
+                            cached_only: bool = False) -> list[SearchHit]:
+        raw = await detail.search_titles(settings, str(media), query,
+                                         cache_only=cached_only)
         return [
             SearchHit(
                 source=Source.TRAKT,

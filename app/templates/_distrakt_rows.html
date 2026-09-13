@@ -1,0 +1,273 @@
+{% import '_confirm.html' as confirm with context %}
+{# ONE ROW OF THE TRACKER'S MONTH, AND THE THREE KINDS OF IT: a roster show, a
+   watched film, and a question the history raised. All three used to be built in
+   the browser out of template strings, which is where the last of this app's
+   `esc()`-into-an-onclick interpolations lived — seven of them, on six lines,
+   putting a JavaScript string literal inside an HTML attribute where an HTML
+   escaper cannot protect it (the HTML parser decodes its output before the JS
+   parser runs). A value on a data attribute, or inside `tojson` in a
+   single-quoted `hx-vals`, is escaped for the layer it actually lands in.
+
+   EVERY BUTTON POSTS ITSELF. `hx-post` + `hx-json-enc` + `hx-vals`, which is
+   the shape the rankings board's Restore established: the request is still
+   `application/json`, so app/authz.py's shape guard sees exactly what it saw
+   when this was a hand-written fetch. `month_post()` below is the one place the
+   target, the swap and the month being looked at are spelled.
+
+   THE ROW OPENS THE DETAILS PANEL and needs no opener of its own:
+   `data-details-open` plus `data-details-heading` are read by the one delegated
+   listener in static/js/ui.js, which also states the rule that a control INSIDE
+   an opener acts for itself — so the ✕, the abandon toggle and the "back" mark
+   do not have to filter their own clicks and none of them may call
+   stopPropagation to do it.
+
+   Context every macro here needs: `month_query` (the year and month the page is
+   showing, as a query string), `closed` (this month is read-only), `emoji_for`
+   (network -> the viewer's fallback emoji) and `logo_for` (network -> a tile
+   URL, or "" when this instance has none). #}
+
+{# THE SHARED HALF OF EVERY MUTATION'S ADDRESS. The target is the show list and
+   the swap is its whole contents, because every one of these routes answers
+   with the month recomputed — a row moving between buckets is the ordinary
+   outcome of pressing any of them.
+
+   `show:top showTarget:.row-marked` is how the page lands on the row a
+   mutation just wrote. The server marks that row (see routes._point_at) and
+   htmx scrolls to whatever the selector finds AFTER the swap; an answer that
+   marked nothing finds nothing and scrolls nowhere, which is the honest
+   outcome for an add that settled onto a month this page is not showing.
+
+   WHICH MONTH IS IN THE ADDRESS AND NOT IN THE BODY, the shape _add_all.html
+   established for the calendar's own month action: it names which month is
+   being acted on, which is a reference the server can resolve, and the body
+   then carries nothing but the row's own identity.
+
+   `swapEmpty:false` IS WHAT LETS A REFUSAL COST NOTHING. A route that will not
+   act answers with the sentence alone, out of band into the toast host, and
+   recomputing a whole month to say "that season is not on your list" would
+   spend a season lookup per listed title to redraw markup that has not changed.
+   Read in the vendored htmx: an answer whose only content went out of band
+   still runs the MAIN swap, because static/js/boost.js turns
+   `allowEmptySwapAfterOOB` on for the pool sentinel's sake — so without this the
+   list would be emptied by every refusal. The flag says what this one swap
+   means rather than changing what the page-wide one does. #}
+{% macro month_post(url, vals) -%}
+hx-post="{{ url }}{{ month_query }}" hx-json-enc hx-vals='{{ vals | tojson }}'
+    hx-target="#distraktShowList"
+    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
+{%- endmacro %}
+
+{# The network badge: the tile this instance has already generated, or the
+   viewer's own emoji for that network.
+
+   ASKED OF THE DISK RATHER THAN OF THE BROWSER. This used to be an <img> at the
+   logo route with an `onerror` that swapped in the emoji, so every network with
+   no tile cost a 404 per row and the fallback was a script. The month payload
+   already warms every network on the page before it renders
+   (routes._live_month_payload's ensure_logos), so by the time a row is drawn the
+   tile either exists or never will, and the server can simply say which. #}
+{% macro badge(network) -%}
+{%- set logo = logo_for(network) -%}
+<span class="distrakt-badge">
+    {%- if logo %}<img class="distrakt-logo" src="{{ logo }}" alt="">
+    {%- else %}{{ emoji_for(network) }}{% endif -%}
+</span>
+{%- endmacro %}
+
+{# A season that was finished and is on the pile again — the episode count moved,
+   so there is more of it than there was. Said out loud rather than left to be
+   noticed: a title you remember finishing, sitting back on the list with no
+   explanation, reads as the page having got it wrong.
+
+   It is a button because dismissing it is the only thing that clears it — not
+   time and not the next load — so the mark has to be pressable where it is read.
+   It answers with itself REMOVED and nothing else: the ✕ and Abandon change what
+   the month holds and hand the whole month back, while this changes one flag on
+   one row, and recomputing a month over it would cost a season lookup per listed
+   title (see routes.api_distrakt_acknowledge_return). #}
+{% macro return_mark(show) -%}
+{%- if show.returned %}
+<button type="button" class="distrakt-return"
+        title="More of this season exists than when you finished it — click when you've seen this"
+        hx-post="/api/distrakt/acknowledge-return" hx-json-enc
+        hx-vals='{{ {"key": show.key, "season": show.season} | tojson }}'
+        hx-target="this" hx-swap="outerHTML">back</button>
+{%- endif %}
+{%- endmacro %}
+
+{# A service has stopped listing this title. NOT a deletion, and the mark exists
+   so that stays visible: the row keeps its counts and its place, and says which
+   service dropped it. NOT A BUTTON, which is the difference from the mark above:
+   that one is cleared by the viewer pressing it, this one is a claim about what a
+   service currently holds, so the service naming the title again clears it on its
+   own and there is nothing to press. #}
+{% macro missing_mark(show) -%}
+{%- set gone = show.missing_sources or [] -%}
+{%- if gone %}
+<span class="distrakt-missing"
+      title="No longer in your {{ gone | join(' and ') }} library — your counts here are kept. Use ✕ to remove it.">dropped</span>
+{%- endif %}
+{%- endmacro %}
+
+{% macro show_row(show, marked=false) %}
+{%- set is_premiere = show.bucket in ('new', 'returning') -%}
+{#- The x/y comes from the server already written out, because when two accounts
+    report different numbers for a season the row shows BOTH, each labelled — and
+    that rule is the same one a closed month is written with, so it has one home
+    (app/distrakt/counts.py). EVERY BUCKET DRAWS ITS COUNT, COMPLETED INCLUDED: a
+    blank cell would read as both services agreeing the season is done, which is a
+    claim neither of them made. -#}
+{%- set xy = show.counts or (show.watched ~ '/' ~ show.total) -%}
+{%- set counts = (xy ~ (', ' ~ show.cadence if show.cadence else '')) if is_premiere else xy -%}
+{#- New/Returning: premiere (– finale for weekly). Keepup: finale (end date). -#}
+{%- if is_premiere -%}
+{%- set dates = (show.premiere or '?/?') if show.cadence == 'b'
+                else ((show.premiere or '?/?') ~ ' – ' ~ (show.finale or '?/?')) -%}
+{%- elif show.bucket == 'keepup' -%}
+{%- set dates = show.finale or '?/?' -%}
+{%- else -%}
+{%- set dates = '' -%}
+{%- endif -%}
+<div class="distrakt-show-row{{ ' abandoned' if show.abandoned }}{{ ' unavailable' if show.unavailable }}{{ ' row-marked' if marked }}"
+     title="{{ show.network or '' }}"
+     data-details-open="/distrakt/fragments/details?key={{ show.key | urlencode }}&amp;season={{ show.season }}"
+     data-details-heading="{{ show.title }} · S{{ '%02d' % show.season }}">
+    {#- Whether these numbers are this load's, first in the row so the column
+        reads down as one thing rather than being hunted for beside each row's
+        counts. On every row, so the mark means something on sight; the sentence
+        behind it names the services the numbers came from and is composed
+        server-side, where the reason is known. THREE STATES, NAMED BY THE
+        SERVER: current, partial (a number here belongs to a service nobody
+        asked, so no refresh will move it) and stale (a service was asked and
+        could not be read). A CLOSED MONTH GETS NONE — what a frozen month
+        recorded is not waiting on anybody. -#}
+    {%- if not closed and show.counts_note %}
+    <span class="distrakt-freshness {{ show.counts_freshness or 'current' }}"
+          role="img" title="{{ show.counts_note }}" aria-label="{{ show.counts_note }}"></span>
+    {%- endif %}
+    {{ badge(show.network) }}
+    <span class="distrakt-title"><span class="tt">{{ show.title }}</span>{{ return_mark(show) }}{{ missing_mark(show) }}</span>
+    <span class="distrakt-season">S{{ '%02d' % show.season }}</span>
+    {#- Spelled out in every bucket, not just as a tooltip: this is the string the
+        emoji map is keyed on, so seeing it is what makes the map editable
+        without guessing. -#}
+    <span class="distrakt-network">{{ show.network or '—' }}</span>
+    <span class="distrakt-counts"
+          {%- if counts and show.counts_detail %} title="{{ show.counts_detail }}"{% endif %}>
+        {{- '(' ~ counts ~ ')' if counts else '' -}}
+    </span>
+    <span class="distrakt-dates">{{ dates }}</span>
+    <span class="distrakt-row-actions">
+        {#- A COMPLETED ROW OFFERS NO ABANDON, and that is not a tidying-up. You
+            cannot give up on something you have finished, so the control was
+            offering a move that has no meaning — and it could never have worked
+            on one: the abandon route searches the way a watch-history
+            reconciliation searches, and that search deliberately steps over a
+            verdict the month under way has already reached, so pressing it
+            answered 404 with nothing to explain why. A closed month loses it
+            too: what a past month RECORDS can still be corrected, but its
+            verdicts were settled when it froze. -#}
+        {%- if not closed and show.bucket != 'completed' %}
+        <button type="button" class="btn-ghost small"
+                {{ month_post('/api/distrakt/abandon',
+                              {'key': show.key, 'season': show.season,
+                               'abandoned': not show.abandoned}) }}>
+            {{ 'Un-abandon' if show.abandoned else 'Abandon' }}</button>
+        {%- endif %}
+        {%- call confirm.ask(slot='remove-' ~ show.key ~ '-' ~ show.season,
+                             question=('Take this off what this month records?'
+                                       if closed else
+                                       'Remove this show from the tracker for this month?'),
+                             label='✕',
+                             title=('Remove from this month' if closed else 'Remove from tracker'),
+                             danger=true, face='btn-ghost small danger') %}
+        <button type="button" class="btn-primary small"
+                {{ month_post('/api/distrakt/remove',
+                              {'key': show.key, 'season': show.season}) }}>Remove</button>
+        {%- endcall %}
+    </span>
+</div>
+{% endmacro %}
+
+{# A watched film: no buckets, no counts, no progress — a play on a day. The one
+   control it has is ✕, because a service's history is not always right about
+   what was watched and there is no roster row to correct it through. #}
+{% macro film_row(film) %}
+<div class="distrakt-show-row distrakt-film-row">
+    <span class="distrakt-badge">🎬</span>
+    <span class="distrakt-title"><span class="tt">{{ film.title or 'Untitled' }}</span></span>
+    <span class="distrakt-season"></span>
+    <span class="distrakt-network">Film</span>
+    <span class="distrakt-counts">{{ film.year or '' }}</span>
+    <span class="distrakt-dates">{{ (film.watched_at or '')[:10] }}</span>
+    <span class="distrakt-row-actions">
+        {%- if film.key %}
+        {%- call confirm.ask(slot='film-' ~ film.key,
+                             question='Forget watching ' ~ (film.title or 'this film')
+                                      ~ '? It comes off every month and out of Rankings imports.',
+                             label='✕', title='Remove this film',
+                             danger=true, face='btn-ghost small danger') %}
+        <button type="button" class="btn-primary small"
+                {{ month_post('/api/distrakt/remove-movie', {'key': film.key}) }}>Forget it</button>
+        {%- endcall %}
+        {%- endif %}
+    </span>
+</div>
+{% endmacro %}
+
+{# A question the history pull raised that only the viewer can settle. Thin on
+   purpose: it says only what the history event itself said, because the season
+   lookup that would fill in counts and dates is exactly the cost this row exists
+   to defer until somebody actually wants it.
+
+   Drawn ABOVE every section rather than inside one — it is not a bucket and it
+   is not part of the month; it is a question, and a question buried under six
+   headings is a question nobody answers.
+
+   THREE QUESTIONS SHARE ONE ROW because they read the same way and are answered
+   the same way; only the sentence and what ✓ does differ. Saying no is one
+   statement whichever it was — do not put this season on my list, stop asking —
+   so all three send the same dismissal, which answers with the row REMOVED and
+   nothing else (nothing on the page changed, and recomputing a month to drop one
+   line would cost a season lookup per listed title).
+
+   `ask.kind` names which of the three this is; the sentence, the ✓ title and the
+   route it posts to are the server's (routes._ASK_KINDS), because the unbacked
+   one's sentence is a comparison between what the month wrote down and what the
+   services say now, and only the server holds both halves. #}
+{% macro ask_row(ask) %}
+{%- set vals = {'key': ask.key, 'season': ask.season} -%}
+<div class="distrakt-unknown-row">
+    <span class="distrakt-unknown-text">
+        {%- if ask.note -%}
+        <strong>{{ ask.title or 'Something' }} S{{ '%02d' % ask.season }}</strong> — {{ ask.note }}
+        {%- else -%}
+        You watched <strong>{{ ask.title or 'Something' }} S{{ '%02d' % ask.season }}E{{ '%02d' % ask.number }}</strong>. {{ ask.sentence }}
+        {%- endif -%}
+    </span>
+    <span class="distrakt-row-actions">
+        {%- if ask.confirm %}
+        {#- The odd one out CONFIRMS, unlike the other two ✓ buttons: those ADD
+            something and the ✕ undoes them, while this one takes a verdict
+            apart, and the month's record of having finished that season does
+            not survive it. -#}
+        {%- call confirm.ask(slot='ask-' ~ ask.kind ~ '-' ~ ask.key ~ '-' ~ ask.season,
+                             question=ask.confirm, label='✓', title=ask.yes_title,
+                             danger=true) %}
+        <button type="button" class="btn-primary small"
+                {{ month_post(ask.yes_url, vals) }}>Work it out again</button>
+        {%- endcall %}
+        {%- else %}
+        <button type="button" class="btn-ghost small" title="{{ ask.yes_title }}"
+                {{ month_post(ask.yes_url, vals) }}>✓</button>
+        {%- endif %}
+        {#- The dismissal takes the ROW out and leaves the month alone. Aimed at
+            the row rather than at the button, so a refusal the server could not
+            record leaves the question standing to be pressed again. -#}
+        <button type="button" class="btn-ghost small" title="Don't ask about this season again"
+                hx-post="/api/distrakt/unknown-dismiss" hx-json-enc
+                hx-vals='{{ vals | tojson }}'
+                hx-target="closest .distrakt-unknown-row" hx-swap="outerHTML">✗</button>
+    </span>
+</div>
+{% endmacro %}

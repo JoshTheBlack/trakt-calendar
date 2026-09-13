@@ -1,0 +1,31 @@
+{% import '_distrakt_add_show.html' as add_show %}
+{% import '_distrakt_add_film.html' as add_film %}
+{% import '_distrakt_rewatch.html' as rewatch %}
+{% import '_source_logo.html' as src with context %}
+{# THE THREE OVERLAYS THE ADD FLOW USES, drawn together because they are reset
+   together.
+
+   EVERY MONTH ANSWER BRINGS THEM BACK CLOSED AND EMPTY (`oob=true`), and that
+   is one rule rather than a decision per route. An answer is only ever produced
+   by something somebody pressed, and the two ways to press one of these — an add
+   that landed, an add that turned into a question and was then answered — both
+   end with the overlay having no business being open. Making it unconditional
+   means no route can forget, and re-sending a closed overlay costs a few hundred
+   bytes of markup that is identical every time.
+
+   IT ALSO REPLACES WHAT `openAddShow` USED TO DO. That function cleared the
+   query, cleared the results, took down the season panel and set the heading —
+   four statements about what an empty modal is, run on OPEN, tidying up after
+   the last one. Drawn fresh, the modal is simply never in a state to tidy.
+
+   WHAT THE ADD FLOW'S SEARCH FIELDS SAY THEY SEARCH comes from the registry's
+   own list rather than from a service somebody hard-coded when there was only
+   one — "Search Trakt" stopped being true the moment a second catalogue could
+   answer. With no catalogue at all it names nothing: the field is still there,
+   and the results say why it can find nothing. #}
+{% macro all(catalogue_sources, as_finished, film_day, film_max, oob=false) %}
+{%- set search_label = ('Search ' ~ src.names(catalogue_sources)) if catalogue_sources else 'Search' -%}
+{{ add_show.modal(search_label, as_finished, oob=oob) }}
+{{ add_film.modal(search_label, film_day, film_max, oob=oob) }}
+{{ rewatch.modal(oob=oob) }}
+{% endmacro %}

@@ -159,6 +159,29 @@ nothing, and that is a rare shape.
 back carrying entries two months past its end. Windows are trimmed before
 storage; without the trim a month read shows the same airing several times.
 
+**JavaScript is for what ONLY JavaScript can do.** `app/assets.py`'s
+`PAGE_SCRIPTS` owns it: every script this app serves is declared there, so adding
+one is a visible act and a reviewable claim that nothing else could have done the
+job (`tests/kernel/test_page_head.py` fails a render that reaches for a script the
+list does not track). BEFORE WRITING A LINE OF IT, ANSWER WHY MARKUP, A
+STYLESHEET RULE, A JINJA TEMPLATE OR A ROUTE CANNOT DO THIS — and the answer goes
+in a comment beside whatever survives. The question is not rhetorical: a season
+picker that looked like a script is a radio group and three CSS rules; how wide a
+day is and whether hiding empties it are `:has()` and `:nth-child(k of …)`; a
+details panel opens from `data-details-open` and one delegated listener; adding a
+title to a library is a button posting itself with `hx-json-enc`, answered with
+markup addressed out of band, which is what deleted the last add script on the
+calendar. Each of those was believed to be script until somebody asked.
+WHAT GENUINELY QUALIFIES, and the list is short: a stream of pointer events (a
+drag); measuring what the browser has actually laid out; reading a local file into
+a request body, because the shape guard above admits only `application/json`;
+the clipboard; and input with no declarative form, such as a modifier-click range
+selection. EVERYTHING ELSE IS THE SERVER'S. The reason is not taste: markup and
+stylesheet rules are right the moment anything changes them and cannot drift from
+the data, while a second copy of a fact in the browser is a copy that goes stale
+silently — three of this app's own copies did, and none of them looked wrong from
+any one page.
+
 ## Conventions for code you add or change
 
 **No references to planning documents in shipped code** — not in comments,

@@ -87,7 +87,8 @@ PAGE_SIZE = 10
 MAX_PAGES = 4
 
 
-async def _search_one(settings: Settings, path: str, query: str, media: Media) -> list[SearchHit]:
+async def _search_one(settings: Settings, path: str, query: str, media: Media, *,
+                      cache_only: bool = False) -> list[SearchHit]:
     """One endpoint's hits, EVERY page of them. Raises transport.SimklError on
     a failure — caught and weighed by `search_titles`, which is the one place
     that gets to decide whether a failed endpoint fails the whole search.
@@ -103,12 +104,13 @@ async def _search_one(settings: Settings, path: str, query: str, media: Media) -
         transport.catalog_client(), settings, path,
         {"q": query, "limit": str(PAGE_SIZE)},
         pool=transport.CATALOG_POOL, raise_errors=True, max_pages=MAX_PAGES,
+        cache_only=cache_only,
     )
     return [_hit(entry, media) for entry in results]
 
 
-async def _name_the_seasons_that_collide(settings: Settings,
-                                         hits: list[SearchHit]) -> list[SearchHit]:
+async def _name_the_seasons_that_collide(settings: Settings, hits: list[SearchHit], *,
+                                         cache_only: bool = False) -> list[SearchHit]:
     """`hits` with `season` filled in on any of them that this ONE answer names
     more than once for the same title.
 
@@ -152,7 +154,8 @@ async def _name_the_seasons_that_collide(settings: Settings,
     if not colliding:
         return hits
     namings = await asyncio.gather(
-        *(_naming.fetch(settings, hits[index].source_id) for index in colliding),
+        *(_naming.fetch(settings, hits[index].source_id, cache_only=cache_only)
+          for index in colliding),
         return_exceptions=True,
     )
     named = list(hits)
@@ -166,9 +169,15 @@ async def _name_the_seasons_that_collide(settings: Settings,
     return named
 
 
-async def search_titles(settings: Settings, media: Media, query: str) -> list[SearchHit]:
+async def search_titles(settings: Settings, media: Media, query: str, *,
+                        cached_only: bool = False) -> list[SearchHit]:
     """app/providers/base.py's SearchPort. Empty query returns [] without a
     call, the same rule Trakt's search keeps.
+
+    `cached_only=True` makes no call at all and reads back what an identical
+    search stored — see SearchPort for what names it. The season-naming pass
+    below inherits it, so a cached-only read cannot reach the network by the
+    back door of resolving a collision.
 
     ONE ENDPOINT FAILING DOES NOT FAIL THE OTHER. A show query is two
     requests under one port call (see module docstring); if /search/anime is
@@ -207,7 +216,8 @@ async def search_titles(settings: Settings, media: Media, query: str) -> list[Se
     failures: list[BaseException] = []
     for path in paths:
         try:
-            hits.extend(await _search_one(settings, path, q, media))
+            hits.extend(await _search_one(settings, path, q, media,
+                                          cache_only=cached_only))
         except Exception as exc:  # noqa: BLE001 — weighed below, per endpoint
             failures.append(exc)
     if failures and len(failures) == len(paths):
@@ -226,4 +236,5 @@ async def search_titles(settings: Settings, media: Media, query: str) -> list[Se
     # a film id even when it is cheap.
     if media is Media.MOVIE:
         return hits
-    return await _name_the_seasons_that_collide(settings, hits)
+    return await _name_the_seasons_that_collide(settings, hits,
+                                                cache_only=cached_only)

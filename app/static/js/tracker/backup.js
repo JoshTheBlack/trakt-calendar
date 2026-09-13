@@ -1,80 +1,44 @@
-// ---- Backup: download an export, restore one back ----
-// The export is a plain authenticated GET, so the download attribute on the link
-// does the whole job — no fetch, no blob juggling, and the browser gets the
-// filename from the response.
+// Reading the backup file somebody chose into the request body.
 //
-// Restore is the destructive direction: it REPLACES this account's tracked data
-// rather than merging into it. Hence the typed acknowledgement — a phrase that
-// has to be read and copied cannot be cleared by muscle memory the way a
-// confirm() can.
-const TRACKER_RESTORE_ACK = 'REPLACE MY DATA';
-let trackerRestorePayload = null;
-
-function setRestoreStatus(message, ok) {
-    const el = document.getElementById('restoreStatus');
-    el.textContent = message || '';
-    el.className = 'distrakt-note' + (message ? (ok ? ' ok' : ' distrakt-warn') : '');
-}
-
-function resetRestore() {
-    trackerRestorePayload = null;
-    document.getElementById('restoreConfirm').hidden = true;
-    document.getElementById('restoreAck').value = '';
-    document.getElementById('restoreBtn').disabled = true;
-}
-
-async function onRestoreFileChosen() {
-    const input = document.getElementById('restoreFile');
+// THE ONE THING ONLY THE BROWSER CAN DO HERE, and the reason is the shape guard:
+// app/authz.py admits `application/json` and nothing else, because a
+// cross-origin multipart form post is exactly what that rule exists to refuse.
+// So the file's text has to reach the server as a field of a JSON body, and only
+// this side can read a local file.
+//
+// EVERYTHING ELSE WENT TO MARKUP. The typed acknowledgement is the form's own
+// `required pattern` (and the route checks it too — a browser validation is a
+// courtesy to the person typing, not a gate); the submit is the form's; the
+// answer is a fragment the server draws. What is left is the read and the line
+// that says what is in the file, which is worth saying BEFORE somebody types a
+// confirmation phrase rather than after.
+document.addEventListener('change', async (event) => {
+    const input = event.target;
+    if (!(input instanceof Element) || !input.dataset.fileInto) return;
+    const into = document.querySelector(input.dataset.fileInto);
+    const status = document.querySelector(input.dataset.fileStatus);
     const file = input.files && input.files[0];
-    resetRestore();
-    if (!file) { setRestoreStatus('', true); return; }
-    // Parsed here, before anything is asked of the user: being told the file is
-    // unreadable is better than typing a confirmation phrase and then finding out.
+    if (into) into.value = '';
+    if (!file) { if (status) status.textContent = ''; return; }
+    let text;
+    let parsed;
     try {
-        trackerRestorePayload = JSON.parse(await file.text());
+        text = await file.text();
+        parsed = JSON.parse(text);
     } catch (e) {
-        setRestoreStatus("That file isn't readable JSON.", false);
+        // Said here, before anything is asked of the reader: being told the file
+        // is unreadable beats typing a confirmation phrase and then finding out.
+        if (status) status.textContent = "That file isn't readable JSON.";
         input.value = '';
         return;
     }
+    if (into) into.value = text;
     // Counted across BOTH record tables, because a season lives in up to two of
     // three places and a count off one of them would understate the file: a month
     // holds what it announced and what it settled, while what is still in hand
     // belongs to no month at all.
-    const months = (trackerRestorePayload.distrakt_months || []).length;
-    const rows = (trackerRestorePayload.distrakt_month_records || []).length
-        + (trackerRestorePayload.distrakt_user_seasons || []).length;
-    setRestoreStatus(`Ready to restore ${months} month(s) and ${rows} record(s).`, true);
-    document.getElementById('restoreConfirm').hidden = false;
-}
-
-function onRestoreAckInput() {
-    const typed = document.getElementById('restoreAck').value.trim();
-    document.getElementById('restoreBtn').disabled = !trackerRestorePayload || typed !== TRACKER_RESTORE_ACK;
-}
-
-async function restoreTrackerBackup() {
-    if (!trackerRestorePayload) return;
-    if (document.getElementById('restoreAck').value.trim() !== TRACKER_RESTORE_ACK) return;
-    const btn = document.getElementById('restoreBtn');
-    btn.disabled = true;
-    setRestoreStatus('Restoring…', true);
-    try {
-        const res = await fetch('/api/distrakt/restore', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(trackerRestorePayload),
-        });
-        const d = await res.json();
-        if (!d.ok) throw new Error(d.error || 'failed');
-        setRestoreStatus(`Restored ${(d.months || []).length} month(s).`, true);
-        document.getElementById('restoreFile').value = '';
-        resetRestore();
-        loadMonthData();
-        toast('Backup restored', true);
-    } catch (e) {
-        setRestoreStatus(e.message || 'Could not restore that file.', false);
-        toast('Could not restore that file', false);
-        onRestoreAckInput();
-    }
-}
+    const months = (parsed.distrakt_months || []).length;
+    const rows = (parsed.distrakt_month_records || []).length
+        + (parsed.distrakt_user_seasons || []).length;
+    if (status) status.textContent = `Ready to restore ${months} month(s) and ${rows} record(s).`;
+});

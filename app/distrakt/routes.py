@@ -22,6 +22,8 @@ import calendar as _calendar
 import json
 import logging
 from datetime import date, datetime, timedelta, timezone
+from typing import NamedTuple
+from urllib.parse import quote
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -120,6 +122,27 @@ def _row_target(data: dict) -> tuple[ItemKey, int]:
     except (KeyError, TypeError, ValueError):
         raise RequestError("Missing or invalid season.") from None
     return key, season
+
+
+def _viewed_month(request: Request) -> tuple[int, int]:
+    """The year and month the page is looking at, off the request's own address.
+
+    ONE READER FOR EVERY ROUTE, and it reads the QUERY STRING on a POST as well
+    as on a GET. Which month a control acts on is a REFERENCE the server
+    resolves — not data the browser hands over — so it rides in the address the
+    way templates/_add_all.html puts the calendar's month there, and the body is
+    left carrying nothing but the row's own identity. Out-of-range and missing
+    both fall back to today, which is route_params' rule everywhere else.
+    """
+    today = clock.today()
+    return (route_params.valid_year(request.query_params.get("year"), today.year),
+            route_params.valid_month(request.query_params.get("month"), today.month))
+
+
+def _this_month() -> str:
+    """The month key the clock is standing in."""
+    today = clock.today()
+    return distrakt_store.month_key(today.year, today.month)
 
 
 async def _distrakt_user_id(request: Request) -> int:
@@ -342,27 +365,39 @@ async def distrakt(request: Request):
         })
     month = route_params.valid_month(request.query_params.get("month"), today.month)
     network_emojis, default_network_emoji = await distrakt_store.get_emoji_prefs(user.user_id)
+    backfill_start, backfill_end = backfill.default_range(today)
     context = {
         "request": request,
         "year": year,
         "month": month,
         "nav": route_params.adjacent_months(year, month),
+        # WHICH MONTH EVERY CONTROL ON THIS PAGE ACTS ON, spelled once. It rides
+        # in each address rather than in a body, because it is a REFERENCE the
+        # server resolves and not data the browser is handing over — the shape
+        # templates/_add_all.html gives the calendar's own month action.
+        "month_query": f"?year={year}&month={month}",
         # For the announcement post's "which calendar view does the embedded link
         # open on" selector; the same list the calendar's endpoint picker uses.
         "endpoints": endpoint_choices(),
         **chrome.page_context(user),
         # This user's OWN map — it renders into their Discord posts and nobody
-        # else's. Rendered in rather than fetched because the roster rows fall
-        # back to these emoji whenever a network has no logo.
-        "network_emojis": network_emojis,
+        # else's. Drawn with the page rather than fetched: it used to be BOTH,
+        # rendered into a global AND fetched again by the page's own init before
+        # the month was even asked for.
         "default_network_emoji": default_network_emoji,
-        # WHICH CATALOGUES THE ADD FLOW'S SEARCH FIELDS NAME, from the same
-        # registry call that will answer the search itself, so the label cannot
-        # promise a service the search does not ask. The INSTANCE's settings,
-        # not this viewer's: a catalogue read authenticates with the instance's
-        # own client id and no account's token has any bearing on it.
-        "catalogue_sources": [str(source) for source, _
-                              in providers.for_catalogue_search(load_settings())],
+        # The editor's rows come from the one function every emoji answer uses,
+        # so the first draw and every redraw are the same markup.
+        "emoji_rows": _emoji_row_contexts(network_emojis),
+        # The range the backfill dialog opens on. Rendered rather than fetched:
+        # the server decides it and used to answer a request whose only job was
+        # to fill in two inputs.
+        "backfill_start": backfill_start,
+        "backfill_end": backfill_end,
+        "restore_ack": RESTORE_ACK,
+        # Which share-link forms would actually resolve, so the selector offers
+        # only the ones that produce a working link.
+        "post_link": await _post_link_choices(user.user_id),
+        **_modal_context(year, month),
     }
     return templates.TemplateResponse(request, "distrakt.html", context)
 
@@ -1067,38 +1102,308 @@ async def _distrakt_month_payload(user_id: int, year: int, month: int, settings,
                                           settings=settings), 200
 
 
-@guard.get("/api/distrakt/month", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_month(request: Request):
-    """Computed buckets + the two copy-paste POST 1/POST 2 markdown blocks.
+# THE THREE QUESTIONS THE PAGE CAN ASK, and what differs between them. They read
+# the same way and are answered the same way — so they share one row
+# (templates/_distrakt_rows.html's `ask_row`) and one refusal — and only the
+# sentence, the tick's title and the route the tick posts to are their own.
+#
+# THE UNBACKED ONE IS THE ODD ONE OUT TWICE OVER. It is not raised by a play, so
+# there is no episode to name and its sentence is composed per row
+# (`_unbacked_note`) rather than being a constant here. And it CONFIRMS before
+# acting: the other two ADD something and the row's own remove undoes them, while
+# this one takes a verdict apart and the month's record of having finished that
+# season does not survive it.
+_ASK_KINDS = {
+    "unknown": {
+        "sentence": "Should we add this to Distrakt?",
+        "yes_title": "Add this season",
+        "yes_url": "/api/distrakt/unknown-add",
+        "confirm": "",
+    },
+    "given_up": {
+        "sentence": "You'd given this up. Add it back to Distrakt?",
+        "yes_title": "Put this season back on your list",
+        "yes_url": "/api/distrakt/unknown-resume",
+        "confirm": "",
+    },
+    "unbacked": {
+        "sentence": "",
+        "yes_title": "Work this season out again from what the services say now",
+        "yes_url": "/api/distrakt/verdict-readd",
+        "confirm": ("Work this season out again from what your accounts say now? "
+                    "This month stops recording that you finished it."),
+    },
+}
 
-    OPEN month: live x/y + cadence/dates recomputed (1x /sync/watched/shows + 1x
-    season call per show), auto-refreshed if totals are stale >24h. CLOSED /
-    past month: rendered from the frozen snapshot with NO Trakt calls. Opening an
-    uninitialized month lazily rolls it over first (see ensure_month)."""
+# The order the questions are asked in: the ones nothing knows about first — a
+# title the tracker has never heard of is a bigger gap than one it holds a
+# verdict on, and a verdict that has lost its backing is the smallest of the
+# three, because the row it is about is on the page just below saying exactly
+# what it has always said.
+_ASK_ORDER = (("unknown", "unknown_episodes"), ("given_up", "given_up_episodes"),
+              ("unbacked", "unbacked_verdicts"))
+
+
+def _ask_rows(payload: dict) -> list[dict]:
+    """Every outstanding question in the payload, as the row template reads them:
+    what the history event said, plus this kind's own sentence and verb."""
+    return [{**_ASK_KINDS[kind], "kind": kind, **ask}
+            for kind, field in _ASK_ORDER for ask in payload.get(field) or []]
+
+
+# What a read-only month says for itself, keyed by whether it was NEVER TRACKED
+# (as opposed to tracked and since frozen). Neither state is a dead end any more
+# — a finished show can be recorded by hand, and Backup then Backfill fills whole
+# months in from watch history — so each names the way in that still works.
+_BANNERS = {
+    True: ("🕗 Past month — never tracked. Nothing is bucketed here, but you can "
+           "record a finished show with ➕ Add show, or fill months in from watch history "
+           "under Backup."),
+    False: ("🔒 Past month — frozen snapshot. ➕ Add show records something "
+            "as finished during it."),
+}
+
+
+def _modal_context(year: int, month: int) -> dict:
+    """What the add flow's three overlays need drawing: which catalogues the
+    search fields may name, whether an add into this month records something as
+    FINISHED, and the day a film defaults to.
+
+    THE MONTH BEING PAST IS THE ONE TEST, and it is the clock's alone. A month
+    behind the clock is filled in by hand and is what `add-completed` is for; the
+    month under way and anything ahead is an ordinary add. Both routes already
+    enforce exactly that for themselves, so asking it here cannot disagree with
+    them — and it needs no month read, which is what lets the page draw the right
+    wording before the month has even been fetched.
+
+    THE FILM'S DEFAULT DAY IS THE SERVER'S because the server knows both the
+    clock and the month on screen: today when they are the same month, and
+    otherwise the 1st of the month being filled in. It was `new Date()`
+    arithmetic against the month the page had put on `window`, which is a
+    second calendar.
+    """
+    today = clock.today()
+    viewing_now = (today.year, today.month) == (year, month)
+    return {
+        "catalogue_sources": [str(source) for source, _
+                              in providers.for_catalogue_search(load_settings())],
+        "as_finished": distrakt_store.month_key(year, month) < _this_month(),
+        "film_day": today.isoformat() if viewing_now else f"{year:04d}-{month:02d}-01",
+        "film_max": today.isoformat(),
+    }
+
+
+def _month_context(request: Request, payload: dict, year: int, month: int,
+                   emojis: dict, default_emoji: str, *,
+                   message: str = "", ok: bool = True) -> dict:
+    """The month fragment's whole context, out of the payload and nothing else.
+
+    ONE READER OF THE PAYLOAD. Every mutating route answers through this, so what
+    a month LOOKS like is decided once rather than per route — which is what the
+    page's own renderer used to be, in a second language, reading the same dict.
+    """
+    shows = payload.get("shows") or []
+    highlight = payload.get("highlight") or {}
+    closed = bool(payload.get("closed") or payload.get("readonly"))
+    # Which networks this instance actually holds a tile for, asked once for the
+    # whole response rather than once per row, and never of the browser.
+    with_logos = logos.tiled(show.get("network") for show in shows)
+    return {
+        "request": request,
+        "sections": discord_fmt.page_sections(shows),
+        "films": discord_fmt.page_films(payload.get("movies")),
+        "asks": _ask_rows(payload),
+        "empty_note": payload.get("empty_note") or "",
+        # The degraded-month sentence and every unreadable source's, in one list:
+        # they say the same thing to a reader, which is that something on this
+        # page could not be refreshed.
+        "notice_lines": [line for line in
+                         [payload.get("notice"), *(payload.get("source_notices") or [])]
+                         if line],
+        "banner": _BANNERS[bool(payload.get("readonly"))] if closed else "",
+        "post1": payload.get("post1") or "",
+        "post2": payload.get("post2") or "",
+        "highlight_key": highlight.get("key"),
+        "highlight_season": highlight.get("season"),
+        "message": message,
+        "message_ok": ok,
+        "closed": closed,
+        "month_query": f"?year={year}&month={month}",
+        "emoji_for": lambda network: emojis.get(network or "", default_emoji),
+        "logo_for": lambda network: (
+            f"/api/network-logo?name={quote(network or '')}" if network in with_logos else ""),
+        **_modal_context(year, month),
+    }
+
+
+async def _month_answer(request: Request, user_id: int, year: int, month: int,
+                        settings, *, message: str = "", ok: bool = True,
+                        force_fresh: bool = False,
+                        point_at: tuple | None = None) -> Response:
+    """The month, recomputed and drawn: the one answer every mutating tracker
+    route gives.
+
+    A ROUTE THAT CHANGED SOMETHING HANDS BACK THE WHOLE MONTH, because a row that
+    moved between buckets, a verdict withdrawn or a film forgotten all change what
+    the page says about the rest of it. That was already true when this was JSON;
+    what is new is that there is no second representation of it to keep in step.
+
+    ALWAYS 200, WHATEVER THE PAYLOAD SAYS. A non-200 is never swapped
+    (static/js/boost.js's `noSwap`), so a status code would leave the page holding
+    the month it had and no explanation of why nothing happened.
+    """
+    payload, _status = await _distrakt_month_payload(user_id, year, month, settings,
+                                                     force_fresh=force_fresh)
+    if point_at is not None and payload.get("ok"):
+        _point_at(payload, *point_at)
+    if not payload.get("ok"):
+        # The one payload shape that is not a month: no source can be asked at
+        # all. There is nothing to draw, so it is said and the list is left alone.
+        return _month_refusal(request, payload.get("error") or "Not configured")
+    emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
+    return templates.TemplateResponse(
+        request, "_distrakt_month.html",
+        _month_context(request, payload, year, month, emojis, default_emoji,
+                       message=message, ok=ok))
+
+
+def _rewatch_answer(request: Request, ask: dict, resubmit_url: str,
+                    vals: dict) -> Response:
+    """The re-watch question, drawn open, over a month left exactly as it was.
+
+    NOTHING HAS BEEN WRITTEN and the answer is what performs the add, so the
+    request that raised the question travels with the question — `resubmit_url`
+    and the body that produced it — and the two buttons re-post it with the
+    answer attached. Two bodies rather than one edited in the template, because
+    which of them is sent IS the answer: an empty floor counts everything, and
+    the field's own value starts a fresh run from the day it names.
+
+    THE DATES ARE FINISHED HERE. `completed_on_label` and each listed episode's
+    day are written out for a reader, and the two presets are the days either
+    side of the restart — the day the run began and the day after the last play.
+    The browser used to compute the second of those, which was `_day_after` in a
+    second language.
+
+    THE WHOLE ANSWER IS OUT OF BAND, so the list keeps the month it is showing:
+    the question is about an add that has not happened.
+    """
+    restart = dict(ask.get("restart") or {})
+    episodes = [{**play, "label": _day_label(play.get("day"))}
+                for play in restart.get("episodes") or []]
+    if episodes:
+        after_day = _day_after(restart["episodes"][-1]["day"])
+        restart = {**restart, "episodes": episodes,
+                   "first_day": restart["episodes"][0]["day"],
+                   "first_day_label": episodes[0]["label"],
+                   "after_day": after_day,
+                   "after_day_label": _day_label(after_day)}
+    return templates.TemplateResponse(request, "_distrakt_rewatch_answer.html", {
+        "request": request,
+        "prompt": {**ask, "restart": restart,
+                   "completed_on_label": _day_label(ask.get("completed_on")),
+                   # EVERY DAY THIS QUESTION CAN SHOW IS SPELLED HERE, including
+                   # the one the submit button opens naming. That button used to
+                   # be drawn saying "start a fresh run" over a field that
+                   # already held a day, correcting itself only once somebody
+                   # touched the field — so the prompt arrived naming one answer
+                   # and offering another.
+                   "suggested_from_label": _day_label(ask.get("suggested_from"))},
+        "resubmit_url": resubmit_url,
+        "vals_counting": {**vals, "decided": True, "history_from": ""},
+        "vals_fresh": {**vals, "decided": True},
+    })
+
+
+def _day_label(iso) -> str:
+    """A stored day as a person reads one — "5 September 2026", or "" for
+    anything unreadable.
+
+    THE SERVER SPELLS IT because the server already holds the day. It was
+    `toLocaleDateString` in the browser, which is one more thing that had to
+    exist so a date could be shown; nothing on this page is localized per
+    viewer, so there was never a viewer-specific answer it was buying.
+    """
+    try:
+        day = date.fromisoformat(str(iso)[:10])
+    except (TypeError, ValueError):
+        return ""
+    # Built rather than strftime`d: the no-leading-zero day is "%-d" on Linux and
+    # "%#d" on Windows, and this app runs on both.
+    return f"{day.day} {day.strftime('%B')} {day.year}"
+
+
+def _and_the_month(response: Response) -> Response:
+    """`response`, plus a nudge that makes the month list fetch itself again.
+
+    FOR AN ANSWER THAT CHANGES WHAT THE LIST LOOKS LIKE WITHOUT BEING ABOUT IT:
+    saving the emoji map changes every roster badge, and restoring a backup
+    replaces the month outright. Recomputing a month inside those answers would
+    spend a season lookup per listed title in a response nobody asked a month of,
+    and it would put a second month-drawing path beside the one the page already
+    has. THE LIST ALREADY KNOWS HOW TO FETCH ITSELF (distrakt.html's hidden
+    loader, `hx-trigger="load, month-changed from:body"`); this only says when.
+
+    The event is aimed at `body` explicitly rather than left to bubble from
+    whatever was pressed, because the loader listens there and a control inside a
+    swapped-away fragment is not a reliable place to fire from.
+    """
+    response.headers["HX-Trigger"] = json.dumps({"month-changed": {"target": "body"}})
+    return response
+
+
+def _month_refusal(request: Request, message: str) -> Response:
+    """A route declining to act, said in a line and nothing else.
+
+    THE LIST IS NOT REDRAWN AND THAT IS THE POINT. Nothing changed, and
+    recomputing a month to report that would spend a season lookup per listed
+    title. The controls ask for `swapEmpty:false` so an answer whose only content
+    went out of band leaves their target exactly as it was —
+    templates/_distrakt_rows.html's `month_post` says why that has to be spelled.
+
+    200, LIKE EVERY OTHER DRAWN REFUSAL IN THIS APP: a status code is never
+    swapped, so a 404 here would be a button that silently does nothing.
+    """
+    return templates.TemplateResponse(request, "_distrakt_refusal.html",
+                                      {"request": request, "message": message})
+
+
+@guard.get("/distrakt/fragments/month", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_month_fragment(request: Request):
+    """The month this page is showing, as the page's own list.
+
+    FETCHED ON LOAD RATHER THAN DRAWN WITH THE PAGE. Opening a month can pull a
+    month of premieres, sweep recent viewing and write a roster's worth of rows,
+    which is seconds — so the shell paints, says it is working, and this
+    fills it in, exactly as it did when the page fetched JSON for itself.
+
+    OPEN month: live x/y plus cadence and dates recomputed (one watch-history read
+    plus a season call per show), auto-refreshed if totals are stale over 24h.
+    CLOSED or past month: rendered from the frozen snapshot with NO provider
+    calls. Opening an uninitialized month lazily rolls it over first (see
+    ensure_month).
+    """
     user_id = await _distrakt_user_id(request)
     today = clock.today()
     year = route_params.valid_year(request.query_params.get("year"), today.year)
     month = route_params.valid_month(request.query_params.get("month"), today.month)
-    with span("GET /api/distrakt/month", ym=f"{year}-{month:02d}"):
+    with span("GET /distrakt/fragments/month", ym=f"{year}-{month:02d}"):
         settings = await viewer.settings_for_user(user_id)
-        payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+        return await _month_answer(request, user_id, year, month, settings)
 
 
 @guard.post("/api/distrakt/refresh", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_refresh(request: Request):
     """Force a fresh totals refresh: bypass the 24h season cache + re-stamp
-    totals_refreshed_at for the OPEN month, then return the same shape as GET
-    /api/distrakt/month. CLOSED months are frozen (nothing to refresh)."""
+    totals_refreshed_at for the OPEN month, then answer with the month drawn.
+    CLOSED months are frozen (nothing to refresh)."""
     user_id = await _distrakt_user_id(request)
-    data = await authz.json_body(request)
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    await authz.json_body(request)
+    year, month = _viewed_month(request)
     settings = await viewer.settings_for_user(user_id)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings,
-                                                    force_fresh=True)
-    return JSONResponse(payload, status_code=status)
+    frozen = distrakt_store.month_key(year, month) < _this_month()
+    return await _month_answer(
+        request, user_id, year, month, settings, force_fresh=True,
+        message="Past month (read-only)" if frozen else "Refreshed totals")
 
 
 @guard.get("/api/distrakt/months", AuthLevel.DISTRAKT_APPROVED)
@@ -1143,22 +1448,21 @@ async def api_distrakt_import(request: Request):
     # over a token the import never uses. calendar_import.premiere_records reads
     # under the same instance settings, for the same reason.
     if not load_settings().calendar_source_configured:
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    data = await authz.json_body(request)
+        return _month_refusal(request, "No calendar is configured, so there is nothing to import.")
+    await authz.json_body(request)
     today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
     month_key = distrakt_store.month_key(year, month)
     if await distrakt_store.is_backfill_blocked(user_id, month_key, today):
-        return JSONResponse({"ok": False, "error": "Can't import into a past month that was never tracked."}, status_code=400)
+        return _month_refusal(request, "Can't import into a past month that was never tracked.")
     doc = await distrakt_store.ensure_month(user_id, year, month, settings, today=today)
     if doc.get("closed"):
-        return JSONResponse({"ok": False, "error": "Past month is frozen (read-only)."}, status_code=400)
+        return _month_refusal(request, "Past month is frozen (read-only).")
     # The instance's settings, for the reason the gate above gives.
     doc = await distrakt_store.import_premieres(user_id, month_key, load_settings())
-    await _register_networks(user_id, [s.get("network") for s in (doc or {}).get("shows", [])])
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    await _register_networks(user_id, [show.get("network") for show in (doc or {}).get("shows", [])])
+    return await _month_answer(request, user_id, year, month, settings,
+                               message="Imported premieres from calendar")
 
 
 @guard.post("/api/distrakt/backfill-networks", AuthLevel.DISTRAKT_APPROVED)
@@ -1167,19 +1471,46 @@ async def api_distrakt_backfill_networks(request: Request):
     (with the default emoji) so they all show up in the editor. Returns the map."""
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
     doc = await distrakt_store.load_month(user_id, distrakt_store.month_key(year, month))
-    emojis = await _register_networks(
-        user_id, [s.get("network") for s in (doc or {}).get("shows", [])],
+    stored = await _register_networks(
+        user_id, [show.get("network") for show in (doc or {}).get("shows", [])],
     )
-    _, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
-    return JSONResponse({
-        "ok": True,
-        "network_emojis": emojis,
-        "default_network_emoji": default_emoji,
-    })
+    # WHAT IS ON SCREEN WINS, WHICH IS WHY THE FORM POSTS ITSELF. The rows the
+    # editor is holding may carry edits nobody has saved, and answering with the
+    # stored map alone would throw them away — so the form sends what it has and
+    # the merge happens here, adding only networks it does not already name. It
+    # was `_syncEmojiEntriesFromDom` reading the rows back out of the DOM before
+    # a redraw could clobber them; a form that posts its own fields needs no such
+    # rescue.
+    on_screen = dict(_emoji_rows_from_form(data))
+    on_screen.pop("", None)
+    merged = {**{network: emoji for network, emoji in stored.items()
+                 if network not in on_screen}, **on_screen}
+    user = await auth.current_user(request)
+    return _emoji_answer(request, merged.items(), user.is_admin,
+                         message="Backfilled networks from shows")
+
+
+@guard.post("/distrakt/fragments/emoji-rows", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_emoji_rows_fragment(request: Request):
+    """The editor's rows with one more or one fewer, and nothing written.
+
+    A POST THAT STORES NOTHING, and the verb is right rather than a compromise.
+    What this needs in order to answer is the form as it stands — every field
+    somebody has typed and not saved — and this app's rule is that an address
+    carries a reference and never data. The server cannot look up an unsaved
+    edit, so the form is the body.
+
+    `remove` NAMES A ROW BY ITS FIELD SUFFIX. Leaving it out is the other action:
+    the answer drops the blanks, sorts what is left and draws a fresh blank row
+    at the end, which is exactly what "+ Add network" means once the row being
+    typed into is committed.
+    """
+    user = await auth.current_user(request)
+    data = await authz.json_body(request)
+    rows = _emoji_rows_from_form(data, drop=str(data.get("remove", "")))
+    return _emoji_answer(request, rows, user.is_admin)
 
 
 @guard.get("/distrakt/fragments/details", AuthLevel.DISTRAKT_APPROVED)
@@ -1366,13 +1697,104 @@ async def _details_view(request: Request, *, episodes_only: bool) -> Response:
                                pinned={"row": str(row_season)})
 
 
-@guard.get("/api/distrakt/emojis", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_emojis(request: Request):
-    """This user's network->emoji map."""
-    user_id = await _distrakt_user_id(request)
-    emojis, default_emoji = await distrakt_store.get_emoji_prefs(user_id)
-    return JSONResponse({
-        "ok": True, "network_emojis": emojis, "default_network_emoji": default_emoji,
+# The emoji editor's rows travel as one flat field per value, named by the row's
+# POSITION: `network-0`, `emoji-0`, `network-1`… That is the shape the calendar's
+# filter chips already use and it is chosen for the same two reasons. json-enc
+# serializes a form as flat name/value pairs with no dependable array convention,
+# so a list has to be spelled out; and the row's own network name cannot be the
+# field name, because it is free text somebody is in the middle of editing.
+#
+# THE INDEX MEANS NOTHING BUT "these two belong together". Rows are re-sorted and
+# renumbered on the way back out, so a gap left by a removal is not a hole
+# anybody has to keep track of.
+_EMOJI_ROW_FIELDS = ("network", "emoji")
+
+
+def _emoji_rows_from_form(data: dict, *, drop: str = "") -> list[tuple[str, str]]:
+    """The editor's rows as (network, emoji) pairs, in the order they were drawn,
+    minus the one `drop` names.
+
+    PAIRED BY THE SUFFIX AND ORDERED BY THE FORM, not by counting up from zero. A
+    removal leaves a gap in the numbering of what is still on screen, and walking
+    0, 1, 2… would stop at the hole and silently discard every row after it. The
+    body preserves the order the fields were serialized in, which is the order
+    they are drawn in, so iterating it IS the page's order.
+
+    A ROW WITH NO NETWORK IS DROPPED rather than refused: the editor always draws
+    a blank row for somebody to type into, and one left untouched is not an error
+    to report. Values are stripped, because a network name with a trailing space
+    keys nothing.
+    """
+    return [(str(value or "").strip(),
+             str(data.get(f"emoji-{key[len('network-'):]}") or "").strip())
+            for key, value in data.items()
+            if key.startswith("network-") and key[len("network-"):] != drop]
+
+
+def _emoji_row_contexts(pairs) -> list[tuple[str, str, str]]:
+    """(network, emoji, tile URL or "") per row, alphabetically, blanks dropped.
+
+    ONE BUILDER FOR THE FIRST DRAW AND EVERY REDRAW, so the rows the page ships
+    with and the rows an answer swaps in cannot differ. Alphabetical by network
+    is the order the editor has always shown, and it is the server's now:
+    sorting in the browser meant the rows had to be held in an array there, which
+    is why an unsaved edit had to be read back out of the DOM before anything
+    could redraw them (`_syncEmojiEntriesFromDom`). A form holds its own edits, so
+    that whole problem goes away with the array.
+    """
+    named = sorted(((network, emoji) for network, emoji in
+                    (pairs.items() if isinstance(pairs, dict) else pairs) if network),
+                   key=lambda pair: pair[0].lower())
+    with_logos = logos.tiled(network for network, _emoji in named)
+    return [(network, emoji,
+             f"/api/network-logo?name={quote(network)}" if network in with_logos else "")
+            for network, emoji in named]
+
+
+async def _post_link_choices(user_id: int) -> dict:
+    """What the announcement post's two selectors offer and which entries are
+    currently chosen.
+
+    ONLY FORMS THAT WOULD ACTUALLY RESOLVE ARE OFFERED — an entry that silently
+    produces no link is worse than not being there — and with nothing publishable
+    at all the selectors are not drawn, because the post omits the link. That
+    decision, and the human names for the three kinds, used to live in the
+    browser beside `share_links.PREFERRED_KINDS`, which names the same three for
+    code; this is the one place they are named for people.
+    """
+    payload = await _share_link_payload(user_id)
+    available = payload["available"]
+    return {
+        "usable": not payload["base_url_missing"] and any(available.values()),
+        "kinds": [(kind, label) for kind, label in LINK_KIND_LABELS.items()
+                  if available.get(kind)],
+        "kind": payload["kind"] or "",
+        "endpoint": payload["endpoint"] or "",
+        "preferred_label": LINK_KIND_LABELS.get(payload["preferred_kind"],
+                                                payload["preferred_kind"]),
+    }
+
+
+def _emoji_answer(request: Request, pairs, is_admin: bool, *,
+                  message: str = "", ok: bool = True) -> Response:
+    """The editor's rows, redrawn — the one answer every emoji-map route gives.
+
+    ALPHABETICAL BY NETWORK, which is the order the editor has always shown and
+    is now the server's to state. Sorting in the browser meant the rows had to be
+    held in an array there, which is why an unsaved edit had to be read back out
+    of the DOM before anything could redraw them (`_syncEmojiEntriesFromDom`) —
+    a form holds its own edits, so that whole problem goes away with the array.
+
+    A ROW WITH NO NETWORK NAME IS DROPPED HERE and a fresh blank one is drawn by
+    the template, so the editor always has somewhere to type and never
+    accumulates the ones nobody filled in.
+    """
+    return templates.TemplateResponse(request, "_distrakt_emoji_rows.html", {
+        "request": request,
+        "rows": _emoji_row_contexts(pairs),
+        "is_admin": is_admin,
+        "message": message,
+        "message_ok": ok,
     })
 
 
@@ -1385,22 +1807,22 @@ async def api_distrakt_set_emojis(request: Request):
     through the admin-only settings endpoint, which is why only an administrator
     could edit what every user's posts looked like.
     """
-    user_id = await _distrakt_user_id(request)
+    user = await auth.current_user(request)
     data = await authz.json_body(request)
-    emojis = data.get("network_emojis")
-    if not isinstance(emojis, dict):
-        return JSONResponse(
-            {"ok": False, "error": "network_emojis must be an object"}, status_code=400,
-        )
+    rows = _emoji_rows_from_form(data)
     default_emoji = str(data.get("default_network_emoji") or "").strip() or distrakt_store.DEFAULT_EMOJI
-    clean = {
-        str(k).strip(): str(v).strip()
-        for k, v in emojis.items() if str(k).strip()
-    }
-    await distrakt_store.set_emoji_prefs(user_id, clean, default_emoji)
-    return JSONResponse({
-        "ok": True, "network_emojis": clean, "default_network_emoji": default_emoji,
-    })
+    clean = {network: emoji for network, emoji in rows if network}
+    await distrakt_store.set_emoji_prefs(user.user_id, clean, default_emoji)
+    # THE ROWS COME BACK SORTED AND RENUMBERED, which is the save's visible
+    # effect: a blank row typed in at the bottom takes its place in the list, and
+    # a row emptied out is gone.
+    #
+    # AND THE MONTH IS ASKED TO REDRAW ITSELF, because every roster badge falls
+    # back to this map, so saving it changes what the list looks like. One header
+    # rather than a second month recompute inside this answer: the list already
+    # knows how to fetch itself, and this says when.
+    return _and_the_month(_emoji_answer(request, clean.items(), user.is_admin,
+                                        message="Emoji map saved"))
 
 
 @guard.post("/api/distrakt/remove", AuthLevel.DISTRAKT_APPROVED)
@@ -1415,13 +1837,11 @@ async def api_distrakt_remove(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return _month_refusal(request, str(exc))
     month_key = distrakt_store.month_key(year, month)
     # Read before removing: the ids a calendar mark would be written under live on
     # the record that is about to go.
@@ -1432,12 +1852,12 @@ async def api_distrakt_remove(request: Request):
     # search deliberately steps over.
     cleared = await distrakt_store.remove_season_everywhere(user_id, key, season)
     if record is None and not cleared:
-        return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
-                            status_code=404)
+        return _month_refusal(request, "Show/season not found in that month")
 
     settings = await viewer.settings_for_user(user_id)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    return await _month_answer(
+        request, user_id, year, month, settings,
+        message="Taken off this month" if month_key < _this_month() else "Removed")
 
 
 def _search_hit_payload(hit: catalogue_search.MergedSearchHit) -> dict:
@@ -1533,14 +1953,20 @@ async def _search_fragment(request: Request, media: Media):
     """
     settings = await viewer.settings_for_user(await _distrakt_user_id(request))
     asked = providers.for_catalogue_search(settings)
+    query = request.query_params.get("q", "")
+    year, month = _viewed_month(request)
     context = {"request": request, "media": str(media), "hits": [], "failed": [],
                # A MARK DISAMBIGUATES, so with one catalogue there is nothing for
                # it to do — the rule _source_logo.html states and the reason a
                # single-source instance looks like this app always did.
-               "marked": len(asked) > 1, "no_catalogue": not asked}
+               "marked": len(asked) > 1, "no_catalogue": not asked,
+               # Each row carries its own request, so it needs to be able to spell
+               # one: the query that found it names the search to read back, and
+               # the month is the one an add would land in.
+               "query": query, "month_query": f"?year={year}&month={month}"}
     if asked:
         result = await catalogue_search.search_catalogue(
-            asked, settings, media, request.query_params.get("q", ""))
+            asked, settings, media, query)
         context["hits"] = _search_rows(result.hits, media)
         context["failed"] = sorted(str(source) for source in result.failed)
     return templates.TemplateResponse(request, "_distrakt_search_results.html", context)
@@ -1598,42 +2024,44 @@ async def api_distrakt_add_movie(request: Request):
     """
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
-    ids = _client_ids(data.get("ids"))
-    if not ids:
-        return JSONResponse({"ok": False, "error": "Missing or invalid film ids"}, status_code=400)
+    settings = await viewer.settings_for_user(user_id)
+    year, month = _viewed_month(request)
     day = str(data.get("watched_on") or "").strip()
     try:
         watched_on = date.fromisoformat(day)
     except ValueError:
-        return JSONResponse({"ok": False, "error": "Pick the day you watched it."}, status_code=400)
+        return _month_refusal(request, "Pick the day you watched it.")
     if watched_on > clock.today():
-        return JSONResponse({"ok": False, "error": "That day hasn't happened yet."}, status_code=400)
+        return _month_refusal(request, "That day hasn't happened yet.")
+    # THE RESULT IS NAMED, NOT HANDED OVER — the ids, the title and the year are
+    # read back out of the search that found it (see `_resolve_pick`), so a play
+    # is filed under the identity the service issued and never one a page sent.
+    pick = await _resolve_pick(settings, Media.MOVIE, data.get("q") or "",
+                               data.get("i"), cached_only=True)
+    if pick is None:
+        return _month_refusal(request, "That search has expired — search for it again.")
+    if pick.unkeyable:
+        return _month_refusal(request, pick.unkeyable)
 
     recorded = await watch_history.record_movie_watches(user_id, [{
-        "ids": ids,
-        "title": data.get("title") or "",
-        "year": data.get("year"),
+        "ids": pick.ids,
+        "title": pick.title,
+        "year": pick.year,
         "watched_at": f"{watched_on.isoformat()}T12:00:00Z",
     }])
     if not recorded:
         # The film named no shared id, so there is no identity to file the play
         # under — see app/providers/base.py's MATCH_SOURCES.
-        return JSONResponse(
-            {"ok": False, "error": "That film has no id the tracker can file it under."},
-            status_code=400)
+        return _month_refusal(request, "That film has no id the tracker can file it under.")
     await _resnapshot_if_closed(user_id, distrakt_store.month_key(watched_on.year, watched_on.month))
 
-    today = clock.today()
-    year = route_params.valid_year(data.get("year_view"), today.year)
-    month = route_params.valid_month(data.get("month_view"), today.month)
-    payload, status = await _distrakt_month_payload(
-        user_id, year, month, await viewer.settings_for_user(user_id))
     # A film has no season, and -1 is what the roster's own schema uses for
     # "this record is not about one" (see db.py's calendar_airings and
-    # store._SEASON_WHERE). The page matches on both, so it needs the same
-    # not-a-season the film row is drawn with.
-    return JSONResponse(_point_at(payload, resolve_key(Media.MOVIE, ids) or "", -1),
-                        status_code=status)
+    # store._SEASON_WHERE).
+    return await _month_answer(
+        request, user_id, year, month, settings,
+        point_at=(resolve_key(Media.MOVIE, pick.ids) or "", -1),
+        message=f"Recorded {pick.title} — watched {day}")
 
 
 async def _resnapshot_if_closed(user_id: int, month_key: str) -> None:
@@ -1672,101 +2100,185 @@ async def api_distrakt_remove_movie(request: Request):
     try:
         key = parse_item_key(data.get("key"))
     except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return _month_refusal(request, str(exc))
 
     watched_at = await watch_history.forget_movie_watch(user_id, key)
     if watched_at is None:
-        return JSONResponse({"ok": False, "error": "No such film on record."}, status_code=404)
+        return _month_refusal(request, "No such film on record.")
 
     # The month it was filed under is the one whose snapshot has to be rebuilt —
     # not necessarily the month being looked at.
     await _resnapshot_if_closed(user_id, watched_at[:7])
 
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
-    payload, status = await _distrakt_month_payload(
-        user_id, year, month, await viewer.settings_for_user(user_id))
-    return JSONResponse(payload, status_code=status)
+    year, month = _viewed_month(request)
+    return await _month_answer(request, user_id, year, month,
+                               await viewer.settings_for_user(user_id),
+                               message="Film removed")
 
 
-@guard.get("/api/distrakt/seasons", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_seasons(request: Request):
-    """The add flow's season picker for one search hit, answered by WHICHEVER
-    SOURCE FOUND IT — `source` names the service, `id` is that service's own
-    id for the title (a merged hit's `source_ids[source]`, never a shared id).
+class Pick(NamedTuple):
+    """A search result somebody chose, resolved the only way it may be resolved:
+    by re-reading the answers the search and the season lookup already stored.
 
-    THREE THINGS COME BACK FROM ONE LOOKUP (app/providers/base.py's
-    `DetailPort.fetch_seasons` — see its own docstring for why): the season
-    list a picker offers, the season this hit's own per-title record already
-    names (so a Simkl season-title skips the picker outright), and every
-    shared id that same lookup surfaced. THE LAST ONE IS WHAT RESOLVES A BARE
-    HIT: a search result with no shared id is under-described, not unkeyable
-    (measured — a per-title lookup fills in every one, 5 for 5), and this is
-    the same lookup the season question already pays for, so resolving it here
-    costs nothing beyond what the click already spends.
+    NOTHING HERE CAME OFF THE PAGE. The page names a query and a result key; the
+    title, the network and every id are the services' own words for it. That
+    closes the last route in this app that took a caller's ids into a write —
+    and it matters more here than almost anywhere, because a wrong Trakt id
+    SHADOWS a correct Simkl one on a roster row for ever (§7's Supernatural
+    finding), so an id a browser could influence is an id that can permanently
+    mis-file somebody's watch record.
 
-    `ids...` QUERY PARAMS ARE THE HIT'S OWN, as the search response's `ids`
-    handed them back — unioned with what THIS lookup surfaces before the key
-    is re-resolved, with the LOOKUP winning any disagreement. Without them a
-    source whose per-title lookup adds nothing new (Trakt, always — see
-    SeasonsAnswer's own docstring) would look unresolvable even though the
-    search hit that named it was never bare; without the precedence, a row
-    whose id and whose season came from two different titles would be filed
-    as one that can never be counted.
-
-    `unkeyable` CARRIES `UnkeyableRecord`'s OWN MESSAGE when the union still
-    names no shared id, the same sentence api_distrakt_add's 400 uses for the
-    identical refusal — one source of truth for why a title cannot be filed,
-    stated here BEFORE an add is offered rather than only after it is tried.
-
-    `network` IS THE FOURTH THING THE ONE LOOKUP ANSWERS, and it is here for the
-    reason the ids are: a source whose SEARCH hit carries no network (Simkl,
-    measured) carries one on the per-title record this call already makes, and
-    on a single-catalogue instance there is no second source for the merge to
-    fill the gap from — so a show added by hand reached the roster with no
-    network, drew no emoji in the announcement post, and registered "" in the
-    viewer's emoji map. Empty from a source whose hit already had it (Trakt),
-    which is what makes the caller's "keep what I have unless this fills it"
-    a no-op rather than a special case.
+    `unkeyable` IS THE SERVER'S OWN SENTENCE for a title the tracker has no
+    shared id to file under, and it is None when there is one — the same
+    sentence the add's refusal uses, asked here BEFORE an add is offered.
     """
-    settings = await viewer.settings_for_user(await _distrakt_user_id(request))
+    title: str
+    network: str
+    year: int | None
+    ids: dict
+    seasons: list[dict]
+    named_season: int | None
+    unkeyable: str | None
+
+
+async def _resolve_pick(settings, media: Media, query: str, index, *,
+                        cached_only: bool) -> Pick | None:
+    """The chosen result, or None when nothing stored answers to that name.
+
+    A RESULT IS NAMED BY ITS QUERY AND ITS PLACE IN THE ANSWER, not by an
+    identity, and that is not a shortcut. A show hit CAN have no shared id at
+    all — that is the ordinary shape of a Simkl season-title before the per-title
+    lookup below fills one in, and refusing those is exactly what this flow
+    exists not to do — so there is no key to name it by until the pick has
+    already happened. The merge is a pure function of the stored answers, so the
+    same query lands on the same row.
+
+    TWO CACHED READS, AND BOTH OF THEM ARE ANSWERS THE CLICK ALREADY PAID FOR.
+    The merged search names the title, the network and the ids the hit carried;
+    the per-title season lookup names the season list, the season the hit IS
+    where its source files seasons as titles, and every shared id the search
+    left out. Neither is a new question — the box searched a moment ago and the
+    picker looked the title up — so re-asking them here is a read of the shared
+    response cache and no request at all.
+
+    `cached_only` IS THE CALLER'S BECAUSE THE TWO CALLERS DIFFER. The picker may
+    make the per-title lookup, because that lookup is what the click is FOR; the
+    add may not make anything, because an add that can search is an add that
+    spends a budget nobody is counting. Both re-read the SEARCH from the store
+    either way: the box's own request stored it seconds earlier, and a result
+    the store no longer holds is one to search for again rather than one to
+    guess at.
+
+    THE FIRST SOURCE IN THE HIT'S OWN ORDER IS WHO IS ASKED, and that order is
+    the registry's — whoever found a title is who can be asked about it, and a
+    Simkl-only instance has no Trakt entry to reach for.
+    """
+    asked = providers.for_catalogue_search(settings)
+    if not asked:
+        return None
+    result = await catalogue_search.search_catalogue(asked, settings, media, query,
+                                                     cached_only=True)
     try:
-        source = Source(request.query_params.get("source", ""))
-    except ValueError:
-        return JSONResponse({"ok": False, "error": "Missing or invalid source"}, status_code=400)
+        hit = result.hits[int(index)]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if media is Media.MOVIE:
+        # A film has no season to pick and so no second lookup: the search hit
+        # is the whole answer, which is also why an unfileable one is refused on
+        # the row it is drawn as rather than on the click.
+        return Pick(hit.title, hit.network, hit.year, dict(hit.ids), [], None,
+                    _unkeyable_reason(media, hit.ids, hit.title))
+    source, source_id = next(iter(hit.source_ids.items()))
     provider = providers.get(source)
     if not provider.detail_port.catalogue_configured(settings):
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
-    source_id = request.query_params.get("id", "")
-    if not source_id:
-        return JSONResponse({"ok": False, "error": "Missing id"}, status_code=400)
-    media = parse_media(request.query_params.get("media"), Media.SHOW)
-    title = request.query_params.get("title", "")
-    given_ids = _client_ids({key: request.query_params.get(key)
-                             for key in ID_KEYS if key in request.query_params})
+        return None
+    answer = await provider.detail_port.fetch_seasons(settings, source_id, media,
+                                                      cached_only=cached_only)
+    # THE LOOKUP WINS A CONFLICT and the hit's own ids fill in the rest. This
+    # answer's `season` was read off the per-title record `answer.ids` came from,
+    # so those two describe the same title by construction; an id that disagrees
+    # describes a different one, and keeping it would file the record with one
+    # title's season beside another title's id — which is exactly what a source
+    # listing one series as several titles produces, and a record nothing can
+    # then count. The hit's ids still travel because a lookup that surfaces
+    # nothing (Trakt, always — see SeasonsAnswer) must not read as "this hit had
+    # no ids after all".
+    ids = {**hit.ids, **answer.ids}
+    return Pick(
+        title=hit.title,
+        year=hit.year,
+        # ONLY WHERE THE HIT HAD NONE. The hit's network came from whichever
+        # source led the merge; this one is the per-title record's, and it fills
+        # a gap rather than overriding a source that already answered — a Simkl
+        # search hit carries no network, so on a Simkl-only instance this is the
+        # only place the roster ever gets one.
+        network=hit.network or answer.network or "",
+        ids=ids,
+        seasons=answer.seasons,
+        named_season=answer.named_season,
+        unkeyable=_unkeyable_reason(media, ids, hit.title),
+    )
+
+
+@guard.get("/distrakt/fragments/seasons", AuthLevel.DISTRAKT_APPROVED)
+async def distrakt_seasons_fragment(request: Request):
+    """The add flow's season picker for the result somebody clicked.
+
+    THE ADDRESS NAMES THE RESULT, NOT THE TITLE. It carries the query that found
+    it and that result's own key, which is all the server needs to read the hit
+    back — see `_resolve_pick`, and the ranker's own add for the rule this
+    follows.
+
+    ONE PARTIAL FOR EVERY STATE this can be in — a picker, a refusal, or a
+    season that names itself and adds on sight — because each of them replaces
+    the same slot, and a state drawn anywhere else is one the next answer cannot
+    replace (templates/_add_all.html established the shape).
+    """
+    user_id = await _distrakt_user_id(request)
+    settings = await viewer.settings_for_user(user_id)
+    year, month = _viewed_month(request)
+    query = request.query_params.get("q", "")
+    index = request.query_params.get("i", "")
+    # A SERVICE THAT COULD NOT BE ASKED IS ITS OWN STATE, drawn rather than
+    # answered with a status: a non-200 is never swapped, so the slot would stay
+    # empty with nothing to explain it — and "search for it again" would send
+    # somebody to retype a query that was never the problem.
+    unavailable = ""
     try:
-        answer = await provider.detail_port.fetch_seasons(settings, source_id, media)
+        pick = await _resolve_pick(settings, Media.SHOW, query, index, cached_only=False)
     except SourceUnavailable as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status or 502)
-    # THE LOOKUP WINS A CONFLICT, and the client's ids fill in the rest. This
-    # answer's `season` was read off the per-title record `answer.ids` came
-    # from, so those two describe the same title by construction; a client id
-    # that disagrees describes a different one, and keeping it would file the
-    # record with one title's season beside another title's id — which is
-    # exactly what a source listing one series as several titles produces, and
-    # a record nothing can then count. The client's own ids still travel
-    # because a lookup that surfaces nothing (Trakt, always — see
-    # SeasonsAnswer) must not read as "this hit had no ids after all".
-    resolved_ids = {**given_ids, **answer.ids}
-    return JSONResponse({
-        "ok": True,
-        "seasons": answer.seasons,
-        "season": answer.named_season,
-        "ids": resolved_ids,
-        "network": answer.network,
-        "unkeyable": _unkeyable_reason(media, resolved_ids, title),
+        pick, unavailable = None, str(exc)
+    return templates.TemplateResponse(request, "_distrakt_seasons.html", {
+        "request": request,
+        "pick": pick,
+        "unavailable": unavailable,
+        "query": query,
+        "index": index,
+        "month_query": f"?year={year}&month={month}",
+        # WHICH ROUTE A SEASON BUTTON POSTS TO, decided here rather than in the
+        # browser. A month behind the clock is filled in by hand and records
+        # something as FINISHED during it; the month under way and anything
+        # ahead is an ordinary add the buckets work out. That is the same test
+        # each of the two routes already enforces for itself
+        # (api_distrakt_add_completed refuses anything but a past month), so
+        # asking it here cannot disagree with them.
+        "as_finished": distrakt_store.month_key(year, month) < _this_month(),
     })
+
+
+async def _outstanding_play(user_id: int, key: ItemKey, season: int) -> dict | None:
+    """The play that raised a still-open question about `(key, season)`, or None.
+
+    THE ROW'S FACTS COME BACK OUT OF THE STORE, which is what lets the answer
+    stop accepting them from the page. `lifecycle.reconcile_history` writes the
+    play down — its title and every id it carried — before the question is ever
+    rendered, precisely so a question survives a reload; reading it back here
+    costs one indexed lookup and closes the last door through which a browser
+    could name a different title than the one it was asked about.
+    """
+    return next((row for row in await distrakt_store.open_prompts(user_id)
+                 if str(row["key"]) == str(key) and int(row["season"]) == int(season)),
+                None)
 
 
 async def _register_networks(user_id: int, networks) -> dict:
@@ -1809,26 +2321,39 @@ async def api_distrakt_add(request: Request):
     # made at all is already survivable — see this function's own last paragraph.
     data = await authz.json_body(request)
     today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
     try:
-        show = {
-            "media": Media.SHOW,
-            "ids": _client_ids(data.get("ids")),
-            "season": int(data["season"]),
-            "title": data.get("title") or "",
-            "network": data.get("network") or "",
-            # Added by hand, so removing it later says nothing about the
-            # calendar — see api_distrakt_remove.
-            "added_by": distrakt_store.ADDED_BY_MANUAL,
-        }
+        season = int(data["season"])
+    except (KeyError, TypeError, ValueError):
+        return _month_refusal(request, "Missing or invalid season")
+    # THE RESULT IS NAMED, NOT HANDED OVER. The body carries the query that found
+    # it and that hit's own key; the title, the network and every id are read back
+    # out of the same two cached answers the picker was drawn from. This route
+    # used to take `ids` and `title` straight from the page, which was the last
+    # reachable way for a browser to decide what identity somebody's watch record
+    # is filed under — and a wrong Trakt id shadows a correct Simkl one for ever.
+    pick = await _resolve_pick(settings, Media.SHOW, data.get("q") or "",
+                               data.get("i"), cached_only=True)
+    if pick is None:
+        return _month_refusal(request, "That search has expired — search for it again.")
+    if pick.unkeyable:
+        return _month_refusal(request, pick.unkeyable)
+    show = {
+        "media": Media.SHOW,
+        "ids": pick.ids,
+        "season": season,
+        "title": pick.title,
+        "network": pick.network,
+        # Added by hand, so removing it later says nothing about the
+        # calendar — see api_distrakt_remove.
+        "added_by": distrakt_store.ADDED_BY_MANUAL,
+    }
+    try:
         # Resolved before anything is written, so a title with no shared id is
         # refused here rather than at the insert, where the answer would be a 500.
         key = distrakt_store.record_key(show)
     except distrakt_store.UnkeyableRecord as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid ids/season"}, status_code=400)
+        return _month_refusal(request, str(exc))
     # ADDING A SEASON WITHDRAWS ANY REFUSAL ABOUT IT. A dismissal says "do not put
     # this season back on my list, stop asking", and adding it by hand is the
     # viewer doing exactly the thing that refusal refused — so the refusal has
@@ -1841,10 +2366,8 @@ async def api_distrakt_add(request: Request):
         # No backfill: refuse to create a never-tracked PAST month even via a
         # manual add, consistent with the read path's read-only rendering of such
         # months. api_distrakt_add_completed is the way to state one outright.
-        return JSONResponse(
-            {"ok": False, "error": "Can't add shows to a past month that was never tracked."},
-            status_code=400,
-        )
+        return _month_refusal(
+            request, "Can't add shows to a past month that was never tracked.")
     try:
         # WHICHEVER SOURCE THIS TITLE'S OWN IDS NAME, through the same one rule
         # the live pass uses. Asking Trakt directly handed a Simkl-only title a
@@ -1884,7 +2407,9 @@ async def api_distrakt_add(request: Request):
         user_id, settings, show, key, int(show["season"]), detail.get("total"),
         data, title=show["title"])
     if ask:
-        return JSONResponse({"ok": True, "needs_decision": ask})
+        return _rewatch_answer(request, ask, f"/api/distrakt/add?year={year}&month={month}",
+                               {"q": data.get("q") or "", "i": data.get("i"),
+                                "season": season})
 
     await distrakt_store.clear_prompt_dismissal(user_id, key, int(show["season"]))
     if already_finished:
@@ -1916,8 +2441,9 @@ async def api_distrakt_add(request: Request):
     if floor:
         await distrakt_store.set_history_from(
             user_id, key, int(show["season"]), floor)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)  # recomputed month (1d)
-    return JSONResponse(_point_at(payload, key, show["season"]), status_code=status)
+    return await _month_answer(
+        request, user_id, year, month, settings, point_at=(key, show["season"]),
+        message=f"Added {show['title']} S{int(show['season']):02d}")
 
 
 def _valid_day(raw) -> str:
@@ -2047,21 +2573,22 @@ async def api_distrakt_add_completed(request: Request):
     # route still refuses when the lookup comes back with no episodes, which is
     # the condition it actually cares about.
     data = await authz.json_body(request)
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
     month_key = distrakt_store.month_key(year, month)
-    if month_key >= distrakt_store.month_key(today.year, today.month):
-        return JSONResponse(
-            {"ok": False, "error": "Only a past month can be filled in by hand."},
-            status_code=400)
-    ids = _client_ids(data.get("ids"))
+    if month_key >= _this_month():
+        return _month_refusal(request, "Only a past month can be filled in by hand.")
     try:
         season = int(data["season"])
     except (KeyError, TypeError, ValueError):
-        return JSONResponse({"ok": False, "error": "Missing or invalid season"}, status_code=400)
-    if not ids:
-        return JSONResponse({"ok": False, "error": "Missing or invalid ids"}, status_code=400)
+        return _month_refusal(request, "Missing or invalid season")
+    # The result is NAMED here too, for the reason api_distrakt_add gives.
+    pick = await _resolve_pick(settings, Media.SHOW, data.get("q") or "",
+                               data.get("i"), cached_only=True)
+    if pick is None:
+        return _month_refusal(request, "That search has expired — search for it again.")
+    if pick.unkeyable:
+        return _month_refusal(request, pick.unkeyable)
+    ids = pick.ids
 
     try:
         # The episode total has to be REAL here — a frozen month's counts are
@@ -2072,22 +2599,20 @@ async def api_distrakt_add_completed(request: Request):
         detail = await live.season_detail(settings, {"media": Media.SHOW, "ids": ids,
                                                      "season": season})
     except SourceUnavailable as exc:
-        return JSONResponse({"ok": False, "error": f"That season could not be read: {exc}"},
-                            status_code=exc.status or 502)
+        return _month_refusal(request, f"That season could not be read: {exc}")
     total = int((detail or {}).get("total") or 0)
     if not total:
-        return JSONResponse(
-            {"ok": False,
-             "error": "No source lists any episodes for that season, so it cannot be recorded as finished."},
-            status_code=400)
+        return _month_refusal(
+            request,
+            "No source lists any episodes for that season, so it cannot be recorded as finished.")
 
     try:
         stored = await distrakt_store.add_month_record(user_id, month_key, {
             "media": Media.SHOW,
             "ids": ids,
-            "title": data.get("title") or "",
+            "title": pick.title,
             "season": season,
-            "network": data.get("network") or "",
+            "network": pick.network,
             # Stated outright, which is the whole point of this route: the caller
             # is the authority on what that month held, and nothing here is going
             # to work the answer out from counts.
@@ -2102,7 +2627,7 @@ async def api_distrakt_add_completed(request: Request):
             "added_by": distrakt_store.ADDED_BY_MANUAL,
         })
     except distrakt_store.UnkeyableRecord as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return _month_refusal(request, str(exc))
     # Writing the record leaves an existing month's `closed` alone and creates a
     # new one open; either way a hand-filled past month ends up closed, like every
     # other past month, so it renders and imports with no further Trakt calls.
@@ -2111,19 +2636,34 @@ async def api_distrakt_add_completed(request: Request):
         doc["closed"] = True
         doc["totals_refreshed_at"] = db.now()
         await distrakt_store.save_month(user_id, doc)
-    await _register_networks(user_id, [data.get("network") or ""])
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(_point_at(payload, (stored or {}).get("key") or "", season),
-                        status_code=status)
+    await _register_networks(user_id, [pick.network])
+    return await _month_answer(
+        request, user_id, year, month, settings,
+        point_at=((stored or {}).get("key") or "", season),
+        message=f"Recorded {pick.title} S{season:02d} as finished")
 
 
-@guard.get("/api/distrakt/backfill", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_backfill_range(request: Request):
-    """The range the backfill dialog opens on, and what is already tracked."""
-    user_id = await _distrakt_user_id(request)
-    tracked = await distrakt_store.list_months(user_id)
-    start, end = backfill.default_range()
-    return JSONResponse({"ok": True, "start": start, "end": end, "tracked": tracked})
+def _backfill_answer(request: Request, *, plan: dict | None = None,
+                     warning: str = "", done: str = "") -> Response:
+    """The backfill panel's answer, in whichever of its states this is: a plan to
+    confirm, a line saying it wrote them, or a refusal.
+
+    ONE PARTIAL FOR ALL OF THEM because each replaces the same block, and a state
+    drawn anywhere else is one the next answer cannot replace — the shape
+    _add_all.html established. It also means "Write these months" only exists
+    while there is a plan to write, which is what the browser was keeping a
+    `backfillReady` flag for.
+
+    THE PLAN IS THE SERVER'S AND STAYS THERE. This route surveys and keeps what
+    it found; the page confirms a summary of it and never hands records back to
+    be stored.
+    """
+    return templates.TemplateResponse(request, "_distrakt_backfill.html", {
+        "request": request,
+        "plan": plan,
+        "warning": warning,
+        "done": done,
+    })
 
 
 def _requested_month(value, fallback: str) -> str | None:
@@ -2157,19 +2697,17 @@ async def api_distrakt_backfill_survey(request: Request):
     # sweep has nothing to report. Naming one service refused the whole backfill
     # to an account whose history is perfectly readable from the other.
     if not await watch_history.tracker_ports(settings, user_id):
-        return JSONResponse({"ok": False, "error": "Not configured"}, status_code=400)
+        return _backfill_answer(request, warning="No service here can be asked for a watch history.")
     data = await authz.json_body(request)
     default_start, default_end = backfill.default_range()
     start = _requested_month(data.get("start"), default_start)
     end = _requested_month(data.get("end"), default_end)
     if start is None or end is None:
-        return JSONResponse(
-            {"ok": False, "error": "Months go in as YYYY-MM, with the month padded — 2026-07, not 2026-7."},
-            status_code=400)
+        return _backfill_answer(
+            request,
+            warning="Months go in as YYYY-MM, with the month padded — 2026-07, not 2026-7.")
     if not backfill.month_range(start, end):
-        return JSONResponse(
-            {"ok": False, "error": "That range covers no months — check the order."},
-            status_code=400)
+        return _backfill_answer(request, warning="That range covers no months — check the order.")
     try:
         plan = await backfill.survey(user_id, settings, start, end)
     except SourceUnavailable as exc:
@@ -2178,10 +2716,9 @@ async def api_distrakt_backfill_survey(request: Request):
         # account that has not linked Trakt is not Trakt at all — and a survey
         # that cannot read the history has to SAY so rather than come back with
         # an empty plan the viewer would confirm as "there was nothing there".
-        return JSONResponse(
-            {"ok": False, "error": f"Your watch history could not be read: {exc}"},
-            status_code=502)
-    return JSONResponse({"ok": True, **backfill.summarize(plan)})
+        return _backfill_answer(request,
+                                warning=f"Your watch history could not be read: {exc}")
+    return _backfill_answer(request, plan=backfill.summarize(plan))
 
 
 @guard.post("/api/distrakt/backfill/apply", AuthLevel.DISTRAKT_APPROVED)
@@ -2189,12 +2726,23 @@ async def api_distrakt_backfill_apply(request: Request):
     """Write the surveyed plan. Refuses if there isn't one — the survey is the
     only thing that can produce records, and it expires."""
     user_id = await _distrakt_user_id(request)
+    await authz.json_body(request)
     try:
         written = await backfill.apply(user_id)
     except backfill.BackfillExpired as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
-    months = await distrakt_store.list_months(user_id)
-    return JSONResponse({"ok": True, **written, "tracked": months})
+        return _backfill_answer(request, warning=str(exc))
+    # WHAT WAS ACTUALLY WRITTEN, and only mentioning films when it wrote some.
+    # The sentence used to be composed in the browser and named a control on
+    # another screen ("switch What to import to Movies") unconditionally,
+    # including on runs that found no films at all — the label of another page's
+    # field is not a fact a script can keep true.
+    films = written.get("movies") or 0
+    said = (f"Wrote {len(written.get('months') or [])} month(s), "
+            f"{written.get('shows') or 0} finished season(s)"
+            + (f", {films} film(s)." if films else ".")
+            + (" Films are on your watch record now; bringing them into a board is a"
+               " separate import from Rankings." if films else ""))
+    return _and_the_month(_backfill_answer(request, done=said))
 
 
 @guard.post("/api/distrakt/abandon", AuthLevel.DISTRAKT_APPROVED)
@@ -2221,12 +2769,11 @@ async def api_distrakt_abandon(request: Request):
     user_id = await _distrakt_user_id(request)
     data = await authz.json_body(request)
     today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return _month_refusal(request, str(exc))
     abandoned = bool(data.get("abandoned"))
     viewed_month = distrakt_store.month_key(year, month)
     # An abandon is dated by the clock; see the docstring. The viewed month is
@@ -2238,8 +2785,7 @@ async def api_distrakt_abandon(request: Request):
     if abandoned:
         placed = await lifecycle.find_season(user_id, key, season, month=viewed_month)
         if placed is None:
-            return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
-                                status_code=404)
+            return _month_refusal(request, "Show/season not found in that month")
         show = await _live_form_source(settings, placed.record, season)
         rec = await lifecycle.give_up(
             user_id, show, month=acted_month,
@@ -2252,11 +2798,10 @@ async def api_distrakt_abandon(request: Request):
         if rec is None and viewed_month != acted_month:
             rec = await lifecycle.take_back(user_id, key, season, month=viewed_month)
         if rec is None:
-            return JSONResponse({"ok": False, "error": "Show/season not found in that month"},
-                                status_code=404)
+            return _month_refusal(request, "Show/season not found in that month")
 
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    return await _month_answer(request, user_id, year, month, settings,
+                               message="Marked abandoned" if abandoned else "Un-abandoned")
 
 
 @guard.post("/api/distrakt/acknowledge-return", AuthLevel.DISTRAKT_APPROVED)
@@ -2280,10 +2825,14 @@ async def api_distrakt_acknowledge_return(request: Request):
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return authz.error(str(exc))
+        return _month_refusal(request, str(exc))
     if not await distrakt_store.set_came_back(user_id, key, season, False):
-        return authz.error("That season isn't on your list.", 404)
-    return JSONResponse({"ok": True})
+        return _month_refusal(request, "That season isn't on your list.")
+    # AN EMPTY ANSWER IS THE WHOLE ANSWER: the button asked to be swapped out of
+    # existence (hx-target="this", outerHTML), so having nothing to swap in is
+    # exactly right. A refusal draws a line instead, which goes out of band and
+    # therefore leaves the mark standing to be pressed again.
+    return Response(status_code=200)
 
 
 @guard.post("/api/distrakt/unknown-add", AuthLevel.DISTRAKT_APPROVED)
@@ -2312,18 +2861,26 @@ async def api_distrakt_unknown_add(request: Request):
     # `trakt_configured` here asked whether this account had linked Trakt — and
     # refused the whole action to somebody signed in with Simkl alone.
     if not settings.trakt_catalogue_configured:
-        return authz.error("Not configured")
+        return _month_refusal(request, "Not configured")
     data = await authz.json_body(request)
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return authz.error(str(exc))
+        return _month_refusal(request, str(exc))
+    # THE IDS AND THE TITLE COME OUT OF THE STORE, NOT OUT OF THE REQUEST. The
+    # play that raised this question was written down with them
+    # (store.open_prompts), so the row the page drew and the record this writes
+    # are the same fact read twice from one place — and no id a browser could
+    # edit reaches a write, which is the rule the add flow now keeps everywhere.
+    asked = await _outstanding_play(user_id, key, season)
+    if asked is None:
+        return _month_refusal(request, "That question is no longer outstanding.")
     record = {
         "media": key.media, "match_source": key.match_source, "match_id": key.match_id,
         "season": season,
-        "ids": _client_ids(data.get("ids")),
-        "title": str(data.get("title") or ""),
-        "network": str(data.get("network") or ""),
+        "ids": dict(asked.get("ids") or {}),
+        "title": str(asked.get("title") or ""),
+        "network": "",
         # Nothing announced this and no month built it in: the viewer's own
         # viewing is what put it here, which is what this records.
         "added_by": distrakt_store.ADDED_BY_HISTORY,
@@ -2341,9 +2898,7 @@ async def api_distrakt_unknown_add(request: Request):
         live.network_for(settings, record),
     )
     record["network"] = record["network"] or network
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+    year, month = _viewed_month(request)
 
     # THE SAME QUESTION THE ORDINARY ADD ASKS, AND FOR A BETTER REASON HERE. This
     # row exists BECAUSE a play arrived that nothing could place — which for a
@@ -2358,7 +2913,10 @@ async def api_distrakt_unknown_add(request: Request):
         user_id, settings, {**record, **detail, "season": season}, key, season,
         (detail or {}).get("total"), data, title=record["title"])
     if ask:
-        return JSONResponse({"ok": True, "needs_decision": ask})
+        year, month = _viewed_month(request)
+        return _rewatch_answer(
+            request, ask, f"/api/distrakt/unknown-add?year={year}&month={month}",
+            {"key": str(key), "season": season})
 
     if already_finished:
         await _file_finished(
@@ -2379,8 +2937,8 @@ async def api_distrakt_unknown_add(request: Request):
     # standing_questions to notice the season is now listed keeps the answer and
     # its effect in one place; that check is the safety net, not the mechanism.
     await distrakt_store.close_prompt(user_id, key, season)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(_point_at(payload, key, season), status_code=status)
+    return await _month_answer(request, user_id, year, month, settings,
+                               point_at=(key, season), message="Added")
 
 
 @guard.post("/api/distrakt/unknown-resume", AuthLevel.DISTRAKT_APPROVED)
@@ -2409,10 +2967,8 @@ async def api_distrakt_unknown_resume(request: Request):
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return authz.error(str(exc))
-    today = clock.today()
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
+        return _month_refusal(request, str(exc))
+    year, month = _viewed_month(request)
     month_key = distrakt_store.month_key(year, month)
     # find_shown_season, for the same reason the page's own question now uses it:
     # find_season deliberately stops one month short of the month being read, so a
@@ -2425,12 +2981,12 @@ async def api_distrakt_unknown_resume(request: Request):
     placed = await lifecycle.find_shown_season(user_id, key, season, month=month_key)
     if placed is None or placed.month is None or \
             placed.record["kind"] != distrakt_store.RecordKind.ABANDONED:
-        return authz.error("That season isn't recorded as given up on.", 404)
+        return _month_refusal(request, "That season isn't recorded as given up on.")
     await lifecycle.take_back(user_id, key, season, month=placed.month)
     await distrakt_store.close_prompt(user_id, key, season)
     settings = await viewer.settings_for_user(user_id)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    return await _month_answer(request, user_id, year, month, settings,
+                               point_at=(key, season), message="Added back")
 
 
 @guard.post("/api/distrakt/verdict-readd", AuthLevel.DISTRAKT_APPROVED)
@@ -2486,22 +3042,20 @@ async def api_distrakt_verdict_readd(request: Request):
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return authz.error(str(exc))
-    today = clock.today()
-    month_key = distrakt_store.month_key(today.year, today.month)
+        return _month_refusal(request, str(exc))
+    month_key = _this_month()
     placed = await lifecycle.find_shown_season(user_id, key, season, month=month_key)
     if (placed is None or placed.month != month_key
             or placed.record["kind"] != distrakt_store.RecordKind.COMPLETED):
-        return authz.error("That season isn't recorded as finished this month.", 404)
+        return _month_refusal(request, "That season isn't recorded as finished this month.")
     settings = await viewer.settings_for_user(user_id)
     await watch_history.baseline_show(settings, user_id, placed.record)
     await lifecycle.reopen(user_id, placed, look_up=_season_lookup(settings))
     # The month the VIEWER is looking at is what comes back, which need not be the
     # month the verdict sat on — the same split every other row control makes.
-    year = route_params.valid_year(data.get("year"), today.year)
-    month = route_params.valid_month(data.get("month"), today.month)
-    payload, status = await _distrakt_month_payload(user_id, year, month, settings)
-    return JSONResponse(payload, status_code=status)
+    year, month = _viewed_month(request)
+    return await _month_answer(request, user_id, year, month, settings,
+                               point_at=(key, season), message="Worked out again")
 
 
 @guard.post("/api/distrakt/unknown-dismiss", AuthLevel.DISTRAKT_APPROVED)
@@ -2535,7 +3089,7 @@ async def api_distrakt_unknown_dismiss(request: Request):
     try:
         key, season = _row_target(data)
     except RequestError as exc:
-        return authz.error(str(exc))
+        return _month_refusal(request, str(exc))
     # WHICH QUESTION WAS REFUSED IS READ FROM THE STORE, NOT FROM THE REQUEST, and
     # the discriminator is exact rather than a heuristic: a history question is
     # raised by a play and always has an outstanding row (lifecycle.
@@ -2556,7 +3110,10 @@ async def api_distrakt_unknown_dismiss(request: Request):
     # both: without the first the same play asks again, and without the second the
     # row lingers until something else notices it was answered.
     await distrakt_store.close_prompt(user_id, key, season)
-    return JSONResponse({"ok": True})
+    # The ROW asked to be swapped out (outerHTML on the question it sits in), so
+    # an empty answer removes it; a refusal is a line out of band and leaves the
+    # question standing rather than losing it to a write that never happened.
+    return Response(status_code=200)
 
 
 async def _live_form_source(settings, record: dict, season: int) -> dict:
@@ -2611,6 +3168,24 @@ async def api_distrakt_export(request: Request):
     })
 
 
+# The phrase a restore has to be confirmed with. A phrase that has to be READ
+# and copied cannot be cleared by muscle memory the way a confirm dialog can, and
+# a restore REPLACES this account's tracked data rather than merging into it.
+RESTORE_ACK = "REPLACE MY DATA"
+
+
+def _restore_answer(request: Request, message: str, ok: bool = False) -> Response:
+    """The restore panel's one line, redrawn.
+
+    A REFUSAL IS 200 WITH A SENTENCE, like every other drawn refusal here: a
+    status code is never swapped (static/js/boost.js's `noSwap`), so a 400 would
+    be a button that silently did nothing.
+    """
+    return templates.TemplateResponse(request, "_distrakt_restore.html", {
+        "request": request, "message": message, "ok": ok,
+    })
+
+
 @guard.post("/api/distrakt/restore", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_restore(request: Request):
     """Replace the requesting user's distrakt data with an exported document.
@@ -2621,16 +3196,46 @@ async def api_distrakt_restore(request: Request):
     into someone else's tracker. This is deliberately NOT the same thing as
     POST /api/distrakt/import, which pulls premieres in from the calendar."""
     user_id = await _distrakt_user_id(request)
-    data = await authz.json_body(request)
+    body = await authz.json_body(request)
+    # THE DOCUMENT ARRIVES AS ONE FIELD OF THE FORM, which is what lets the whole
+    # restore be a form. The browser reads the chosen file — the one thing only it
+    # can do, because app/authz.py's shape guard admits application/json alone and
+    # a cross-origin multipart upload is exactly what that rule exists to refuse —
+    # and puts the text in a hidden input. The typed phrase, the submit and the
+    # answer are all markup.
+    try:
+        data = json.loads(str(body.get("payload") or ""))
+    except ValueError:
+        return _restore_answer(request, "That file isn't readable JSON.")
+    if not isinstance(data, dict):
+        return _restore_answer(request, "That file is not a tracker export.")
+    # THE PHRASE IS CHECKED HERE TOO, not only by the form's own `pattern`. A
+    # browser validation is a courtesy to the person typing; this is the one thing
+    # standing between a mis-aimed request and somebody's whole tracker, and it
+    # used to be checked nowhere but in the page.
+    if str(body.get("ack") or "").strip() != RESTORE_ACK:
+        return _restore_answer(request, f"Type {RESTORE_ACK} to confirm.")
     try:
         await distrakt_store.restore_user_data(user_id, data)
     except distrakt_store.RestoreError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        return _restore_answer(request, str(exc))
     except db.DatabaseError as exc:
         logger.warning("distrakt restore failed for user %s", user_id, exc_info=True)
-        return JSONResponse({"ok": False, "error": f"Could not restore this file: {exc}"}, status_code=400)
+        return _restore_answer(request, f"Could not restore this file: {exc}")
     months = await distrakt_store.list_months(user_id)
-    return JSONResponse({"ok": True, "months": months})
+    return _and_the_month(_restore_answer(
+        request, f"Restored {len(months)} month(s).", ok=True))
+
+
+# THE ONLY PLACE THE SHARE-LINK KINDS ARE NAMED FOR PEOPLE.
+# app/calendar/share_links.PREFERRED_KINDS names the same three for code; this is
+# the announcement post's selector, and the labels used to live in the browser
+# where nothing could hold the two lists to each other.
+LINK_KIND_LABELS = {
+    "token": "Private link",
+    "username": "Username link",
+    "slug": "Custom link",
+}
 
 
 async def _share_link_payload(user_id: int) -> dict:
@@ -2655,12 +3260,6 @@ async def _share_link_payload(user_id: int) -> dict:
     }
 
 
-@guard.get("/api/distrakt/share-link", AuthLevel.DISTRAKT_APPROVED)
-async def api_distrakt_share_link(request: Request):
-    """This user's current announcement-post link settings."""
-    return JSONResponse(await _share_link_payload(await _distrakt_user_id(request)))
-
-
 @guard.post("/api/distrakt/share-link", AuthLevel.DISTRAKT_APPROVED)
 async def api_distrakt_set_share_link(request: Request):
     """Choose which share-link form the announcement post embeds and which
@@ -2676,9 +3275,16 @@ async def api_distrakt_set_share_link(request: Request):
     kind = data["kind"] or None if "kind" in data else ...
     endpoint = data["endpoint"] or None if "endpoint" in data else ...
     if kind is ... and endpoint is ...:
-        return JSONResponse({"ok": False, "error": "Nothing to update"}, status_code=400)
+        return _month_refusal(request, "Nothing to update")
     try:
         await share_links.set_post_link(user_id, kind=kind, endpoint=endpoint)
     except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
-    return JSONResponse(await _share_link_payload(user_id))
+        return _month_refusal(request, str(exc))
+    # THE MONTH IS THE ANSWER, because the link is rendered INTO the announcement
+    # post: which form it takes and which view it opens on are visible only in
+    # the copy block, and the copy blocks ride with the month. It used to be two
+    # requests — save, then reload the month — with the selectors rebuilt in
+    # between from a payload that was "two shapes of the same answer".
+    year, month = _viewed_month(request)
+    return await _month_answer(request, user_id, year, month,
+                               await viewer.settings_for_user(user_id))

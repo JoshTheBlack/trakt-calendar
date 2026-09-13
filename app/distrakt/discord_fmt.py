@@ -99,9 +99,42 @@ READER_BUCKETS: dict[MonthStanding, ReaderBuckets] = {
     ),
 }
 
+# WHAT A BUCKET IS CALLED, ONCE, for every reader that names one. The page's
+# section heads and the notices' markdown headers were three separate spellings
+# of these six words — the enum's own values are lower-case identifiers, the
+# notices wrote "## **Cleanup**" inline, and the browser carried a third table —
+# so a bucket renamed would have been renamed in one of three places.
+#
+# THE DECORATION IS NOT IN HERE. "## **Cleanup**" is Discord markdown and
+# "Cleanup" is the bucket's name; the notice wraps it where it renders, and the
+# page draws it bare. One is a fact about the vocabulary, the other about the
+# medium.
+BUCKET_LABELS: dict[Bucket, str] = {
+    Bucket.CLEANUP: "Cleanup",
+    Bucket.KEEPUP: "Keepup",
+    Bucket.NEW: "New Shows",
+    Bucket.RETURNING: "Returning",
+    Bucket.COMPLETED: "Completed",
+    Bucket.ABANDONED: "Abandoned",
+}
+
+# THE ORDER THE PAGE DRAWS ITS SECTIONS IN. This existed nowhere in Python at
+# all — it was a tuple in the browser — which is why the page and the notices
+# could not be held to one another by anything but reading both. It is the
+# page's own order and deliberately not the notices': READER_BUCKETS.post2
+# states theirs, and the two genuinely differ (the notices never carry a
+# premiere section at all — see render_post2).
+PAGE_BUCKET_ORDER: tuple[Bucket, ...] = (
+    Bucket.CLEANUP, Bucket.KEEPUP, Bucket.NEW, Bucket.RETURNING,
+    Bucket.COMPLETED, Bucket.ABANDONED,
+)
+
 # Keepup groups shows by air weekday, Sun..Sat; only weekdays with at least one
 # show get a header, so a quiet Tuesday doesn't leave an empty section in the post.
-_WEEKDAY_ORDER = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+# PUBLIC because the page groups Keepup the same way and by the same list: a
+# second copy of these seven strings in a second language is exactly what the
+# browser used to carry.
+WEEKDAY_ORDER = ("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 
 
 _LEADING_ARTICLES = ("the ", "a ", "an ")
@@ -310,13 +343,13 @@ def _group_by_bucket(shows: list[dict]) -> dict[Bucket, list[dict]]:
 
 
 def _render_keepup(shows: list[dict], emoji_map: dict, default_emoji: str) -> str:
-    by_day: dict[str, list[dict]] = {d: [] for d in _WEEKDAY_ORDER}
+    by_day: dict[str, list[dict]] = {d: [] for d in WEEKDAY_ORDER}
     for show in shows:
         day = show.get("cadence")
         if day in by_day:
             by_day[day].append(show)
-    lines = ["## **Keepup**"]
-    for day in _WEEKDAY_ORDER:
+    lines = [f"## **{BUCKET_LABELS[Bucket.KEEPUP]}**"]
+    for day in WEEKDAY_ORDER:
         group = by_day[day]
         if not group:
             continue
@@ -349,22 +382,107 @@ def render_post1(series_premieres: list[dict], season_premieres: list[dict],
     the page's and the second notice's rule for what THEY may say, and applying
     it here would answer this notice's question with the wrong one.
 
-    `link_url` is omitted entirely when there is nothing to link to, rather than
-    rendered as an empty or broken line. It is wrapped in angle brackets, which
-    is Discord's own way of suppressing the link preview card — an announcement
-    that already lists a month of shows does not want a second, larger block
-    underneath it.
+    `link_url` IS BARE, AND THAT IS THE POINT OF IT. It used to be wrapped in
+    angle brackets, which is Discord's own way of SUPPRESSING the preview card —
+    and the card is the reason to post the link at all, because it carries the
+    calendar's own picture. The url is omitted entirely when there is nothing to
+    link to, rather than rendered as an empty or broken line.
     """
     emoji_map = emoji_map or {}
     news = sorted(series_premieres, key=_premiere_sort_key)
     returning = sorted(season_premieres, key=_premiere_sort_key)
     sections = [
-        _section("**New Shows**", [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
-        _section("**Returning**", [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
+        _section(f"**{BUCKET_LABELS[Bucket.NEW]}**",
+                 [_new_returning_line(s, emoji_map, default_emoji) for s in news]),
+        _section(f"**{BUCKET_LABELS[Bucket.RETURNING]}**",
+                 [_new_returning_line(s, emoji_map, default_emoji) for s in returning]),
     ]
     if link_url:
-        sections.append(f"**Full calendar:** <{link_url}>")
+        sections.append(f"**Full calendar:** {link_url}")
     return "\n\n".join(sections)
+
+
+class PageSection(NamedTuple):
+    """One heading on the tracker page and what is drawn under it.
+
+    `rows` are the rows directly beneath the heading; `days` are the weekday
+    sub-headings Keepup — and only Keepup — splits its rows into, in
+    WEEKDAY_ORDER. A section carries one or the other, never both, and the
+    template draws whichever it was given rather than asking which bucket this
+    is: which buckets group by weekday is a fact about the vocabulary and it is
+    settled here, once, beside the notice that already grouped one that way.
+    """
+    label: str
+    rows: list[dict]
+    days: list[tuple[str, list[dict]]]
+
+
+def page_sections(shows: list[dict]) -> list[PageSection]:
+    """The tracker page's own list, in the order and the order-within it draws.
+
+    THE PAGE'S ORDER IS PYTHON'S NOW, AND THAT IS THE POINT OF THIS FUNCTION.
+    It used to be a bucket order, a label table and two comparison functions in
+    the browser, sitting beside the notices' versions of the same three facts
+    with nothing holding the two together — and they had drifted: the browser
+    matched a leading article followed by ANY whitespace while `_sort_title`
+    matches a literal space, and it ordered with `localeCompare` while Python
+    orders by code point. So a title separated from its article by a
+    non-breaking space, and any accented title, sorted one way on the page and
+    another in the notice the page exists to produce. Both now come out of
+    `_sort_title` and `_premiere_sort_key`, which is what makes the two agree by
+    construction rather than by inspection.
+
+    NEW AND RETURNING GO BY PREMIERE DATE, everything else alphabetically, and
+    Keepup by weekday and then alphabetically — the same three rules the
+    notices use, read from the same two key functions.
+
+    `shows` HAS ALREADY BEEN FILTERED for what this month's standing may show
+    (routes._rows_for reads READER_BUCKETS.page), so this only groups and
+    orders. An empty bucket draws no heading at all: on the page a heading with
+    nothing under it is a section the reader scans and finds empty, which is a
+    different bargain from the notice's, where a missing Cleanup heading would
+    read as the month having none.
+    """
+    groups = _group_by_bucket(shows)
+    sections: list[PageSection] = []
+    for bucket in PAGE_BUCKET_ORDER:
+        rows = groups[bucket]
+        if not rows:
+            continue
+        label = BUCKET_LABELS[bucket]
+        if bucket is Bucket.KEEPUP:
+            sections.append(PageSection(label, [], _by_weekday(rows)))
+            continue
+        key = (_premiere_sort_key if bucket in (Bucket.NEW, Bucket.RETURNING)
+               else (lambda show: _sort_title(show.get("title"))))
+        sections.append(PageSection(label, sorted(rows, key=key), []))
+    return sections
+
+
+def _by_weekday(shows: list[dict]) -> list[tuple[str, list[dict]]]:
+    """Keepup's rows under their air weekday, Sun..Sat, skipping empty days —
+    the same grouping `_render_keepup` writes into the notice, and a row whose
+    cadence names no weekday (a binge) is left out of both by the same test.
+    """
+    by_day: dict[str, list[dict]] = {day: [] for day in WEEKDAY_ORDER}
+    for show in shows:
+        day = show.get("cadence")
+        if day in by_day:
+            by_day[day].append(show)
+    return [(day, sorted(by_day[day], key=lambda s: _sort_title(s.get("title"))))
+            for day in WEEKDAY_ORDER if by_day[day]]
+
+
+def page_films(movies: list[dict] | None) -> list[dict]:
+    """The month's watched films in the order the page lists them: by the day
+    they were watched.
+
+    NOT the notice's order, which is alphabetical (see render_post2's
+    `**Movies**`), and the difference is deliberate rather than an oversight
+    left standing. The notice is a list somebody reads down; the page is a
+    record of a month, and a month's films happened in an order.
+    """
+    return sorted(movies or [], key=lambda movie: str(movie.get("watched_at") or ""))
 
 
 def _movie_line(movie: dict) -> str:
@@ -410,15 +528,18 @@ def render_post2(shows: list[dict], emoji_map: dict | None = None, default_emoji
     # filtered through — so "does this month have a Keepup" is asked in one place.
     blocks = {
         Bucket.CLEANUP: lambda: _section(
-            "## **Cleanup**", [_cleanup_line(s, emoji_map, default_emoji) for s in cleanup]),
+            f"## **{BUCKET_LABELS[Bucket.CLEANUP]}**",
+            [_cleanup_line(s, emoji_map, default_emoji) for s in cleanup]),
         Bucket.KEEPUP: lambda: _render_keepup(groups[Bucket.KEEPUP], emoji_map, default_emoji),
         # Unlike the two above, an empty one of these is not informative to a
         # reader of the post, so it is left out entirely rather than headed.
         Bucket.COMPLETED: lambda: _section(
-            "**Completed**", [_completed_line(s, emoji_map, default_emoji) for s in completed],
+            f"**{BUCKET_LABELS[Bucket.COMPLETED]}**",
+            [_completed_line(s, emoji_map, default_emoji) for s in completed],
         ) if completed else None,
         Bucket.ABANDONED: lambda: _section(
-            "**Abandoned**", [_abandoned_line(s, emoji_map, default_emoji) for s in abandoned],
+            f"**{BUCKET_LABELS[Bucket.ABANDONED]}**",
+            [_abandoned_line(s, emoji_map, default_emoji) for s in abandoned],
         ) if abandoned else None,
     }
     sections = [block for block in (blocks[bucket]() for bucket in READER_BUCKETS[standing].post2)

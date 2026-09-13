@@ -1831,8 +1831,29 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     color: var(--text-dim); padding: 9px 16px; cursor: pointer; font-size: 0.9rem; font-weight: 600;
 }
 .distrakt-tab:hover { color: var(--text); }
-.distrakt-tab.active { color: var(--gold-soft); border-bottom-color: var(--gold); }
-.distrakt-panel[hidden] { display: none; }
+/* THE TAB STRIP IS A RADIOGROUP, which is what a tab strip already IS: one of a
+   set, chosen, and arrow-key navigable for free. The radios are hidden rather
+   than removed so they keep the keyboard and can show their own focus, and each
+   panel is drawn by the radio it belongs to — the same shape the filter chips
+   use (.fchip above). It was a function toggling a class on four buttons and
+   `hidden` on four panels: the same statement made twice, in a language that
+   cannot see the markup. */
+.distrakt-tab-radio { position: absolute; width: 1px; height: 1px; opacity: 0; }
+#tab-shows:checked ~ .distrakt-tabs [for="tab-shows"],
+#tab-copy:checked ~ .distrakt-tabs [for="tab-copy"],
+#tab-data:checked ~ .distrakt-tabs [for="tab-data"],
+#tab-emoji:checked ~ .distrakt-tabs [for="tab-emoji"] {
+    color: var(--gold-soft); border-bottom-color: var(--gold);
+}
+#distraktRoot:has(.distrakt-tab-radio:focus-visible) .distrakt-tabs label {
+    outline-offset: -2px;
+}
+.distrakt-tab-radio:focus-visible ~ .distrakt-tabs [for="tab-shows"] { outline: 2px solid var(--gold); }
+.distrakt-panel { display: none; }
+#tab-shows:checked ~ [data-panel="shows"],
+#tab-copy:checked ~ [data-panel="copy"],
+#tab-data:checked ~ [data-panel="data"],
+#tab-emoji:checked ~ [data-panel="emoji"] { display: block; }
 .distrakt-placeholder { text-align: center; padding: 100px 20px; color: var(--text-faint); }
 .distrakt-placeholder .emoji { font-size: 2.4rem; margin-bottom: 12px; }
 .distrakt-show-row .btn-ghost.danger { color: var(--danger, #e0736b); border-color: transparent; }
@@ -1850,6 +1871,45 @@ body.auth-page.has-nav .auth-shell { max-width: 680px; }
     border: 1px solid var(--danger, #e0736b); border-radius: 8px;
     background: rgba(224,115,107,0.08);
     padding: 8px 12px; margin-bottom: 10px; font-size: 0.85rem;
+}
+
+/* ARE YOU SURE, WITH NO SCRIPT AND NO REQUEST (templates/_confirm.html). The
+   control and the question it turns into are both in the markup; a hidden
+   checkbox says which one is drawn, and Cancel is a second label for the same
+   box. The question is `position: absolute` inside the control's own box, which
+   is what confirmInline needed getBoundingClientRect for — a popover anchored to
+   whichever button opened it, without measuring anything.
+
+   RIGHT-ALIGNED AND ABOVE EVERYTHING, because these sit at the end of a row: a
+   sentence growing rightwards would leave the viewport, and one in the flow
+   would widen the row it is in. */
+.confirm { position: relative; display: inline-flex; }
+.confirm-toggle { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.confirm-toggle:checked ~ .confirm-open { display: none; }
+.confirm-toggle:not(:checked) ~ .confirm-ask { display: none; }
+.confirm:has(.confirm-toggle:focus-visible) .confirm-open {
+    outline: 2px solid var(--gold); outline-offset: 2px;
+}
+/* THE SAME BOX confirmInline DRAWS, to the pixel where it can be: this replaces
+   that popover on these controls, and two "are you sure" looks in one app would
+   be the drift this plan exists to remove. The sentence is its own line above
+   right-aligned actions, the width is capped so a long one wraps rather than
+   stretching the row it sits in, and a danger confirm is crimson rather than the
+   gold a primary button wears everywhere else. */
+.confirm-ask {
+    position: absolute; top: 100%; right: 0; z-index: 30; margin-top: 6px;
+    width: max-content; max-width: min(280px, 74vw);
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--bg-panel); border: 1px solid var(--card-border);
+    box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+    font-size: 0.8rem; line-height: 1.45; color: var(--text-dim);
+    text-align: left; white-space: normal;
+}
+.confirm-ask .hint { display: block; margin-bottom: 8px; color: var(--text-dim); }
+.confirm-ask-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.confirm-ask label { cursor: pointer; }
+.confirm.danger .confirm-ask .btn-primary {
+    background: linear-gradient(90deg, var(--crimson), #8a2331);
 }
 
 .distrakt-show-list { display: flex; flex-direction: column; gap: 5px; }
@@ -2046,9 +2106,15 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 }
 
 .distrakt-search-results { display: flex; flex-direction: column; gap: 6px; max-height: 240px; overflow-y: auto; }
+/* A ROW IS A <button> NOW, because a row IS a button — which is what gives it
+   Enter and Space without a listener translating them into a click. The
+   element's own appearance has to be undone for that: a button brings a
+   background, a border, a font and a centred, non-wrapping text flow that a row
+   does not want. */
 .distrakt-search-row {
     display: flex; align-items: center; gap: 10px; cursor: pointer;
     padding: 9px 12px; border: 1px solid var(--card-border); border-radius: 8px;
+    width: 100%; background: none; color: inherit; font: inherit; text-align: left;
 }
 .distrakt-search-row:hover { border-color: var(--gold); }
 .distrakt-search-row .distrakt-title { flex: 1; font-weight: 600; }
@@ -2065,6 +2131,10 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
    carrying its own reason rather than a tooltip nobody hovers for. */
 .distrakt-search-row.is-unkeyable { cursor: default; opacity: 0.62; flex-wrap: wrap; }
 .distrakt-search-row.is-unkeyable:hover { border-color: var(--card-border); }
+/* `disabled` IS WHAT REFUSES IT NOW, rather than `aria-disabled` plus a click
+   handler that checked for the attribute: the element the row became already
+   knows how to be unpressable. */
+.distrakt-search-row:disabled { cursor: default; }
 .distrakt-search-row .distrakt-unkeyable { flex: 1 0 100%; color: var(--gold-soft); font-size: 0.78rem; }
 /* Which service(s) returned a row, drawn only where two catalogues were asked. */
 .distrakt-search-marks { display: inline-flex; align-items: center; gap: 3px; }
@@ -2090,12 +2160,25 @@ a.ep-check:hover .ep-mark { opacity: 1; filter: none; }
 .emoji-row .emoji-logo-cell { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; }
 .emoji-row .emoji-logo { max-width: 30px; max-height: 30px; border-radius: 6px; object-fit: contain; }
 .emoji-row .logo-actions { display: none; gap: 4px; }
+/* `.has-logo` IS THE SERVER'S ANSWER NOW rather than an `onload` handler's: the
+   month's own rows stopped asking the browser whether a tile exists (see
+   templates/_distrakt_rows.html's `badge`) and the editor follows. */
 .emoji-row.has-logo .logo-actions { display: inline-flex; }
 .emoji-row input {
     background: var(--bg-input, rgba(255,255,255,0.04)); border: 1px solid var(--card-border);
     border-radius: 8px; padding: 8px 10px; color: var(--text); font-family: inherit;
 }
 .distrakt-default-emoji { max-width: 160px; margin: 14px 0; }
+
+/* The backfill plan's month rows. Two elements draw one kind of line: a month
+   with titles to list is a <details>, and a month whose whole content is a count
+   is a paragraph, because a disclosure triangle that opens onto an empty list is
+   a promise the row cannot keep. They are padded to the same left edge so a plan
+   holding both does not read as two kinds of thing. */
+.distrakt-backfill-month { margin: 4px 0; font-size: 0.86rem; }
+.distrakt-backfill-month summary { cursor: pointer; }
+.distrakt-backfill-month.flat { padding-left: 1.1em; color: var(--text-dim); }
+.distrakt-backfill-month ul { margin: 4px 0 8px 0; padding-left: 2.2em; }
 
 /* Month-nav + frozen (past-month) banner */
 /* Sits inside .hero-lead beside the wordmark, exactly like the calendar's own

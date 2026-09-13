@@ -1,0 +1,50 @@
+{# THE ADD-A-FILM MODAL, drawn by the server and redrawn closed and empty with
+   every month answer, for the reason _distrakt_add_show.html gives.
+
+   A film is a play on a day, not a roster entry, so this asks for the date and
+   nothing else — the month it lands in follows from it and need not be the month
+   on screen. There is no season step here and there never will be, which is also
+   why a film hit that names no shared id is refused where it is DRAWN rather
+   than on the click: the show flow's click already buys a lookup that could
+   resolve one, and this one has nothing to hide a round trip inside.
+
+   THE DATE IS SERVER-DEFAULTED. It used to be `new Date()` arithmetic against
+   the month on screen; the server knows both the clock and the month, so it
+   states the day and the browser stops keeping a second calendar.
+
+   `hx-include` IS WHY A ROW CAN POST THE DATE IT WAS NOT DRAWN WITH. Each result
+   row carries its own add, and the date lives outside the results list because a
+   new search replaces that list — so the row names the field rather than
+   carrying a copy of its value. #}
+{% macro modal(search_label, default_day, max_day, oob=false) %}
+<div id="addMovieModal" class="modal-overlay"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+    <div class="modal">
+        <div class="modal-head">
+            <h2>🎬 Add a film</h2>
+            <button type="button" class="modal-close" data-modal-close="addMovieModal">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="distrakt-note">Recorded as watched on the day you pick, which is the month
+                it shows up in — here and in Rankings imports.</p>
+            <div class="field">
+                <label for="addMovieDate">Watched on</label>
+                <input type="date" id="addMovieDate" name="watched_on"
+                       value="{{ default_day }}" max="{{ max_day }}">
+            </div>
+            <form class="field distrakt-search-submit" hx-boost="false"
+                  hx-get="/distrakt/fragments/search-movie"
+                  hx-target="#addMovieResults" hx-indicator="#addMovieBusy">
+                <label for="addMovieSearch">{{ search_label }}</label>
+                <input type="text" id="addMovieSearch" name="q" placeholder="Type a film title…"
+                       autocomplete="off" spellcheck="false" required autofocus>
+                <button type="submit" class="btn-ghost small">Search</button>
+                <span id="addMovieBusy" class="htmx-indicator distrakt-empty">Searching…</span>
+            </form>
+            <div id="addMovieResults" class="distrakt-search-results"></div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" data-modal-close="addMovieModal">Cancel</button>
+        </div>
+    </div>
+</div>
+{% endmacro %}

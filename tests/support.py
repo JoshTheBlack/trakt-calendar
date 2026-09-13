@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import os
 import re
 import shutil
@@ -246,6 +247,199 @@ class AppTestCase(unittest.TestCase):
         session_id = asyncio.run(auth.create_session(user_id))
         self.client.cookies.set(auth.COOKIE_NAME_SECURE, session_id)
         return session_id
+
+
+# ---------------------------------------------------------------------------
+# The tracker's month, read the two ways there are to read one.
+# ---------------------------------------------------------------------------
+class RewatchPrompt:
+    """The re-watch question, read back out of the markup it is now drawn as.
+
+    IT USED TO BE A `needs_decision` OBJECT the browser turned into a dialog, and
+    every fact in it is still here — the question is drawn open over a month left
+    exactly as it was, so the whole answer is out of band and this reads it.
+    `asked` is the one thing every caller checks: whether the add stopped to ask
+    rather than writing something.
+
+    THE DAYS COME BACK AS THEY ARE SPELLED FOR A READER, because that is what the
+    server now sends: `completed_on` was an ISO day the browser formatted, and
+    the formatting moved with the markup.
+    """
+
+    _OPEN = re.compile(r'<div id="rewatchModal" class="modal-overlay open"')
+    _FINISHED = re.compile(r"Your history says you finished (.*?) season (\d+)\s*"
+                           r"on (.*?)\.</p>", re.S)
+    _FROM = re.compile(r'id="rewatchFrom"[^>]*value="([^"]*)"')
+    _PRESET = re.compile(r'data-fill-value="([^"]*)"')
+    _PRESET_LABEL = re.compile(r'data-fill-label="([^"]*)"')
+    _SUBMIT = re.compile(r'id="rewatchSubmit".*?>(.*?)</button>', re.S)
+    _EPISODE = re.compile(r"<li>S\d+E(\d+)\s*<span class=\"rewatch-when\">([^<]*)</span>")
+    _POST = re.compile(r'hx-post="([^"]*)"')
+
+    def __init__(self, html: str):
+        self.html = html
+
+    @property
+    def asked(self) -> bool:
+        return bool(self._OPEN.search(self.html))
+
+    @property
+    def title(self) -> str:
+        found = self._FINISHED.search(self.html)
+        return " ".join(found.group(1).split()) if found else ""
+
+    @property
+    def season(self) -> int | None:
+        found = self._FINISHED.search(self.html)
+        return int(found.group(2)) if found else None
+
+    @property
+    def finished_on(self) -> str:
+        """The day the previous run ended, as the reader is shown it."""
+        found = self._FINISHED.search(self.html)
+        return " ".join(found.group(3).split()) if found else ""
+
+    @property
+    def suggested_from(self) -> str:
+        """The day a fresh run is offered from — the date field's own value."""
+        found = self._FROM.search(self.html)
+        return found.group(1) if found else ""
+
+    @property
+    def presets(self) -> list[str]:
+        """The two days either side of the restart, or [] where nothing
+        restarted and the plainer question is asked."""
+        return self._PRESET.findall(self.html)
+
+    @property
+    def episodes(self) -> list[tuple[str, str]]:
+        """(episode number, the day it was watched) for what has been seen since
+        the run turned back."""
+        return self._EPISODE.findall(self.html)
+
+    @property
+    def submit_label(self) -> str:
+        """What the button that starts a fresh run SAYS as the question opens.
+
+        The field arrives pre-filled, so a label that named no day — or named
+        one only after somebody touched the field — was the prompt offering one
+        answer and announcing another."""
+        found = self._SUBMIT.search(self.html)
+        return " ".join(found.group(1).split()) if found else ""
+
+    @property
+    def preset_labels(self) -> list[str]:
+        """How each preset's day is SPELLED. The server spells every day this
+        question can show, so pressing a preset needs no date formatter in the
+        browser to say which day it just chose."""
+        return self._PRESET_LABEL.findall(self.html)
+
+    @property
+    def resubmit(self) -> str:
+        """Where answering re-posts. Both buttons send the same address: the
+        route that asked IS the add, and it now has the answer it was missing."""
+        found = self._POST.findall(self.html)
+        return found[0] if found else ""
+
+
+def restore_backup(client, document: dict, ack: str = "REPLACE MY DATA"):
+    """POST a tracker export back, the way the page does.
+
+    THE DOCUMENT IS ONE FIELD OF A FORM. Reading the chosen file is the one thing
+    only the browser can do — app/authz.py's shape guard admits application/json
+    alone — so the text arrives in a hidden input beside the typed
+    acknowledgement, and everything else about the restore is markup. Two callers
+    drive it, and each writing that shape out itself is two places to fix.
+    """
+    return client.post("/api/distrakt/restore",
+                       json={"payload": json.dumps(document), "ack": ack})
+
+
+def tracker_month(user_id: int, year: int, month: int, *, fresh: bool = False) -> dict:
+    """The payload a month is computed into, called directly.
+
+    THERE IS NO LONGER A ROUTE THAT HANDS THIS BACK. The tracker's page reads a
+    RENDERED month (GET /distrakt/fragments/month) and every mutation answers
+    with the same markup, so the JSON that used to be both the page's state and
+    a test's window into a month is gone — it was state only because the rows
+    were assembled in the browser.
+
+    WHAT THAT SPLITS IS WHICH QUESTION A TEST IS ASKING, and the split is worth
+    having. A test about what a month CONTAINS — which bucket a season landed
+    in, what its counts say, which service could not be read — asks this, the
+    function that works it out, with no HTTP and no markup in the way. A test
+    about what a VIEWER is told asks the fragment and reads its markup, the way
+    every details-panel test already does.
+    """
+    from app.distrakt import routes as distrakt_routes, viewer
+
+    async def _run() -> dict:
+        settings = await viewer.settings_for_user(user_id)
+        payload, _status = await distrakt_routes._distrakt_month_payload(
+            user_id, year, month, settings, force_fresh=fresh)
+        return payload
+
+    return asyncio.run(_run())
+
+
+class TrackerMonth:
+    """A rendered month fragment, read back out of its own markup.
+
+    The same bargain DetailsPanel makes one panel down: what a viewer is told is
+    now markup, so a test that is about what the page SAYS reads the page.
+    """
+
+    def __init__(self, html: str):
+        self.html = html
+
+    @property
+    def headings(self) -> list[str]:
+        """Every section head and weekday head, in the order they are drawn."""
+        return re.findall(r'<div class="distrakt-(?:bucket|weekday)-head">([^<]*)</div>',
+                          self.html)
+
+    @property
+    def titles(self) -> list[str]:
+        """Every row's title, in the order the page draws them."""
+        return re.findall(r'<span class="tt">([^<]*)</span>', self.html)
+
+    def section(self, label: str) -> list[str]:
+        """The titles drawn under one heading, up to the next heading."""
+        parts = re.split(r'<div class="distrakt-(?:bucket|weekday)-head">([^<]*)</div>',
+                         self.html)
+        for index in range(1, len(parts), 2):
+            if parts[index] == label:
+                return re.findall(r'<span class="tt">([^<]*)</span>', parts[index + 1])
+        return []
+
+    @property
+    def notice(self) -> str:
+        """What the degraded-month banner says, or "" when it is hidden."""
+        found = re.search(r'<div id="distraktNotice"[^>]*>(.*?)</div>', self.html, re.S)
+        return unescape((found.group(1) if found else "").strip())
+
+    @property
+    def banner(self) -> str:
+        """What the read-only banner says, or "" when the month is editable."""
+        found = re.search(r'<div class="distrakt-frozen-note">(.*?)</div>', self.html, re.S)
+        return unescape((found.group(1) if found else "").strip())
+
+    @property
+    def toast(self) -> str:
+        """The line this answer flashed, or ""."""
+        found = re.search(r'<div class="toast [^"]*"[^>]*>(.*?)</div>', self.html, re.S)
+        return unescape((found.group(1) if found else "").strip())
+
+    @property
+    def asks(self) -> list[str]:
+        """The text of each question drawn above the list."""
+        return [unescape(re.sub(r"<[^>]+>", "", block)).strip()
+                for block in re.findall(
+                    r'<span class="distrakt-unknown-text">(.*?)</span>', self.html, re.S)]
+
+    def posts_to(self) -> list[str]:
+        """Every address this fragment's controls post to."""
+        return re.findall(r'hx-post="([^"]*)"', self.html)
 
 
 # ---------------------------------------------------------------------------

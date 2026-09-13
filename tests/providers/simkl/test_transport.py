@@ -458,6 +458,84 @@ class PrivateCachingTests(TransportStateTestCase):
         self.assertIsNone(out)
 
 
+class CacheOnlyReadTests(TransportStateTestCase):
+    """`cache_only=True` answers out of the store and NEVER sends a request.
+
+    IT IS WHAT MAKES NAMING A SEARCH RESULT SAFE. The tracker's add re-reads the
+    very search the picker made rather than taking the title off the page, so
+    this flag is on the path of an ordinary add — and an add that could reach
+    the network would be a search nobody's budget counts.
+
+    THE PAGED READ IS TESTED BESIDE THE PLAIN ONE BECAUSE IT IS A SECOND
+    IMPLEMENTATION of the same decision, and it is the one Simkl's search rides:
+    /search/tv and /search/anime are walked page by page and stored as one
+    answer. A cache-only paged read that RAISED rather than missing was
+    indistinguishable, one layer up, from Simkl being down — the source was
+    recorded failed, its hits vanished from the merge, and adding a Simkl-only
+    title answered "that search has expired".
+    """
+
+    def _reads(self, stored, stale=None):
+        """Patch the cache to answer `stored` fresh and `stale` past its TTL."""
+        async def _get(key, ttl_seconds):
+            # The real one starts with `if ttl_seconds <= 0`, so a caller passing
+            # None here raises instead of missing. That is the shape of the bug.
+            assert isinstance(ttl_seconds, int), f"ttl was {ttl_seconds!r}"
+            return stored
+
+        async def _get_stale(key):
+            return stale
+
+        return patch("app.cache.get", _get), patch("app.cache.get_stale", _get_stale)
+
+    async def test_a_paged_read_answers_the_stored_list_without_a_request(self):
+        client = FakeClient([])
+        fresh, stale = self._reads([{"title": "Attack on Titan"}])
+        with fresh, stale:
+            out = await transport.cached_paged_get(
+                client, FAKE_SETTINGS, "search/anime", {"q": "attack on titan"},
+                pool=transport.CATALOG_POOL, cache_only=True, raise_errors=True)
+        self.assertEqual(out, [{"title": "Attack on Titan"}])
+        self.assertEqual(client.requests, [])
+
+    async def test_a_paged_read_prefers_a_stale_list_to_a_blank_one(self):
+        """This caller can never trigger the refresh that would fix a hard miss,
+        so an answer past its TTL is the best one there is — the same bargain
+        `cached_get` makes one function down."""
+        client = FakeClient([])
+        fresh, stale = self._reads(None, stale=[{"title": "Attack on Titan"}])
+        with fresh, stale:
+            out = await transport.cached_paged_get(
+                client, FAKE_SETTINGS, "search/anime", {"q": "attack on titan"},
+                pool=transport.CATALOG_POOL, cache_only=True, raise_errors=True)
+        self.assertEqual(out, [{"title": "Attack on Titan"}])
+        self.assertEqual(client.requests, [])
+
+    async def test_a_paged_read_with_nothing_stored_is_empty_and_quiet(self):
+        """Empty rather than raising, even under `raise_errors`: nothing was
+        asked, so there is no failure to report. Simkl's search passes both
+        flags together, and a raise here reads upstream as the service being
+        down."""
+        client = FakeClient([])
+        fresh, stale = self._reads(None, stale=None)
+        with fresh, stale:
+            out = await transport.cached_paged_get(
+                client, FAKE_SETTINGS, "search/tv", {"q": "attack on titan"},
+                pool=transport.CATALOG_POOL, cache_only=True, raise_errors=True)
+        self.assertEqual(out, [])
+        self.assertEqual(client.requests, [])
+
+    async def test_a_plain_cache_only_get_makes_no_request_either(self):
+        client = FakeClient([])
+        fresh, stale = self._reads(None, stale={"title": "A Show"})
+        with fresh, stale:
+            out = await transport.cached_get(
+                client, FAKE_SETTINGS, "tv/1234", {},
+                pool=transport.CATALOG_POOL, cache_only=True)
+        self.assertEqual(out, {"title": "A Show"})
+        self.assertEqual(client.requests, [])
+
+
 class RedirectClassificationTests(unittest.TestCase):
     """Which pool a redirect TARGET deserves, decided from the target alone.
 

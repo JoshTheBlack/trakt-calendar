@@ -342,6 +342,109 @@ document.addEventListener('htmx:finally:request', (event) => {
 });
 
 
+/* ---- The three shared markup blocks ----
+ *
+ * Each of these exists because a dozen call sites were writing the same four
+ * lines, and each of them is the LAST piece of script a whole feature needs.
+ * They are declared here, once, and used by markup anywhere in the app.
+ */
+
+// `data-copy="<selector>"` — copy that element's text.
+//
+// ONLY SCRIPT CAN WRITE THE CLIPBOARD, which is the whole of why this is here.
+// What is not intrinsic is everything around it: six copy functions, one per
+// thing worth copying, each reading its own element and raising its own toast.
+// The selector names what to copy and the delegated listener does the rest.
+//
+// SELECTING THE TEXT IS THE FALLBACK, not an error message. A clipboard write
+// can be refused — an insecure origin, a permission the browser did not grant —
+// and leaving the text selected means the reader can still take it with the
+// keyboard, which is what they were going to do anyway.
+document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Element)) return;
+    const trigger = e.target.closest('[data-copy]');
+    if (!trigger) return;
+    const source = document.querySelector(trigger.dataset.copy);
+    if (!source) return;
+    const text = source.value !== undefined ? source.value : source.textContent;
+    navigator.clipboard.writeText(text).then(
+        () => toast('Copied to clipboard', true),
+        () => {
+            if (source.select) source.select();
+            toast('Could not copy — text selected instead', false);
+        },
+    );
+});
+
+// `data-modal-open="<id>"` and `data-modal-close="<id>"` — show and hide an
+// overlay.
+//
+// A CLASS TOGGLE IS NOT A REASON FOR A FUNCTION. Every modal in this app was
+// opened by a one-line wrapper named after it, called from an inline handler;
+// closing already had one shared implementation (closeModal, which tears down
+// whatever the overlay was playing) and opening had a dozen. The id is the only
+// thing that differed.
+//
+// FOCUS IS WHY OPENING IS NOT PURELY DECLARATIVE. `autofocus` applies when an
+// element is PARSED, so it does nothing for markup that has been sitting hidden
+// in the page since the load — only the browser can move focus into something
+// being revealed, and a search box you have to click into first is the thing
+// this is for.
+document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Element)) return;
+    const closer = e.target.closest('[data-modal-close]');
+    if (closer) { closeModal(closer.dataset.modalClose); return; }
+    const opener = e.target.closest('[data-modal-open]');
+    if (!opener) return;
+    const modal = document.getElementById(opener.dataset.modalOpen);
+    if (!modal) return;
+    modal.classList.add('open');
+    const focus = modal.querySelector('[autofocus]');
+    if (focus) focus.focus();
+});
+
+// `data-fill="<selector>"` with `data-fill-value` — write a value into a field,
+// and `data-day-label="<selector>"` — keep a button naming the day that field
+// holds.
+//
+// THE ONE THING ON THIS PAGE THAT IS GENUINELY THE BROWSER'S: a label that has
+// to follow what somebody TYPES, before anything is submitted. Every day the
+// server already knows about arrives spelled — the field's opening value is
+// named in the button as drawn, and each preset carries its own `data-fill-label`
+// — so this formats a date only when there is no server answer to use.
+function fillField(field, value, label) {
+    if (!field) return;
+    field.value = value;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    // AFTER the event, not before: the listener below would otherwise re-spell
+    // the day this label was handed for.
+    const button = label && field.dataset.dayLabel
+        ? document.querySelector(field.dataset.dayLabel) : null;
+    if (button) button.textContent = `${button.dataset.labelPrefix} ${label}`;
+    field.focus();
+}
+
+document.addEventListener('click', (e) => {
+    if (!(e.target instanceof Element)) return;
+    const preset = e.target.closest('[data-fill]');
+    if (preset) fillField(document.querySelector(preset.dataset.fill),
+                          preset.dataset.fillValue || '', preset.dataset.fillLabel);
+});
+
+document.addEventListener('input', (e) => {
+    if (!(e.target instanceof Element) || !e.target.dataset.dayLabel) return;
+    const button = document.querySelector(e.target.dataset.dayLabel);
+    if (!button) return;
+    const value = e.target.value;
+    // The button names the day it will use, so a date typed above it and a
+    // button saying something else can never be two answers on screen at once.
+    button.textContent = value
+        ? `${button.dataset.labelPrefix} ${new Date(value + 'T00:00:00')
+            .toLocaleDateString(undefined, { day: 'numeric', month: 'long', year: 'numeric' })}`
+        : button.dataset.labelEmpty;
+});
+
+
 // A SELECT WHOSE VALUE IS PART OF THE URL MUST NOT SURVIVE A RESTORE SAYING
 // OTHERWISE. `autocomplete="off"` in the markup handles the browser reapplying a
 // control's value over a freshly parsed page; it has nothing to say about the

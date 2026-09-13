@@ -11,17 +11,19 @@ import asyncio
 import unittest
 from datetime import date, timedelta
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+from fastapi.responses import Response
 from fastapi.testclient import TestClient
 
 from app import auth, db, distrakt
+from app.distrakt import routes as distrakt_routes
 from app.distrakt import backfill, watch_history
 from app.calendar import state as calendar_state
 from app.providers.base import ItemKey, PlayCounts
 from app.config import Settings, save_settings
 from app.main import app
-from tests.support import ORIGIN, migrated_db
+from tests.support import ORIGIN, migrated_db, tracker_month
 
 # The two credential flags the tracker's source selection reads. A fake
 # settings object has to answer both, because the selector asks every
@@ -193,8 +195,67 @@ class SurveyTests(BackfillTestCase):
         self.assertEqual(summary["months"], [{"month": "2026-04", "count": 1,
                                               "titles": ["Season Two S02"],
                                               "movie_count": 0, "movie_titles": [],
-                                              "movie_known": 0}])
+                                              "movie_known": 0, "tracked": False}])
+        self.assertEqual(summary["to_write"], 1)
         self.assertNotIn("trakt_id", repr(summary))
+
+
+class WhatTheSummarySaysAboutASkippedMonthTests(BackfillTestCase):
+    """A month that already holds something is swept for FILMS and never
+    examined for SEASONS, and the summary has to be readable as that.
+
+    THE SHAPE THAT MADE IT UNREADABLE: such a month appeared in the plan with a
+    season count of 0, beside a closing line reading "0 finished season(s)" —
+    which states, of a month somebody finished nine seasons in, that they
+    finished none. The count was never a claim about their viewing; it was a
+    claim about what a write would add, and nothing on the row said so.
+    """
+
+    async def _tracked_april(self):
+        """April already holds a row, so the sweep skips it for seasons."""
+        await distrakt.add_month_record(self.user_id, "2026-04", {
+            "media": "show", "ids": {"trakt": 900, "tmdb": 900}, "season": 1,
+            "title": "Decided By Hand", "network": "HBO",
+            "kind": distrakt.RecordKind.ABANDONED})
+
+    async def test_the_month_says_it_was_left_alone_rather_than_counting_zero(self):
+        await self._tracked_april()
+        events = [_ep_event(301, 1, 1, "2026-04-02T00:00:00Z", title="Not Read"),
+                  _mv_event(71, "A Film", 2026, "2026-04-09T00:00:00Z")]
+        summary = backfill.summarize(await self._survey(
+            events, {301: {1: {1: "2026-04-02T00:00:00Z"}}}, {(301, 1): {"total": 1}}))
+
+        month, = summary["months"]
+        self.assertEqual(month["month"], "2026-04")
+        self.assertTrue(month["tracked"],
+                        "a skipped month is indistinguishable from an examined one")
+        # Zero because it was never looked at, which is the whole point: the
+        # season above WAS finished in April and is deliberately not offered.
+        self.assertEqual((month["count"], summary["total"]), (0, 0))
+
+    async def test_a_film_in_a_skipped_month_is_still_a_real_write(self):
+        """Films are collected across the whole range — that is what makes a
+        re-run able to top an existing month up — so `to_write` counts it."""
+        await self._tracked_april()
+        summary = backfill.summarize(await self._survey(
+            [_mv_event(71, "A Film", 2026, "2026-04-09T00:00:00Z")], {}, {}))
+        self.assertEqual(summary["to_write"], 1)
+
+    async def test_a_month_with_nothing_left_to_do_is_not_offered_to_write(self):
+        """`to_write` is what the confirmation hangs off. A row can be drawn so
+        a reader can see the sweep reached that month without there being
+        anything in it to confirm, and spending a button on a no-op reads as the
+        feature being broken."""
+        await self._tracked_april()
+        events = [_mv_event(71, "A Film", 2026, "2026-04-09T00:00:00Z")]
+        await self._survey(events, {}, {})
+        await backfill.apply(self.user_id)
+
+        summary = backfill.summarize(await self._survey(events, {}, {}))
+        month, = summary["months"]
+        self.assertEqual((month["movie_count"], month["movie_known"]), (0, 1))
+        self.assertEqual(summary["to_write"], 0,
+                         "nothing would be written, so nothing may be confirmed")
 
 
 class ApplyTests(BackfillTestCase):
@@ -403,17 +464,30 @@ class ManualCompletedRouteTests(unittest.TestCase):
         self.client.close()
         db.close_thread_connection()
 
+    def _picked(self, ids=None, title="Watched Elsewhere", network="Net"):
+        """The add NAMES a search result now — the query it came from and its
+        place in the answer — and reads the title back out of the cached search
+        itself. What these tests are about is what the route WRITES, so the pick
+        is stood in for rather than two caches seeded; the resolution has its own
+        coverage in tests/distrakt/test_search_routes.py."""
+        return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
+            return_value=distrakt_routes.Pick(
+                title=title, network=network, year=None,
+                ids=dict(ids or {"trakt": 321, "tmdb": 4321, "slug": "elsewhere"}),
+                seasons=[], named_season=None, unkeyable=None)))
+
     def _add(self, year, month, season=1, total=6):
         async def fake_season(settings, trakt_id, season_no, fresh=False, client=None):
             return {"total": total, "cadence": "Mon", "premiere": "3/1", "finale": "4/5",
                     "started_airing": True, "finished_airing": True}
 
         with patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season), \
-             patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/add-completed", json={
-                "year": year, "month": month, "season": season,
-                "ids": {"trakt": 321, "tmdb": 4321, "slug": "elsewhere"},
-                "title": "Watched Elsewhere", "network": "Net"})
+             self._picked(), \
+             patch("app.distrakt.routes._month_answer",
+                   new=AsyncMock(return_value=Response(status_code=200))):
+            return self.client.post(
+                f"/api/distrakt/add-completed?year={year}&month={month}",
+                json={"q": "elsewhere", "i": 0, "season": season})
 
     def test_it_records_the_season_as_finished_and_closes_the_month(self):
         resp = self._add(2026, 3)
@@ -432,11 +506,12 @@ class ManualCompletedRouteTests(unittest.TestCase):
             return {"total": 10}
 
         with patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season), \
-             patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            self.client.post("/api/distrakt/add-completed", json={
-                "year": 2026, "month": 3, "season": 1,
-                "ids": {"trakt": 321, "tmdb": 4321},
-                "title": "T", "watched": 999, "total": 999})
+             self._picked({"trakt": 321, "tmdb": 4321}, title="T"), \
+             patch("app.distrakt.routes._month_answer",
+                   new=AsyncMock(return_value=Response(status_code=200))):
+            self.client.post("/api/distrakt/add-completed?year=2026&month=3",
+                             json={"q": "t", "i": 0, "season": 1,
+                                   "watched": 999, "total": 999})
         doc = asyncio.run(distrakt.load_month(self.user_id, "2026-03"))
         self.assertEqual((doc["shows"][0]["watched"], doc["shows"][0]["total"]), (10, 10))
 
@@ -448,15 +523,19 @@ class ManualCompletedRouteTests(unittest.TestCase):
         self.assertIn("2026-01", asyncio.run(distrakt.list_months(self.user_id)))
 
     def test_the_current_month_is_refused(self):
+        """Refused by being DRAWN, like everything else this page declines: a
+        non-200 is never swapped, so a status code would be a button that
+        silently did nothing."""
         today = date.today()
         resp = self._add(today.year, today.month)
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("past month", resp.json()["error"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("past month", resp.text)
 
     def test_a_season_trakt_has_no_episodes_for_is_refused(self):
         """Recording 0/0 as finished would import as a show with no episodes."""
         resp = self._add(2026, 3, total=0)
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("cannot be recorded as finished", resp.text)
         self.assertEqual(asyncio.run(distrakt.load_month(self.user_id, "2026-03")), None)
 
 
@@ -496,9 +575,10 @@ class CorrectingAFrozenMonthTests(unittest.TestCase):
         asyncio.run(distrakt.save_month(self.user_id, doc))
 
     def _remove(self):
-        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/remove", json={
-                "year": 2026, "month": 3, "key": "show:tmdb:601", "season": 1})
+        with patch("app.distrakt.routes._month_answer",
+                   new=AsyncMock(return_value=Response(status_code=200))):
+            return self.client.post("/api/distrakt/remove?year=2026&month=3",
+                                    json={"key": "show:tmdb:601", "season": 1})
 
     def test_a_row_can_be_taken_off_a_closed_month(self):
         resp = self._remove()
@@ -568,7 +648,7 @@ class FilmsAreVisibleTests(unittest.TestCase):
 
     def test_a_frozen_month_hands_its_films_to_the_page(self):
         self._freeze_january_with_a_film()
-        body = self.client.get("/api/distrakt/month?year=2026&month=1").json()
+        body = tracker_month(self.user_id, 2026, 1)
         self.assertEqual([m["title"] for m in body["movies"]], ["The Sixth Sense"])
 
     def test_a_month_with_nothing_still_answers_with_an_empty_list(self):
@@ -595,7 +675,7 @@ class FilmsAreVisibleTests(unittest.TestCase):
              patch("app.providers.trakt.sync.fetch_play_counts",
                    return_value=PlayCounts({}, False)), \
              patch("app.providers.trakt.sync.fetch_progress_details", return_value={}):
-            body = self.client.get("/api/distrakt/month?year=2020&month=5").json()
+            body = tracker_month(self.user_id, 2020, 5)
         self.assertEqual(body["movies"], [])
 
 
@@ -617,10 +697,20 @@ class AddingAFilmByHandTests(unittest.TestCase):
         db.close_thread_connection()
 
     def _add(self, watched_on, trakt_id=900, title="Hand Added"):
-        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/add-movie", json={
-                "ids": {"trakt": trakt_id, "tmdb": trakt_id}, "title": title, "year": 2011,
-                "watched_on": watched_on, "year_view": 2026, "month_view": 7})
+        """The film NAMES a search result — the query and its place in the answer
+        — and the route reads the ids, the title and the year back out of that
+        search. The pick is stood in for here because what these are about is
+        where the play lands; the resolution has its own coverage in
+        tests/distrakt/test_search_routes.py."""
+        picked = patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
+            return_value=distrakt_routes.Pick(
+                title=title, network="", year=2011,
+                ids={"trakt": trakt_id, "tmdb": trakt_id},
+                seasons=[], named_season=None, unkeyable=None)))
+        with picked, patch("app.distrakt.routes._month_answer",
+                           new=AsyncMock(return_value=Response(status_code=200))):
+            return self.client.post("/api/distrakt/add-movie?year=2026&month=7",
+                                    json={"q": title, "i": 0, "watched_on": watched_on})
 
     def test_it_is_recorded_on_the_day_given(self):
         resp = self._add("2026-03-09")
@@ -659,7 +749,9 @@ class AddingAFilmByHandTests(unittest.TestCase):
         is not even looking at."""
         for day in ("", "not-a-date", "2099-01-01"):
             with self.subTest(day=day):
-                self.assertEqual(self._add(day).status_code, 400)
+                resp = self._add(day)
+                self.assertEqual(resp.status_code, 200)
+                self.assertIn("toast err", resp.text)
         self.assertEqual(asyncio.run(db.fetch_all(
             "SELECT 1 FROM distrakt_movie_watches WHERE user_id = ?", (self.user_id,))), [])
 
@@ -692,9 +784,10 @@ class RemovingAFilmTests(unittest.TestCase):
         db.close_thread_connection()
 
     def _remove(self, tmdb=91):
-        with patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/remove-movie", json={
-                "key": f"movie:tmdb:{tmdb}", "year": 2026, "month": 7})
+        with patch("app.distrakt.routes._month_answer",
+                   new=AsyncMock(return_value=Response(status_code=200))):
+            return self.client.post("/api/distrakt/remove-movie?year=2026&month=7",
+                                    json={"key": f"movie:tmdb:{tmdb}"})
 
     def test_it_forgets_only_that_film(self):
         self.assertEqual(self._remove().status_code, 200)
@@ -719,8 +812,13 @@ class RemovingAFilmTests(unittest.TestCase):
         self.assertTrue(after["closed"])
         self.assertEqual([s["ids"]["trakt"] for s in after["shows"]], [803])
 
-    def test_a_film_that_was_never_there_is_a_404(self):
-        self.assertEqual(self._remove(tmdb=404).status_code, 404)
+    def test_a_film_that_was_never_there_is_refused(self):
+        """Drawn at 200 with the sentence out of band, like every refusal on
+        this page: a non-200 is never swapped, so a status code would be a
+        button that silently did nothing."""
+        resp = self._remove(tmdb=404)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("No such film on record.", resp.text)
 
     def test_the_removal_survives_an_ordinary_sync(self):
         """The routine sweep only reaches back to where it last synced, so a film
@@ -761,8 +859,9 @@ class BackfillRouteTests(unittest.TestCase):
         self.client.close()
         db.close_thread_connection()
 
-    def _survey(self):
-        events = [_ep_event(301, 1, 2, "2026-02-10T00:00:00Z", title="Route Show")]
+    def _survey(self, events=None, start="2026-01", end="2026-06"):
+        events = events if events is not None else [
+            _ep_event(301, 1, 2, "2026-02-10T00:00:00Z", title="Route Show")]
         progress = {301: {1: {1: "2026-02-01T00:00:00Z", 2: "2026-02-10T00:00:00Z"}}}
 
         async def fake_history(settings, start_at=None, limit=100, max_pages=50):
@@ -780,34 +879,99 @@ class BackfillRouteTests(unittest.TestCase):
              patch("app.providers.trakt.sync.fetch_show_progress_detail", side_effect=fake_progress), \
              patch("app.providers.trakt.detail.fetch_season_detail", side_effect=fake_season):
             return self.client.post("/api/distrakt/backfill/survey",
-                                    json={"start": "2026-01", "end": "2026-06"})
+                                    json={"start": start, "end": end})
 
     def test_the_survey_reports_without_writing_anything(self):
         resp = self._survey()
         self.assertEqual(resp.status_code, 200, resp.text)
-        body = resp.json()
-        self.assertEqual(body["months"], [{"month": "2026-02", "count": 1,
-                                           "titles": ["Route Show S01"],
-                                           "movie_count": 0, "movie_titles": [],
-                                           "movie_known": 0}])
+        self.assertIn("<strong>2026-02</strong>", resp.text)
+        self.assertIn("1 finished", resp.text)
+        self.assertIn("Route Show S01", resp.text)
+        self.assertIn("Nothing has been written yet.", resp.text)
         self.assertEqual(asyncio.run(distrakt.list_months(self.user_id)), [])
+
+    def test_the_button_that_writes_them_exists_only_while_there_is_a_plan(self):
+        """One partial for every state is what makes a `backfillReady` flag in
+        the browser unnecessary: the control that commits is drawn beside the
+        plan it commits, or not at all."""
+        self.assertIn("/api/distrakt/backfill/apply", self._survey().text)
+        resp = self.client.post("/api/distrakt/backfill/survey",
+                                json={"start": "2026-06", "end": "2026-01"})
+        self.assertNotIn("/api/distrakt/backfill/apply", resp.text)
+
+    def test_a_month_with_nothing_to_list_is_not_drawn_as_openable(self):
+        """A <details> that opens onto an empty <ul> is a promise the row cannot
+        keep, and it is exactly the shape an already-tracked month takes: its
+        films are COUNTED and never listed, because the ones it already has are
+        not part of a plan.
+
+        It also must not carry the button. Every month in this range either is
+        already tracked or holds only what the account already has, so "Write
+        these months" would spend a confirmation on a write of nothing.
+        """
+        asyncio.run(distrakt.add_month_record(self.user_id, "2026-02", {
+            "ids": {"trakt": 900, "tmdb": 900}, "season": 1,
+            "title": "Decided By Hand", "kind": distrakt.RecordKind.ABANDONED}))
+        # A film the sweep sees in that month and this account already has —
+        # which is what puts the month on the list at all. Written by a first
+        # run, so the second one finds it already recorded.
+        seen = [_mv_event(71, "Seen It", 2026, "2026-02-14T00:00:00Z")]
+        self._survey(seen)
+        self.client.post("/api/distrakt/backfill/apply", json={})
+        html = self._survey(seen).text
+
+        self.assertIn("<strong>2026-02</strong>", html)
+        self.assertIn("already tracked, seasons left alone", html)
+        self.assertNotIn("<details", html)
+        self.assertNotIn("/api/distrakt/backfill/apply", html)
+        self.assertIn("Nothing to write", html)
+        # AND NO COUNT OF SEASONS AT ALL, in either of the two spellings that got
+        # it wrong: "0 finished season(s)" claimed the sweep found none, and
+        # "read 0 season(s)" claimed it looked. Five months here WERE read, so
+        # the sentence says so.
+        self.assertNotIn("0 finished season(s)", html)
+        self.assertNotIn("0 season(s)", html)
+        self.assertIn("named no finished season in the 5 month(s) that were read",
+                      " ".join(html.split()))
+        self.assertIn("empty it first", " ".join(html.split()))
+
+    def test_a_range_that_was_never_read_says_so_instead_of_counting_zero(self):
+        """THE REPORTED SENTENCE. With EVERY month in the range already tracked,
+        the season pass does not run at all — so a reader who finished nine
+        seasons in one of those months was told the sweep read zero. `skipped`
+        alone cannot say this, because a range can hold a tracked month beside
+        months that were read; only the survey knows how many it ran over."""
+        for month in ("2026-01", "2026-02"):
+            asyncio.run(distrakt.add_month_record(self.user_id, month, {
+                "ids": {"trakt": 900, "tmdb": 900}, "season": 1,
+                "title": "Decided By Hand", "kind": distrakt.RecordKind.ABANDONED}))
+        html = " ".join(self._survey([], start="2026-01", end="2026-02").text.split())
+
+        self.assertIn("No month in that range was read for seasons", html)
+        self.assertNotIn("season(s)", html)
+        self.assertNotIn("/api/distrakt/backfill/apply", html)
 
     def test_apply_writes_what_the_survey_found(self):
         self._survey()
         resp = self.client.post("/api/distrakt/backfill/apply", json={})
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["months"], ["2026-02"])
+        self.assertIn("Wrote 1 month(s), 1 finished season(s).", resp.text)
         self.assertEqual(asyncio.run(distrakt.list_months(self.user_id)), ["2026-02"])
+        # AND THE MONTH ON SCREEN IS ASKED TO REDRAW ITSELF, because writing whole
+        # months is exactly the kind of change the list is showing.
+        self.assertIn("month-changed", resp.headers["HX-Trigger"])
 
     def test_apply_without_a_survey_is_refused(self):
         resp = self.client.post("/api/distrakt/backfill/apply", json={})
-        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Nothing surveyed to write", resp.text)
         self.assertEqual(asyncio.run(distrakt.list_months(self.user_id)), [])
 
     def test_a_backwards_range_is_refused(self):
         resp = self.client.post("/api/distrakt/backfill/survey",
                                 json={"start": "2026-06", "end": "2026-01"})
-        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("covers no months", resp.text)
 
     def test_a_malformed_month_is_refused_rather_than_replaced(self):
         """A month somebody typed wrong must not be swapped for a default.
@@ -824,8 +988,8 @@ class BackfillRouteTests(unittest.TestCase):
             with self.subTest(start=start, end=end):
                 resp = self.client.post("/api/distrakt/backfill/survey",
                                         json={"start": start, "end": end})
-                self.assertEqual(resp.status_code, 400, resp.text)
-                self.assertIn("YYYY-MM", resp.json()["error"])
+                self.assertEqual(resp.status_code, 200, resp.text)
+                self.assertIn("YYYY-MM", resp.text)
                 self.assertEqual(asyncio.run(distrakt.list_months(self.user_id)), [])
 
     def test_an_omitted_month_still_falls_back_to_the_default(self):
@@ -872,10 +1036,12 @@ class BackfillRouteTests(unittest.TestCase):
         asyncio.run(distrakt.add_month_record(self.user_id, end, {
             "ids": {"trakt": 1, "tmdb": 1, "slug": "t"}, "season": 1, "title": "T",
             "kind": distrakt.RecordKind.SERIES_PREMIERE}))
-        body = self.client.get("/api/distrakt/backfill").json()
-        self.assertEqual(body["start"], start)
-        self.assertEqual(body["end"], end)
-        self.assertEqual(body["tracked"], [end])
+        # DRAWN WITH THE PAGE now rather than fetched: the server decides the
+        # range and used to answer a request whose only job was to fill in two
+        # inputs.
+        page = self.client.get("/distrakt?year=2026&month=7").text
+        self.assertIn(f'id="backfillStart" name="start" value="{start}"', page)
+        self.assertIn(f'id="backfillEnd" name="end" value="{end}"', page)
 
 
 if __name__ == "__main__":

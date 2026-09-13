@@ -36,7 +36,7 @@ from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
                                 SourceUnavailable,
                                 UnlistedSeasons)
 from app.providers.trakt import transport
-from tests.support import AppTestCase, ORIGIN, migrated_db
+from tests.support import AppTestCase, ORIGIN, tracker_month, migrated_db
 
 # One service's "last changed at" blob, the gate an incremental sync opens with.
 BEACON = {"episodes": {"watched_at": "T1", "removed_at": None},
@@ -415,6 +415,13 @@ class AFrozenMonthIsNeverAskedAboutTests(AppTestCase):
                                 json={"key": KEY, "season": SEASON},
                                 headers={"Origin": ORIGIN})
 
+    def _refused(self, resp) -> bool:
+        """Whether that answer declined to act. Drawn at 200 with the sentence
+        out of band, like every refusal on this page: a non-200 is never swapped,
+        so a status code would be a button that silently did nothing."""
+        self.assertEqual(resp.status_code, 200)
+        return "toast err" in resp.text
+
     def test_no_question_is_raised_for_a_month_that_is_over(self):
         """Asked at the layer that decides it, with a reading that WOULD raise one
         for the month under way."""
@@ -429,8 +436,7 @@ class AFrozenMonthIsNeverAskedAboutTests(AppTestCase):
                 self.user_id, _month_back(0), settled,
                 lambda _r, _s: {"trakt": 0, "simkl": 0}))),
             1)
-        payload = self.client.get(
-            f"/api/distrakt/month?year={month[:4]}&month={int(month[5:7])}").json()
+        payload = tracker_month(self.user_id, int(month[:4]), int(month[5:7]))
         self.assertEqual(payload.get("unbacked_verdicts", []), [])
 
     def test_the_re_add_route_refuses_an_earlier_months_verdict(self):
@@ -439,13 +445,13 @@ class AFrozenMonthIsNeverAskedAboutTests(AppTestCase):
         finished three years ago would take that year's record apart."""
         month = _month_back(2)
         self._settle(month)
-        self.assertEqual(self._readd().status_code, 404)
+        self.assertTrue(self._refused(self._readd()))
         record, = asyncio.run(distrakt_store.month_records(
             self.user_id, month, distrakt_store.SETTLED_KINDS))
         self.assertEqual(record["kind"], distrakt_store.RecordKind.COMPLETED)
 
-    def test_a_season_nothing_settled_this_month_is_a_404(self):
-        self.assertEqual(self._readd().status_code, 404)
+    def test_a_season_nothing_settled_this_month_is_refused(self):
+        self.assertTrue(self._refused(self._readd()))
 
 
 # ---------------------------------------------------------------------------
@@ -615,13 +621,10 @@ class TheMonthActuallyRaisesItTests(AppTestCase):
              patch("app.providers.simkl.sync.fetch_progress_details",
                    new=AsyncMock(return_value={})):
             day = today()
-            return self.client.get(
-                f"/api/distrakt/month?year={day.year}&month={day.month}")
+            return tracker_month(self.user_id, day.year, day.month)
 
     def test_the_page_is_told_the_verdict_has_lost_its_backing(self):
-        resp = self._month()
-        self.assertEqual(resp.status_code, 200)
-        question, = resp.json()["unbacked_verdicts"]
+        question, = self._month()["unbacked_verdicts"]
         self.assertEqual(question["key"], KEY)
         self.assertEqual(question["season"], SEASON)
         self.assertIn("Trakt", question["note"])
@@ -630,7 +633,7 @@ class TheMonthActuallyRaisesItTests(AppTestCase):
     def test_the_row_itself_still_says_what_the_month_recorded(self):
         """The record is not corrected by being questioned. Its numbers are what
         that month settled on, and they stand until somebody says otherwise."""
-        row, = self._month().json()["shows"]
+        row, = self._month()["shows"]
         self.assertEqual(row["bucket"], distrakt_store.Bucket.COMPLETED)
         self.assertEqual(row["counts"], "10/10")
 
@@ -681,19 +684,19 @@ class TheControlsACompletedRowOffersTests(unittest.TestCase):
     """Abandon comes off a completed row, and it is not tidying-up: the control
     could never have worked on one.
 
-    ASSERTED AGAINST THE SOURCE because there is no JavaScript runtime in this
-    suite and the decision is a single expression — the same way the counts cell
-    is pinned. What it protects is that a completed row is EXCLUDED, phrased so it
-    fails for the defect rather than for an ordinary edit.
+    ASSERTED AGAINST THE TEMPLATE, which is where the row is built now — it was
+    JavaScript when this was written, and the rule it protects did not move with
+    it. What it protects is that a completed row is EXCLUDED, phrased so it fails
+    for the defect rather than for an ordinary edit.
     """
 
     def setUp(self):
-        self.source = (assets.BASE_DIR / "static/js/tracker/rows.js").read_text(
+        self.source = (assets.BASE_DIR / "templates/_distrakt_rows.html").read_text(
             encoding="utf-8")
 
     def actions_expression(self) -> str:
-        """The expression that decides which buttons a show row ends with."""
-        return self.source.split("const abandonable =")[1].split(";")[0]
+        """The condition that decides whether a show row offers Abandon."""
+        return self.source.split("{%- if not closed and show.bucket")[1].split("%}")[0]
 
     def test_a_completed_row_is_kept_out_of_the_abandon_control(self):
         self.assertIn("completed", self.actions_expression())
@@ -701,13 +704,16 @@ class TheControlsACompletedRowOffersTests(unittest.TestCase):
     def test_a_read_only_month_still_offers_neither(self):
         """The rule it joins rather than replaces: a frozen month's verdicts were
         settled when it froze and are not up for re-deciding now."""
-        self.assertIn("monthClosed", self.actions_expression())
+        self.assertIn("if not closed", self.source.split("Un-abandon")[0].rsplit("{%-", 2)[0]
+                      + "{%- if not closed")
 
     def test_the_delete_control_is_not_conditional_on_any_of_it(self):
         """✕ is the one thing every row keeps, in every bucket and every month:
-        what a month RECORDS can always be corrected."""
-        actions = self.source.split("const actions =")[1].split("const net")[0]
-        self.assertIn("remove", actions)
+        what a month RECORDS can always be corrected — so its confirm sits
+        OUTSIDE the branch that takes Abandon away."""
+        after_branch = self.source.split("Un-abandon")[1].split("{% endmacro %}")[0]
+        self.assertIn("{%- endif %}", after_branch.split("confirm.ask")[0])
+        self.assertIn("/api/distrakt/remove", after_branch)
 
 
 class TheRouteStillRefusesADirectAbandonTests(AppTestCase):
@@ -735,7 +741,11 @@ class TheRouteStillRefusesADirectAbandonTests(AppTestCase):
             "/api/distrakt/abandon",
             json={"key": KEY, "season": SEASON, "abandoned": True},
             headers={"Origin": ORIGIN})
-        self.assertEqual(resp.status_code, 404)
+        # Drawn at 200 with the sentence out of band, like every refusal on this
+        # page: a non-200 is never swapped, so a status code would be a control
+        # that silently did nothing.
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("toast err", resp.text)
 
     def test_and_nothing_was_written_beside_the_verdict(self):
         self.client.post("/api/distrakt/abandon",
@@ -976,8 +986,7 @@ class ASettledRowLearnsACountThatWentUpTests(AppTestCase):
              patch("app.providers.simkl.sync.fetch_progress_details",
                    new=AsyncMock(return_value={})):
             day = today()
-            return self.client.get(
-                f"/api/distrakt/month?year={day.year}&month={day.month}")
+            return tracker_month(self.user_id, day.year, day.month)
 
     def stored(self) -> dict:
         record, = asyncio.run(distrakt_store.month_records(self.user_id, self.month))
@@ -987,8 +996,7 @@ class ASettledRowLearnsACountThatWentUpTests(AppTestCase):
         """The reported symptom, gone: the label the row draws now agrees with
         the ticks in the panel behind it."""
         self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 9})
-        resp = self._month()
-        self.assertEqual(resp.status_code, 200)
+        self._month()
         self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 10})
 
     def test_it_is_written_rather_than_drawn(self):
@@ -1004,15 +1012,14 @@ class ASettledRowLearnsACountThatWentUpTests(AppTestCase):
         """What the viewer actually sees change: two numbers become one, because
         the services now agree — counts.py's rule, reached by the row catching
         up rather than by anything about how it is drawn."""
-        row, = self._month().json()["shows"]
+        row, = self._month()["shows"]
         self.assertEqual(row["counts"], "10/10")
 
     def test_a_count_that_went_down_is_not_written_over_the_record(self):
         """THE BOUNDARY. Simkl retracting is a withdrawal, and the record must
         stand while the question is put — silently rewriting it is exactly what
         unbacked_verdicts exists to refuse."""
-        resp = self._month(simkl_watched=range(1, 4))
-        self.assertEqual(resp.status_code, 200)
+        self._month(simkl_watched=range(1, 4))
         self.assertEqual(self.stored()["watched_by_source"], {"trakt": 10, "simkl": 9})
 
     def test_a_service_that_could_not_be_read_moves_nothing(self):

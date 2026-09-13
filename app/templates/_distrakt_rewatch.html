@@ -1,0 +1,130 @@
+{# ADDING A SEASON YOUR HISTORY SAYS YOU ALREADY FINISHED.
+
+   IT ASKS RATHER THAN GUESSING, because the two cases are indistinguishable
+   from the data: somebody starting a re-watch and a tracker meeting an old
+   completion for the first time produce the identical signal — a finished
+   season being added. Left to infer, it files the season onto the month that
+   history dates it to, which is right for the second and reads as broken for
+   the first, and there is no definition of "recent" that tells them apart
+   without being a guess somebody has to defend.
+
+   NOTHING HAS BEEN WRITTEN YET WHEN THIS OPENS. The route refused to guess and
+   wrote nothing, so ANSWERING IS WHAT PERFORMS THE ADD — which is why both
+   buttons re-post the original pick with the answer attached, and why closing
+   this leaves the season off the list rather than half on it. The request that
+   raised the question rides in `resubmit_url` and the two bodies below, so the
+   answer finishes the act that asked rather than being turned into a different
+   one: there are two ways to reach this question — searching for a season, and
+   saying yes to an episode the history could not place — and each has to finish
+   its own.
+
+   ONE PARTIAL, TWO STATES, the shape _add_all.html established: with a `prompt`
+   it is the question, open; without one it is the empty overlay the page ships
+   and every month answer restores. That is how it CLOSES after an answer, with
+   nothing script-side holding a pending choice to forget.
+
+   BOTH DATES ARE THE SERVER'S. `suggested_from` is where a fresh run would
+   start and the two presets are the days either side of the restart — the day
+   the run began, and the day after the last play. The browser used to do that
+   arithmetic itself, which was a second copy of routes._day_after in a second
+   language.
+
+   Context: `prompt` (routes' needs_decision dict, or None), `resubmit_url`, and
+   the two bodies the two answers send (`vals_counting` carries the empty floor;
+   `vals_fresh` leaves `history_from` to the field). Two dicts rather than one
+   edited here, because which of them a button sends IS the answer. #}
+{% macro modal(prompt=None, resubmit_url='', vals_counting=None, vals_fresh=None, oob=false) %}
+<div id="rewatchModal" class="modal-overlay{{ ' open' if prompt }}"
+     {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
+{%- if prompt %}
+{%- set episodes = (prompt.restart or {}).get('episodes') or [] %}
+    <div class="modal narrow">
+        <div class="modal-head">
+            <h2>🔁 Watched this before</h2>
+            <button type="button" class="modal-close" data-modal-close="rewatchModal">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p>Your history says you finished {{ prompt.title }} season {{ prompt.season }}
+               on {{ prompt.completed_on_label or 'some time ago' }}.</p>
+            {%- if episodes %}
+            {#- WHAT WAS WATCHED SINCE THE RUN TURNED BACK, listed rather than
+                summarised. The question used to be a date and nothing else, so
+                answering it meant remembering your own viewing; the episodes are
+                already known, and naming them lets the choice be made by
+                looking. Absent when the play order shows no restart, which is
+                the ordinary case of a season watched once. -#}
+            <p class="distrakt-note">
+                {{- 'One episode has' if episodes | length == 1
+                    else (episodes | length ~ ' episodes have') }} been watched since then:</p>
+            <ul class="rewatch-episodes">
+                {%- for episode in episodes %}
+                <li>S{{ '%02d' % prompt.season }}E{{ '%02d' % episode.episode }}
+                    <span class="rewatch-when">{{ episode.label }}</span></li>
+                {%- endfor %}
+            </ul>
+            {%- endif %}
+            <p><strong>When should this run begin?</strong></p>
+            {#- THE DAY A FRESH RUN COUNTS FROM, and the ONE thing the answer is
+                made of. Everything else here writes into this field rather than
+                answering around it — which is what stops a typed date being an
+                option with no way to submit it. -#}
+            <div class="field">
+                <label for="rewatchFrom">Count episodes watched on or after</label>
+                <input type="date" id="rewatchFrom" name="history_from"
+                       value="{{ prompt.suggested_from or '' }}" data-day-label="#rewatchSubmit">
+            </div>
+            {%- if episodes %}
+            {#- THE TWO ANSWERS ANYBODY ACTUALLY MEANS, as presets on the field
+                rather than as buttons of their own. "Count those" and "do not
+                count those" is how a person thinks about it; a date is how the
+                app stores it, and filling the field visibly is what shows the
+                reader those are the same statement. Both days are computed
+                server-side. -#}
+            <div class="rewatch-presets">
+                <button type="button" class="btn-ghost small" data-fill="#rewatchFrom"
+                        data-fill-value="{{ prompt.restart.first_day }}"
+                        data-fill-label="{{ prompt.restart.first_day_label }}">Include those episodes</button>
+                <button type="button" class="btn-ghost small" data-fill="#rewatchFrom"
+                        data-fill-value="{{ prompt.restart.after_day }}"
+                        data-fill-label="{{ prompt.restart.after_day_label }}">Start after them</button>
+            </div>
+            {%- endif %}
+        </div>
+        <div class="modal-foot rewatch-foot">
+            {#- "Count everything" sends an EMPTY floor and deliberately does not
+                include the field: no floor IS counting everything, and reading
+                the field here would let a date somebody typed and then changed
+                their mind about answer a question they answered the other way. -#}
+            <button type="button" class="btn-ghost"
+                    hx-post="{{ resubmit_url }}" hx-json-enc
+                    hx-vals='{{ vals_counting | tojson }}'
+                    hx-target="#distraktShowList"
+                    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked">
+                Count everything I've watched</button>
+            {#- THE LABEL NAMES THE DAY IT WILL USE. "Start a fresh run" does not
+                say WHICH run: after filling the date above, the reader was left
+                to assume this button used it.
+
+                DRAWN ALREADY NAMING THE SUGGESTED DAY, because the field opens
+                holding it. The label used to be corrected only by an `input`
+                event, so the question arrived offering a day and a button that
+                denied it. Every day this prompt can show is spelled by
+                routes._day_label — this one, and one on each preset — so the
+                only thing left to the browser is a day somebody TYPES, which is
+                the one case no server answer can be waiting for. -#}
+            <button type="button" class="btn-primary" id="rewatchSubmit"
+                    hx-post="{{ resubmit_url }}" hx-json-enc
+                    hx-vals='{{ vals_fresh | tojson }}'
+                    hx-include="#rewatchFrom"
+                    hx-target="#distraktShowList"
+                    hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
+                    data-label-empty="Start a fresh run"
+                    data-label-prefix="Start the run from">
+                {{- ('Start the run from ' ~ prompt.suggested_from_label)
+                    if prompt.suggested_from_label else 'Start a fresh run' -}}
+            </button>
+        </div>
+    </div>
+{%- endif %}
+</div>
+{% endmacro %}

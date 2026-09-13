@@ -1,0 +1,89 @@
+{% import '_distrakt_rows.html' as row with context %}
+{% import '_toast.html' as toast %}
+{% import '_distrakt_modals.html' as modals %}
+{# THE TRACKER'S MONTH, drawn from the payload `_distrakt_month_payload` has
+   always built — the questions, the buckets with their weekday heads, the films,
+   the notice, the read-only banner and the two copy blocks.
+
+   ONE ANSWER FOR THE FIRST LOAD AND FOR EVERY MUTATION. Every route that
+   changes a month ends by recomputing it, and each of them used to hand that
+   payload back as JSON for the browser to render into rows; the rows were the
+   only reason the JSON was state at all. Now the same payload renders here, so
+   there is one description of what a month looks like and a mutation's answer
+   IS the month rather than the ingredients for one.
+
+   THE LIST IS THE MAIN SWAP AND THE REST IS OUT OF BAND, because the rest lives
+   in four different places on the page: a banner above the tabs, a notice above
+   the list, and the two copy blocks on another tab entirely. One response
+   redraws all of them, which is the shape _library_answer.html established — and
+   it is what keeps the copy blocks in step with the rows they describe, which
+   used to be two calls the browser made in sequence.
+
+   Context: `sections`/`films` (discord_fmt.page_sections and page_films),
+   `asks`, `empty_note`, `notice_lines`, `banner`, `post1`/`post2`,
+   `highlight_key`/`highlight_season`, `message`/`message_ok`, plus what
+   _distrakt_rows.html and _distrakt_modals.html need. #}
+
+{#- The questions stand on an otherwise empty month: they come from viewing,
+    not from anything the month holds. -#}
+{%- for ask in asks %}{{ row.ask_row(ask) }}{% endfor %}
+
+{%- if not sections and not films %}
+{#- `empty_note` is the server's own sentence for WHY this month is empty, when
+    it knows one. The same blank list means "waiting for you to ask", "the
+    calendar isn't there yet" and "nobody was tracking that far back". -#}
+<div class="distrakt-empty">{{ empty_note or 'Nothing tracked yet this month.' }}</div>
+{%- else %}
+{%- for section in sections %}
+<div class="distrakt-bucket-head">{{ section.label }}</div>
+{%- for show in section.rows %}
+{{ row.show_row(show, marked=(show.key == highlight_key and show.season == highlight_season)) }}
+{%- endfor %}
+{%- for day, day_rows in section.days %}
+<div class="distrakt-weekday-head">{{ day }}</div>
+{%- for show in day_rows %}
+{{ row.show_row(show, marked=(show.key == highlight_key and show.season == highlight_season)) }}
+{%- endfor %}
+{%- endfor %}
+{%- endfor %}
+{#- Films watched during the month, in their own block. They were being
+    recorded, counted and imported while appearing nowhere on this page except
+    buried in the second notice's text, which reads exactly like them not being
+    there. -#}
+{%- if films %}
+<div class="distrakt-bucket-head">Films</div>
+{%- for film in films %}{{ row.film_row(film) }}{% endfor %}
+{%- endif %}
+{%- endif %}
+
+{#- ---- everything that is not the list ---------------------------------- -#}
+
+{#- WHAT COULD NOT BE REFRESHED, as finished sentences the server composed. A
+    season showing one number has to say WHY that is all there is instead of
+    reading as two services agreeing, and there is more than one why — a service
+    that could not be read, one this instance has no credential for, and a title
+    no registered service can look up. The rule that chooses between them is the
+    one the row's own tooltip is written from (app/distrakt/live.py). -#}
+<div id="distraktNotice" class="distrakt-notice" hx-swap-oob="outerHTML"
+     {{ 'hidden' if not notice_lines }}>
+    {{- ('⚠ ' ~ notice_lines | join(' ')) if notice_lines else '' -}}
+</div>
+
+{#- A month that cannot be edited says so, and says WHICH kind it is: a frozen
+    snapshot, or a past month nobody was tracking at the time. Neither is a dead
+    end, so the banner names the way in that still works. -#}
+<div id="distraktBanner" hx-swap-oob="outerHTML">
+    {%- if banner %}<div class="distrakt-frozen-note">{{ banner }}</div>{% endif -%}
+</div>
+
+<textarea id="post1Text" class="distrakt-copy-textarea" readonly spellcheck="false"
+          hx-swap-oob="outerHTML">{{ post1 }}</textarea>
+<textarea id="post2Text" class="distrakt-copy-textarea" readonly spellcheck="false"
+          hx-swap-oob="outerHTML">{{ post2 }}</textarea>
+
+{#- The add flow's overlays, closed and empty. Unconditional rather than
+    per-route: an answer only ever exists because somebody pressed something, and
+    every way of pressing one of these ends with the overlay having no business
+    being open — see _distrakt_modals.html. -#}
+{{ modals.all(catalogue_sources, as_finished, film_day, film_max, oob=true) }}
+{{ toast.flash(message, message_ok) }}

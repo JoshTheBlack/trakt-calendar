@@ -159,7 +159,7 @@ def translation(naming: Naming, own_seasons: Sequence[int]) -> tuple[int, int] |
     return None if local == naming.season else (local, naming.season)
 
 
-async def fetch(settings: Settings, simkl_id) -> Naming:
+async def fetch(settings: Settings, simkl_id, *, cache_only: bool = False) -> Naming:
     """`GET /tv/{id}?extended=full`, read as a `Naming`.
 
     Returns EMPTY for a title with no id and for one Simkl could not answer for
@@ -169,12 +169,17 @@ async def fetch(settings: Settings, simkl_id) -> Naming:
     rejected credential, an unreadable body), because a caller resolving a bare
     search hit needs that to fail honestly rather than read as "this title has
     no ids after all".
+
+    `cache_only=True` makes no call and answers EMPTY where nothing is stored —
+    the same reading this function already gives a title Simkl cannot answer
+    for, which is why it needs no fourth outcome.
     """
     if not simkl_id:
         return EMPTY
     payload = await transport.cached_get(
         transport.catalog_client(), settings, f"tv/{simkl_id}", {"extended": "full"},
         pool=transport.CATALOG_POOL, ttl_seconds=CACHE_TTL_SECONDS, raise_errors=True,
+        cache_only=cache_only,
     )
     if not isinstance(payload, dict) or not isinstance(payload.get("ids"), dict):
         return EMPTY
@@ -198,7 +203,8 @@ async def series_root(settings: Settings, simkl_id, start: Naming) -> int | None
     return await title_for_season(settings, simkl_id, 1)
 
 
-async def network_of_series(settings: Settings, simkl_id, start: Naming) -> str:
+async def network_of_series(settings: Settings, simkl_id, start: Naming, *,
+                            cache_only: bool = False) -> str:
     """`start.network`, or the network of the first title of its series that
     names one — "" when none does.
 
@@ -222,7 +228,7 @@ async def network_of_series(settings: Settings, simkl_id, start: Naming) -> str:
         return start.network
     ours = str(start.ids.get("tmdb") or "")
     for sibling_id in start.siblings:
-        sibling = await fetch(settings, sibling_id)
+        sibling = await fetch(settings, sibling_id, cache_only=cache_only)
         if not sibling.network:
             continue
         # The same cross-identity guard `title_for_season` needs: `relations`

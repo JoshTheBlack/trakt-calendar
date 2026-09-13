@@ -56,6 +56,22 @@ def cached_tile(network: str) -> Path | None:
     return p if (network and p.exists()) else None
 
 
+def tiled(networks) -> set[str]:
+    """Which of `networks` already have a tile on disk.
+
+    ASKED ONCE PER RESPONSE SO A ROW DOES NOT HAVE TO ASK THE BROWSER. A network
+    badge is the tile if there is one and the viewer's own emoji if there is not,
+    and that used to be settled by requesting the tile and handling the 404 in an
+    `onerror` — a request per network with no logo, on every row, to learn
+    something the filesystem answers here for nothing. The tracker warms every
+    network on the page before it renders (`ensure_logos`), so by render time the
+    answer is final.
+
+    Blank names are dropped rather than answered for: "" is not a network.
+    """
+    return {name for name in {n for n in networks if n} if cached_tile(name)}
+
+
 def is_negative(network: str) -> bool:
     return bool(network) and _none_path(network).exists()
 

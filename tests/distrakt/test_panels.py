@@ -20,13 +20,15 @@ from __future__ import annotations
 import unittest
 import asyncio
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from fastapi.responses import Response
 
 from app import distrakt as distrakt_store
 from app.calendar import state as calendar_state
 from app.providers.base import Item, ItemKey, Media, Source
 from app.config import Settings, load_settings
-from tests.support import AppTestCase, ORIGIN
+from tests.support import AppTestCase, ORIGIN, restore_backup
 
 
 def _month_offset(today: date, offset: int) -> tuple[int, int]:
@@ -127,9 +129,11 @@ class BackupPanelTests(TrackerPanelTestCase):
         reflex, and this cannot."""
         body = self.client.get(self.page).text
         self.assertIn("REPLACE MY DATA", body)
-        self.assertIn('id="restoreAck"', body)
-        # The button starts unusable, so the phrase is the only way to arm it.
-        self.assertRegex(body, r'id="restoreBtn"[^>]*disabled')
+        # THE FORM'S OWN VALIDATION IS THE GATE now — `required pattern` on the
+        # field, which the browser enforces before it will submit — rather than a
+        # button a script enables once the typed text matches. The route makes the
+        # same check, because a browser validation is a courtesy and not a gate.
+        self.assertRegex(body, r'id="restoreAck"[^>]*required pattern="REPLACE MY DATA"')
 
     def test_the_export_downloads_as_a_file(self):
         resp = self.client.get("/api/distrakt/export")
@@ -145,7 +149,7 @@ class BackupPanelTests(TrackerPanelTestCase):
             self.user_id, ItemKey("show", "tmdb", "11"), 1))
         self.assertEqual(self.client.get(self.list_url).json()["shows"], [])
 
-        resp = self.client.post("/api/distrakt/restore", json=exported)
+        resp = restore_backup(self.client, exported)
         self.assertEqual(resp.status_code, 200, resp.text)
         listed = self.client.get(self.list_url).json()
         self.assertEqual([s["title"] for s in listed["shows"]], ["Kept Show"])
@@ -158,7 +162,7 @@ class BackupPanelTests(TrackerPanelTestCase):
 
         other = self.tracker_user("other_tracker")
         self.sign_in_as(other)
-        resp = self.client.post("/api/distrakt/restore", json=exported)
+        resp = restore_backup(self.client, exported)
         self.assertEqual(resp.status_code, 200, resp.text)
         landed = self.client.get(self.list_url).json()
         self.assertEqual([s["title"] for s in landed["shows"]], ["Mine"])
@@ -201,8 +205,10 @@ class ImportingAMonthTests(TrackerPanelTestCase):
         # recomputing the whole month; neither is what is under test here.
         with patch("app.calendar.cache.read_month", side_effect=_fake_premiere_read(303, 1)), \
              patch("app.providers.trakt.sync.fetch_watched_progress", return_value=[]), \
-             patch("app.distrakt.routes._distrakt_month_payload", return_value=({"ok": True}, 200)):
-            return self.client.post("/api/distrakt/import", json={"year": year, "month": month})
+             patch("app.distrakt.routes._month_answer",
+                   new=AsyncMock(return_value=Response(status_code=200))):
+            return self.client.post(f"/api/distrakt/import?year={year}&month={month}",
+                                    json={})
 
     def _key(self, offset: int) -> str:
         index = self.today.month - 1 + offset
@@ -237,8 +243,10 @@ class ImportingAMonthTests(TrackerPanelTestCase):
             "title": "Seed", "network": "Net",
             "kind": distrakt_store.RecordKind.SERIES_PREMIERE}))
         resp = self._import(-1)
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("never tracked", resp.json()["error"])
+        # Drawn rather than answered with a status: a non-200 is never swapped,
+        # so a status code would be a control that silently did nothing.
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("never tracked", resp.text)
         self.assertNotIn(self._key(-1), asyncio.run(distrakt_store.list_months(self.user_id)))
 
     def test_the_month_in_progress_imports(self):
@@ -298,15 +306,16 @@ class AcknowledgingASeasonThatCameBackTests(TrackerPanelTestCase):
         self._list_season(808)
         resp = self._acknowledge(808)
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertTrue(resp.json()["ok"])
         self.assertFalse(self._flag(808))
 
-    def test_it_answers_with_the_acknowledgement_and_not_a_whole_month(self):
-        """Recomputing a month to drop one word would cost a season lookup per
-        listed title — and there is no provider configured in this test, so a
-        month rebuild here would also be a different failure."""
+    def test_it_answers_with_nothing_at_all_and_not_a_whole_month(self):
+        """AN EMPTY ANSWER IS THE WHOLE ANSWER: the mark asked to be swapped out
+        of existence, so having nothing to swap in is exactly right. Recomputing
+        a month to drop one word would cost a season lookup per listed title —
+        and there is no provider configured in this test, so a month rebuild here
+        would also be a different failure."""
         self._list_season(808)
-        self.assertEqual(self._acknowledge(808).json(), {"ok": True})
+        self.assertEqual(self._acknowledge(808).text, "")
 
     def test_only_the_named_season_is_cleared(self):
         self._list_season(808, 1)
@@ -316,15 +325,18 @@ class AcknowledgingASeasonThatCameBackTests(TrackerPanelTestCase):
         self.assertTrue(self._flag(808, 2))
 
     def test_a_season_that_is_not_on_the_list_says_so(self):
+        """Drawn rather than answered with a status, so the mark stays on screen
+        to be pressed again: a non-200 is never swapped, and an empty 404 body
+        would have removed it while nothing was written down."""
         resp = self._acknowledge(909)
-        self.assertEqual(resp.status_code, 404)
-        self.assertFalse(resp.json()["ok"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("isn&#39;t on your list", resp.text)
 
     def test_a_malformed_row_address_is_refused_rather_than_queried(self):
         resp = self.client.post("/api/distrakt/acknowledge-return",
                                 json={"key": "nonsense", "season": 1})
-        self.assertEqual(resp.status_code, 400)
-        self.assertTrue(resp.json()["error"])
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("toast err", resp.text)
 
 
 # ENDING A TITLE'S RUN NO LONGER REACHES THE CALENDAR — see the note in

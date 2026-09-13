@@ -1,0 +1,63 @@
+{% import '_source_logo.html' as src with context %}
+{# THE ADD-SHOW MODAL, DRAWN BY THE SERVER IN THE ONE STATE IT IS EVER IN:
+   closed, empty, and worded for the month being looked at.
+
+   IT RIDES BACK WITH EVERY MONTH ANSWER (`oob=true`), which is how it closes
+   after an add and how it forgets the query and the results that produced one.
+   That used to be four lines of script clearing three elements and setting a
+   heading, run on OPEN — so the modal that opened was whatever the last one had
+   left behind, tidied up. Redrawn on every answer it is simply never in a state
+   anybody has to undo, and "what an empty add modal looks like" is written once.
+
+   THE SEARCH IS A FORM. `required` is the empty check the browser already knows
+   how to make, Enter is submit, and the button is submit — three lines of
+   script for what a <form> element is. SUBMITTED AND NOT TYPED, deliberately:
+   this is not a discovery UI, you open it already knowing what you came to add,
+   and a catalogue fan-out at every prefix buys nothing for it.
+
+   NOTHING INSIDE THE FORM POSTS. Read in the vendored htmx: a request's verb is
+   found by walking `get, post, put, patch, delete` in that order, with each one
+   looked up THROUGH ATTRIBUTE INHERITANCE — so an ancestor's `hx-get` is found
+   before a descendant's own `hx-post`. The results list and the season slot are
+   therefore siblings of this form and not children of it. #}
+{% macro modal(search_label, as_finished, oob=false) %}
+<div id="addShowModal" class="modal-overlay"{% if oob %} hx-swap-oob="outerHTML"{% endif %}>
+    <div class="modal">
+        <div class="modal-head">
+            {#- A past month is closed, so there is nothing live to bucket a show
+                against: what goes in was finished, and the wording says so
+                before anything is picked rather than after it lands. -#}
+            <h2>{{ '➕ Add a finished show' if as_finished else '➕ Add show' }}</h2>
+            <button type="button" class="modal-close" data-modal-close="addShowModal">&times;</button>
+        </div>
+        <div class="modal-body">
+            {%- if as_finished %}
+            <p class="distrakt-note distrakt-warn">
+                This month is closed. Whatever you pick is recorded as
+                <strong>finished during it</strong> — your watch history is not
+                consulted and cannot contradict it.</p>
+            {%- endif %}
+            <form class="field distrakt-search-submit" hx-boost="false"
+                  hx-get="/distrakt/fragments/search"
+                  hx-target="#addSearchResults" hx-indicator="#addSearchBusy">
+                <label for="addSearchInput">{{ search_label }}</label>
+                <input type="text" id="addSearchInput" name="q" placeholder="Type a show title…"
+                       autocomplete="off" spellcheck="false" required autofocus>
+                <button type="submit" class="btn-ghost small">Search</button>
+                <span id="addSearchBusy" class="htmx-indicator distrakt-empty">Searching…</span>
+            </form>
+            {#- The rows arrive from the server and each one carries its own
+                request, so nothing here has to know how many there are or where
+                in a list each one sits. -#}
+            <div id="addSearchResults" class="distrakt-search-results"></div>
+            {#- What a pick answers into: a season picker, a refusal, or a season
+                that names itself — one partial, all three states
+                (_distrakt_seasons.html). -#}
+            <div id="addSeasonPick" class="distrakt-season-pick"></div>
+        </div>
+        <div class="modal-foot">
+            <button type="button" class="btn-ghost" data-modal-close="addShowModal">Cancel</button>
+        </div>
+    </div>
+</div>
+{% endmacro %}

@@ -176,9 +176,9 @@ class UnauthenticatedTests(GatingTestCase):
     def test_distrakt_level_is_refused(self):
         """Tested route by route rather than as a group: a gap here exposes one
         specific user's private watch history."""
-        for path in ("/distrakt", "/api/distrakt/list", "/api/distrakt/month",
+        for path in ("/distrakt", "/api/distrakt/list", "/distrakt/fragments/month",
                      "/api/distrakt/months", "/distrakt/fragments/search",
-                     "/api/distrakt/seasons", "/api/distrakt/backfill",
+                     "/distrakt/fragments/seasons",
                      "/distrakt/fragments/search-movie"):
             with self.subTest(path=path):
                 self.assertEqual(self.client.get(path).status_code, 401)
@@ -311,13 +311,19 @@ class DistraktTemplateTests(GatingTestCase):
         return user_id
 
     def test_the_emoji_map_is_rendered_in_rather_than_fetched(self):
-        """The roster falls back to these emoji for networks with no logo, so the
-        page needs them without a second round trip."""
+        """The editor's rows come with the page rather than being asked for.
+
+        It used to be BOTH — rendered into a global AND fetched again by the
+        page's own init before the month was even asked for — because the rows
+        were built in the browser from that global. They are drawn now, by the
+        one function every emoji answer uses (routes._emoji_row_contexts), so
+        the first draw and every redraw are the same markup."""
         user_id = self._tracker(is_admin=False)
         asyncio.run(distrakt.set_emoji_prefs(user_id, {"HBO": ":hbo:"}, ":tv:"))
         self.sign_in_as(user_id)
         body = self.client.get(self.PAGE).text
-        self.assertIn('window.NETWORK_EMOJIS = {"HBO": ":hbo:"}', body)
+        self.assertIn('name="network-0" value="HBO"', body)
+        self.assertIn('name="emoji-0" value=":hbo:"', body)
 
     def test_the_emoji_map_is_this_users_own(self):
         """It renders into ONE account's Discord posts, so it is that account's.
@@ -337,14 +343,17 @@ class DistraktTemplateTests(GatingTestCase):
 
     def test_a_new_account_starts_with_an_empty_map(self):
         """Nothing seeds it — not settings.json, not another account. It fills in
-        from this user's own roster and travels with their Backup export."""
+        from this user's own roster and travels with their Backup export. One
+        blank row is always drawn, which is what "+ Add network" means."""
         self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn("window.NETWORK_EMOJIS = {}", self.client.get(self.PAGE).text)
+        body = self.client.get(self.PAGE).text
+        self.assertIn('name="network-0" value=""', body)
+        self.assertNotIn('name="network-1"', body)
 
     def test_every_tracker_user_can_edit_their_own_map(self):
         """No longer admin-only: the map decides how THIS account's posts render."""
         self.sign_in_as(self._tracker(is_admin=False))
-        self.assertIn("saveEmojiMap()", self.client.get(self.PAGE).text)
+        self.assertIn('hx-post="/api/distrakt/emojis"', self.client.get(self.PAGE).text)
 
 
 class SettingsRedactionTests(GatingTestCase):

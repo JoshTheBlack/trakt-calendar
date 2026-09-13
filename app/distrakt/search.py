@@ -310,7 +310,8 @@ def _whole_shows_absorb_seasons(slots: list[_Merging]) -> list[_Merging]:
 
 
 async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
-                            media: Media, query: str) -> SearchMergeResult:
+                            media: Media, query: str, *,
+                            cached_only: bool = False) -> SearchMergeResult:
     """Ask every `(Source, SearchPort)` in `asked` for `query` at once, and
     merge whatever answers come back. `asked` is
     `providers.for_catalogue_search(settings)`'s own return — this function
@@ -323,11 +324,20 @@ async def search_catalogue(asked: Sequence[tuple[Source, SearchPort]], settings,
     and recorded in the result's `failed` set, while whoever else answered
     still renders. A search that 502s because a service the viewer was not
     even thinking about is down is exactly the failure this avoids.
+
+    `cached_only=True` MAKES NO CALL AT ALL and re-reads what this exact search
+    already stored, merged again by the same rules. It is how the add flow acts
+    on a result the page NAMED: the picker searched moments ago, so the title,
+    the ids and the network that get written are the services' own answer rather
+    than fields a browser handed back — and a search the instance no longer
+    holds answers with nothing, which the caller reads as "search for it again"
+    rather than quietly spending a search nobody counted.
     """
     if not asked:
         return SearchMergeResult(hits=[], failed=frozenset())
     answers = await asyncio.gather(
-        *(port.search_titles(settings, media, query) for _source, port in asked),
+        *(port.search_titles(settings, media, query, cached_only=cached_only)
+          for _source, port in asked),
         return_exceptions=True)
     per_source: list[tuple[Source, Sequence[SearchHit]]] = []
     failed: set[Source] = set()

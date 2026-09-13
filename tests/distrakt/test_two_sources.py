@@ -38,7 +38,7 @@ from app.providers.base import (ItemKey, LibraryEntry, LibraryRead, PlayCounts,
                                 UnlistedSeasons)
 from app.providers.simkl import SimklError
 from app.providers.trakt import TraktError
-from tests.support import AppTestCase, ORIGIN, migrated_db
+from tests.support import AppTestCase, ORIGIN, migrated_db, tracker_month
 
 # What each account's request-scoped Settings looks like. A source is "linked"
 # for the tracker exactly when this object carries a usable credential for it —
@@ -1341,13 +1341,10 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
              patch("app.providers.trakt.sync.fetch_play_counts",
                    new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.simkl.transport.cached_get", new=self._refused):
-            return self.client.get(
-                f"/api/distrakt/month?year={today.year}&month={today.month}")
+            return tracker_month(self.user_id, today.year, today.month)
 
     def test_the_month_renders_and_names_the_service_that_was_refused(self):
-        resp = self._month()
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
+        body = self._month()
         self.assertTrue(body["ok"])
         # The page states it as a finished sentence rather than as a list of
         # names for the browser to build one out of — there is more than one
@@ -1357,7 +1354,7 @@ class TheMonthSaysWhichServiceCouldNotBeReadTests(AppTestCase):
     def test_the_other_services_counts_still_render(self):
         """Degrading is not failing. The row shows what Trakt reported, and the
         notice above it is what says the number is one service's alone."""
-        row, = self._month().json()["shows"]
+        row, = self._month()["shows"]
         self.assertEqual(row["watched"], 2)
         self.assertEqual(row["total"], 8)
 
@@ -1462,19 +1459,12 @@ class TheOtherServiceSaysSoTooTests(AppTestCase):
                    new=AsyncMock(return_value={})), \
              patch("app.providers.trakt.transport.cached_get", new=self._refused), \
              patch("app.providers.trakt.transport.send", new=self._refused_send):
-            if force:
-                return self.client.post("/api/distrakt/refresh",
-                                        json={"year": today.year, "month": today.month},
-                                        headers={"Origin": ORIGIN})
-            return self.client.get(
-                f"/api/distrakt/month?year={today.year}&month={today.month}")
+            return tracker_month(self.user_id, today.year, today.month, fresh=force)
 
     def test_the_month_renders_and_names_the_service_that_was_refused(self):
-        """HTTP 200 with the service NAMED, which is the combination that was
-        missing: the page came back complete and silent."""
-        resp = self._month()
-        self.assertEqual(resp.status_code, 200)
-        body = resp.json()
+        """A DRAWN MONTH with the service NAMED, which is the combination that
+        was missing: the page came back complete and silent."""
+        body = self._month()
         self.assertTrue(body["ok"])
         self.assertIn("Trakt could not be read just now", body["source_notices"][0])
 
@@ -1482,7 +1472,7 @@ class TheOtherServiceSaysSoTooTests(AppTestCase):
         """Degrading is not failing. The row shows what the service that answered
         reported, and the notice above it is what says the number is one
         service's alone."""
-        row, = self._month().json()["shows"]
+        row, = self._month()["shows"]
         self.assertEqual(row["counts"], "2/8 (Trakt) · 3/8 (Simkl)")
         self.assertFalse(row["unavailable"])
 
@@ -1576,33 +1566,33 @@ class ACompletedRowShowsWhatEachServiceSawTests(TwoSourceTestCase):
         self.assertNotIn("Trakt", post)
 
 
-class TheRowTheBrowserDrawsTests(unittest.TestCase):
-    """The one decision the browser still makes about a count: whether to draw
-    the string the server wrote.
+class TheRowTheCountsCellDrawsTests(unittest.TestCase):
+    """The one decision left about a count: whether to draw the string the server
+    wrote.
 
-    ASSERTED AGAINST THE SOURCE because there is no JavaScript runtime in this
-    suite and the rule is a single expression. What it protects is that no bucket
-    is singled out and blanked — the moment one is, the server's careful
-    "10/10 (Trakt) · 3/10 (Simkl)" is computed, frozen onto a month, and thrown
-    away one line before it is drawn.
+    ASSERTED AGAINST THE TEMPLATE, which is where the row is built now — it was
+    JavaScript when this was written, and the rule it protects did not move with
+    it. What it protects is that no bucket is singled out and blanked: the moment
+    one is, the server's careful "10/10 (Trakt) · 3/10 (Simkl)" is computed,
+    frozen onto a month, and thrown away one line before it is drawn.
     """
 
     def setUp(self):
-        self.source = (assets.BASE_DIR / "static/js/tracker/rows.js").read_text(
+        self.source = (assets.BASE_DIR / "templates/_distrakt_rows.html").read_text(
             encoding="utf-8")
 
     def counts_expression(self) -> str:
         """The expression that decides what a show row's counts cell holds."""
-        return self.source.split("let counts =")[1].split(";")[0]
+        return self.source.split("set counts =")[1].split("-%}")[0]
 
     def test_no_bucket_is_blanked_out_of_the_counts_cell(self):
         self.assertNotIn("bucket", self.counts_expression())
 
     def test_the_cell_is_drawn_from_the_string_the_server_wrote(self):
-        """`s.counts` is the server's, and the fallback is only for a row from
-        before it was carried. Neither may be re-derived in the browser: the rule
-        is the one a month is frozen with (app/distrakt/counts.py)."""
-        self.assertIn("const xy = s.counts ||", self.source)
+        """`show.counts` is the server's, and the fallback is only for a row from
+        before it was carried. Neither may be re-derived while rendering: the
+        rule is the one a month is frozen with (app/distrakt/counts.py)."""
+        self.assertIn("set xy = show.counts or", self.source)
         self.assertIn("xy", self.counts_expression())
 
 
@@ -1729,9 +1719,8 @@ class TheTooltipReachesTheRowTests(AppTestCase):
                    new=AsyncMock(return_value={7: {3: {1: "2026-07-01",
                                                        2: "2026-07-02"}}})),              patch("app.providers.trakt.detail.fetch_season_detail", _season),              patch("app.providers.trakt.sync.fetch_play_counts",
                    new=AsyncMock(return_value=PlayCounts({}, False))):
-            resp = self.client.get(
-                f"/api/distrakt/month?year={today.year}&month={today.month}")
-        row, = resp.json()["shows"]
+            payload = tracker_month(self.user_id, today.year, today.month)
+        row, = payload["shows"]
         return row
 
     def test_the_row_carries_the_service_by_service_breakdown(self):

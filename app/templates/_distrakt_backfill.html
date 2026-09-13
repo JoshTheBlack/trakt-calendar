@@ -1,0 +1,99 @@
+{# WHAT A BACKFILL WOULD WRITE, and then what it wrote — one block in whichever
+   of its states this is.
+
+   TWO STEPS ON PURPOSE: the check does all the provider work and the server
+   KEEPS the plan, so what you confirm is exactly what gets written and this page
+   never hands records back to be stored. "Write these months" therefore exists
+   only while there is a plan to write — which is what a `backfillReady` flag in
+   the browser was standing in for, and one partial for every state is what makes
+   the flag unnecessary (the shape _add_all.html established).
+
+   Context: exactly one of `plan` (a backfill.summarize dict), `warning` (a
+   refusal) and `done` (what was written), or none of them for the block the page
+   ships with. #}
+
+{#- ONE MONTH'S LINE. A month that HAS something to show opens; one that has
+    only a count behind it does not, because a disclosure triangle that reveals
+    an empty list is a promise the row cannot keep — and that is exactly the
+    shape an already-tracked month takes, since its films are counted and never
+    listed. Both states spell the line the same way, from here, so they cannot
+    drift apart. -#}
+{%- macro line(month) -%}
+{%- set parts = [] -%}
+{#- SAID FIRST, BECAUSE IT CHANGES WHAT EVERY OTHER NUMBER ON THE ROW MEANS. A
+    tracked month is swept for films and NOT examined for seasons (see
+    backfill.survey), so "0 finished" on it is "not looked at" rather than "you
+    finished nothing" — and the difference is invisible in a count. -#}
+{%- if month.tracked %}{% set _ = parts.append('already tracked, seasons left alone') %}{% endif -%}
+{%- if month.count %}{% set _ = parts.append(month.count ~ ' finished') %}{% endif -%}
+{%- if month.movie_count %}{% set _ = parts.append(month.movie_count ~ ' film' ~ ('' if month.movie_count == 1 else 's')) %}{% endif -%}
+{#- Said out loud rather than left out: a month whose films are all already
+    recorded looks identical to one where none could be found. -#}
+{%- if month.movie_known %}{% set _ = parts.append(month.movie_known ~ ' film' ~ ('' if month.movie_known == 1 else 's') ~ ' already here') %}{% endif -%}
+<strong>{{ month.month }}</strong> &mdash; {{ parts | join(', ') or 'nothing' }}
+{%- endmacro -%}
+
+{#- HOW FAR THE SWEEP ACTUALLY GOT, and the reason it is a sentence rather than
+    a number. `seasons_seen` counts seasons EXAMINED, and the season pass does not
+    run at all when every month in the range is already tracked (see
+    backfill.survey) — so a bare "0 season(s)" tells a reader who finished nine of
+    them in that range that the sweep looked and found none. Three genuinely
+    different outcomes sit behind that zero and each says which it is; `skipped`
+    alone cannot tell them apart, because a range can hold a tracked month AND
+    months that were read, which is why the survey states `months_read`. -#}
+{%- macro reach() -%}
+{%- if plan.seasons_seen %}The sweep read {{ plan.seasons_seen }} season(s).
+{%- elif not plan.months_read %}No month in that range was read for seasons: a
+month that already holds something keeps its own decisions, so every one of these
+was left alone.
+{%- else %}Your watch history named no finished season in the
+{{ plan.months_read }} month(s) that were read.
+{%- endif %}
+{%- if plan.movies_known %} {{ plan.movies_known }} film(s) it saw are already
+recorded.{% endif %}
+{%- endmacro -%}
+
+<div id="backfillResult" class="distrakt-backfill">
+{%- if warning %}
+<p class="distrakt-note distrakt-warn">{{ warning }}</p>
+{%- elif done %}
+<p class="distrakt-note ok">{{ done }}</p>
+{%- elif plan is not none %}
+{%- if not plan.months %}
+<p class="distrakt-note">Nothing to add. {{ reach() }}</p>
+{%- else %}
+{%- for month in plan.months %}
+{#- Films get their own line per month rather than one total at the end: they
+    come from the same sweep, and a count you cannot see the contents of is not
+    something to confirm. -#}
+{%- if month.titles or month.movie_titles %}
+<details class="distrakt-backfill-month">
+    <summary>{{ line(month) }}</summary>
+    <ul>
+        {%- for title in month.titles %}<li>{{ title }}</li>{% endfor %}
+        {%- for title in month.movie_titles %}<li>🎬 {{ title }}</li>{% endfor %}
+    </ul>
+</details>
+{%- else %}
+<p class="distrakt-backfill-month flat">{{ line(month) }}</p>
+{%- endif %}
+{%- endfor %}
+{%- if plan.to_write %}
+<p class="distrakt-note">{{ plan.to_write }} month(s) to write, {{ plan.total }} finished season(s)
+    {%- if plan.movies %}, and {{ plan.movies }} watched film(s){% endif -%}
+    . Nothing has been written yet.</p>
+<button type="button" class="btn-ghost small"
+        hx-post="/api/distrakt/backfill/apply" hx-json-enc
+        hx-target="#backfillResult" hx-swap="outerHTML">Write these months</button>
+{%- else %}
+{#- NO BUTTON, BECAUSE THERE IS NOTHING TO CONFIRM. Every month in the range
+    either is already tracked or holds only films this account already has, so
+    "Write these months" would spend a confirmation on a no-op — and a button
+    that appears to have done nothing reads as the feature being broken. -#}
+<p class="distrakt-note">Nothing to write. {{ reach() }}
+    {%- if plan.skipped %} To have a tracked month built from history again, empty
+    it first.{% endif %}</p>
+{%- endif %}
+{%- endif %}
+{%- endif %}
+</div>

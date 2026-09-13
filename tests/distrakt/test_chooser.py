@@ -78,9 +78,9 @@ class ArrivingChoosesNothingTests(ChooserTestCase):
     def test_the_bare_address_offers_a_choice_instead_of_a_month(self):
         body = self.chooser()
         self.assertIn("Pick a Month", body)
-        # The month view's loader takes the month from these; their absence is
-        # what says no month is being loaded.
-        self.assertNotIn("window.DISTRAKT_MONTH", body)
+        # The month view fetches its month by ADDRESS; the absence of that
+        # address is what says no month is being loaded.
+        self.assertNotIn("/distrakt/fragments/month", body)
 
     def test_arriving_builds_no_month(self):
         """Nothing is rolled over, and no row is written, until a month is named."""
@@ -92,8 +92,7 @@ class ArrivingChoosesNothingTests(ChooserTestCase):
     def test_naming_a_month_opens_that_month(self):
         year, month = _month(0)
         body = self.client.get(f"/distrakt?year={year}&month={month}").text
-        self.assertIn(f"window.DISTRAKT_MONTH = {month};", body)
-        self.assertIn(f"window.DISTRAKT_YEAR = {year};", body)
+        self.assertIn(f"/distrakt/fragments/month?year={year}&amp;month={month}", body)
         # The month's own view, not the chooser.
         self.assertIn("Copy blocks", body)
 
@@ -172,9 +171,9 @@ class EveryWayInLandsOnTheChooserTests(ChooserTestCase):
         self.assertNotIn("month=", href)
         body = self.client.get(href).text
         self.assertIn("Pick a Month", body)
-        # The month view's loader takes its month from this; its absence is what
-        # says nothing was opened.
-        self.assertNotIn("window.DISTRAKT_MONTH", body)
+        # The month view fetches its month by ADDRESS; the absence of that
+        # address is what says nothing was opened.
+        self.assertNotIn("/distrakt/fragments/month", body)
 
     def test_the_calendars_menu_item_asks_which_month(self):
         """The reported bug: opening the tracker from a calendar showing some

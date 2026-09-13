@@ -9,17 +9,34 @@
    see. Rendering here leaves one renderer, and the row's data attributes below
    are read back from the same dict that drew its text.
 
-   EVERY ROW IS SELF-DESCRIBING. Its ids, its per-source callback ids and its
-   title ride on the row itself rather than on an index into a list the browser
-   happens to be holding, so ONE delegated listener on the container serves
-   every row (app/static/js/tracker/add.js's `onShowResultClick` and
-   `onMovieResultClick`) and a row is as clickable arriving with this fragment as
-   it would be arriving with the page. `data-source-ids` KEEPS ITS ORDER on
-   purpose — see `pickShow` for why its first entry is load-bearing.
+   EVERY ROW CARRIES ITS OWN REQUEST AND NAMES ITSELF, which is the shape that
+   replaced a delegated click listener and three data attributes holding a copy
+   of the title. A show row fetches its season picker; a film row posts the add.
+   Both send the QUERY that found them and their PLACE IN THE ANSWER, and
+   nothing else about the title — the server reads the hit back out of the same
+   search (routes._resolve_pick), so what gets stored is the service's own answer
+   and never a field a page handed back. The ids, the network and the per-source
+   callback ids have all left the markup with the listener that read them.
+
+   THE PLACE RATHER THAN THE KEY, because a show hit can legitimately have no
+   shared id at all — a Simkl season-title before the per-title lookup fills one
+   in — and those are exactly the rows this flow exists to reach. The merge is a
+   pure function of the stored answers, so the same query lands on the same
+   row.
+
+   A NEW SEARCH TAKES DOWN THE LAST PICK'S ANSWER, out of band, because the
+   season picker sits outside the list this fragment replaces and would otherwise
+   go on describing a title nobody is looking at any more. Shows only: the film
+   flow has no picker.
 
    Context: `hits` (each `_search_hit_payload` plus `unkeyable`), `failed` (the
    sources that could not be asked), `marked` (whether there is more than one
-   catalogue, so a mark disambiguates anything), `media`, `no_catalogue`. #}
+   catalogue, so a mark disambiguates anything), `media`, `no_catalogue`, `query`
+   and `month_query`. #}
+
+{%- if media != 'movie' %}
+<div id="addSeasonPick" class="distrakt-season-pick" hx-swap-oob="outerHTML"></div>
+{%- endif %}
 
 {% if no_catalogue %}
 {# NOT "search failed" — nothing was searched. An instance with neither client
@@ -48,25 +65,30 @@
    400 cannot drift into two explanations of one rule. It only ever happens on
    the film path: a show hit with no shared id is under-described rather than
    unfileable, and the season click it is about to get resolves it. #}
-<div class="distrakt-search-row{{ ' is-unkeyable' if hit.unkeyable }}"
-     {%- if hit.unkeyable %} aria-disabled="true"{% else %} role="button" tabindex="0"{% endif %}
-     data-title="{{ hit.title }}"
-     data-network="{{ hit.network }}"
-     data-year="{{ hit.year if hit.year else '' }}"
-     {# Both travel as JSON in a SINGLE-quoted attribute: `tojson` escapes the
-        apostrophe (and the angle brackets) but not the double quotes its own
-        strings are wrapped in.
-
-        THE SOURCES GO AS ORDERED PAIRS, NOT AS AN OBJECT, and that is
-        load-bearing: the FIRST one is the service the pick calls back for the
-        season list, because whoever found a title is who can be asked about it
-        and the merge puts the registry's leader first. `tojson` SORTS AN
-        OBJECT'S KEYS (Jinja's own default policy), which would have quietly
-        made Simkl answer for every row Trakt leads. A list cannot be
-        reordered by a serializer, so the order is a fact of the markup rather
-        than a property somebody has to know not to break. #}
-     data-ids='{{ hit.ids | tojson }}'
-     data-source-ids='{{ hit.source_ids.items() | list | tojson }}'>
+{#- A ROW IS A BUTTON, so it is one — which is also what gives it the keyboard
+    for free. It used to be a div wearing `role="button"` with a listener
+    translating Enter and Space into a click, because the row's click had to be
+    delegated to a container that outlived it. Each row carries its own request
+    now, so nothing outlives anything. -#}
+<button type="button" class="distrakt-search-row{{ ' is-unkeyable' if hit.unkeyable }}"
+     {%- if hit.unkeyable %} disabled{% endif %}
+     {%- if not hit.unkeyable %}
+     {%- if media == 'movie' %}
+     {#- A film has no season to pick, so the row IS the add. It names the day
+         by INCLUDING the field rather than carrying a copy of it: a new search
+         replaces this list and the date input is not in it. -#}
+     hx-post="/api/distrakt/add-movie{{ month_query }}" hx-json-enc
+     hx-include="#addMovieDate"
+     hx-target="#distraktShowList"
+     hx-swap="innerHTML swapEmpty:false show:top showTarget:.row-marked"
+     hx-vals='{{ {"q": query, "i": loop.index0} | tojson }}'
+     {%- else %}
+     {#- A show row fetches its season picker. A read that changes nothing, so it
+         is a GET, and the address names the result rather than describing it. -#}
+     hx-get="/distrakt/fragments/seasons{{ month_query }}&amp;q={{ query | urlencode }}&amp;i={{ loop.index0 }}"
+     hx-target="#addSeasonPick" hx-swap="outerHTML"
+     {%- endif %}
+     {%- endif %}>
     {%- if marked and hit.source_ids %}
     {# A MARK PER SOURCE THAT RETURNED IT, and only where two catalogues were
        asked: with one there is nothing to disambiguate and the row should look
@@ -98,7 +120,7 @@
     {%- if hit.unkeyable %}
     <span class="distrakt-unkeyable">{{ hit.unkeyable }}</span>
     {%- endif %}
-</div>
+</button>
 {% endfor %}
 
 {% endif %}

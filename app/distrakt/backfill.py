@@ -215,6 +215,13 @@ async def survey(user_id: int, settings, start_month: str, end_month: str,
         "skipped": skipped,
         "shows_seen": len(show_ids),
         "seasons_seen": seasons_seen,
+        # HOW MANY MONTHS THE SEASON PASS WAS RUN OVER AT ALL. `seasons_seen` of
+        # 0 has two completely different causes — the pass ran and history named
+        # nothing, or the pass never ran because every month was skipped — and a
+        # reader told "0 season(s)" cannot tell which. Only the caller that ran
+        # the pass knows, so it says so rather than leaving it to be inferred
+        # from `skipped`, which is right only when the whole range was skipped.
+        "months_read": len(wanted),
     }
     await cache.set(_plan_key(user_id), plan)
     logger.info("distrakt backfill survey: user %s, %s..%s, %d month(s) of seasons, %d film(s)",
@@ -248,29 +255,45 @@ def summarize(plan: dict) -> dict:
     # Films are listed month by month beside the seasons, not summed into one
     # number at the end: they are recorded by the same sweep, and a count nobody
     # can see the contents of is not something to confirm.
+    skipped = plan.get("skipped") or []
+    already = set(skipped)
     keys = sorted(set(months) | set(by_month) | set(known_by_month))
+    rows = [
+        {
+            "month": key,
+            "count": len(months.get(key) or []),
+            "titles": sorted(
+                f"{r.get('title') or 'Untitled'} S{int(r.get('season') or 0):02d}"
+                for r in (months.get(key) or [])
+            ),
+            "movie_count": len(by_month.get(key) or []),
+            "movie_titles": sorted(by_month.get(key) or []),
+            "movie_known": known_by_month.get(key, 0),
+            # WHETHER THIS MONTH WAS EXAMINED FOR SEASONS AT ALL. A month that
+            # already holds something is skipped for seasons and swept for films
+            # (see `survey`), so its `count` of 0 means "not looked at", not "you
+            # finished nothing" — and a reader cannot tell those apart from a
+            # number. Said per row because that is where it is read.
+            "tracked": key in already,
+        }
+        for key in keys
+    ]
     return {
         "range": plan.get("range") or [],
-        "months": [
-            {
-                "month": key,
-                "count": len(months.get(key) or []),
-                "titles": sorted(
-                    f"{r.get('title') or 'Untitled'} S{int(r.get('season') or 0):02d}"
-                    for r in (months.get(key) or [])
-                ),
-                "movie_count": len(by_month.get(key) or []),
-                "movie_titles": sorted(by_month.get(key) or []),
-                "movie_known": known_by_month.get(key, 0),
-            }
-            for key in keys
-        ],
+        "months": rows,
         "movies": len(movies),
         "movies_known": len(known),
-        "skipped": plan.get("skipped") or [],
+        "skipped": skipped,
         "shows_seen": plan.get("shows_seen") or 0,
         "seasons_seen": plan.get("seasons_seen") or 0,
-        "total": sum(len(rows) for rows in months.values()),
+        "months_read": plan.get("months_read") or 0,
+        "total": sum(len(records) for records in months.values()),
+        # HOW MANY MONTHS WOULD ACTUALLY GAIN SOMETHING, which is not the length
+        # of the list above: that list also carries months whose only content is
+        # films this account already has, drawn so a reader can see the sweep
+        # reached them. Confirming a plan that writes nothing is the shape this
+        # exists to keep off the page.
+        "to_write": sum(1 for row in rows if row["count"] or row["movie_count"]),
     }
 
 
@@ -352,7 +375,7 @@ class BackfillExpired(Exception):
 
 def _empty_plan(start_month: str, end_month: str) -> dict:
     return {"range": [start_month, end_month], "months": {}, "movies": [],
-            "skipped": [], "shows_seen": 0, "seasons_seen": 0}
+            "skipped": [], "shows_seen": 0, "seasons_seen": 0, "months_read": 0}
 
 
 def _completed_record(ident: dict, season: int, total: int, detail: dict) -> dict:

@@ -1,0 +1,21 @@
+{# A LINE THE SERVER WANTED TO SAY, delivered out of band into the host every
+   page carries.
+
+   ONE PARTIAL BECAUSE A TOAST IS ONE THING. Two answers were writing this same
+   four-line block themselves — the calendar's library answer and the rankings
+   board's flash — and a third was about to. What a toast IS (the host it lands
+   in, the classes that fade it, the role a screen reader reads it by) is one
+   fact, and the day it changes it has to change once.
+
+   `beforeend` RATHER THAN A SWAP OF THE HOST: several answers can be in flight
+   at once — a month's add and a row's dismissal — and each appends its own line
+   instead of replacing whatever the other put there. `.is-flash` fades it out
+   with a CSS animation and no timer (style.css, beside the toast rules), which
+   is why nothing here has to be cleaned up afterwards. #}
+{% macro flash(message, ok=true) %}
+{%- if message %}
+<div id="toastHost" hx-swap-oob="beforeend">
+    <div class="toast {{ 'ok' if ok else 'err' }} is-flash" role="status">{{ message }}</div>
+</div>
+{%- endif %}
+{% endmacro %}

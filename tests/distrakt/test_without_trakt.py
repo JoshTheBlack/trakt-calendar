@@ -22,8 +22,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import unittest
 from datetime import date
+from html import unescape
 from unittest.mock import AsyncMock, patch
 
 from app import cache, db, distrakt as distrakt_store
@@ -32,7 +34,8 @@ from app.distrakt import live, routes as distrakt_routes
 from app.providers.base import PlayCounts
 from app.providers.trakt import TraktError
 from app.providers.trakt import detail as trakt_detail, transport
-from tests.support import AppTestCase, DetailsPanel, ORIGIN, migrated_db
+from tests.support import (AppTestCase, DetailsPanel, ORIGIN, migrated_db,
+                           tracker_month)
 
 # THE INSTANCE'S CATALOGUE CREDENTIALS, WHICH ARE NOT ANYBODY'S TOKEN. Whether a
 # season's episode count can be looked up is a client id and nothing else (see
@@ -507,9 +510,7 @@ class ADegradedRefreshKeepsTheListOnTheScreenTests(AppTestCase):
         with patch("app.calendar.cache.read_month", new=AsyncMock(return_value=([], None))), \
              patch("app.distrakt.rollover.history_records", AsyncMock(return_value=[])), \
              patch("app.distrakt.watch_history.sync_and_baseline", _boom):
-            return self.client.post(
-                "/api/distrakt/refresh",
-                json={"year": today.year, "month": today.month}).json()
+            return tracker_month(self.user_id, today.year, today.month, fresh=True)
 
     def test_the_row_is_still_there(self):
         body = self._degraded_month()
@@ -628,8 +629,7 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
                    new=AsyncMock(return_value={})),              patch("app.providers.trakt.sync.fetch_play_counts",
                    new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.trakt.detail.fetch_season_detail", _boom):
-            body = self.client.get(
-                f"/api/distrakt/month?year={today.year}&month={today.month}").json()
+            body = tracker_month(self.user_id, today.year, today.month)
 
         self.assertTrue(body["ok"])
         # The page still renders — degrading is not failing — and it now says who
@@ -660,8 +660,7 @@ class TheMonthPayloadCarriesTheBannerTests(AppTestCase):
                    new=AsyncMock(return_value={})),              patch("app.providers.trakt.sync.fetch_play_counts",
                    new=AsyncMock(return_value=PlayCounts({}, False))), \
              patch("app.providers.trakt.detail.fetch_season_detail", _season):
-            body = self.client.get(
-                f"/api/distrakt/month?year={today.year}&month={today.month}").json()
+            body = tracker_month(self.user_id, today.year, today.month)
 
         self.assertEqual(body["source_notices"], [])
 
@@ -710,25 +709,33 @@ class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
         self.sign_in_as(self.user_id)
 
     def refusal(self, resp) -> str:
-        return (resp.json() or {}).get("error", "")
+        """The sentence a refusal drew. Every one of these answers 200 with the
+        line out of band, because a non-200 is never swapped and a status code
+        would be a control that silently did nothing — so what a gate refused
+        with is read out of the markup rather than off a JSON field."""
+        self.assertEqual(resp.status_code, 200, resp.text[:200])
+        found = re.search(
+            r'<(?:div class="toast [^"]*|p class="distrakt-note distrakt-warn)"[^>]*>(.*?)</',
+            resp.text, re.S)
+        return unescape((found.group(1) if found else "").strip())
 
     def test_import_from_calendar_is_not_refused_for_a_missing_trakt_token(self):
         """It reads the month's premieres out of the instance's own calendar
         cache and this account's marks. No viewer's credential is spent."""
         with _quiet_sources():
-            resp = self.client.post("/api/distrakt/import", json={"year": 2020, "month": 1})
-        self.assertNotEqual(self.refusal(resp), "Not configured")
+            resp = self.client.post("/api/distrakt/import?year=2020&month=1", json={})
+        self.assertNotIn("configured", self.refusal(resp))
         # A month with nothing cached for it imports nothing and says so
         # politely, which is the ordinary answer and not a refusal.
         self.assertEqual(resp.status_code, 200, resp.text[:200])
 
     def test_adding_a_show_by_hand_is_not_refused(self):
-        resp = self.client.post("/api/distrakt/add", json={"ids": {}, "season": "x"})
+        resp = self.client.post("/api/distrakt/add", json={"q": "", "key": "", "season": "x"})
         self.assertNotEqual(self.refusal(resp), "Not configured")
 
     def test_filling_in_a_past_month_by_hand_is_not_refused(self):
-        resp = self.client.post("/api/distrakt/add-completed",
-                                json={"year": 2020, "month": 1, "ids": {}})
+        resp = self.client.post("/api/distrakt/add-completed?year=2020&month=1",
+                                json={"q": "", "key": ""})
         self.assertNotEqual(self.refusal(resp), "Not configured")
         self.assertIn("season", self.refusal(resp).lower())
 
@@ -737,7 +744,7 @@ class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
         asked, and this account has one."""
         resp = self.client.post("/api/distrakt/backfill/survey",
                                 json={"start": "2026-7", "end": "2026-08"})
-        self.assertNotEqual(self.refusal(resp), "Not configured")
+        self.assertNotIn("could be asked", self.refusal(resp))
         self.assertIn("YYYY-MM", self.refusal(resp))
 
     def test_saying_yes_to_an_unknown_episode_is_not_refused(self):
@@ -753,7 +760,7 @@ class SimklOnlyAccountReachesItsOwnTrackerTests(AppTestCase):
         self.sign_in_as(empty)
         resp = self.client.post("/api/distrakt/backfill/survey",
                                 json={"start": "2026-07", "end": "2026-08"})
-        self.assertEqual(self.refusal(resp), "Not configured")
+        self.assertIn("No service here can be asked", self.refusal(resp))
 
 
 class ASimklOnlyRosterRowOpensItsModalTests(AppTestCase):
@@ -917,7 +924,7 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
         refuses."""
         with _quiet_sources():
             return self.client.get(
-                f"/api/distrakt/month?year={self.today.year}&month={self.today.month}")
+                f"/distrakt/fragments/month?year={self.today.year}&month={self.today.month}")
 
     def test_opening_the_month_persists_it(self):
         """It used to hand back an unpersisted empty document every time, so
@@ -931,8 +938,9 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
         """The reported case. The import itself had nothing wrong with it — it
         merged premieres into a document nobody kept."""
         with _quiet_sources():
-            resp = self.client.post("/api/distrakt/import", json={
-                "year": self.today.year, "month": self.today.month})
+            resp = self.client.post(
+                f"/api/distrakt/import?year={self.today.year}&month={self.today.month}",
+                json={})
         self.assertEqual(resp.status_code, 200, resp.text[:200])
         self.assertEqual(self.stored_months(),
                          [f"{self.today.year}-{self.today.month:02d}"])
@@ -959,7 +967,7 @@ class ASimklOnlyAccountGetsAMonthAtAllTests(AppTestCase):
 
         with patch("app.calendar.cache.read_month", _read),              patch("app.distrakt.watch_history.tracker_ports", AsyncMock(return_value=[])):
             resp = self.client.get(
-                f"/api/distrakt/month?year={self.today.year}&month={self.today.month}")
+                f"/distrakt/fragments/month?year={self.today.year}&month={self.today.month}")
         self.assertEqual(resp.status_code, 200)
         self.assertTrue(seen, "the month was built without reading a calendar at all")
         for settings in seen:
@@ -1022,17 +1030,26 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
     SEASON = {"season": 3, "total": 12, "cadence": "b", "premiere": "7/23",
               "finale": "7/23", "started_airing": True, "finished_airing": True}
 
+    def _picked(self, ids, title, network=""):
+        """The add routes NAME a search result now and read the title back out
+        of the cached answers themselves (`_resolve_pick`), so the pick is stood
+        in for here rather than seeding two caches: what these tests are about is
+        which service the SEASON lookup behind it asks, and that is a different
+        question from how the title got named."""
+        return patch.object(distrakt_routes, "_resolve_pick", AsyncMock(
+            return_value=distrakt_routes.Pick(
+                title=title, network=network, year=None, ids=dict(ids),
+                seasons=[], named_season=None, unkeyable=None)))
+
     def test_add_asks_simkl_for_a_title_trakt_does_not_name(self):
         simkl_call = AsyncMock(return_value=dict(self.SEASON))
         trakt_call = AsyncMock(return_value=dict(self.SEASON))
         with _quiet_sources(), \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
              patch("app.providers.trakt.detail.fetch_season_detail", trakt_call), \
-             patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)):
-            resp = self.client.post("/api/distrakt/add", json={
-                "year": 2026, "month": 8, "ids": dict(self.SIMKL_ONLY_IDS),
-                "title": "Shingeki no Kyojin Season 3", "network": "", "season": 3,
-            })
+             patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)),              self._picked(self.SIMKL_ONLY_IDS, "Shingeki no Kyojin Season 3"):
+            self.client.post("/api/distrakt/add?year=2026&month=8",
+                             json={"q": "aot", "key": "show:tmdb:1429", "season": 3})
         trakt_call.assert_not_awaited()
         simkl_call.assert_awaited_once()
         # THAT SERVICE'S OWN ID, never a shared one — the same rule /seasons
@@ -1046,11 +1063,9 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
         trakt_call = AsyncMock(return_value=dict(self.SEASON))
         with _quiet_sources(), \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
-             patch("app.providers.trakt.detail.fetch_season_detail", trakt_call):
-            resp = self.client.post("/api/distrakt/add-completed", json={
-                "year": 2020, "month": 1, "ids": dict(self.SIMKL_ONLY_IDS),
-                "title": "Shingeki no Kyojin Season 3", "season": 3,
-            })
+             patch("app.providers.trakt.detail.fetch_season_detail", trakt_call),              self._picked(self.SIMKL_ONLY_IDS, "Shingeki no Kyojin Season 3"):
+            self.client.post("/api/distrakt/add-completed?year=2020&month=1",
+                             json={"q": "aot", "key": "show:tmdb:1429", "season": 3})
         trakt_call.assert_not_awaited()
         simkl_call.assert_awaited_once()
 
@@ -1062,11 +1077,9 @@ class AddRoutesAskWhoeverKnowsTheTitleTests(AppTestCase):
         with _quiet_sources(), \
              patch("app.providers.simkl.detail.fetch_season_detail", simkl_call), \
              patch("app.providers.trakt.detail.fetch_season_detail", trakt_call), \
-             patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)):
-            resp = self.client.post("/api/distrakt/add", json={
-                "year": 2026, "month": 8, "ids": {"trakt": 1388, "tmdb": 1396},
-                "title": "Breaking Bad", "network": "AMC", "season": 3,
-            })
+             patch("app.distrakt.watch_history.baseline_show", AsyncMock(return_value=None)),              self._picked({"trakt": 1388, "tmdb": 1396}, "Breaking Bad", "AMC"):
+            self.client.post("/api/distrakt/add?year=2026&month=8",
+                             json={"q": "bb", "key": "show:tmdb:1396", "season": 3})
         simkl_call.assert_not_awaited()
         trakt_call.assert_awaited_once()
 

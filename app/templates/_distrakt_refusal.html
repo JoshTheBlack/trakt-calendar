@@ -1,0 +1,9 @@
+{% import '_toast.html' as toast %}
+{# A TRACKER ROUTE DECLINING TO ACT: the sentence, and deliberately nothing else.
+
+   The whole answer goes out of band into the toast host, so the month list is
+   left holding exactly what it was already showing. The controls spell
+   `swapEmpty:false` for that to work — see templates/_distrakt_rows.html's
+   `month_post`, which says why an out-of-band-only answer would otherwise empty
+   its own target. #}
+{{- toast.flash(message, false) -}}

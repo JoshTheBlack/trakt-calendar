@@ -16,6 +16,7 @@ Both the data-layer functions and the two HTTP routes are exercised. No network.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import unittest
 from unittest import mock
@@ -29,7 +30,7 @@ from app.distrakt import watch_history as wh
 from app.config import Settings, save_settings
 from app.main import app
 from tests.distrakt.test_store import month_back
-from tests.support import ORIGIN, migrated_db, new_db_path
+from tests.support import ORIGIN, migrated_db, new_db_path, restore_backup
 
 async def _seed_dataset(user_id: int, *, tag: str) -> None:
     """A dataset touching every exported table, so a round trip has something to
@@ -242,18 +243,31 @@ class ExportRouteTests(unittest.TestCase):
         # Restoring the same document onto a DIFFERENT account moves the data to
         # whoever is signed in, which is the "move my dev data over" case.
         self.sign_in_as(self.other_id)
-        resp = self.client.post("/api/distrakt/restore", json=doc)
+        resp = restore_backup(self.client, doc)
         self.assertEqual(resp.status_code, 200, resp.text)
-        self.assertEqual(resp.json()["months"], ["2026-07", "2026-08"])
+        self.assertIn("Restored 2 month(s).", resp.text)
         self.assertEqual(asyncio.run(distrakt.list_months(self.other_id)),
                          ["2026-07", "2026-08"])
 
     def test_restore_route_refuses_an_unknown_schema(self):
         self.sign_in_as(self.user_id)
-        resp = self.client.post("/api/distrakt/restore", json={"schema": 99})
-        self.assertEqual(resp.status_code, 400)
-        self.assertFalse(resp.json()["ok"])
+        resp = restore_backup(self.client, {"schema": 99})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("distrakt-warn", resp.text)
         self.assertEqual(asyncio.run(distrakt.list_months(self.user_id)), [])
+
+    def test_the_typed_phrase_is_checked_by_the_route_and_not_only_the_form(self):
+        """A browser validation is a courtesy to the person typing; this is the
+        one thing standing between a mis-aimed request and somebody's whole
+        tracker, and it used to be checked nowhere but in the page."""
+        asyncio.run(_seed_dataset(self.user_id, tag="mine"))
+        self.sign_in_as(self.other_id)
+        doc = json.loads(self.client.get("/api/distrakt/export").text)
+        resp = self.client.post("/api/distrakt/restore",
+                                json={"payload": json.dumps(doc), "ack": "yes please"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("REPLACE MY DATA", resp.text)
+        self.assertEqual(asyncio.run(distrakt.list_months(self.other_id)), [])
 
     def test_export_is_scoped_to_the_caller(self):
         asyncio.run(_seed_dataset(self.other_id, tag="theirs"))
@@ -272,9 +286,8 @@ class ExportRouteTests(unittest.TestCase):
                 if user is not None:
                     self.sign_in_as(user)
                 self.assertIn(self.client.get("/api/distrakt/export").status_code, (401, 403))
-                self.assertIn(
-                    self.client.post("/api/distrakt/restore", json={"schema": 1}).status_code,
-                    (401, 403))
+                self.assertIn(restore_backup(self.client, {"schema": 1}).status_code,
+                              (401, 403))
 
 class LegacyBackupTests(ExportTestCase):
     """A backup taken BEFORE the tracker was re-keyed, restored onto the current

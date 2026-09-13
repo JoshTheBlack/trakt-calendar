@@ -1,0 +1,10 @@
+{% import '_distrakt_rewatch.html' as rewatch %}
+{# THE RE-WATCH QUESTION AS AN ANSWER, and nothing else in it.
+
+   The whole response is out of band, so the month list keeps exactly what it was
+   showing: nothing has been written, and the question is about an add that has
+   not happened yet. The controls spell `swapEmpty:false` so an
+   out-of-band-only answer leaves their target alone — see
+   templates/_distrakt_rows.html's `month_post`. #}
+{{- rewatch.modal(prompt=prompt, resubmit_url=resubmit_url,
+                  vals_counting=vals_counting, vals_fresh=vals_fresh, oob=true) -}}

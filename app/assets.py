@@ -90,21 +90,19 @@ PAGE_SCRIPTS = {
     "tracker": (
         "static/js/ui.js",
         "static/js/nav.js",
-        "static/js/tracker/month.js",
+        # TWO FILES, AND EACH IS ONE THING THE BROWSER MUST DO: measuring whether
+        # a title overflows the cell drawn for it, and reading a chosen backup
+        # file into a JSON body. Everything else this page used to run — the
+        # month, the rows, the row actions, the add flow, the emoji editor, the
+        # backfill, the copy blocks and the tab strip — is markup the server
+        # draws, and the page needs no init of its own any more.
         "static/js/tracker/rows.js",
-        "static/js/tracker/actions.js",
-        "static/js/tracker/post.js",
-        "static/js/tracker/details.js",
-        "static/js/tracker/add.js",
-        "static/js/tracker/emoji.js",
         "static/js/tracker/backup.js",
-        "static/js/tracker/backfill.js",
         # The calendar's file, on this page too, because the Konami code is ONE
         # listener for both — see static/js/calendar/easter-egg.js. Loading it
         # twice is not a re-declaration: boost.js keys what is running on the
         # file's PATH, and a page that already has it does not fetch it again.
         "static/js/calendar/easter-egg.js",
-        "static/js/tracker/boot.js",
     ),
     "rankings": (
         # SortableJS first: ranker/dnd.js hands it containers, and `typeof

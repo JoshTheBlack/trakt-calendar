@@ -171,8 +171,10 @@ class _SimklDetailPort:
                                    season: int, media: Media) -> dict:
         return await detail.fetch_season_detail(settings, source_id, int(season), media)
 
-    async def fetch_seasons(self, settings: Settings, source_id, media: Media) -> SeasonsAnswer:
-        return await detail.fetch_seasons(settings, source_id, media)
+    async def fetch_seasons(self, settings: Settings, source_id, media: Media, *,
+                            cached_only: bool = False) -> SeasonsAnswer:
+        return await detail.fetch_seasons(settings, source_id, media,
+                                          cached_only=cached_only)
 
 
 class _SimklSearchPort:
@@ -183,8 +185,10 @@ class _SimklSearchPort:
     side of this call.
     """
 
-    async def search_titles(self, settings: Settings, media: Media, query: str) -> list[SearchHit]:
-        return await search.search_titles(settings, media, query)
+    async def search_titles(self, settings: Settings, media: Media, query: str, *,
+                            cached_only: bool = False) -> list[SearchHit]:
+        return await search.search_titles(settings, media, query,
+                                          cached_only=cached_only)
 
 
 class _SimklProvider:

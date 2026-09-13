@@ -506,7 +506,8 @@ async def fetch_season_episodes(settings: Settings, trakt_id, season: int,
     return out
 
 
-async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
+async def fetch_show_seasons(settings: Settings, trakt_id, *,
+                             cached_only: bool = False) -> list[dict]:
     """/shows/{id}/seasons?extended=full -> [{season, episode_count, first_aired}] for
     seasons Trakt has actually populated with episodes (skips season 0/
     specials and any season with zero KNOWN episodes at all). Powers the
@@ -535,7 +536,14 @@ async def fetch_show_seasons(settings: Settings, trakt_id) -> list[dict]:
     day early on a day that had nothing on it.
     """
     results = await transport.cached_get(
-        transport.shared_client(), settings, f"shows/{trakt_id}/seasons", {"extended": "full"}, raise_errors=True,
+        transport.shared_client(), settings, f"shows/{trakt_id}/seasons", {"extended": "full"},
+        raise_errors=True,
+        # `cache_only` is the one both transports spell the same way and
+        # document the same way — never call, answer what is stored. The add
+        # flow's refusal therefore means "nothing was ever stored for this",
+        # which is the honest thing to say to somebody naming a result from a
+        # search the instance no longer holds.
+        cache_only=cached_only,
     )
     out = []
     for entry in results if isinstance(results, list) else []:

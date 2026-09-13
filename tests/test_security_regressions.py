@@ -753,22 +753,33 @@ class PerUserEmojiMapTests(RegressionTestCase):
                          ({"HBO": ":hbo:"}, ":film:"))
 
     def test_the_editor_is_reachable_without_being_an_admin(self):
+        """The editor is a FORM now: its rows travel as one flat field per value,
+        named by position, and the answer is the rows the server made of them.
+        There is no GET beside it any more — the rows come with the page."""
         user_id = self.tracker("plain")
         self.login("plain")
-        self.assertTrue(self.client.get("/api/distrakt/emojis").json()["ok"])
-        body = self.client.post("/api/distrakt/emojis", json={
-            "network_emojis": {"HBO": ":hbo:"}, "default_network_emoji": ":film:",
-        }).json()
-        self.assertTrue(body["ok"])
+        resp = self.client.post("/api/distrakt/emojis", json={
+            "network-0": "HBO", "emoji-0": ":hbo:", "default_network_emoji": ":film:",
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('name="network-0" value="HBO"', resp.text)
         from app import distrakt as store
         self.assertEqual(asyncio.run(store.get_emoji_prefs(user_id)),
                          ({"HBO": ":hbo:"}, ":film:"))
 
-    def test_a_malformed_map_is_refused(self):
-        self.tracker("plain")
+    def test_a_row_nobody_filled_in_is_dropped_rather_than_stored(self):
+        """The editor always draws a blank row to type into, and one left
+        untouched is not an error to report — it is a row nobody filled in. A
+        map cannot be malformed any more: it arrives as flat fields, so there is
+        no shape for a caller to get wrong."""
+        user_id = self.tracker("plain")
         self.login("plain")
-        self.assertEqual(self.client.post(
-            "/api/distrakt/emojis", json={"network_emojis": "not-an-object"}).status_code, 400)
+        self.client.post("/api/distrakt/emojis", json={
+            "network-0": "HBO", "emoji-0": ":hbo:",
+            "network-1": "  ", "emoji-1": ":nobody:",
+        })
+        from app import distrakt as store
+        self.assertEqual(asyncio.run(store.get_emoji_prefs(user_id))[0], {"HBO": ":hbo:"})
 
 
 class DistraktDetailsTests(RegressionTestCase):
